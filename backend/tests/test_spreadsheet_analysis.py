@@ -1069,6 +1069,10 @@ def test_issue_archive_resolves_redacts_and_expires(tmp_path):
         status="resolved", now=datetime(2026, 8, 30, 13, tzinfo=timezone.utc)
     )
     assert resolved["artifact_available"] is False
+    # The status filter: once resolved, the open listing no longer has it.
+    assert _listed_issues(store,
+        status="open", now=datetime(2026, 8, 30, 13, tzinfo=timezone.utc)
+    ) == []
 
     store.redact_source(
         "nb-1", "src-1", occurred_at="2026-08-30T14:00:00+00:00"
@@ -1096,6 +1100,34 @@ def test_issue_archive_resolves_redacts_and_expires(tmp_path):
         now=datetime(2026, 9, 1, 1, tzinfo=timezone.utc)
     ) == []
     assert not (store.root / "issues" / "redacted").exists()
+
+
+def test_issue_listing_filters_by_category(tmp_path):
+    store = AnalysisArtifactStore(tmp_path, retention_days=30)
+    for source_id, category, code in (
+        ("src-parse", "source_parse", "SOURCE_PARSE_FAILED"),
+        ("src-sheet", "spreadsheet_analysis", "SPREADSHEET_ANALYSIS_FAILED"),
+    ):
+        store.record_issue(
+            notebook_id="nb-1",
+            notebook_name="Notebook",
+            owner_id="user-1",
+            source_id=source_id,
+            source_title=source_id,
+            file_name=f"{source_id}.pdf",
+            source_type="pdf",
+            category=category,
+            code=code,
+            summary="safe",
+            occurred_at="2026-08-29T00:00:00+00:00",
+        )
+    now = datetime(2026, 8, 30, tzinfo=timezone.utc)
+    assert len(_listed_issues(store, now=now)) == 2
+    [parse] = _listed_issues(store, category="source_parse", now=now)
+    assert parse["category"] == "source_parse"
+    [sheet] = _listed_issues(store, category="spreadsheet_analysis", now=now)
+    assert sheet["category"] == "spreadsheet_analysis"
+    assert _listed_issues(store, category="model_output", now=now) == []
 
 
 def test_issue_pages_reach_every_match_and_report_the_filtered_total(tmp_path):

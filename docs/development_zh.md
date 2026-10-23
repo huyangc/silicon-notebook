@@ -66,7 +66,9 @@
   成员转手也不算），就报红，除非 `scripts/component_test_only_allowlist.json` 把它登记为
   测试观察点（`def` 上注明「测试观察点」）、扩展端口、扫描看不到的运行时引用或待拍板项；
   登记了却已不是候选的条目同样报红。不要新增只给测试调用的成员：改测试走生产路径，或者
-  带理由登记。
+  带理由登记。已知两个盲区：普查按名字而不按接收者判定，只被测试调用的成员若与某个生产在用的
+  名字同名（`neighbors`、`snapshot` 等），永远不会被报出；登记成员的方法体按生产调用计，
+  所以登记的观察点调用到的成员会随它一起保持存活。
 - 两种 adapter 的 `access_sql.py`、`mount_sql.py` 与 `memory_sql.py` 判据同步维护；
   `memory_sql.py` 是「谁能读 Memory 派生来源」与「哪些 KG 行算派生自 Memory」的共享
   定义点，新读者一律 import（`source_store.hidden_source_ids` 与来源读取闸

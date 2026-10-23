@@ -757,9 +757,6 @@ class _SourceGraphDomain:
     # consumed by Ask/Report in this PR; wiring it here gives later graph
     # primitives one backend-neutral, generation-keyed snapshot owner.
     source_subgraphs: SourceSubgraphService
-    # Shadow-only selected-source graph tools. Public Ask/Report wiring is
-    # intentionally deferred to the baseline-preserving rollout PRs.
-    source_graph_primitives: SourceGraphPrimitives
     # Shadow lane keeps the historical result immutable. Ask/Report wiring
     # remains deferred; later consumers must finish B before invoking G.
     source_graph_enrichment: BaselineProtectedEnrichmentService
@@ -791,7 +788,7 @@ def _build_source_graph_domain(
     subgraphs = SourceSubgraphService(
         projections=seats.index_projections, settings=settings
     )
-    primitives = SourceGraphPrimitives(snapshots=subgraphs, settings=settings)
+    primitives = SourceGraphPrimitives()
     enrichment = BaselineProtectedEnrichmentService()
     online_ppr = SourceSubgraphPprService(settings=settings)
     artifact_store = ScaleArtifactStore(settings)
@@ -803,7 +800,6 @@ def _build_source_graph_domain(
     return _SourceGraphDomain(
         scale_artifact_store=artifact_store,
         source_subgraphs=subgraphs,
-        source_graph_primitives=primitives,
         source_graph_enrichment=enrichment,
         source_subgraph_ppr=online_ppr,
         source_partitioned_ppr=partitioned_ppr,
@@ -1168,7 +1164,6 @@ class RepositoryRuntime:
         graph = _build_source_graph_domain(foundation, seats)
         self.scale_artifact_store = graph.scale_artifact_store
         self.source_subgraphs = graph.source_subgraphs
-        self.source_graph_primitives = graph.source_graph_primitives
         self.source_graph_enrichment = graph.source_graph_enrichment
         self.source_subgraph_ppr = graph.source_subgraph_ppr
         self.source_partitioned_ppr = graph.source_partitioned_ppr

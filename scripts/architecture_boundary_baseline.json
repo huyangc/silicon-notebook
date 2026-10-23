@@ -288,7 +288,7 @@
     "allowed": []
   },
   "facade_protocol_binding_gaps": {},
-  "ports_protocol_method_count": 982,
+  "ports_protocol_method_count": 981,
   "function_length_ceiling": {
     "backend/app/extensions/ask.py::AskCompletedObserverHost.observe_application": 154,
     "backend/app/extensions/parser_chain.py::ParserProviderChainHost._run": 307,
@@ -311,7 +311,7 @@
     "backend/app/services/report_engine.py::ReportEngine._assemble": 454,
     "backend/app/services/report_engine.py::ReportEngine._draft_section": 266,
     "backend/app/services/repository_facade.py::RepositoryFacade.__init__": 469,
-    "backend/app/services/repository_runtime.py::RepositoryRuntime.__init__": 147,
+    "backend/app/services/repository_runtime.py::RepositoryRuntime.__init__": 146,
     "backend/app/services/source_ingestion.py::SourceIngestionService._process_source_scoped": 352,
     "backend/app/services/source_ingestion.py::SourceIngestionService.process_source": 17
   }

@@ -38,6 +38,7 @@ from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import (
     RecordingModelProvider, bind_all_embedding_clients, bind_chat_client,
 )
+from tests.ask_testkit import ask_engine_as_current_user
 
 
 # ---------------------------------------------------------------------------
@@ -608,7 +609,7 @@ def test_ask_chunk_citation_carries_the_section_figure(repo, monkeypatch):
     notebook_id, source_id = _seed_source_with_a_captioned_figure(repo)
     calls = _spy_on_image_asset_rows(repo, monkeypatch)
 
-    response = repo._runtime.ask_component.ask_chunk_current(notebook_id, AskRequest(question=UNIQUE_TERM))
+    response = ask_engine_as_current_user(repo._runtime.ask_component, notebook_id, AskRequest(question=UNIQUE_TERM))
 
     assert response.citations, "ask_chunk 未产出引用"
     with_images = [c for c in response.citations if c.images]
@@ -638,7 +639,7 @@ def test_ask_chunk_answer_survives_an_image_store_read_failure(repo, monkeypatch
 
     monkeypatch.setattr(repo._runtime.source_store, "image_asset_rows", _boom)
 
-    response = repo._runtime.ask_component.ask_chunk_current(notebook_id, AskRequest(question=UNIQUE_TERM))
+    response = ask_engine_as_current_user(repo._runtime.ask_component, notebook_id, AskRequest(question=UNIQUE_TERM))
 
     # 回答没有因为附图这一步炸了而丢失。
     assert response.citations, "ask_chunk 未产出引用"
@@ -674,7 +675,7 @@ def test_grounded_chunk_answer_puts_the_figure_on_the_chunk_anchor(repo, monkeyp
     bind_chat_client(repo, "ask_answer", _ChunkAnswerLLM())
     calls = _spy_on_image_asset_rows(repo, monkeypatch)
 
-    response = repo._runtime.ask_component.ask_chunk_current(notebook_id, AskRequest(question=UNIQUE_TERM))
+    response = ask_engine_as_current_user(repo._runtime.ask_component, notebook_id, AskRequest(question=UNIQUE_TERM))
 
     assert response.answer, (response.conclusion, response.model_errors)
     chunk_anchors = [a for a in response.anchors if a.object_type == "chunk"]

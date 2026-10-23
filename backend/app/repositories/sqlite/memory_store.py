@@ -1534,34 +1534,6 @@ class MemoryStore:
         base_ids = [str(value) for value in raw_ids] if isinstance(raw_ids, list) else []
         return item, candidates, base_ids
 
-    @staticmethod
-    def validate_promotion_approval_access_on(
-        db: sqlite3.Connection,
-        memory_id: str,
-        candidate_notebook_id: str,
-    ) -> None:
-        """Revalidate Memory scope and creator access inside approval's write txn.
-
-        读权判定整条走唯一定义点的**列引用**形式(notebook 是已 join 的 `n`,用户是
-        `m.created_by`),因而一个参数都不消费。此前这里只算 `is_member` 再在 Python
-        里补一次 owner 比较——那是「读权」的一份手写复刻,群组授权扩展时它不会自动
-        跟随,会让被授权者的晋升审批在写事务里被拒。
-        """
-        row = db.execute(
-            "SELECT m.notebook_id,("
-            + read_access_clause("n", user_ref="m.created_by")
-            # K3: no approval out of a notebook being deleted/copied/imported.
-            + f" AND n.{NOTEBOOK_LIVE_SQL}) AS has_access FROM memory_items m "
-            "JOIN notebooks n ON n.id=m.notebook_id WHERE m.id=?",
-            (memory_id,),
-        ).fetchone()
-        if row is None:
-            raise KeyError(memory_id)
-        if row["notebook_id"] != candidate_notebook_id:
-            raise ValueError("promotion candidate notebook does not match Memory notebook")
-        if not bool(row["has_access"]):
-            raise PermissionError(memory_id)
-
     def record_promotion_decision_on(
         self,
         db: sqlite3.Connection,

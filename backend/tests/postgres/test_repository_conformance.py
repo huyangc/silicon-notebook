@@ -12,6 +12,7 @@ from app.models.notebooks import NotebookCreate
 from app.models.sources import SourceImportFile, SourceImportRequest
 from app.repositories.bundle import PersistenceBundle
 from app.repositories.ports import UploadedSourceFile
+from tests.ask_testkit import ask_engine_as_current_user
 
 pytestmark = pytest.mark.postgres_integration
 
@@ -174,7 +175,7 @@ def test_complete_postgres_repository_smoke_from_empty_schema(
         ) == 1
         assert warm_progress == [(1, 1)]
 
-        answer = repository._runtime.ask_component.ask_chunk_current(
+        answer = ask_engine_as_current_user(repository._runtime.ask_component, 
             notebook.id,
             AskRequest(question="What evidence is available?", mode="chunk"),
         )

@@ -883,9 +883,9 @@ def test_move_does_not_reingest_kg_source_when_deprecated_after_source_removed(
 # calls memory_store.promotion_data_on -> promotion_rows_on, which raises
 # KeyError on the now-missing memory_id (memory_service.py's own
 # propose_promotion docstring chain and knowledge_governance.py:1100's
-# memory_by_id lookup both key off exactly this), or governance_store.
-# validate_promotion_approval_access_on similarly assumes the memory row is
-# still there — either way, approval fails for an admin who has no way to
+# memory_by_id lookup both key off exactly this), or the approval's
+# in-transaction lock (memory_store.lock_promotion_memory_on) similarly assumes
+# the memory row is still there — either way, approval fails for an admin who has no way to
 # know why a queue entry with no payload is broken.
 #
 # State-name verification done before writing this guard (not assumed):

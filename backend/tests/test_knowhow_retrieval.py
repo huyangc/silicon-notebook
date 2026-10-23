@@ -37,6 +37,7 @@ from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_chat_client
 from tests.knowhow_world_testkit import quiesce_knowhow_world, world_payload
 from tests.world_templates import world_env, world_template
+from tests.ask_testkit import ask_engine_as_current_user
 
 EMBED_DIM = 16
 
@@ -353,7 +354,7 @@ def test_fts_and_retrieval_hit_knowhow_chunk_with_element_backtrace(client, impo
     # and an element_id that resolves the same way (no LLM configured in
     # this fixture -> deterministic non-LLM fallback, same shape as
     # test_ask_chunk_deterministic_without_llm in test_retrieval_service.py).
-    resp = repo._runtime.ask_component.ask_chunk_current(nb, AskRequest(question=UNIQUE_TERM))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb, AskRequest(question=UNIQUE_TERM))
     assert resp.citations, "ask_chunk 未产出引用"
     cite = next((c for c in resp.citations if UNIQUE_TERM in c.quoted_span), None)
     assert cite is not None, [c.quoted_span for c in resp.citations]
@@ -495,7 +496,7 @@ def test_delete_table_clears_chunk_fts_vector_and_ko_so_query_no_longer_hits(cli
     scored, _ids, _mat = repo._retrieve_chunks(nb, UNIQUE_TERM)
     assert not any(UNIQUE_TERM in c.text for c in scored)
 
-    resp = repo._runtime.ask_component.ask_chunk_current(nb, AskRequest(question=UNIQUE_TERM))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb, AskRequest(question=UNIQUE_TERM))
     assert not any(UNIQUE_TERM in c.quoted_span for c in resp.citations)
 
 

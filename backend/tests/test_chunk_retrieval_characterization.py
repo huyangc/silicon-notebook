@@ -22,6 +22,7 @@ from app.services.sqlite_repository import SQLiteRepository, _now
 from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_rerank_client
 from tests.model_testkit import bind_chat_client
+from tests.ask_testkit import ask_engine_as_current_user
 
 
 # ─────────────────────────── fixtures / helpers ───────────────────────────
@@ -406,7 +407,7 @@ def test_mix_direct_collision_restores_feature_off_rerank_tie_order(
 
     monkeypatch.setattr(ask, "_activate_selected_source_graph", capture_selected)
 
-    repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="routing"))
+    ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="routing"))
 
     assert [chunk.chunk_id for chunk in captured["chunks"]] == ["historical"]
 
@@ -472,7 +473,7 @@ def test_ask_chunk_strategy_dispatch_is_mutually_exclusive(repo, monkeypatch):
             # 默认 fixture 的 rerank 未配置 → overlay_on 自然为 False
             bind_rerank_client(repo, _UnconfiguredRerank())
 
-        repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="moe routing"))
+        ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="moe routing"))
 
         chosen = [k for k, v in calls.items() if v > 0]
         assert chosen == [expected], (
@@ -503,7 +504,7 @@ def test_ask_chunk_multi_subquery_quota_fuse_end_to_end(repo, monkeypatch):
 
     monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks_multi", _spy)
 
-    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="alpha vs beta"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="alpha vs beta"))
 
     assert calls["multi"] == 1, "多子查询必须委托 _retrieve_chunks_multi(quota_fuse 分支)"
     # 非 mix 分支:每个 selected 一条 Citation → citation 数 == selected 数 ≤ chunk_mmr_k
@@ -533,7 +534,7 @@ def test_ask_chunk_mmr_uses_settings_k_and_lambda(repo, monkeypatch):
 
     monkeypatch.setattr(repo.retrieval.candidates, "_mmr_select_chunks", _spy)
 
-    repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="shared topic"))
+    ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="shared topic"))
 
     assert seen.get("k") == 2, f"MMR k 应取 settings.chunk_mmr_k=2,实为 {seen.get('k')}"
     assert seen.get("lambda") == 0.9, f"MMR lambda 应取 settings.chunk_mmr_lambda=0.9,实为 {seen.get('lambda')}"
@@ -563,7 +564,7 @@ def test_ask_chunk_multi_fuse_k_equals_mmr_k(repo, monkeypatch):
 
     monkeypatch.setattr(rmod, "quota_fuse", _spy)
 
-    repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="alpha vs beta"))
+    ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="alpha vs beta"))
 
     assert seen.get("top_n") == 4, (
         f"quota_fuse 的 top_n 应复用 settings.chunk_mmr_k=4,实为 {seen.get('top_n')}")
@@ -591,7 +592,7 @@ def test_ask_chunk_expand_query_uses_chunk_max_subqueries(repo, monkeypatch):
         return qr.ExpandedQuery(query=question, sub_queries=[qr.SubQuerySpec(query=question)])
 
     monkeypatch.setattr(qr, "expand_query", _spy_expand)
-    repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="what is topic"))
+    ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="what is topic"))
     assert seen.get("max_subqueries") == 7, (
         f"expand_query 应收到 settings.chunk_max_subqueries=7,实为 {seen.get('max_subqueries')}")
 
@@ -615,7 +616,7 @@ def test_ask_chunk_expand_query_uses_chunk_max_subqueries(repo, monkeypatch):
         return orig_single(notebook_id, query, recall)
 
     monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks", _spy_single)
-    repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="topic"))
+    ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="topic"))
     assert called["expand"] == 0, "query_rewrite_enabled=False 时不应调 expand_query"
     assert seen_single.get("query") == "topic", (
         f"关 rewrite → 单查询应为 retrieval_query('topic'),实为 {seen_single.get('query')}")
@@ -1419,7 +1420,7 @@ def test_ask_chunk_default_chunk_recall_wiring(repo, monkeypatch):
 
     monkeypatch.setattr(rmod, "score_chunks", _spy)
 
-    repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="topic alpha"))
+    ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="topic alpha"))
 
     assert seen.get("limit") == 200, (
         f"暴力路径 score_chunks 的 limit 应 == 默认 chunk_recall=200,实为 {seen.get('limit')}")
@@ -1467,7 +1468,7 @@ def test_ask_chunk_mix_token_budget_actually_trims(repo, monkeypatch):
 
     monkeypatch.setattr(rmod, "truncate_by_tokens", _spy)
 
-    repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="moe routing"))
+    ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="moe routing"))
 
     assert seen.get("in") == 10, "truncate_by_tokens 应收到全部 10 条候选"
     assert seen.get("out") is not None and seen["out"] < seen["in"], (
@@ -1503,7 +1504,7 @@ def test_ask_chunk_citation_binding_parity_mix_vs_nonmix(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "max_total_tokens", 30000)  # 够大,不触发截断
     bind_chat_client(repo, "ask_answer", _FakeLLM(markers=("k2",)))        # 答案只引用 k2 → 只绑 ck-cite-1
 
-    resp_mix = repo._runtime.ask_component.ask_chunk_current(nb1.id, AskRequest(question="moe routing"))
+    resp_mix = ask_engine_as_current_user(repo._runtime.ask_component, nb1.id, AskRequest(question="moe routing"))
 
     assert [a.object_id for a in resp_mix.anchors] == ["ck-cite-1"], (
         f"答案只引 k2 → anchor 应仅 ck-cite-1,实为 {[a.object_id for a in resp_mix.anchors]}")
@@ -1528,7 +1529,7 @@ def test_ask_chunk_citation_binding_parity_mix_vs_nonmix(repo, monkeypatch):
                         lambda scored, ids, mat, k, lam: list(selected))
     bind_chat_client(repo, "ask_answer", _FakeLLM(markers=("k2",)))        # 答案仍只引用 k2
 
-    resp_non = repo._runtime.ask_component.ask_chunk_current(nb2.id, AskRequest(question="moe routing"))
+    resp_non = ask_engine_as_current_user(repo._runtime.ask_component, nb2.id, AskRequest(question="moe routing"))
 
     # 非 mix:每个 selected chunk 一条 Citation(3 条),与 anchor 无关
     assert len(resp_non.citations) == 3, (
@@ -1588,7 +1589,7 @@ def test_ask_chunk_citation_tier_reflects_cross_tier_ppr_chunk(repo, monkeypatch
     monkeypatch.setattr(repo.settings, "max_total_tokens", 30000)
     bind_chat_client(repo, "ask_answer", _FakeLLM(markers=("k1", "k2")))    # 两条都被引用
 
-    resp = repo._runtime.ask_component.ask_chunk_current(active_nb.id, AskRequest(question="moe routing"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, active_nb.id, AskRequest(question="moe routing"))
 
     tier_by_chunk = {c.source_id: c.tier for c in resp.citations}
     assert tier_by_chunk.get(own_sid) == "personal", (

@@ -45,6 +45,7 @@ from app.services.retrieval import RetrievedKnowledge
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_chat_client
+from tests.ask_testkit import ask_engine_as_current_user
 
 
 class _Notebooks:
@@ -455,7 +456,7 @@ def test_ask_chunk_citations_carry_knowhow_and_the_batch_query_still_fires_once(
     seeded = _seed_projected_table(repo, projector)
     calls = _spy_on_evidence_elements(repo, monkeypatch)
 
-    resp = repo._runtime.ask_component.ask_chunk_current(seeded["notebook_id"], AskRequest(question=UNIQUE_TERM))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, seeded["notebook_id"], AskRequest(question=UNIQUE_TERM))
 
     assert resp.citations, "ask_chunk 未产出引用"
     # Every citation in this fixture comes from a knowhow-projected cell (the
@@ -513,7 +514,7 @@ def test_grounded_chunk_answer_puts_knowhow_on_the_chunk_anchor(
     bind_chat_client(repo, "ask_answer", _ChunkAnswerLLM())
     calls = _spy_on_evidence_elements(repo, monkeypatch)
 
-    resp = repo._runtime.ask_component.ask_chunk_current(seeded["notebook_id"], AskRequest(question=UNIQUE_TERM))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, seeded["notebook_id"], AskRequest(question=UNIQUE_TERM))
 
     assert resp.answer, (resp.conclusion, resp.model_errors)  # 合成真的跑了
     chunk_anchors = [a for a in resp.anchors if a.object_type == "chunk"]

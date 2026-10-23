@@ -21,8 +21,7 @@
   `MEMBER_PROBE_FOR_SHARE_SQL` 或本文件的 direct/group grant-chain probe 锁住一条
   当前有效的 self-service 读权链，直到详情响应对象组装完。
 * `postgres/memory_store.py`:`_read_access_clause`(经
-  `live_read_access_exists_clause`,带笔记本存活谓词)、`_answer_save_scope_exists`、
-  `validate_promotion_approval_access_on`(用列引用形式)。
+  `live_read_access_exists_clause`,带笔记本存活谓词)、`_answer_save_scope_exists`。
 * `postgres/query_store.py`:本人自助读的 ask_jobs/reports(活动概览「只看提问/只看
   报告」)经 `live_read_access_exists_clause`。⚠ 铃铛的待确认报告**例外**:它用
   `read_access_exists_clause` + 投影列 `(nb.<NOTEBOOK_LIVE_SQL>) AS notebook_live`、

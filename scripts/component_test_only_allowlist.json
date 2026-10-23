@@ -152,11 +152,6 @@
       "reason": "旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)"
     },
     {
-      "member": "backend/app/repositories/ports.py::SourceStorePort.visible_source_identity_rows_bounded",
-      "category": "pending-decision",
-      "reason": "可见来源身份清单的有界读,只剩测试与计划钉;配套部分索引 idx_sources_visible_identity 只为它服务。删方法会留下孤立索引,是否连索引一起迁移下线需拍板"
-    },
-    {
       "member": "backend/app/repositories/ports.py::UnifiedKgStorePort.community_member_ids",
       "category": "test-observation",
       "reason": "已发布社区成员观察点"
@@ -247,19 +242,9 @@
       "reason": "直写 Memory 行的构造点"
     },
     {
-      "member": "backend/app/repositories/postgres/memory_store.py::MemoryStore.validate_promotion_approval_access_on",
-      "category": "pending-decision",
-      "reason": "晋升审批写事务内的读权复核:生产审批现走 lock_promotion_memory_on(_lock_memory_aggregate_on, permission_error/require_live),本方法只剩计划钉用例。删除前需确认两条判据(含群组授权)等价——属授权语义核查,不自行判定"
-    },
-    {
       "member": "backend/app/repositories/postgres/retrieval_experience_store.py::RetrievalExperienceStore.read_experience",
       "category": "test-observation",
       "reason": "按 id 读一条检索经验的观察点"
-    },
-    {
-      "member": "backend/app/repositories/postgres/source_store.py::SourceStore.visible_source_identity_rows_bounded",
-      "category": "pending-decision",
-      "reason": "可见来源身份清单的有界读,只剩测试与计划钉;配套部分索引 idx_sources_visible_identity 只为它服务。删方法会留下孤立索引,是否连索引一起迁移下线需拍板"
     },
     {
       "member": "backend/app/repositories/postgres/unified_kg_store.py::UnifiedKgStore.community_member_ids",
@@ -367,19 +352,9 @@
       "reason": "直写 Memory 行的构造点"
     },
     {
-      "member": "backend/app/repositories/sqlite/memory_store.py::MemoryStore.validate_promotion_approval_access_on",
-      "category": "pending-decision",
-      "reason": "晋升审批写事务内的读权复核:生产审批现走 lock_promotion_memory_on(_lock_memory_aggregate_on, permission_error/require_live),本方法只剩计划钉用例。删除前需确认两条判据(含群组授权)等价——属授权语义核查,不自行判定"
-    },
-    {
       "member": "backend/app/repositories/sqlite/retrieval_experience_store.py::RetrievalExperienceStore.read_experience",
       "category": "test-observation",
       "reason": "按 id 读一条检索经验的观察点"
-    },
-    {
-      "member": "backend/app/repositories/sqlite/source_store.py::SourceStore.visible_source_identity_rows_bounded",
-      "category": "pending-decision",
-      "reason": "可见来源身份清单的有界读,只剩测试与计划钉;配套部分索引 idx_sources_visible_identity 只为它服务。删方法会留下孤立索引,是否连索引一起迁移下线需拍板"
     },
     {
       "member": "backend/app/repositories/sqlite/unified_kg_store.py::UnifiedKgStore.community_member_ids",
@@ -395,16 +370,6 @@
       "member": "backend/app/repositories/sqlite/unified_kg_store.py::UnifiedKgStore.replace_cluster_rows_streamed",
       "category": "test-observation",
       "reason": "直接写簇行的构造点,用例借它摆出指定的簇状态"
-    },
-    {
-      "member": "backend/app/services/ask_service.py::AskService.ask_chunk_current",
-      "category": "pending-decision",
-      "reason": "单引擎、带检索天花板的直调入口;生产只走 ask() 按模式分发。是否算对外语义(留作引擎直调面)还是改测试走 ask() 后删除,需拍板"
-    },
-    {
-      "member": "backend/app/services/ask_service.py::AskService.ask_reasoning_current",
-      "category": "pending-decision",
-      "reason": "单引擎、带检索天花板的直调入口;生产只走 ask() 按模式分发。是否算对外语义(留作引擎直调面)还是改测试走 ask() 后删除,需拍板"
     },
     {
       "member": "backend/app/services/graph_retrieval.py::GraphRetrievalService.relation_support_count",
@@ -449,7 +414,7 @@
     {
       "member": "backend/app/services/notebook_sharing.py::NotebookSharingService.kick_all_members",
       "category": "pending-decision",
-      "reason": "「整本踢出全部成员」没有任何生产入口,只有 Memory 退出与只读分享用例在用;是保留为产品能力(待接入口)还是连同用例删除,需拍板"
+      "reason": "功能 PR 跟进(用户 2026-10-23 裁决):补上「整本移除全部成员」的入口,做成功能;在此之前保留"
     },
     {
       "member": "backend/app/services/pending_bus.py::PendingBus._buffered_count",
@@ -490,11 +455,6 @@
       "member": "backend/app/services/section_outline.py::AddressBook.addresses",
       "category": "test-observation",
       "reason": "本 run 地址簿的只读视图观察点"
-    },
-    {
-      "member": "backend/app/services/source_graph_primitives.py::SourceGraphPrimitives.retrieve_relations",
-      "category": "pending-decision",
-      "reason": "selected-source 图原语族(neighbors / follow_chain / retrieve_relations)里唯一未接生产的一个;删除连带结果类型与 max_relation_results 配置,是否保留这个原语需拍板"
     },
     {
       "member": "backend/app/services/source_partitioned_ppr.py::SourcePartitionedPprService.cache_size",

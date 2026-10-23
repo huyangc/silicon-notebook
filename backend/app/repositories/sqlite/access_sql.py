@@ -75,7 +75,7 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
 
 `member_exists_expr` / `grant_access_expr` / `read_access_clause` 的 ref 参数既可以是
 占位符,也可以是外层查询的列引用(如 `mount_sql.MOUNT_VALID_EXPR` 用 `a.created_by`
-表示「挂载方 owner」、`validate_promotion_approval_access_on` 用 `m.created_by`)。
+表示「挂载方 owner」)。
 `read_access_clause` 的 `user_ref` 刻意是**关键字参数**:它若挤在 `nb_alias` 之后当
 第二个位置参数,既有的 `read_access_clause("n", "nm")`(第二个是 member_alias)会被
 静默解释成「owner 是 nm 这一列」——一个不报错、只是把权限判错的形态。
@@ -93,8 +93,7 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
   嵌进 Memory 各处读查询)、
   `create_candidate_with_initial_revision`(写前判定)、
   `create_answer_with_initial_revision`(答案存 Memory 的范围校验;同名的
-  `_answer_save_scope_locked_on` 是不含 SQL 的空接缝,谓词不在那儿)、
-  `validate_promotion_approval_access_on`(晋升审批写事务内复核,用列引用形式)。
+  `_answer_save_scope_locked_on` 是不含 SQL 的空接缝,谓词不在那儿)。
 * `sqlite/memory_store.py::group_exit_memory_preview` —— 本人退群预览:`read_access_clause`
   (此刻可读)∧ NOT `read_access_after_group_exit_clause`(退群后可读),两条都用列引用
   形式(`gm.user_id` / `gm.group_id`),不消费参数。

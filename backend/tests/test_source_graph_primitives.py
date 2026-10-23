@@ -4,7 +4,6 @@ import json
 
 import pytest
 
-import app.services.source_graph_primitives as primitives_module
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from tests.test_source_subgraph import _seed
@@ -158,35 +157,22 @@ def _add_chain_and_manual(repo):
     return notebook_id, source_a, source_b
 
 
-def test_neighbors_relation_search_and_two_hop_chain_stay_inside_scope(repo):
+def _primitives(repo):
+    """The primitives the selected-source graph activation expands with."""
+    return repo._runtime.selected_source_graph._primitives
+
+
+def test_expand_graph_stays_inside_the_selected_source(repo):
     notebook_id, source_a, source_b = _add_chain_and_manual(repo)
-    primitives = repo._runtime.source_graph_primitives
-    snapshot = primitives.snapshot(notebook_id, [source_a])
-
-    neighbors = primitives.neighbors(snapshot, "ko-a1", direction="out")
-    assert [node.object_id for node in neighbors.nodes] == ["ko-a2"]
-    assert {relation.source_id for relation in neighbors.relations} == {source_a}
-    assert all(source_b not in node.source_ids for node in neighbors.nodes)
-
-    relations = primitives.retrieve_relations(
-        snapshot, "A two", endpoint_object_ids=["ko-a2"]
-    )
-    assert {hit.relation.relation_id for hit in relations.hits} == {"rel-a", "rel-a2"}
-    assert all(hit.relation.source_id == source_a for hit in relations.hits)
-
-    chain = primitives.follow_chain(
-        snapshot, "ko-a1", edge_type="part_of", direction="out"
-    )
-    assert len(chain.inferences) == 1
-    assert chain.inferences[0].via_id == "ko-a2"
-    assert chain.inferences[0].target_id == "ko-a3"
-    assert {hop.relation_id for hop in chain.inferences[0].hops} == {
-        "rel-a",
-        "rel-a2",
-    }
+    snapshot = repo._runtime.source_subgraphs.snapshot(notebook_id, [source_a])
+    expansion = _primitives(repo).expand_graph(snapshot, ["ko-a1"], max_depth=3)
+    assert {node.object_id for node in expansion.nodes} >= {"ko-a1", "ko-a2"}
+    assert {relation.source_id for relation in expansion.relations} == {source_a}
+    assert all(source_b not in node.source_ids for node in expansion.nodes)
+    assert all(set(node.source_ids) <= {source_a} for node in expansion.nodes)
 
 
-def test_high_degree_and_expand_graph_obey_result_and_node_bounds(repo, monkeypatch):
+def test_high_degree_expand_graph_obeys_result_and_node_bounds(repo):
     notebook_id, source_a, _source_b = _add_chain_and_manual(repo)
     now = repo._runtime.seams.now()
     with repo._write() as db:
@@ -236,14 +222,9 @@ def test_high_degree_and_expand_graph_obey_result_and_node_bounds(repo, monkeypa
             "WHERE notebook_id=?",
             (notebook_id,),
         )
-    snapshot = repo._runtime.source_graph_primitives.snapshot(notebook_id, [source_a])
-    neighbors = repo._runtime.source_graph_primitives.neighbors(
-        snapshot, "ko-a1", direction="out", max_results=3
-    )
-    assert len(neighbors.relations) == 3
-    assert neighbors.truncated
-
-    expansion = repo._runtime.source_graph_primitives.expand_graph(
+    primitives = _primitives(repo)
+    snapshot = repo._runtime.source_subgraphs.snapshot(notebook_id, [source_a])
+    expansion = primitives.expand_graph(
         snapshot,
         ["ko-a1"],
         max_depth=99,
@@ -259,7 +240,7 @@ def test_high_degree_and_expand_graph_obey_result_and_node_bounds(repo, monkeypa
         for endpoint in (relation.source_object_id, relation.target_object_id)
     } <= {node.object_id for node in expansion.nodes}
 
-    one_node = repo._runtime.source_graph_primitives.expand_graph(
+    one_node = primitives.expand_graph(
         snapshot,
         ["ko-a1"],
         max_depth=3,
@@ -269,99 +250,15 @@ def test_high_degree_and_expand_graph_obey_result_and_node_bounds(repo, monkeypa
     assert [node.object_id for node in one_node.nodes] == ["ko-a1"]
     assert one_node.relations == ()
 
-    captured_relation_counts = []
-    original_compose = primitives_module.compose_two_hop_paths
 
-    def capture_compose(nodes, relations, *args, **kwargs):
-        captured_relation_counts.append(len(relations))
-        return original_compose(nodes, relations, *args, **kwargs)
-
-    monkeypatch.setattr(primitives_module, "compose_two_hop_paths", capture_compose)
-    repo._runtime.source_graph_primitives.follow_chain(
-        snapshot,
-        "ko-a1",
-        edge_type="part_of",
-        max_fan_out=3,
-        max_results=16,
-    )
-    # At most one bounded first frontier and one bounded second frontier per
-    # middle node reach the quadratic pure composer; the 20 parallel edges do
-    # not expand it to the complete snapshot relation set.
-    assert captured_relation_counts == [4]
-
-    # Non-transitive edges are filtered before frontier truncation. They may
-    # never consume the bounded seats and starve a valid transitive chain when
-    # the caller leaves edge_type unspecified.
-    default_chain = repo._runtime.source_graph_primitives.follow_chain(
-        snapshot,
-        "ko-a1",
-        max_fan_out=3,
-        max_results=16,
-    )
-    assert len(default_chain.inferences) == 1
-    assert captured_relation_counts == [4, 4]
-    unsupported = repo._runtime.source_graph_primitives.follow_chain(
-        snapshot, "ko-a1", edge_type="contrasts_with"
-    )
-    assert unsupported.capability.reason == "unsupported_chain_edge_type"
-
-
-def test_exact_subtree_and_cursor_enumeration_return_only_selected_source(repo):
-    notebook_id, source_a, source_b = _add_chain_and_manual(repo)
-    primitives = repo._runtime.source_graph_primitives
-    snapshot = primitives.snapshot(notebook_id, [source_a])
-
-    exact = primitives.exact_lookup(snapshot, "set_db 如何使用")
-    assert {chunk.chunk_id for chunk in exact.chunks} == {
-        "manual-main",
-        "manual-args",
-        "manual-example",
-    }
-    assert {chunk.source_id for chunk in exact.chunks} == {source_a}
-    assert all(chunk.source_id != source_b for chunk in exact.chunks)
-
-    first = primitives.enumerate(snapshot, "chunks", limit=2)
-    assert first.total == len(snapshot.chunks)
-    assert len(first.items) == 2
-    assert first.next_cursor
-    assert not first.complete
-    second = primitives.enumerate(
-        snapshot, "chunks", after=first.next_cursor, limit=100
-    )
-    assert second.complete
-    assert not {item.chunk_id for item in first.items} & {
-        item.chunk_id for item in second.items
-    }
-    assert all(item.source_id == source_a for item in (*first.items, *second.items))
-
-
-def test_channel_specific_capability_reasons_are_preserved(repo):
+def test_expand_graph_reports_the_snapshot_capability_reason(repo):
     notebook_id, source_a, _source_b = _add_chain_and_manual(repo)
     with repo._write() as db:
         db.execute(
             "UPDATE unified_kg_state SET source_index_backfilled=0 WHERE notebook_id=?",
             (notebook_id,),
         )
-    primitives = repo._runtime.source_graph_primitives
-    snapshot = primitives.snapshot(notebook_id, [source_a])
-    assert primitives.neighbors(snapshot, "ko-a1").capability.reason == (
-        "source_index_unavailable"
-    )
-    assert primitives.exact_lookup(snapshot, "set_db").capability.reason == (
-        "source_index_unavailable"
-    )
-    assert primitives.enumerate(snapshot, "chunks").capability.reason == (
-        "source_index_unavailable"
-    )
-
-
-def test_shadow_primitives_are_not_public_retrieval_consumers(repo, monkeypatch):
-    notebook_id, _source_a, _source_b = _add_chain_and_manual(repo)
-
-    def unexpected_snapshot(*_args, **_kwargs):
-        pytest.fail("public retrieval consumed shadow source-graph primitives")
-
-    monkeypatch.setattr(
-        repo._runtime.source_graph_primitives, "snapshot", unexpected_snapshot
-    )
-    assert repo.retrieval.exact_lookup_chunks(notebook_id, "set_db") == []
+    snapshot = repo._runtime.source_subgraphs.snapshot(notebook_id, [source_a])
+    expansion = _primitives(repo).expand_graph(snapshot, ["ko-a1"])
+    assert expansion.capability.reason == "source_index_unavailable"
+    assert expansion.nodes == () and expansion.relations == ()

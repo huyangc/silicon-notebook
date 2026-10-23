@@ -1183,22 +1183,27 @@ def test_memory_source_cannot_be_reached_by_name_or_by_id(repo):
         )
 
 
-def test_visible_source_identity_roster_uses_partial_ordering_index(repo):
+def test_kg_target_pager_uses_the_visible_source_partial_ordering_index(repo):
+    """``source_build_state_page`` (the KG extraction target pager) walks
+    visible sources in (created_at, id) keyset order on the partial
+    ``idx_sources_visible_identity`` -- no temp sort."""
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     _add_source(repo, notebook.id, "s-a", [], title="Manual A")
+    statements = []
+
+    class _Capture:
+        def __init__(self, db):
+            self._db = db
+
+        def execute(self, sql, params=()):
+            statements.append((sql, params))
+            return self._db.execute(sql, params)
+
     with repo._connect() as db:
-        assert repo._runtime.source_store.visible_source_identity_rows_bounded(
-            db, notebook.id, 0
-        ) == []
-        plan = db.execute(
-            "EXPLAIN QUERY PLAN SELECT s.id,s.notebook_id,s.title,s.file_name,"
-            "m.is_paper,m.paper_title FROM sources s "
-            "LEFT JOIN source_paper_meta m ON m.source_id=s.id "
-            "WHERE s.notebook_id=? "
-            "AND s.source_type NOT IN ('memory','knowhow') "
-            "ORDER BY s.created_at,s.id LIMIT ?",
-            (notebook.id, 10),
-        ).fetchall()
+        repo._runtime.knowledge.source_build_state_page(
+            _Capture(db), notebook.id, None, "", 10)
+        ((sql, params),) = statements
+        plan = db.execute("EXPLAIN QUERY PLAN " + sql, params).fetchall()
     detail = " ".join(str(row["detail"]) for row in plan)
     assert "idx_sources_visible_identity" in detail
     assert "TEMP B-TREE" not in detail
