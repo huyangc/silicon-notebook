@@ -13,6 +13,7 @@ import pytest
 from app.services.query_rewrite import expand_query, ExpandedQuery, SubQuerySpec
 from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_chat_client
+from tests.ask_testkit import ask_engine_as_current_user
 
 
 class _FakeLLM:
@@ -305,7 +306,7 @@ def test_ask_chunk_unions_bilingual_keyword_hit_once(repo, monkeypatch):
         return orig_quota(collected, per_query, top_n, relevance)
     monkeypatch.setattr(_ret, "quota_fuse", _cap_quota)
 
-    repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="what about the LNA?"))
+    ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="what about the LNA?"))
     assert calls["n"] == 1            # ONE keyword-union FTS call per query
     assert captured.get("collected_ids")
     # the Chinese chunk (only reachable via the bilingual keyword) is in candidates

@@ -78,13 +78,16 @@ def test_runtime_owns_one_ask_service_and_current_user_entry_adapts_identity(rep
         notebook_id, payload, *, user_id, job_id="", cancel_event=None
     ):
         seen["args"] = (notebook_id, user_id, job_id, cancel_event)
-        return AskResponse(conclusion="stubbed")
+        return AskResponse(conclusion="stubbed", answer_id="ans-stubbed")
 
     monkeypatch.setattr(service, "ask_chunk", fake_chunk, raising=False)
-    out = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="q", mode="chunk"))
+    out = repo._runtime.ask_component.ask_current(nb.id, AskRequest(question="q", mode="chunk"))
 
     assert out.conclusion == "stubbed"
-    assert seen["args"] == (nb.id, repo.current_user().id, "", None)
+    notebook_id, user_id, job_id, cancel_event = seen["args"]
+    assert (notebook_id, user_id) == (nb.id, repo.current_user().id)
+    # The synchronous surface runs the engine under its own durable job.
+    assert job_id and cancel_event is not None
 
 
 def test_system_model_provider_is_independent_of_request_user_context(repo):

@@ -76,10 +76,11 @@ Methodology (read before trusting a row)
 5. **Not candidates at all.**  A member that overrides a method of a class
    from outside ``app`` (``HTMLParser.handle_data``, a pydantic settings
    hook): the framework calls it.  A member with a decorator that registers
-   it (``field_validator``, ``model_validator``, ``computed_field``, a route
-   decorator ...): the decorator is the caller.  Only ``property`` / setter /
-   getter / deleter, ``staticmethod``, ``classmethod``, ``cached_property``,
-   ``abstractmethod``, ``overload`` and ``override`` are non-registering.
+   it (a pydantic validator / serializer / ``computed_field``, a route or CLI
+   command decorator on a receiver, ``*.register``): the decorator is the
+   caller.  This is an allowlist of registering decorators: any other one
+   (``contextmanager``, ``lru_cache``, ``cache``, ``wraps`` ...) only wraps
+   the function, and its member is censused like any other.
    Classes nested in a function cannot be imported to check their MRO; their
    candidates are filed ``doubtful`` instead of guessed.
 
@@ -87,9 +88,9 @@ Methodology (read before trusting a row)
    (``app.extension_sdk``) and the plugin contracts in ``app.domain`` /
    ``app.extensions``.  A member is ``extension_surface`` when its class is a
    Protocol defined there, is re-exported by an ``app.extension_sdk``
-   module, is a host or SDK class there serving a method such a Protocol
-   declares, or anywhere else structurally implements (defines every method
-   of) such a Protocol declaring the name.  The census still lists these (an
+   module, or structurally implements (defines or inherits every method of)
+   such a Protocol declaring the name.  Sharing one method name with a
+   contract is not enough.  The census still lists these (an
    out-of-tree caller is invisible to it), but they are registered, never
    deleted.  The persistence ports in ``repositories/ports.py`` are not
    extension surface: plugins never get a store.
@@ -150,20 +151,29 @@ CATEGORIES = ("test-observation", "extension-port", "runtime-reference", "pendin
 # helpers are part of it, not test-only members of their own.
 LIVE_CATEGORIES = frozenset(CATEGORIES)
 
-NON_REGISTERING_DECORATORS = frozenset(
+# Decorators that register the function with a framework, which then calls
+# it: pydantic validators / serializers / computed fields, route and CLI
+# command decorators (``router.get``, ``app.command`` ...) and
+# ``*.register``. Matched on the last dotted segment; the route / command
+# names only when spelled on a receiver (``router.get``, not a bare ``get``).
+# Any other decorator (``contextmanager``, ``lru_cache``, ``cache``,
+# ``wraps`` ...) only wraps the function, so its member is censused as usual.
+REGISTERING_DECORATORS = frozenset(
     {
-        "property",
-        "staticmethod",
-        "classmethod",
-        "cached_property",
-        "functools.cached_property",
-        "abstractmethod",
-        "abc.abstractmethod",
-        "overload",
-        "typing.overload",
-        "override",
-        "typing.override",
-        "typing_extensions.override",
+        "field_validator",
+        "model_validator",
+        "validator",
+        "root_validator",
+        "field_serializer",
+        "model_serializer",
+        "computed_field",
+        "register",
+    }
+)
+RECEIVER_REGISTERING_DECORATORS = frozenset(
+    {
+        "get", "post", "put", "patch", "delete", "head", "options",
+        "api_route", "websocket", "route", "command", "callback",
     }
 )
 PROPERTY_ACCESSOR_SUFFIXES = (".setter", ".getter", ".deleter")
@@ -522,12 +532,17 @@ def _external_override(cls: type, name: str) -> str | None:
     return None
 
 
+def is_registering_decorator(dotted: str) -> bool:
+    """Whether a decorator (its dotted name, call parentheses dropped) hands
+    the function to a framework that calls it (see REGISTERING_DECORATORS)."""
+    tail = dotted.rsplit(".", 1)[-1]
+    if tail in REGISTERING_DECORATORS:
+        return True
+    return "." in dotted and tail in RECEIVER_REGISTERING_DECORATORS
+
+
 def _registering_decorators(member: Member) -> list[str]:
-    return [
-        d
-        for d in member.decorators
-        if d not in NON_REGISTERING_DECORATORS and not d.endswith(PROPERTY_ACCESSOR_SUFFIXES)
-    ]
+    return [d for d in member.decorators if is_registering_decorator(d)]
 
 
 def _own_members(cls: type) -> set[str]:
@@ -625,6 +640,105 @@ def load_allowlist(path: Path = ALLOWLIST_PATH) -> dict[str, dict[str, str]]:
     return {entry["member"]: entry for entry in data["members"]}
 
 
+@dataclass
+class Verdict:
+    bucket: str  # "keep" | "exempt" | "test-only" | "unreferenced" | "doubtful"
+    reason: str = ""
+    production_refs: int = 0
+    test_refs: list[Ref] = field(default_factory=list)
+
+
+def _refs_by_name(refs: Iterable[Ref], names: set[str]) -> dict[str, list[Ref]]:
+    by_name: dict[str, list[Ref]] = {}
+    for ref in refs:
+        if ref.pattern is None:
+            if ref.name in names:
+                by_name.setdefault(ref.name, []).append(ref)
+            continue
+        for name in names:
+            if ref.pattern.match(name):
+                by_name.setdefault(name, []).append(ref)
+    return by_name
+
+
+def classify_members(
+    members: list[Member],
+    prod_refs: Iterable[Ref],
+    test_refs: Iterable[Ref],
+    *,
+    exempt_reason,
+    importable,
+    kept: set[str],
+) -> dict[str, Verdict]:
+    """Pure classification (methodology points 3-5). ``exempt_reason(member)``
+    gives why a member is not a candidate at all (or None), ``importable``
+    whether its class can be checked, ``kept`` the registered keys whose
+    bodies keep counting as production callers.
+
+    Fixed point: a production reference inside a candidate's own body is not
+    a production caller -- it only runs when a test runs that candidate -- so
+    removing such references can make further members candidates, until
+    nothing changes. A reference inside the member's own ``def`` never counts
+    for it."""
+    names = {m.name for m in members}
+    prod_by_name = _refs_by_name(prod_refs, names)
+    test_by_name = _refs_by_name(test_refs, names)
+
+    def live(m: Member, dead: set[str]) -> list[Ref]:
+        return [r for r in prod_by_name.get(m.name, []) if r.owner != m.key and r.owner not in dead]
+
+    dead: set[str] = set()
+    while True:
+        new_dead = {
+            m.key
+            for m in members
+            if not live(m, dead)
+            and exempt_reason(m) is None
+            and importable(m)  # doubtful: its body keeps counting
+            and m.key not in kept
+        }
+        if new_dead == dead:
+            break
+        dead = new_dead
+
+    verdicts: dict[str, Verdict] = {}
+    for m in members:
+        production = live(m, dead)
+        tests = [r for r in test_by_name.get(m.name, []) if r.owner != m.key]
+        if production:
+            verdicts[m.key] = Verdict("keep", production_refs=len(production), test_refs=tests)
+            continue
+        reason = exempt_reason(m)
+        if reason is not None:
+            verdicts[m.key] = Verdict("exempt", reason, test_refs=tests)
+        elif not importable(m):
+            verdicts[m.key] = Verdict(
+                "doubtful", "class cannot be imported to check its MRO", test_refs=tests
+            )
+        else:
+            verdicts[m.key] = Verdict("test-only" if tests else "unreferenced", test_refs=tests)
+    return verdicts
+
+
+def _is_extension_surface(
+    m: Member, cls: type | None, protocol_members, sdk_classes: set[int]
+) -> bool:
+    """Methodology point 6: a Protocol in the plugin-contract modules, a class
+    an SDK module exports, or a class that structurally implements (defines
+    every method of) a plugin-contract Protocol declaring this name."""
+    if cls is None:
+        return False
+    if id(cls) in sdk_classes:
+        return True
+    if m.is_protocol and m.module.startswith(EXTENSION_MODULE_PREFIXES):
+        return True
+    available = _own_members(cls) | set(dir(cls))
+    return any(
+        m.name in proto_names and proto_names <= available
+        for _proto, proto_names in protocol_members
+    )
+
+
 def build_report(allowlist: dict[str, dict[str, str]] | None = None) -> dict[str, object]:
     _ensure_backend_on_path()
     allowlist = load_allowlist() if allowlist is None else allowlist
@@ -633,28 +747,8 @@ def build_report(allowlist: dict[str, dict[str, str]] | None = None) -> dict[str
     member_index: dict[str, dict[tuple[str, str], str]] = {}
     for m in members:
         member_index.setdefault(m.rel, {})[(m.qualname, m.name)] = m.key
-    names = {m.name for m in members}
-
     prod_refs = collect_refs(PRODUCTION_ROOTS, False, member_index)
     test_refs = collect_refs(TEST_ROOTS + ("examples", "fangan"), True, member_index)
-
-    patterns = [r for r in prod_refs if r.pattern is not None]
-    prod_by_name: dict[str, list[Ref]] = {}
-    for ref in prod_refs:
-        if ref.pattern is None and ref.name in names:
-            prod_by_name.setdefault(ref.name, []).append(ref)
-    for ref in patterns:
-        for name in names:
-            if ref.pattern.match(name):
-                prod_by_name.setdefault(name, []).append(ref)
-    test_by_name: dict[str, list[Ref]] = {}
-    for ref in test_refs:
-        if ref.pattern is None and ref.name in names:
-            test_by_name.setdefault(ref.name, []).append(ref)
-        elif ref.pattern is not None:
-            for name in names:
-                if ref.pattern.match(name):
-                    test_by_name.setdefault(name, []).append(ref)
 
     exemptions: dict[str, str | None] = {}
 
@@ -674,60 +768,29 @@ def build_report(allowlist: dict[str, dict[str, str]] | None = None) -> dict[str
             exemptions[m.key] = reason
         return exemptions[m.key]
 
-    # Fixed point: references inside a candidate's own body do not keep
-    # anything alive (methodology point 4).
-    dead: set[str] = set()
-    while True:
-        new_dead: set[str] = set()
-        for m in members:
-            live = [
-                r
-                for r in prod_by_name.get(m.name, [])
-                if r.owner != m.key and r.owner not in dead
-            ]
-            if live or exemption(m) is not None or _resolve_class(m) is None:
-                continue  # exempt, or doubtful: its body keeps counting
-            if allowlist.get(m.key, {}).get("category") in LIVE_CATEGORIES:
-                continue
-            new_dead.add(m.key)
-        if new_dead == dead:
-            break
-        dead = new_dead
+    kept = {k for k, e in allowlist.items() if e.get("category") in LIVE_CATEGORIES}
+    verdicts = classify_members(
+        members, prod_refs, test_refs,
+        exempt_reason=exemption,
+        importable=lambda m: _resolve_class(m) is not None,
+        kept=kept,
+    )
 
     protocols, sdk_classes = extension_surface()
     protocol_members = [(p, _own_members(p)) for p in protocols]
 
     rows: list[Row] = []
     for m in members:
-        live = [r for r in prod_by_name.get(m.name, []) if r.owner != m.key and r.owner not in dead]
-        tests = [r for r in test_by_name.get(m.name, []) if r.owner != m.key]
-        row = Row(m, "keep", production_refs=len(live), test_refs=len(tests))
-        if live:
-            rows.append(row)
-            continue
-        reason = exemption(m)
-        if reason is not None:
-            row.bucket, row.reason = "exempt", reason
-            rows.append(row)
-            continue
-        cls = _resolve_class(m)
-        if cls is None:
-            row.bucket = "doubtful"
-            row.reason = "class cannot be imported to check its MRO"
-        else:
-            row.bucket = "test-only" if tests else "unreferenced"
-            in_extension_modules = m.module.startswith(EXTENSION_MODULE_PREFIXES)
-            if id(cls) in sdk_classes or (m.is_protocol and in_extension_modules):
-                row.surface = True
-            elif in_extension_modules and any(m.name in names for _p, names in protocol_members):
-                row.surface = True  # a host or SDK class serving a contract method
-            else:
-                own = _own_members(cls)
-                for proto, proto_names in protocol_members:
-                    if m.name in proto_names and proto_names <= own | set(dir(cls)):
-                        row.surface = True
-                        break
-        row.test_sites = sorted({f"{r.rel}:{r.lineno}" for r in tests})[:5]
+        verdict = verdicts[m.key]
+        row = Row(
+            m, verdict.bucket, reason=verdict.reason,
+            production_refs=verdict.production_refs, test_refs=len(verdict.test_refs),
+        )
+        if verdict.bucket in {"test-only", "unreferenced"}:
+            row.surface = _is_extension_surface(
+                m, _resolve_class(m), protocol_members, sdk_classes
+            )
+        row.test_sites = sorted({f"{r.rel}:{r.lineno}" for r in verdict.test_refs})[:5]
         rows.append(row)
 
     candidates = [r for r in rows if r.bucket in {"test-only", "unreferenced", "doubtful"}]

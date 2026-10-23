@@ -93,8 +93,6 @@ def test_every_ask_entry_goes_through_the_one_installation():
         (ask, "<module>.AskService._engine_scope"),
         (ask, "<module>.AskService.preview_reasoning_intent"),
         (ask, "<module>.AskService.report_link_check"),
-        (ask, "<module>.AskService.ask_chunk_current"),
-        (ask, "<module>.AskService.ask_reasoning_current"),
     }
     # ``_engine_scope`` (model-work priority + the ceiling + the retrieval
     # run) is entered by the answer dispatch and by the retrieval-only output,
@@ -124,15 +122,10 @@ def test_every_ask_entry_goes_through_the_one_installation():
         (ask, "<module>.AskService.ask_evidence"),
     }
     # The engines are reached only from inside an installation: ``ask``
-    # dispatches by name (``getattr(self, spec.handler)``), the two
-    # current-user calls wrap theirs, and nothing calls the extension engine
-    # directly.
-    assert _call_sites(index, "ask_chunk") == {
-        (ask, "<module>.AskService.ask_chunk_current"),
-    }
-    assert _call_sites(index, "ask_reasoning") == {
-        (ask, "<module>.AskService.ask_reasoning_current"),
-    }
+    # dispatches by name (``getattr(self, spec.handler)``) and nothing calls
+    # an engine directly.
+    assert _call_sites(index, "ask_chunk") == set()
+    assert _call_sites(index, "ask_reasoning") == set()
     assert _call_sites(index, "ask_plugin_engine") == set()
 
 

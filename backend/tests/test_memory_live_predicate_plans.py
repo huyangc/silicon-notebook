@@ -286,10 +286,6 @@ def test_live_predicate_keeps_every_sqlite_reader_plan(repo, monkeypatch):
         except RolledBack:
             pass
 
-    def validate_approval():
-        with repo._runtime.database.connect() as db:
-            store.validate_promotion_approval_access_on(db, mid, target)
-
     def page(**kwargs):
         args = dict(notebook_id=None, status=None, origin=None, query="",
                     offset=0, limit=50)
@@ -318,7 +314,6 @@ def test_live_predicate_keeps_every_sqlite_reader_plan(repo, monkeypatch):
         ),
         "bell.report_outlines": lambda: queries.pending_actions_projection_rows(HEAVY),
         "promotion.lock": lock_for_approval,
-        "promotion.validate": validate_approval,
     }
     differing = {}
     compared = 0

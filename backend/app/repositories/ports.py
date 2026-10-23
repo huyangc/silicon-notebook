@@ -2133,20 +2133,6 @@ class SourceStorePort(Protocol):
         render a page of titles.
         """
         ...
-    def visible_source_identity_rows_bounded(
-        self, db: object, notebook_id: str, limit: int
-    ) -> list[Any]:
-        """At most ``limit`` user-visible source identity rows.
-
-        This is the bounded identity-catalog primitive used before a reasoning
-        run accepts a model-proposed source restriction.  It carries the same
-        display columns as ``source_display_rows``, applies the source tab's
-        hidden synthetic-source predicate in SQL, and orders by ``created_at,
-        id``.  Callers pass at most their hard catalog ceiling plus one, so a
-        large notebook never has to materialize its full source roster merely
-        to prove that the ceiling was exceeded.
-        """
-        ...
     def source_listing_rows(
         self, db: object, source_ids: Sequence[str]
     ) -> list[Any]:

@@ -9,6 +9,7 @@ from app.services.retrieval import RetrievalSupport, RetrievedChunk
 from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_rerank_client
 from tests.model_testkit import bind_chat_client
+from tests.ask_testkit import ask_engine_as_current_user
 
 
 @pytest.fixture(autouse=True)
@@ -203,7 +204,7 @@ def test_ask_chunk_overlay_off_is_chunk_only(repo):
     repo.settings.chunk_kg_overlay_enabled = False
     bind_chat_client(repo, "ask_answer", _AnswerLLM("answer [k1]"))
     nb = _seed_chunks_and_kg(repo)
-    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="cascode", mode="chunk"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="cascode", mode="chunk"))
     assert all(a.object_type == "chunk" for a in resp.anchors)
 
 
@@ -212,7 +213,7 @@ def test_ask_chunk_mix_runs_end_to_end(repo):
     bind_chat_client(repo, "ask_answer", _AnswerLLM("Cascode raises rout [k1]"))
     bind_rerank_client(repo, _FakeRerank(configured=True))
     nb = _seed_chunks_and_kg(repo)
-    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="cascode", mode="chunk"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="cascode", mode="chunk"))
     assert resp.answer
     assert resp.mode == "chunk"
     assert isinstance(resp.grounded, bool)
@@ -223,7 +224,7 @@ def test_ask_chunk_rerank_unconfigured_falls_back(repo):
     bind_chat_client(repo, "ask_answer", _AnswerLLM("answer [k1]"))
     bind_rerank_client(repo, _FakeRerank(configured=False))
     nb = _seed_chunks_and_kg(repo)
-    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="cascode", mode="chunk"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="cascode", mode="chunk"))
     assert resp.answer
     assert all(a.object_type == "chunk" for a in resp.anchors)
 
@@ -252,6 +253,6 @@ def test_ask_chunk_byte_equivalent_when_overlay_and_rerank_off(repo):
     assert not repo._runtime.models.rerank("retrieval_rerank").configured
     bind_chat_client(repo, "ask_answer", _AnswerLLM("answer [k1]"))
     nb = _seed_chunks_and_kg(repo)
-    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="cascode", mode="chunk"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="cascode", mode="chunk"))
     assert all(a.object_type == "chunk" for a in resp.anchors)   # 无 KG anchor
     assert len(resp.citations) >= 1                              # 每精选 chunk 一条

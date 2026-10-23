@@ -27,3 +27,16 @@ def seed_ask_evidence(repo, notebook_id: str) -> None:
             (f"seed-chunk-{notebook_id}", notebook_id,
              f"seed-src-{notebook_id}", "seed text", _NOW),
         )
+
+
+def ask_engine_as_current_user(ask_service, notebook_id: str, payload, on_trace=None, *,
+                               cancel_event=None):
+    """Answer ``payload`` through the production dispatch ``AskService.ask`` --
+    what the synchronous surface (``ask_current``) and the stream job runner
+    call -- for the request's user: the engine named by ``payload.mode`` runs
+    inside ``_engine_scope`` (model-work priority, the retrieval ceiling and
+    the retrieval run), with no durable job row of its own."""
+    return ask_service.ask(
+        notebook_id, payload, user_id=ask_service.current_user_id(),
+        on_trace=on_trace, cancel_event=cancel_event,
+    )

@@ -28,6 +28,7 @@ import pytest
 
 from app.core.config import Settings
 from app.services import repository_runtime
+from app.services.source_graph_primitives import SourceGraphPrimitives
 from app.services.sqlite_repository import SQLiteRepository
 
 
@@ -139,7 +140,6 @@ RUNTIME_ATTRIBUTES = [
     "source_embedding",
     "source_files",
     "source_graph_enrichment",
-    "source_graph_primitives",
     "source_ingestion",
     "source_partitioned_ppr",
     "source_store",
@@ -332,7 +332,7 @@ def test_the_shared_instances_the_domains_hand_around_stay_shared(runtime):
     assert runtime.report_application.notebooks is runtime.catalog
     assert runtime.collection_enumeration._catalog is runtime.collection_catalog
     assert runtime.selected_source_graph._snapshots is runtime.source_subgraphs
-    assert runtime.selected_source_graph._primitives is runtime.source_graph_primitives
+    assert isinstance(runtime.selected_source_graph._primitives, SourceGraphPrimitives)
     assert runtime.selected_source_graph._online_ppr is runtime.source_subgraph_ppr
     assert (
         runtime.selected_source_graph._partitioned_ppr
@@ -341,7 +341,6 @@ def test_the_shared_instances_the_domains_hand_around_stay_shared(runtime):
     assert (
         runtime.selected_source_graph._enrichment is runtime.source_graph_enrichment
     )
-    assert runtime.source_graph_primitives._snapshots is runtime.source_subgraphs
     assert runtime.source_partitioned_ppr._artifacts is runtime.scale_artifact_store
     assert runtime.ask_execution.cancellations is runtime.ask_cancellations
     assert runtime.ask_execution.ask_state is runtime.ask_state

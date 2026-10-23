@@ -270,12 +270,13 @@ def test_unknown_mode_still_raises():
 # ---------------------------------------------------------------------------
 
 from app.models.schemas import AskRequest
+from tests.ask_testkit import ask_engine_as_current_user
 
 
 def test_strict_blocked_when_no_kg_no_base(repo):
     _configure_ask(repo)
     nb = repo.create_notebook(NotebookCreate(name="n"))
-    resp = repo._runtime.ask_component.ask_reasoning_current(nb.id, AskRequest(question="q", mode="reasoning"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="q", mode="reasoning"))
     assert resp.kg_required is True
     assert resp.reasoning_trace is None       # did NOT run the agentic loop
 
@@ -289,7 +290,7 @@ def test_strict_no_kg_keeps_the_trace_it_already_streamed(repo):
     _configure_ask(repo)
     nb = repo.create_notebook(NotebookCreate(name="n"))
     streamed = []
-    resp = repo._runtime.ask_component.ask_reasoning_current(
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, 
         nb.id, AskRequest(question="q", mode="reasoning"), streamed.append,
     )
     assert resp.kg_required is True
@@ -319,7 +320,7 @@ def test_short_circuit_run_never_claims_memory_was_used(repo, monkeypatch):
     )
     nb = repo.create_notebook(NotebookCreate(name="n"))
     streamed = []
-    resp = repo._runtime.ask_component.ask_reasoning_current(
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, 
         nb.id, AskRequest(question="q", mode="reasoning"), streamed.append,
     )
     assert resp.llm_mode == "deterministic"          # 确实走了短路,没有合成
@@ -346,7 +347,7 @@ def test_strict_allowed_when_base_has_kg(repo):
          }]}], [])
     empty = repo.create_notebook(NotebookCreate(name="empty"))   # own KG empty
     repo.replace_notebook_bases(empty.id, [base.id], "user-local")
-    resp = repo._runtime.ask_component.ask_reasoning_current(empty.id, AskRequest(question="Engram", mode="reasoning"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, empty.id, AskRequest(question="Engram", mode="reasoning"))
     assert resp.kg_required is False           # mounted base satisfies the gate
 
 
@@ -362,7 +363,7 @@ def test_strict_required_when_the_only_graph_bearing_base_contributes_nothing(re
          "payload": {"name": "Engram"}, "evidence": []}], [])
     empty = repo.create_notebook(NotebookCreate(name="empty"))
     repo.replace_notebook_bases(empty.id, [base.id], "user-local")
-    resp = repo._runtime.ask_component.ask_reasoning_current(empty.id, AskRequest(question="Engram", mode="reasoning"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, empty.id, AskRequest(question="Engram", mode="reasoning"))
     assert resp.kg_required is True
 
 

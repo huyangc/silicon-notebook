@@ -86,7 +86,11 @@ contributor constraints, not a second implementation history.
   point (the `def` carries a 「测试观察点」 comment), an extension port, a run-time
   reference the scan cannot see, or a pending decision. It also fails on an entry
   that is no longer a candidate. Do not add a member only tests call: rewrite the
-  test through the production path, or register it with a reason.
+  test through the production path, or register it with a reason. Two blind spots
+  are known: the census matches names, not receivers, so a test-only member whose
+  name some live production code also uses (`neighbors`, `snapshot`, ...) is never
+  reported; and a registered member's body counts as production, so everything a
+  registered observation point calls stays alive with it.
 - Keep both adapters' `access_sql.py`, `mount_sql.py` and `memory_sql.py` predicates
   aligned. `memory_sql.py` is the shared definition point of who may read a
   Memory-derived source and of which KG rows count as Memory-derived; new readers import

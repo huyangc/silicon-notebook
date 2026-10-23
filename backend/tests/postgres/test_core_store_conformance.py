@@ -4038,62 +4038,10 @@ def test_typed_collection_source_primitives_match_sqlite_semantics(
     assert metadata["src-doc-b"]["doc_type"] == ""
 
 
-def test_bounded_visible_source_identity_rows_match_sqlite_semantics(
-    core_stores: CoreStores,
-):
-    owner = core_stores.identity.create_user("v00123456", "password-12")
-    notebook_id = core_stores.notebooks.create_row(
-        NotebookCreate(name="Bounded source identities"), owner.id
-    )
-    for source_id, source_type in (
-        ("src-bounded-a", "pdf"),
-        ("src-bounded-b", "markdown"),
-        ("src-bounded-memory", "memory"),
-        ("src-bounded-knowhow", "knowhow"),
-    ):
-        core_stores.sources.insert_source(
-            source_id=source_id,
-            notebook_id=notebook_id,
-            title=source_id,
-            source_type=source_type,
-            status="parsed",
-            parse_status="parsed",
-            file_name=f"{source_id}.md",
-            file_path=f"uploads/{source_id}.md",
-            file_size=1,
-            file_hash="hash",
-            summary="",
-            doc_type="",
-        )
-    core_stores.sources.upsert_paper_meta(
-        "src-bounded-a",
-        notebook_id,
-        {
-            "is_paper": True,
-            "paper_title": "Bounded Paper Title",
-            "authors": [],
-        },
-    )
-
-    with core_stores.database.connect() as connection:
-        first = core_stores.sources.visible_source_identity_rows_bounded(
-            connection, notebook_id, 1
-        )
-        all_visible = core_stores.sources.visible_source_identity_rows_bounded(
-            connection, notebook_id, 3
-        )
-        none = core_stores.sources.visible_source_identity_rows_bounded(
-            connection, notebook_id, 0
-        )
-
-    assert [row["id"] for row in first] == ["src-bounded-a"]
-    assert [row["id"] for row in all_visible] == [
-        "src-bounded-a", "src-bounded-b"
-    ]
-    assert all_visible[0]["notebook_id"] == notebook_id
-    assert all_visible[0]["file_name"] == "src-bounded-a.md"
-    assert all_visible[0]["paper_title"] == "Bounded Paper Title"
-    assert none == []
+def test_visible_source_identity_index_keeps_its_shape(core_stores: CoreStores):
+    """The partial index the KG extraction target pager
+    (``source_build_state_page``) drives on: notebook-scoped keyset order over
+    user-visible sources."""
     index = _fetch_one(
         core_stores,
         "SELECT indexdef FROM pg_indexes WHERE schemaname=current_schema() "

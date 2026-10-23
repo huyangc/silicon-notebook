@@ -1117,20 +1117,6 @@ class SourceStore:
             ).fetchall())
         return out
 
-    def visible_source_identity_rows_bounded(
-        self, connection: Any, notebook_id: str, limit: int
-    ) -> list[Any]:
-        if int(limit) <= 0:
-            return []
-        return connection.execute(
-            "SELECT s.id,s.notebook_id,s.title,s.file_name,"
-            "m.is_paper,m.paper_title "
-            "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
-            f"WHERE s.notebook_id=%s AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
-            "ORDER BY s.created_at,s.id LIMIT %s",
-            (notebook_id, int(limit)),
-        ).fetchall()
-
     def evidence_elements(
         self, element_ids: Sequence[str]
     ) -> dict[str, dict[str, Any]]:

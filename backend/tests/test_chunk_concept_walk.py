@@ -7,6 +7,7 @@ from app.models.schemas import NotebookCreate, AskRequest
 from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_rerank_client
 from tests.model_testkit import bind_chat_client
+from tests.ask_testkit import ask_engine_as_current_user
 
 
 @pytest.fixture
@@ -116,7 +117,7 @@ def test_ask_chunk_concept_walk_end_to_end(repo):
     bind_chat_client(repo, "ask_answer", _AnswerLLM("DeepSeek 与 GLM 都用 MoE [k1]."))
     bind_rerank_client(repo, _FakeRerank(configured=True))
     nb = _seed_two_doc_moe(repo)
-    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="DeepSeek-V3 MoE 相比其他模型", mode="chunk"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="DeepSeek-V3 MoE 相比其他模型", mode="chunk"))
     assert resp.mode == "chunk"
     assert resp.answer
     assert any(a.object_type == "chunk" for a in resp.anchors)   # 跨文档 chunk 成了可引用证据
@@ -129,7 +130,7 @@ def test_ask_chunk_concept_walk_off_unchanged(repo, monkeypatch):
     bind_chat_client(repo, "ask_answer", _AnswerLLM("答案 [k1]."))
     bind_rerank_client(repo, _FakeRerank(configured=True))
     nb = _seed_two_doc_moe(repo)
-    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="MoE", mode="chunk"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="MoE", mode="chunk"))
     assert resp.mode == "chunk" and resp.answer
 
 

@@ -12,6 +12,7 @@ from app.services.embedding import FakeEmbedder
 from app.models.schemas import AskRequest, NotebookCreate
 from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_chat_client
+from tests.ask_testkit import ask_engine_as_current_user
 
 
 def _ck(cid, text):
@@ -782,7 +783,7 @@ def test_ask_chunk_lexical_failure_shows_no_chunk_fts_banner(repo, monkeypatch):
 
     scope = SourceScope(mode="include", source_ids=[sid], narrowed=False)
     with source_scope_context(nb.id, scope):
-        resp = repo._runtime.ask_component.ask_chunk_current(
+        resp = ask_engine_as_current_user(repo._runtime.ask_component, 
             nb.id, AskRequest(question=query, mode="chunk", source_scope=scope)
         )
 
@@ -2045,7 +2046,7 @@ def test_ask_chunk_deterministic_without_llm(repo):
     # fixture 清了 LLM key → llm_client.configured False → 走确定性兜底。
     nb, _ = _seed_chunks(repo, ["deepseek v3 mixture of experts routing " * 20,
                                 "deepseek v2 dense baseline architecture " * 20])
-    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="deepseek experts routing"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="deepseek experts routing"))
     assert resp.answer == "" and "passage" in resp.conclusion.lower()
     assert resp.anchors == [] and resp.citations          # 有引用, 无 anchor
     assert resp.citations[0].source_id and resp.evidence_level == "inferred"
@@ -2054,7 +2055,7 @@ def test_ask_chunk_deterministic_without_llm(repo):
 def test_ask_chunk_binds_anchor_to_chunk_with_llm(repo, monkeypatch):
     nb, _ = _seed_chunks(repo, ["deepseek v3 mixture of experts routing " * 20])
     bind_chat_client(repo, "ask_answer", _FakeLLM("DeepSeek V3 uses MoE routing [k1]."))
-    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="deepseek experts"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="deepseek experts"))
     assert resp.answer and resp.anchors
     a = resp.anchors[0]
     assert a.object_type == "chunk" and a.object_id.startswith("ck-")
@@ -2083,7 +2084,7 @@ def test_ask_chunk_comparison_balances_both_entities(repo, monkeypatch):
         query="V3 vs V2", sub_queries=[qr.SubQuerySpec("DeepSeek-V3 improvements"),
                                        qr.SubQuerySpec("DeepSeek-V2 features")]))
     bind_chat_client(repo, "ask_answer", _FakeLLM("V3 improves on V2 [k1][k2]."))
-    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="deepseekv3相比deepseekv2有什么改进"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="deepseekv3相比deepseekv2有什么改进"))
     srcs = " ".join((a.snippet or "") + (a.name or "") for a in resp.anchors).lower()
     cites = " ".join(c.quoted_span.lower() for c in resp.citations)
     assert "v2" in (srcs + cites) and "v3" in (srcs + cites)   # 两实体都被代表
@@ -2094,7 +2095,7 @@ def test_ask_chunk_single_subquery_still_works(repo, monkeypatch):
     import app.services.query_rewrite as qr
     monkeypatch.setattr(qr, "expand_query", lambda *a, **k: qr.ExpandedQuery(
         query="alpha", sub_queries=[qr.SubQuerySpec("alpha topic")]))
-    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="alpha"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="alpha"))
     assert resp.citations   # 单子查询走 MMR,正常返回
 
 

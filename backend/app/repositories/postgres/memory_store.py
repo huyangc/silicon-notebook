@@ -1656,32 +1656,6 @@ class MemoryStore:
         base_ids = [str(value) for value in raw_ids] if isinstance(raw_ids, list) else []
         return item, candidates, base_ids
 
-    @staticmethod
-    def validate_promotion_approval_access_on(
-        db: object,
-        memory_id: str,
-        candidate_notebook_id: str,
-    ) -> None:
-        """Revalidate Memory scope and creator access inside approval's write txn.
-
-        读权判定整条走唯一定义点的**列引用**形式,不消费参数——理由与 SQLite 侧同款
-        (见那一份的 docstring)。
-        """
-        row = db.execute(
-            "SELECT m.notebook_id,("
-            + read_access_clause("n", user_ref="m.created_by")
-            # K3: no approval out of a notebook being deleted/copied/imported.
-            + f" AND n.{NOTEBOOK_LIVE_SQL}) AS has_access FROM memory_items m "
-            "JOIN notebooks n ON n.id=m.notebook_id WHERE m.id=%s",
-            (memory_id,),
-        ).fetchone()
-        if row is None:
-            raise KeyError(memory_id)
-        if row["notebook_id"] != candidate_notebook_id:
-            raise ValueError("promotion candidate notebook does not match Memory notebook")
-        if not bool(row["has_access"]):
-            raise PermissionError(memory_id)
-
     def record_promotion_decision_on(
         self,
         db: object,

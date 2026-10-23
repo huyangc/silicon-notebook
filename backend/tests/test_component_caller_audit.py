@@ -92,7 +92,7 @@ def _report(*candidates):
 
 
 OBSERVED = "backend/app/services/pending_bus.py::PendingBus._buffered_count"
-UNMARKED = "backend/app/services/ask_service.py::AskService.ask_chunk_current"
+UNMARKED = "backend/app/repositories/sqlite/unified_kg_store.py::UnifiedKgStore.community_overview"
 
 
 def test_check_passes_when_every_candidate_is_registered_once():
@@ -154,3 +154,85 @@ def test_allowlist_is_sorted_unique_and_fully_described():
         assert entry["reason"].strip(), entry
         rel = entry["member"].split("::", 1)[0]
         assert (ROOT / rel).is_file(), entry
+
+
+# ---------------------------------------------------------------- classification
+
+
+def _member(cls: str, name: str) -> "audit.Member":
+    return audit.Member("backend/app/x.py", "app.x", cls, name, 1)
+
+
+def _ref(name: str, owner: "audit.Member | None", rel: str = "backend/app/x.py") -> "audit.Ref":
+    return audit.Ref(name, None, rel, 1, owner.key if owner else None)
+
+
+def _classify(members, prod, tests, kept=()):
+    return audit.classify_members(
+        members, prod, tests,
+        exempt_reason=lambda _m: None, importable=lambda _m: True, kept=set(kept),
+    )
+
+
+def test_a_member_called_only_from_a_test_only_member_is_a_candidate_too():
+    a, b, c = _member("A", "a"), _member("B", "b"), _member("C", "c")
+    # production: b's body calls a, module code uses c; only tests call b.
+    prod = [_ref("a", b), _ref("c", None)]
+    tests = [_ref("b", None, "backend/tests/test_x.py")]
+    verdicts = _classify([a, b, c], prod, tests)
+    assert verdicts[b.key].bucket == "test-only"
+    assert verdicts[a.key].bucket == "unreferenced"  # its one caller is dead
+    assert verdicts[c.key].bucket == "keep"
+
+
+def test_a_registered_member_keeps_what_it_calls_alive():
+    a, b = _member("A", "a"), _member("B", "b")
+    prod = [_ref("a", b)]
+    tests = [_ref("b", None, "backend/tests/test_x.py")]
+    verdicts = _classify([a, b], prod, tests, kept={b.key})
+    assert verdicts[b.key].bucket == "test-only"  # still listed, registered
+    assert verdicts[a.key].bucket == "keep"
+
+
+def test_recursion_is_not_a_production_caller():
+    a = _member("A", "a")
+    verdicts = _classify([a], [_ref("a", a)], [_ref("a", None, "backend/tests/t.py")])
+    assert verdicts[a.key].bucket == "test-only"
+
+
+@pytest.mark.parametrize(
+    ("decorator", "registers"),
+    [
+        ("field_validator", True), ("pydantic.model_validator", True),
+        ("computed_field", True), ("router.get", True), ("app.command", True),
+        ("atexit.register", True),
+        ("get", False), ("contextmanager", False), ("contextlib.asynccontextmanager", False),
+        ("functools.lru_cache", False), ("cache", False), ("functools.wraps", False),
+    ],
+)
+def test_only_known_registering_decorators_exempt_a_member(decorator, registers):
+    assert audit.is_registering_decorator(decorator) is registers
+
+
+def test_extension_surface_needs_the_whole_protocol_not_one_shared_name():
+    from typing import Protocol
+
+    class Port(Protocol):
+        def search(self) -> None: ...
+        def fetch(self) -> None: ...
+
+    class Full:
+        def search(self):
+            return None
+
+        def fetch(self):
+            return None
+
+    class SharesOneName:
+        def search(self):
+            return None
+
+    protocol_members = [(Port, audit._own_members(Port))]
+    member = audit.Member("backend/app/services/x.py", "app.services.x", "C", "search", 1)
+    assert audit._is_extension_surface(member, Full, protocol_members, set())
+    assert not audit._is_extension_surface(member, SharesOneName, protocol_members, set())

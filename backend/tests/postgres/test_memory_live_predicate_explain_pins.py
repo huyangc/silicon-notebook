@@ -339,10 +339,6 @@ def capture_readers(repo, monkeypatch, seeded: Seeded) -> dict[str, list[tuple[s
             store.lock_promotion_memory_on(db, mid, nb, require_live=True)
             raise _RolledBack()  # take the locks, write nothing
 
-    def validate_approval():
-        with repo._runtime.database.connect() as db:
-            store.validate_promotion_approval_access_on(db, mid, nb)
-
     def list_page(**kwargs):
         args = dict(notebook_id=None, status=None, origin=None, query="",
                     offset=0, limit=50)
@@ -378,7 +374,6 @@ def capture_readers(repo, monkeypatch, seeded: Seeded) -> dict[str, list[tuple[s
         ),
         "bell.report_outlines": lambda: queries.pending_actions_projection_rows(HEAVY),
         "promotion.lock": lambda: _swallow(lock_for_approval, _RolledBack),
-        "promotion.validate": validate_approval,
     }
     captured: dict[str, list[tuple[str, Any]]] = {}
     for label, call in readers.items():
@@ -518,7 +513,6 @@ _EXPECTED_INDEXES: dict[str, dict[int, tuple[set[str], set[str]]]] = {
     "bell.report_outlines": {0: ({"pk_notebooks"}, {"pk_notebooks"})},
     # The curator's approval: one primary-key row each.
     "promotion.lock": {0: ({"pk_notebooks"}, {"pk_notebooks"})},
-    "promotion.validate": {0: (_PK | {"pk_notebooks"}, _PK | {"pk_notebooks"})},
 }
 
 

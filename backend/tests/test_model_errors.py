@@ -18,6 +18,7 @@ from app.services.model_provider import ModelInvocationError
 from app.services.model_registry import ModelServiceDefinition, WorkloadSpec
 from tests.model_testkit import bind_chat_client
 from tests.model_testkit import bind_all_embedding_clients
+from tests.ask_testkit import ask_engine_as_current_user
 
 
 @pytest.fixture
@@ -103,7 +104,7 @@ def test_scheduled_ask_failure_has_safe_support_metadata_and_no_fake_answer(
     repo.settings.chunk_kg_overlay_enabled = False
     notebook = _seed_chunks(repo)
 
-    response = repo._runtime.ask_component.ask_chunk_current(
+    response = ask_engine_as_current_user(repo._runtime.ask_component, 
         notebook.id, AskRequest(question="cascode", mode="chunk")
     )
 
@@ -133,7 +134,7 @@ def test_answer_llm_failure_recorded(repo):
     bind_chat_client(repo, "ask_answer", _RaisingLLM())
     nb = _seed_chunks(repo)
 
-    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="cascode", mode="chunk"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="cascode", mode="chunk"))
 
     stages = [e.stage for e in resp.model_errors]
     assert "answer" in stages
@@ -148,7 +149,7 @@ def test_answer_failure_names_dynamic_primary_service_without_persisting_unstamp
     raising.model = "runtime-primary-name"
     bind_chat_client(repo, "ask_answer", raising)
     nb = _seed_chunks(repo)
-    response = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="cascode", mode="chunk"))
+    response = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="cascode", mode="chunk"))
     error = next(item for item in response.model_errors if item.stage == "answer")
     assert (error.service_id, error.service_name, error.model) == ("", "", "")
     assert error.workload_id == "ask_answer"
@@ -164,7 +165,7 @@ def test_safe_tagged_model_name_remains_dynamic_on_failure(repo):
     bind_chat_client(repo, "ask_answer", raising)
     nb = _seed_chunks(repo)
 
-    response = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="cascode", mode="chunk"))
+    response = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="cascode", mode="chunk"))
 
     error = next(item for item in response.model_errors if item.stage == "answer")
     assert (error.service_id, error.model, error.message) == (
@@ -191,7 +192,7 @@ def test_ask_failure_keeps_raw_diagnostic_server_side_only(repo, monkeypatch):
     bind_chat_client(repo, "ask_answer", SensitiveFailure())
     nb = _seed_chunks(repo)
 
-    response = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="cascode", mode="chunk"))
+    response = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="cascode", mode="chunk"))
     serialized = response.model_dump_json()
     replay = repo.get_conversation(response.conversation_id).model_dump_json()
     with repo._connect() as db:
@@ -281,7 +282,7 @@ def test_embed_failure_recorded(repo, monkeypatch):
     bind_chat_client(repo, "ask_answer", _AnswerLLM())
     nb = _seed_chunks(repo)
 
-    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="cascode", mode="chunk"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="cascode", mode="chunk"))
 
     stages = [e.stage for e in resp.model_errors]
     assert "embed" in stages
@@ -298,7 +299,7 @@ def test_embedding_failure_is_embedding_service(repo, monkeypatch):
     )
     bind_chat_client(repo, "ask_answer", _AnswerLLM())
     nb = _seed_chunks(repo)
-    response = repo._runtime.ask_component.ask_chunk_current(
+    response = ask_engine_as_current_user(repo._runtime.ask_component, 
         nb.id, AskRequest(question="cascode", mode="chunk")
     )
     error = next(item for item in response.model_errors if item.stage == "embed")
@@ -345,6 +346,6 @@ def test_no_model_errors_on_success(repo):
     bind_chat_client(repo, "ask_answer", _AnswerLLM())
     nb = _seed_chunks(repo)
 
-    resp = repo._runtime.ask_component.ask_chunk_current(nb.id, AskRequest(question="cascode", mode="chunk"))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb.id, AskRequest(question="cascode", mode="chunk"))
 
     assert resp.model_errors == []

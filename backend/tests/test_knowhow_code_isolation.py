@@ -51,6 +51,7 @@ from app.services.embedding import FakeEmbedder
 from tests.model_testkit import bind_all_embedding_clients
 from tests.knowhow_world_testkit import quiesce_knowhow_world, world_payload
 from tests.world_templates import world_env, world_template
+from tests.ask_testkit import ask_engine_as_current_user
 
 EMBED_DIM = 16
 
@@ -372,7 +373,7 @@ def test_marker_absent_from_fts_and_chunk_retrieval_and_ask_context(client, seed
     scored, _ids, _mat = repo._retrieve_chunks(nb, MARKER)
     assert not any(MARKER in c.text for c in scored)
 
-    resp = repo._runtime.ask_component.ask_chunk_current(nb, AskRequest(question=MARKER))
+    resp = ask_engine_as_current_user(repo._runtime.ask_component, nb, AskRequest(question=MARKER))
     assert not any(MARKER in c.quoted_span for c in resp.citations)
     assert MARKER not in (resp.answer or "")
 

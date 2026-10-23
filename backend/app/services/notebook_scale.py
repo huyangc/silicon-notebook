@@ -219,7 +219,6 @@ class CopyStatsMemo:
 
 class NotebookScaleFactsRepository(Protocol):
     def load_notebook_scale_facts(self, notebook_id: str) -> NotebookScaleFacts: ...
-    def is_mounted_by_anyone(self, notebook_id: str) -> bool: ...
 
 class NotebookScaleProfile:
     def __init__(self, settings: Settings, facts: NotebookScaleFactsRepository, version_for: Callable[[str], Hashable], memo: CopyStatsMemo) -> None:

@@ -352,8 +352,7 @@ class ScaleArtifactRuntime:
     def _is_mounted_by_anyone(self, notebook_id: str) -> bool:
         """被任何笔记本当作参考库挂着 —— 本身即构成建索引资格。否则挂一个大的个人
         笔记本会因为没有 scale 索引而在 PPR 侧被大库守卫拒绝(返回空),静默失效。
-        NotebookScaleProfile.index_eligible 是刻意的镜像实现,两处必须保持一致
-        (见 IndexProjectionStore.is_mounted_by_anyone 的 docstring)。"""
+        判据本身见 IndexProjectionStore.is_mounted_by_anyone 的 docstring。"""
         return self.projections.is_mounted_by_anyone(notebook_id)
 
     def _resolve_index_owner(self, notebook_id: str) -> str | None:
