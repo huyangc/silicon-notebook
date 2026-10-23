@@ -98,6 +98,7 @@ from app.domain.portable_rows import (
 from app.models.knowledge import ObjectSchemaModel
 from app.repositories.ports import CopyRowsOutcome, CopyTableConsumer
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS
+from app.services.notebook_copy_writer import cluster_seed_object_id
 
 #: Bytes per read when copying a file into its entry while hashing it.
 _COPY_BLOCK = 1 << 20
@@ -457,23 +458,6 @@ def _row_encoder(table: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
             if column.data_type == "timestamp with time zone"
         ],
     )
-
-
-def cluster_seed_object_id(canonical_id: str) -> "str | None":
-    """The knowledge object id a cluster's canonical id was minted from, or None.
-
-    ``concept_clusters.canonical_id`` is never a bare object id: every writer
-    builds it as ``<type prefix><seed>`` (``kg_merge``: ``id_prefix + seed``,
-    prefixes ``K-`` / ``KL-`` / ``KF-`` / ``KP-``). Only when an object's name
-    normalises to nothing does the seed fall back to ``~<object id>``
-    (``kg_merge.seed_or_unique``), so the id embeds an object id after the
-    prefix. Python twin of ``memory_sql.cluster_seed_object_id`` (both
-    backends): ``K-~ko-...`` -> from offset 3, ``K?-~ko-...`` -> from offset 4."""
-    if canonical_id.startswith("K-~ko-"):
-        return canonical_id[3:]
-    if canonical_id[:1] == "K" and canonical_id[2:7] == "-~ko-":
-        return canonical_id[4:]
-    return None
 
 
 class _Normalizer:
