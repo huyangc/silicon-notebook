@@ -806,15 +806,25 @@ class SharingStore:
             )
         return str(chosen)
 
-    def clear_share(self, notebook_id: str) -> None:
+    def clear_share(self, notebook_id: str) -> list[str]:
+        """Unshare + kick every member in ONE write transaction; returns the
+        user ids whose membership this call ended (sorted).
+
+        The member delete is ``kick_all_members`` on this same connection —
+        the one implementation of "end every link membership" (user ruling
+        2026-10-23). Order is load-bearing under READ COMMITTED: the
+        ``UPDATE`` takes the notebook row lock first, and a join takes
+        ``FOR SHARE`` on that row before inserting (``insert_member_if_live``).
+        A join that locked first commits before this ``UPDATE`` proceeds, so
+        the ``DELETE`` (a later statement, a fresh snapshot) sees and removes
+        its row; a join that arrives later waits for this commit, re-checks
+        the token, finds it gone and inserts nothing."""
         with self.database.write() as connection:
             connection.execute(
                 "UPDATE notebooks SET is_shared=0,share_token=NULL,updated_at=%s WHERE id=%s",
                 (self.now(), notebook_id),
             )
-            connection.execute(
-                "DELETE FROM notebook_members WHERE notebook_id=%s", (notebook_id,)
-            )
+            return self.kick_all_members(connection, notebook_id)
 
     def find_by_token(self, token: str) -> str | None:
         """codex #659 R11 P1：见 SQLite 孪生的完整理由（逐字同义）——并入
@@ -984,7 +994,9 @@ class SharingStore:
             )
 
     @staticmethod
-    def insert_member_if_live(connection, notebook_id: str, user_id: str, now) -> int:
+    def insert_member_if_live(
+        connection, notebook_id: str, user_id: str, now, share_token: str,
+    ) -> int:
         """codex #659 R12 P1：``join_shared`` 专属的原子插入——**不自己开
         事务**（与 ``notebook_row_on`` 同款静态方法形状；见 SQLite 孪生的
         docstring）。``PostgresDatabase.write()`` 不允许嵌套（会抛
@@ -999,7 +1011,22 @@ class SharingStore:
         会让这条 INSERT 插 0 行；但「已是成员」的 ``ON CONFLICT DO
         NOTHING`` 幂等 no-op 同样是 0 行——两种 0 行的含义完全不同，旧代码
         忽略 rowcount 会把前者也当成功放行。调用方须在 rowcount==0 时用
-        ``is_member_on`` 再判一次区分。"""
+        ``is_member_on`` 再判一次区分。
+
+        ``share_token`` 是加入者手里的那条链接：插入还要求它此刻仍是这本库
+        的有效链接，并对库行取 ``FOR SHARE``。路由先凭 token 解析出库、再开
+        这个写事务，两步之间若取消分享（``clear_share``）在跑，这把行锁与它
+        的 ``UPDATE`` 互斥：取消先拿到锁时，这里等它提交后按新版本重判谓词，
+        token 已作废，一行不插；这里先拿到锁时，取消等本事务提交，之后的
+        ``DELETE`` 看得见这一行、把它一并删掉。没有这把锁，READ COMMITTED
+        下加入可以在取消的 ``DELETE`` 之后提交，把人留在一本已撤链接的库里。"""
+        lock = connection.execute(
+            "SELECT 1 FROM notebooks WHERE id=%s AND is_shared=1 AND share_token=%s "
+            f"AND {NOTEBOOK_LIVE_SQL} FOR SHARE",
+            (notebook_id, share_token),
+        ).fetchone()
+        if lock is None:
+            return 0
         cursor = connection.execute(
             "INSERT INTO notebook_members(notebook_id,user_id,role,added_at) "
             "SELECT %s,%s,'reader',%s WHERE EXISTS ("
@@ -1026,11 +1053,17 @@ class SharingStore:
                 (notebook_id, user_id),
             )
 
-    def kick_all_members(self, notebook_id: str) -> None:
-        with self.database.write() as connection:
-            connection.execute(
-                "DELETE FROM notebook_members WHERE notebook_id=%s", (notebook_id,)
-            )
+    @staticmethod
+    def kick_all_members(connection, notebook_id: str) -> list[str]:
+        """End every link membership of this notebook on the caller's write
+        connection; returns the removed user ids (sorted). Does not open a
+        transaction: its one caller, ``clear_share``, voids the token in the
+        same one. Only ``notebook_members`` — grant edges are untouched."""
+        rows = connection.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=%s RETURNING user_id",
+            (notebook_id,),
+        ).fetchall()
+        return sorted(str(row["user_id"]) for row in rows)
 
     def list_members(self, notebook_id: str) -> list[dict]:
         with self.database.connect() as connection:

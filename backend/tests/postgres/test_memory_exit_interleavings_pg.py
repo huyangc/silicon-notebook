@@ -12,7 +12,7 @@ harness, and asserts the state each one must leave:
 * S2  a candidate confirmed (inline KG ingest) during the purge;
   S2b its ingest running only after the exit finished;
   S3  a candidate rejected during the purge;
-* S4  the owner removing the member / unsharing / kicking everyone /
+* S4  the owner removing the member / unsharing (which kicks everyone) /
       deleting the notebook / removing and re-adding the member during the
       purge;
 * S8  the process dying between pages, then the retry from the disclosure;
@@ -231,7 +231,7 @@ def test_s3_a_candidate_rejected_during_the_purge(world, monkeypatch):
 
 @pytest.mark.parametrize(
     "action",
-    ["remove_member", "unshare", "kick_all", "delete_notebook", "remove_and_readd"],
+    ["remove_member", "unshare", "delete_notebook", "remove_and_readd"],
 )
 def test_s4_other_actions_during_the_purge(world, monkeypatch, action):
     """The exit deletes exactly what was acknowledged and reports it; the
@@ -248,8 +248,6 @@ def test_s4_other_actions_during_the_purge(world, monkeypatch, action):
             repo._runtime.sharing.remove_member(world.shared, world.alice.id)
         elif action == "unshare":
             repo._runtime.sharing.unshare_notebook(world.shared)
-        elif action == "kick_all":
-            repo._runtime.sharing.kick_all_members(world.shared)
         elif action == "delete_notebook":
             repo.delete_notebook(world.shared)
         else:

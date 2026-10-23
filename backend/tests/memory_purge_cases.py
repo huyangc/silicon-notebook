@@ -3,7 +3,7 @@
 ``test_memory_purge.py`` runs every case on SQLite and
 ``postgres/test_memory_purge_pg.py`` runs the same cases on PostgreSQL. Each
 case drives the production entry points — the facade's ``delete_memory`` /
-``bulk_delete_memories`` / ``remove_member`` / ``kick_all_members``, and the
+``bulk_delete_memories`` / ``remove_member`` / ``unshare_notebook``, and the
 member's own exit ``MemoryService.leave_notebook`` (the route's use case,
 with its acknowledged Memory count) — against a world
 whose Memory projections are REAL: the hidden source, its element and
@@ -940,13 +940,13 @@ def case_self_exit_keeps_memory_while_an_everyone_grant_reads(world: World) -> N
 
 def case_removal_by_others_never_deletes_memory(world: World) -> None:
     """Only the member's own acknowledged exit deletes Memory: an owner's
-    removal, a notebook-wide kick and the facade's membership-only leave end
-    the membership and keep every Memory."""
+    removal, a notebook-wide kick (unsharing the link) and the facade's
+    membership-only leave end the membership and keep every Memory."""
     repo = world.repo
     repo._runtime.sharing.remove_member(world.shared, world.alice.id)
     assert not repo._runtime.sharing.is_member(world.shared, world.alice.id)
     assert_intact(world, "alice")
-    repo._runtime.sharing.kick_all_members(world.shared)
+    repo._runtime.sharing.unshare_notebook(world.shared)
     assert not repo._runtime.sharing.is_member(world.shared, world.bob.id)
     assert_intact(world, "bob")
     repo._runtime.sharing.leave_notebook(world.elsewhere, world.alice.id)
@@ -1613,6 +1613,183 @@ def case_the_memory_purge_refuses_a_document_source(world: World) -> None:
     assert_intact(world, "alice")
 
 
+# --------------------------------------------------------------------------
+# Unsharing the link removes every link member the way ``remove_member``
+# removes one (user ruling 2026-10-23): each removed member's overlay blocks,
+# overlay job row and agent observations go; Memory, the shared base layer,
+# grant edges and the same person's state in other notebooks stay.
+# --------------------------------------------------------------------------
+_MEMBER_STATE_TABLES = ("agent_notebook_profile", "agent_profile_jobs", "agent_observations")
+
+
+def _seed_member_state(world: World, notebook_id: str, owner_id: str) -> None:
+    """One overlay block, the overlay job row and one agent observation — the
+    per-member state a membership end must clear. ``owner_id=''`` seeds the
+    notebook's shared base layer instead."""
+    runtime = world.repo._runtime
+    runtime.agent_profile.write_block(
+        notebook_id, owner_id, "answer_preferences",
+        value=f"{owner_id or 'base'} prefers tables", evidence=[],
+        expected_revision=0, origin="job", actor="",
+    )
+    runtime.agent_profile.bump_signal(notebook_id, owner_id, 2)
+    runtime.agent_observations.append_observation(
+        notebook_id, owner_id, "agent-kick",
+        text=f"{owner_id or 'base'} noticed the tables",
+        client_request_id=f"kick-{notebook_id}-{owner_id or 'base'}",
+    )
+
+
+def _member_state(world: World, notebook_id: str, owner_id: str) -> dict[str, int]:
+    return {
+        table: world.sql.count(
+            f"SELECT COUNT(*) AS c FROM {table} WHERE notebook_id=? AND owner_id=?",
+            (notebook_id, owner_id),
+        )
+        for table in _MEMBER_STATE_TABLES
+    }
+
+
+_SEEDED = {table: 1 for table in _MEMBER_STATE_TABLES}
+_CLEARED = {table: 0 for table in _MEMBER_STATE_TABLES}
+
+
+def _membership_snapshot(world: World, notebook_id: str) -> dict:
+    """Everything a member removal may touch in one notebook, keyed without
+    the notebook id so two notebooks can be compared."""
+    sql = world.sql
+    return {
+        "members": sorted(
+            row["user_id"] for row in sql.rows(
+                "SELECT user_id FROM notebook_members WHERE notebook_id=?", (notebook_id,)
+            )
+        ),
+        "grants": sorted(
+            (row["principal_type"], row["principal_id"]) for row in sql.rows(
+                "SELECT principal_type,principal_id FROM notebook_grants WHERE notebook_id=?",
+                (notebook_id,),
+            )
+        ),
+        "state": {
+            owner_id: _member_state(world, notebook_id, owner_id)
+            for owner_id in ("", world.alice.id, world.bob.id)
+        },
+        "memory": {
+            user.id: member_memory_count(world, notebook_id, user)
+            for user in (world.alice, world.bob)
+        },
+    }
+
+
+def _twin_notebook(world: World, name: str) -> str:
+    """A shared notebook with Alice and Bob as link members, each with their
+    private state and a Memory, a base layer, and a user grant for Bob."""
+    repo = world.repo
+    notebook_id = _as_user(
+        world.owner, lambda: repo.create_notebook(NotebookCreate(name=name))
+    ).id
+    repo._runtime.sharing.share_notebook(notebook_id)
+    _seed_member_state(world, notebook_id, "")
+    for user in (world.alice, world.bob):
+        repo._runtime.sharing.add_member(notebook_id, user.id)
+        _seed_member_state(world, notebook_id, user.id)
+        plain_memory(world, notebook_id, user, f"{name}-{user.id}", "confirmed")
+    grant_user(world, notebook_id, world.bob)
+    return notebook_id
+
+
+def case_unshare_clears_every_members_state_and_keeps_memory(world: World) -> None:
+    """Every link member's overlay blocks, job row and observations in this
+    notebook are cleared; their Memory, the base layer, the grant edge and
+    Alice's state in the other notebook she belongs to are not."""
+    sharing = world.repo._runtime.sharing
+    sharing.share_notebook(world.shared)
+    _seed_member_state(world, world.shared, "")
+    for user in (world.alice, world.bob):
+        _seed_member_state(world, world.shared, user.id)
+    _seed_member_state(world, world.elsewhere, world.alice.id)
+    grant_id = grant_user(world, world.shared, world.bob)
+
+    sharing.unshare_notebook(world.shared)
+
+    assert sharing.list_members(world.shared) == []
+    for user in (world.alice, world.bob):
+        assert _member_state(world, world.shared, user.id) == _CLEARED, user.id
+    assert_intact(world, "alice")
+    assert_intact(world, "bob")
+    assert _member_state(world, world.shared, "") == _SEEDED
+    assert _member_state(world, world.elsewhere, world.alice.id) == _SEEDED
+    assert sharing.is_member(world.elsewhere, world.alice.id)
+    assert world.sql.count(
+        "SELECT COUNT(*) AS c FROM notebook_grants WHERE id=?", (grant_id,)
+    ) == 1
+    assert world.repo.user_can_read_notebook(world.shared, world.bob.id)
+    assert not world.repo.user_can_read_notebook(world.shared, world.alice.id)
+
+
+def case_unshare_equals_removing_each_member_in_turn(world: World) -> None:
+    """Differential: two identical notebooks, one unshared, the other with
+    each member removed one ``remove_member`` at a time, end in the same
+    membership-related state (and that state is not the starting one)."""
+    sharing = world.repo._runtime.sharing
+    kicked = _twin_notebook(world, "Kick twin A")
+    single = _twin_notebook(world, "Kick twin B")
+    before = _membership_snapshot(world, kicked)
+    assert before == _membership_snapshot(world, single)
+
+    sharing.unshare_notebook(kicked)
+    for user in (world.alice, world.bob):
+        sharing.remove_member(single, user.id)
+
+    after = _membership_snapshot(world, kicked)
+    assert after == _membership_snapshot(world, single)
+    assert after["members"] == []
+    assert after["state"] == {"": _SEEDED, world.alice.id: _CLEARED, world.bob.id: _CLEARED}
+    assert after["grants"] == before["grants"]
+    assert after["memory"] == before["memory"] == {world.alice.id: 1, world.bob.id: 1}
+
+
+def case_unshare_without_members_is_a_no_op(world: World) -> None:
+    """No link members: unsharing succeeds and touches no one's state; doing
+    it again is the same."""
+    sharing = world.repo._runtime.sharing
+    _seed_member_state(world, world.alice_home, "")
+    _seed_member_state(world, world.alice_home, world.alice.id)
+    sharing.share_notebook(world.alice_home)
+    for _ in range(2):
+        sharing.unshare_notebook(world.alice_home)
+        assert sharing.list_members(world.alice_home) == []
+        assert _member_state(world, world.alice_home, "") == _SEEDED
+        assert _member_state(world, world.alice_home, world.alice.id) == _SEEDED
+        assert_intact(world, "alice_home")
+
+
+def case_a_join_holding_the_voided_link_is_refused(world: World) -> None:
+    """The join route resolves the notebook from the token, then joins in a
+    transaction of its own; an unshare landing in between voids that token,
+    so the join is a 404 and leaves no membership — also after the owner
+    shares again (a new token). The new link works."""
+    sharing = world.repo._runtime.sharing
+    carol = world.repo._runtime.identity.create_user("c00100004", "pw123456")
+    old = sharing.share_notebook(world.shared)["share_token"]
+    assert sharing.find_notebook_by_share_token(old) == world.shared
+    sharing.unshare_notebook(world.shared)
+    new = ""
+    for _ in range(2):
+        try:
+            sharing.join_shared(world.shared, carol.id, share_token=old)
+        except KeyError:
+            pass
+        else:  # pragma: no cover - the assertion below explains the failure
+            raise AssertionError("a join holding the voided link went through")
+        assert not sharing.is_member(world.shared, carol.id)
+        new = sharing.share_notebook(world.shared)["share_token"]
+        assert new != old
+    joined = sharing.join_shared(world.shared, carol.id, share_token=new)
+    assert joined.access == "reader"
+    assert sharing.is_member(world.shared, carol.id)
+
+
 CASES: dict[str, Callable[..., None]] = {
     "hard_delete": case_hard_delete_removes_every_derived_row,
     "hard_delete_unbackfilled": case_hard_delete_on_an_unbackfilled_notebook,
@@ -1644,6 +1821,10 @@ CASES: dict[str, Callable[..., None]] = {
     "contract_200_counts": case_contract_a_finished_exit_reports_what_it_deleted,
     "contract_zero_claim_refuses_ack": case_contract_zero_claim_refuses_a_positive_acknowledgement,
     "exit_clears_member_overlay": case_a_finished_exit_clears_the_members_overlay,
+    "unshare_clears_member_state": case_unshare_clears_every_members_state_and_keeps_memory,
+    "unshare_equals_single_removals": case_unshare_equals_removing_each_member_in_turn,
+    "unshare_without_members": case_unshare_without_members_is_a_no_op,
+    "join_with_voided_link_refused": case_a_join_holding_the_voided_link_is_refused,
 }
 
 

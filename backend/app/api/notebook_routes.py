@@ -506,7 +506,7 @@ def join_shared_route(token: str, user: UserProfile = Depends(get_current_user))
             if sharing.find_notebook_by_share_token(token) is None:
                 raise HTTPException(status_code=404, detail="Shared notebook not found")
             raise HTTPException(status_code=400, detail="small notebook — use copy, not join")
-        return sharing.join_shared(nb_id, user.id)
+        return sharing.join_shared(nb_id, user.id, share_token=token)
     except KeyError:
         raise HTTPException(status_code=404, detail="Shared notebook not found")
 

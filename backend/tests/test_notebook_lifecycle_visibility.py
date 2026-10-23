@@ -384,7 +384,7 @@ def test_join_shared_rejects_a_non_live_notebook(repo, lifecycle):
 
     for hidden_id in (lifecycle["copying_id"], lifecycle["deleting_id"]):
         with pytest.raises(KeyError):
-            sharing.join_shared(hidden_id, joiner_id)
+            sharing.join_shared(hidden_id, joiner_id, share_token="shr-hidden")
         with repo._runtime.database.connect() as db:
             assert db.execute(
                 "SELECT 1 FROM notebook_members WHERE notebook_id=? AND user_id=?",
@@ -392,7 +392,8 @@ def test_join_shared_rejects_a_non_live_notebook(repo, lifecycle):
             ).fetchone() is None
 
     # 对照组:active 上 join 正常成功。
-    result = sharing.join_shared(lifecycle["active_id"], joiner_id)
+    token = repo._runtime.sharing_store.set_share_token(lifecycle["active_id"], "shr-active")
+    result = sharing.join_shared(lifecycle["active_id"], joiner_id, share_token=token)
     assert result.id == lifecycle["active_id"]
     assert result.access == "reader"
 
@@ -455,17 +456,19 @@ def test_rejoin_by_an_existing_member_is_refused_once_the_tombstone_lands(
     member = lifecycle["member_id"]  # 已是三本库的既有成员
 
     real_insert = store.insert_member_if_live
+    # 链接有效:0 行只能来自活性谓词,不是 token 不匹配。
+    token = store.set_share_token(nb, "shr-r16")
 
-    def tombstone_then_insert(db, notebook_id, user_id, now):
+    def tombstone_then_insert(db, notebook_id, user_id, now, share_token):
         db.execute(
             "UPDATE notebooks SET status='deleting' WHERE id=?",
             (notebook_id,),
         )
-        return real_insert(db, notebook_id, user_id, now)
+        return real_insert(db, notebook_id, user_id, now, share_token)
 
     monkeypatch.setattr(store, "insert_member_if_live", tombstone_then_insert)
     with pytest.raises(KeyError):
-        sharing.join_shared(nb, member)
+        sharing.join_shared(nb, member, share_token=token)
 
 
 # --------------------------------------------------------------------------

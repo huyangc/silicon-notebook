@@ -316,7 +316,17 @@ class NotebookSharingService:
         # longer hold, and it comes back if they are let in again. Only a
         # member's own acknowledged exit (``MemoryService.leave_notebook``)
         # deletes Memory.
-        self._store.clear_share(notebook_id)
+        #
+        # Each removed member's private state goes exactly as in
+        # ``remove_member`` (user ruling 2026-10-23: one semantics for the
+        # single and the notebook-wide removal): the store returns who it
+        # removed, in the same transaction that voided the token, and the
+        # same per-member cleanup runs after the commit — membership first,
+        # for the reason ``remove_member`` gives. A rejoin through a newly
+        # minted link between the commit and the cleanup only resets that
+        # person's just-started overlay, which is the rejoin contract anyway.
+        for user_id in self._store.clear_share(notebook_id):
+            self._clear_member_profile(notebook_id, user_id)
 
     def find_notebook_by_share_token(self, token: str) -> "str | None":
         if not token:
@@ -643,28 +653,12 @@ class NotebookSharingService:
                 notebook_id,
             )
 
-    def kick_all_members(self, notebook_id: str) -> None:
-        """Drop every membership row for this notebook.
-
-        ⚠ Deliberately does NOT clear the removed members' overlays, and the
-        reason is that it cannot do so honestly: the store method removes the
-        rows in one statement, so this layer has no list of who was removed,
-        and reconstructing one with a read-then-delete would be racing the very
-        rows it is deleting. Those blocks stay unreadable through the read-side
-        gate (identical to the ``remove_member`` case before its clear runs),
-        and rejoining the notebook is what makes them visible again — which is
-        the same person's own notes, so that is correct rather than a leak.
-        The single-member path is the one users actually take, and it cleans up.
-
-        Never deletes Memory either: nobody else's action may destroy a
-        member's Memory (see ``remove_member``).
-        """
-        return self._store.kick_all_members(notebook_id)
-
     def list_members(self, notebook_id: str) -> list:
         return self._store.list_members(notebook_id)
 
-    def join_shared(self, notebook_id: str, user_id: str) -> NotebookSummary:
+    def join_shared(
+        self, notebook_id: str, user_id: str, *, share_token: str
+    ) -> NotebookSummary:
         # codex #659 R12 P1: R11 wrapped a database.write() (inside
         # add_member) INSIDE an outer database.connect() — under
         # POSTGRES_POOL_MAX_SIZE=1 that nested acquisition can never get a
@@ -687,7 +681,7 @@ class NotebookSharingService:
             if row is None:
                 raise KeyError(notebook_id)
             inserted = self._store.insert_member_if_live(
-                db, notebook_id, user_id, self._store.now()
+                db, notebook_id, user_id, self._store.now(), share_token
             )
             # codex #659 R14 P2: rowcount==0 is ambiguous between "already a
             # member" (insert_member_if_live's OR IGNORE/DO NOTHING idempotent
@@ -711,6 +705,13 @@ class NotebookSharingService:
             # member → the guard could only have blocked on liveness that
             # has since returned... which cannot happen for a monotonic
             # tombstone, so that combination also reads as not-joinable.
+            #
+            # The link itself is checked too (kick-all ruling 2026-10-23): the
+            # route resolved the notebook from ``share_token`` before this
+            # transaction, so an unshare can commit in between. The insert
+            # requires the token to still be this notebook's live link; the
+            # unshare removed every member in the transaction that voided it,
+            # so a voided link lands here with no membership and is a 404.
             if inserted == 0:
                 fresh = self._store.notebook_row_on(db, notebook_id)
                 if fresh is None or not self._store.is_member_on(
