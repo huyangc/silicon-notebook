@@ -1033,7 +1033,8 @@ def assert_a_join_summary_is_the_joiners(env) -> None:
     the one their next GET reads: Carol, who may read ``b``, joins ``e``."""
     sharing = notebook_sharing_repository()
     sharing.add_member(env["library"].id, env["carol"].id)
-    joined = sharing.join_shared(env["empty"].id, env["carol"].id)
+    token = sharing.share_notebook(env["empty"].id)["share_token"]
+    joined = sharing.join_shared(env["empty"].id, env["carol"].id, share_token=token)
     marker = set_request_user(env["carol"])
     try:
         fetched = repository().get_notebook(env["empty"].id)

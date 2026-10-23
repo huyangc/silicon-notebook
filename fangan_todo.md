@@ -331,9 +331,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       本守卫永远报不出来；facade 层（`RepositoryFacade` 及其子类）整体不在普查范围内，其私有包装里另有约
       110 个生产零调用的成员（去掉 `ownership_manifest.py` 的名字后可见）。两类一起清点：同名掩护需要按接收者
       的类型做一轮专项排查，facade 私有包装按 facade 退役台账逐批退役。
-- [ ] **`kick_all_members` 做成功能**（来源：S2-D，用户 2026-10-23 裁决）：「整本移除全部成员」目前没有任何
-      生产入口，只有 Memory 退出与只读分享的用例在用；用户要求补上入口、做成功能，另开 PR。在此之前
-      `NotebookSharingService.kick_all_members` 在组件普查的允许清单里登记为 pending-decision。
 
 ### 整改计划刻意不做、只登记
 

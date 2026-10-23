@@ -860,14 +860,22 @@ class SharingStore:
             )
         return str(chosen)
 
-    def clear_share(self, notebook_id: str) -> None:
-        """Unshare + kick every member in ONE write transaction."""
+    def clear_share(self, notebook_id: str) -> list[str]:
+        """Unshare + kick every member in ONE write transaction; returns the
+        user ids whose membership this call ended (sorted).
+
+        The member delete is ``kick_all_members`` on this same connection —
+        the one implementation of "end every link membership" (user ruling
+        2026-10-23). The token is voided first, inside the same writer-fenced
+        transaction, so a join holding the old token either committed before
+        this (its row is in the returned list) or runs after it and finds no
+        matching token (``insert_member_if_live``)."""
         with self.database.write() as db:
             db.execute(
                 "UPDATE notebooks SET is_shared = 0, share_token = NULL, updated_at = ? WHERE id = ?",
                 (self.now(), notebook_id),
             )
-            db.execute("DELETE FROM notebook_members WHERE notebook_id = ?", (notebook_id,))
+            return self.kick_all_members(db, notebook_id)
 
     def find_by_token(self, token: str) -> "str | None":
         """codex #659 R11 P1：并入 ``NOTEBOOK_LIVE_SQL``——tombstone 落地
@@ -1082,6 +1090,7 @@ class SharingStore:
     @staticmethod
     def insert_member_if_live(
         db: sqlite3.Connection, notebook_id: str, user_id: str, now: str,
+        share_token: str,
     ) -> int:
         """codex #659 R12 P1：``join_shared`` 专属的原子插入——**不自己开
         事务**（与 ``notebook_row_on`` 同款静态方法形状），调用方必须已经
@@ -1099,12 +1108,20 @@ class SharingStore:
         codex #659 R14 P2：返回受影响行数（0 或 1）——rowcount==0 本身有
         歧义（「已是成员」的幂等 no-op 与「活性谓词挡下」都会是 0），调用方
         （``join_shared``）必须在同一事务内用 ``is_member_on`` 再判一次区分
-        这两种情况，见那边的完整理由。"""
+        这两种情况，见那边的完整理由。
+
+        ``share_token`` 是加入者手里的那条链接：插入还要求它此刻仍是这本库
+        的有效链接（``is_shared = 1 AND share_token = ?``）。路由先凭 token
+        解析出库、再开这个写事务，两步之间若取消分享已提交（作废 token、
+        踢掉全部成员），没有这条谓词这次加入会在取消之后落地，把人留在一本
+        已经撤了链接的库里。写事务经 ``BEGIN IMMEDIATE`` 与 ``clear_share``
+        串行，所以谓词在这里判定就够了。"""
         cursor = db.execute(
             "INSERT OR IGNORE INTO notebook_members (notebook_id, user_id, role, added_at) "
             "SELECT ?, ?, 'reader', ? WHERE EXISTS ("
-            f"SELECT 1 FROM notebooks WHERE id = ? AND {NOTEBOOK_LIVE_SQL})",
-            (notebook_id, user_id, now, notebook_id),
+            "SELECT 1 FROM notebooks WHERE id = ? AND is_shared = 1 AND share_token = ? "
+            f"AND {NOTEBOOK_LIVE_SQL})",
+            (notebook_id, user_id, now, notebook_id, share_token),
         )
         return cursor.rowcount
 
@@ -1124,9 +1141,17 @@ class SharingStore:
                 (notebook_id, user_id),
             )
 
-    def kick_all_members(self, notebook_id: str) -> None:
-        with self.database.write() as db:
-            db.execute("DELETE FROM notebook_members WHERE notebook_id = ?", (notebook_id,))
+    @staticmethod
+    def kick_all_members(db: sqlite3.Connection, notebook_id: str) -> list[str]:
+        """End every link membership of this notebook on the caller's write
+        connection; returns the removed user ids (sorted). Does not open a
+        transaction: its one caller, ``clear_share``, voids the token in the
+        same one. Only ``notebook_members`` — grant edges are untouched."""
+        rows = db.execute(
+            "DELETE FROM notebook_members WHERE notebook_id = ? RETURNING user_id",
+            (notebook_id,),
+        ).fetchall()
+        return sorted(str(row["user_id"]) for row in rows)
 
     def list_members(self, notebook_id: str) -> list:
         with self.database.connect() as db:

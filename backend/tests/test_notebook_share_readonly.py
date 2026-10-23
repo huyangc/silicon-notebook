@@ -46,7 +46,7 @@ def test_membership_crud_and_read_access(repo):
     assert [m["username"] for m in repo._runtime.sharing.list_members(nb)] == ["b00000001"]
     repo._runtime.sharing.add_member(nb, "user-bob")  # 幂等
     assert len(repo._runtime.sharing.list_members(nb)) == 1
-    repo._runtime.sharing.kick_all_members(nb)
+    repo._runtime.sharing.unshare_notebook(nb)
     assert repo._runtime.sharing.list_members(nb) == []
     assert repo.user_can_read_notebook(nb, "user-bob") is False
 

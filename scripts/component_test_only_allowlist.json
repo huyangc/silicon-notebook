@@ -412,11 +412,6 @@
       "reason": "直接写成员行的构造点(生产入会走分享令牌 join_shared),大量用例借它摆成员关系"
     },
     {
-      "member": "backend/app/services/notebook_sharing.py::NotebookSharingService.kick_all_members",
-      "category": "pending-decision",
-      "reason": "功能 PR 跟进(用户 2026-10-23 裁决):补上「整本移除全部成员」的入口,做成功能;在此之前保留"
-    },
-    {
       "member": "backend/app/services/pending_bus.py::PendingBus._buffered_count",
       "category": "test-observation",
       "reason": "缓冲区条数观察点,测 TTL 与出队"

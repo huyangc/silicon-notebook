@@ -224,6 +224,7 @@ def test_t4deleg_notebook_row_on_delegate(repo, monkeypatch):
     notebook_id = _seed_plain_nb(repo, owner="user-local", name="join")
     _seed_user(repo, "user-joiner")
     store = repo._runtime.sharing_store
+    token = store.set_share_token(notebook_id, "shr-join")
     summaries = repo._runtime.sharing._summaries
     original_store = store.notebook_row_on  # staticmethod -> plain function
     original_summary = summaries.from_row
@@ -240,7 +241,7 @@ def test_t4deleg_notebook_row_on_delegate(repo, monkeypatch):
 
     monkeypatch.setattr(store, "notebook_row_on", spy_store)
     monkeypatch.setattr(summaries, "from_row", spy_summary)
-    result = repo._runtime.sharing.join_shared(notebook_id, "user-joiner")
+    result = repo._runtime.sharing.join_shared(notebook_id, "user-joiner", share_token=token)
     assert len(store_dbs) == 1
     assert len(summary_dbs) == 1
     assert store_dbs[0] is summary_dbs[0]  # MUT
@@ -263,6 +264,7 @@ def test_join_shared_acquires_exactly_one_connection(repo, monkeypatch):
 
     notebook_id = _seed_plain_nb(repo, owner="user-local", name="join-count")
     _seed_user(repo, "user-joiner-count")
+    token = repo._runtime.sharing_store.set_share_token(notebook_id, "shr-join-count")
     database = repo._runtime.database
     original_connect = database.connect
     original_write = database.write
@@ -280,7 +282,7 @@ def test_join_shared_acquires_exactly_one_connection(repo, monkeypatch):
 
     monkeypatch.setattr(database, "connect", counting_connect)
     monkeypatch.setattr(database, "write", counting_write)
-    result = repo._runtime.sharing.join_shared(notebook_id, "user-joiner-count")
+    result = repo._runtime.sharing.join_shared(notebook_id, "user-joiner-count", share_token=token)
     assert calls == ["write"]  # MUT: exactly one acquisition, and it's a write()
     assert result.id == notebook_id
     assert result.access == "reader"
@@ -304,9 +306,10 @@ def test_join_shared_is_idempotent_for_an_existing_member(repo):
     notebook_id = _seed_plain_nb(repo, owner="user-local", name="join-idempotent")
     _seed_user(repo, "user-repeat-joiner")
     sharing = repo._runtime.sharing
-    first = sharing.join_shared(notebook_id, "user-repeat-joiner")
+    token = repo._runtime.sharing_store.set_share_token(notebook_id, "shr-repeat")
+    first = sharing.join_shared(notebook_id, "user-repeat-joiner", share_token=token)
     assert first.id == notebook_id
-    second = sharing.join_shared(notebook_id, "user-repeat-joiner")  # MUT
+    second = sharing.join_shared(notebook_id, "user-repeat-joiner", share_token=token)  # MUT
     assert second.id == notebook_id
     assert second.access == "reader"
     with repo._runtime.database.connect() as db:
@@ -327,6 +330,7 @@ def test_join_shared_rejects_an_insert_blocked_by_the_liveness_guard(repo, monke
     notebook_id = _seed_plain_nb(repo, owner="user-local", name="join-race")
     _seed_user(repo, "user-raced-joiner")
     store = repo._runtime.sharing_store
+    token = store.set_share_token(notebook_id, "shr-raced")  # the link is valid: only liveness blocks
     with repo._runtime.database.connect() as db:
         stale_row = dict(store.notebook_row_on(db, notebook_id))  # captured WHILE still live
     with repo._runtime.database.write() as db:
@@ -337,7 +341,7 @@ def test_join_shared_rejects_an_insert_blocked_by_the_liveness_guard(repo, monke
     # independent liveness check rather than re-proving notebook_row_on's.
     monkeypatch.setattr(store, "notebook_row_on", lambda db, nb_id: dict(stale_row))
     with pytest.raises(KeyError):
-        repo._runtime.sharing.join_shared(notebook_id, "user-raced-joiner")  # MUT
+        repo._runtime.sharing.join_shared(notebook_id, "user-raced-joiner", share_token=token)  # MUT
     with repo._runtime.database.connect() as db:
         rows = db.execute(
             "SELECT COUNT(*) c FROM notebook_members WHERE notebook_id=? AND user_id=?",
