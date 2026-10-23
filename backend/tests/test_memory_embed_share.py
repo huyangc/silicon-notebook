@@ -80,3 +80,31 @@ def test_report_run_keeps_the_hand_over_bounded(world):
 
 def test_scout_shares_across_libraries(world):
     cases.scout_shares_across_libraries(world)
+
+
+def test_hand_over_keeps_the_most_recently_used_vectors():
+    """LRU, not FIFO: a vector just read back outlives an older one offered
+    after it, so a question Memory keeps re-reading is not pushed out by the
+    stage's other texts."""
+    from app.services.retrieval_run import (
+        QUERY_VECTOR_SHARE_LIMIT,
+        retrieval_run,
+        share_query_vector,
+        shared_query_vector,
+    )
+
+    embedder = cases.CountingEmbedder()
+    assert QUERY_VECTOR_SHARE_LIMIT == 2
+    with retrieval_run(run_kind="ask_reasoning"):
+        share_query_vector(embedder, "question", [1.0])
+        share_query_vector(embedder, "other", [2.0])
+        assert shared_query_vector(embedder, "question") == [1.0]
+        share_query_vector(embedder, "third", [3.0])
+        assert shared_query_vector(embedder, "question") == [1.0]
+        assert shared_query_vector(embedder, "other") is None
+        assert shared_query_vector(embedder, "third") == [3.0]
+        share_query_vector(embedder, "none", None)
+        assert shared_query_vector(embedder, "question") == [1.0]
+    # Outside a run nothing is kept.
+    share_query_vector(embedder, "question", [1.0])
+    assert shared_query_vector(embedder, "question") is None
