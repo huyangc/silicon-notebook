@@ -857,6 +857,12 @@ def main() -> int:
             for problem in problems:
                 print(f"  - {problem}", file=sys.stderr)
             exit_code = 1
+        else:
+            print(
+                "audit_component_callers: OK ("
+                f"{len(report['candidates'])} component members production never reaches, "
+                "all registered)"
+            )
     if args.json:
         args.json.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     if args.markdown:

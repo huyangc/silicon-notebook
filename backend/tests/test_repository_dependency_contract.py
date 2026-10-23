@@ -133,7 +133,6 @@ LIFECYCLE_STORE_CALLS = {
         "communities_count",
         "discard_board_dependent_kg_analysis_artifacts",
         "community_graph_rows",
-        "community_member_ids",
         "community_rows_for_summary",
         "concept_clusters_count",
         # codex #772 r16: `_unified_graph_version` reads the four-part graph
