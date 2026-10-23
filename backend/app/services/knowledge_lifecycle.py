@@ -5370,7 +5370,11 @@ class KnowledgeLifecycleService:
         a non-member reading a mounted library, every cluster) carries that
         member's object id and name, the focus included; and a hidden focus
         answers exactly what an unknown id does (``_absent_focus_neighbors``),
-        as does, for that non-member, a focus given as a cluster id.
+        as does, for that non-member, a focus given as a cluster id.  A focus
+        the scope refuses outright (``KgViewerScope.refuses_focus``: a live
+        object owned by an unreadable source, and for that non-member any id
+        that is no visible raw object) is answered before any neighbour,
+        preview or cluster read is made for it.
 
         ``cap`` counts VISIBLE neighbours: both hydration paths apply their
         cap before this filter, so the raw read over-fetches (by the
@@ -5380,6 +5384,9 @@ class KnowledgeLifecycleService:
         order.  The DB path's relation read takes the viewer (E4-4's
         ``viewer_id``) so a relation of a hidden source between two visible
         objects is not returned either."""
+        if scope.refuses_focus(object_id):
+            return self._absent_focus_neighbors(
+                notebook_id, object_id, artifacts=artifacts)
         budget = cap + min(len(scope.owned_hidden), cap)
         while True:
             probe: dict = {}

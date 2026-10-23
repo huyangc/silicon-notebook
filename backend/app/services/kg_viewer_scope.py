@@ -259,6 +259,9 @@ class KgViewerScope:
         # ``{canonical id: first visible member row or None}``, read once per
         # cluster for the scope's request (``_first_visible_members``).
         self._first_rows: Dict[str, Optional[Dict[str, Any]]] = {}
+        # ``{id: hidden?}`` for the ids ``_raw_objects`` read, ``None`` for an
+        # id that is no object row: judged once for the scope's request.
+        self._raw_judged: Dict[str, Optional[bool]] = {}
 
     @property
     def filters(self) -> bool:
@@ -519,22 +522,50 @@ class KgViewerScope:
         (merges keep the merged-away object's relations) whose owner is an
         unreadable source.  Only ``id`` and ``source_id`` are used: with the
         E4-4 stores assembled the read skips the evidence JSON
-        (``with_evidence=False``, the same seam as ``viewer_id``)."""
+        (``with_evidence=False``, the same seam as ``viewer_id``).  An id
+        judged once is not read again for the scope's request
+        (``refuses_focus`` judges the focus before the neighbour read)."""
         owned = self.owned_hidden
-        hidden = {oid for oid in object_ids if oid in owned}
-        known = set(hidden)
-        rest = sorted({oid for oid in object_ids if oid not in owned})
+        rest = sorted({oid for oid in object_ids
+                       if oid not in owned and oid not in self._raw_judged})
         narrow = {"with_evidence": False} if store_readers_take_viewer_id() else {}
         if rest:
+            found: Dict[str, bool] = {}
             with self._reader.connect() as db:
                 for start in range(0, len(rest), _ID_BATCH):
                     for row in self._reader.knowledge.object_evidence_rows(
                         db, rest[start:start + _ID_BATCH], **narrow
                     ):
-                        known.add(str(row["id"]))
-                        if self.row_hidden(row["source_id"]):
-                            hidden.add(str(row["id"]))
+                        found[str(row["id"])] = self.row_hidden(row["source_id"])
+            # ``None``: no object row at all (a cluster id, or unknown).
+            self._raw_judged.update((oid, found.get(oid)) for oid in rest)
+        hidden = {oid for oid in object_ids if oid in owned}
+        known = set(hidden)
+        for oid in object_ids:
+            if oid not in owned and self._raw_judged.get(oid) is not None:
+                known.add(oid)
+                if self._raw_judged[oid]:
+                    hidden.add(oid)
         return frozenset(hidden), frozenset(known)
+
+    def refuses_focus(self, object_id: str) -> bool:
+        """Whether a neighbour read asked about ``object_id`` is answered
+        like an unknown id before anything is read for its neighbourhood:
+        the id is a live object owned by an unreadable source
+        (``owned_hidden``, which the read's budget needs anyway) -- and, for
+        a scope that ``answers_by_member``, any id that is no visible raw
+        object (the identity read ``answer_neighbourhood`` would make for it,
+        made first and kept): a hidden one, a cluster id or an unknown id.
+        A focus refused only by what the neighbour read returns -- a member
+        scope's cluster id whose every member is hidden, a deprecated hidden
+        object -- is still refused there."""
+        object_id = str(object_id)
+        if object_id in self.owned_hidden:
+            return True
+        if not self.answers_by_member:
+            return False
+        hidden, known = self._raw_objects([object_id])
+        return object_id in hidden or object_id not in known
 
     def visible_member(self, canonical_id: str) -> Optional[Dict[str, Any]]:
         """The first visible member (member-id order) of a cluster, or
