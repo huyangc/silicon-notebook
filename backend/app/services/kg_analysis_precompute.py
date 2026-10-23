@@ -1125,5 +1125,3 @@ class SourceProfileFolder:
                 (mainstream_n / denominator) if denominator else 0.0,
             ))
         return out
-
-
