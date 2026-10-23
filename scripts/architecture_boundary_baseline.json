@@ -287,11 +287,7 @@
   "core_models_service_imports": {
     "allowed": []
   },
-  "facade_protocol_binding_gaps": {
-    "NotebookRepository": [
-      "rerank"
-    ]
-  },
+  "facade_protocol_binding_gaps": {},
   "ports_protocol_method_count": 1007,
   "function_length_ceiling": {
     "backend/app/extensions/ask.py::AskCompletedObserverHost.observe_application": 154,

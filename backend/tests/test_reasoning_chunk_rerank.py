@@ -688,6 +688,32 @@ def test_real_path_unconfigured_rerank_is_byte_identical_to_mmr(rrepo):
         json.dumps([vars(h) for h in before], default=repr, ensure_ascii=False)
 
 
+def test_from_repository_facade_stays_on_mmr_with_a_configured_reranker(request):
+    """S2-A: `from_repository`(knowhow 智能补全)把 facade 当 `model_clients`,
+    facade 不实现 `rerank`,所以即使绑定了已配置的精排客户端,这条路径也恒走
+    MMR、逐字节不变。给 facade 补一个 `rerank` 委托会让它开始精排——行为变化,
+    这里钉住;同一个客户端经运行时 provider 会被调用,证明用例不是空转。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    # 按名取夹具:形参写 `rrepo` 会再记一条 F811(lint 基线只降不升)。
+    repo = request.getfixturevalue("rrepo")
+    nb = _seed_notebook_without_kg(repo, texts=_TEXTS)
+    before = ReasoningRetriever.from_repository(
+        repo, repo.settings).search_chunks(nb.id, "布局布线", k=2)
+    client = _Rerank()
+    bind_rerank_client(repo, client)
+    rr = ReasoningRetriever.from_repository(repo, repo.settings)
+    assert rr.model_clients is repo
+    after = rr.search_chunks(nb.id, "布局布线", k=2)
+    assert client.calls == []
+    assert json.dumps([vars(h) for h in after], default=repr, ensure_ascii=False) == \
+        json.dumps([vars(h) for h in before], default=repr, ensure_ascii=False)
+
+    rr.model_clients = repo._runtime.models
+    rr.search_chunks(nb.id, "布局布线", k=2)
+    assert client.calls
+
+
 def test_rerank_timeout_falls_back_to_the_real_mmr_and_applies_the_reserve_once(
     monkeypatch,
 ):

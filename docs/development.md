@@ -70,8 +70,9 @@ contributor constraints, not a second implementation history.
   receiver in `backend/app` or `scripts`. Those callers degrade silently instead of
   raising, so the audit cannot see them. It also fails when a protocol the facade is
   handed out as (`cast(P, repository())`, or `-> P` returning `repository()`)
-  declares a method the facade lacks; gaps that predate the check are listed in
-  `facade_protocol_binding_gaps` with zero slack. Retire facade members against the
+  declares a method the facade lacks. The gaps that predated the check were listed in
+  `facade_protocol_binding_gaps` with zero slack and are all closed, so that list is
+  empty and any gap fails. Retire facade members against the
   [caller ledger](./superpowers/plans/2026-08-23-facade-retirement-ledger.md), reproduced
   by `scripts/audit_facade_callers.py`; update the ownership/surface fixtures with
   `scripts/generate_repository_contract_fixtures.py --rebaseline-surface`.

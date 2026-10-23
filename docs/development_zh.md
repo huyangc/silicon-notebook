@@ -55,8 +55,8 @@
   `_repository_from_weakref(...)` 接缝，以及 `backend/app`、`scripts` 中对 facade 形状
   接收者用字面量做的 `getattr`/`hasattr` 探测。这类调用方不会报错而是静默降级，普查脚本
   也看不到它们。facade 被当作协议交出去时（`cast(P, repository())`，或标注 `-> P` 并
-  返回 `repository()`），协议声明了 facade 没有的方法也会报错；检查上线前已有的缺口登记在
-  `facade_protocol_binding_gaps`，同样无预留空间。退役 facade 成员按
+  返回 `repository()`），协议声明了 facade 没有的方法也会报错。检查上线前已有的缺口曾登记在
+  `facade_protocol_binding_gaps`（同样无预留空间），现已全部补上，名单为空，任何缺口都报错。退役 facade 成员按
   [调用方台账](./superpowers/plans/2026-08-23-facade-retirement-ledger.md) 逐批进行，
   用 `scripts/audit_facade_callers.py` 复现，并同步 ownership/surface fixture：
   `scripts/generate_repository_contract_fixtures.py --rebaseline-surface`。

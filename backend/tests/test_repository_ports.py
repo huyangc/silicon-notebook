@@ -76,3 +76,23 @@ def test_access_and_sharing_protocols_still_declare_the_facade_reads():
         assert ports.NotebookAccessRepository not in facade_bound.__mro__
     assert ports.NotebookShareReadRepository in ports.NotebookRepository.__mro__
     assert ports.NotebookSharingRepository not in ports.NotebookRepository.__mro__
+
+
+def test_facade_bound_model_contract_is_the_reasoning_provider_without_rerank():
+    """S2-A: the facade implements ``chat`` / ``configured`` / ``parallelism``
+    but never ``rerank``, and must not grow it -- the knowhow
+    ``from_repository`` path hands the facade over as ``model_clients`` and
+    stays on MMR only because the rerank probe finds nothing there. So the
+    facade-bound ``NotebookRepository`` inherits ``ReasoningModelProvider``
+    through ``FacadePropertyContract``, not ``ModelClientProvider``; the rerank
+    callers (report engine, ``AskModelClientProvider``) keep the full port,
+    which the runtime model provider implements."""
+    assert ports.ReasoningModelProvider in ports.FacadePropertyContract.__mro__
+    assert ports.ModelClientProvider not in ports.FacadePropertyContract.__mro__
+    assert ports.ModelClientProvider not in ports.NotebookRepository.__mro__
+    assert "rerank" not in _protocol_members(ports.NotebookRepository)
+    assert {"chat", "configured", "parallelism"} <= _protocol_members(
+        ports.NotebookRepository
+    )
+    assert "rerank" in _protocol_members(ports.ModelClientProvider)
+    assert ports.ModelClientProvider in ports.AskModelClientProvider.__mro__
