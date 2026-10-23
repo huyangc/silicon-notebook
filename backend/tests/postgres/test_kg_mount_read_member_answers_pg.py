@@ -215,6 +215,34 @@ def test_pg_a_hidden_focus_answers_like_an_unknown_id(repo, monkeypatch, large):
     assert "Membernote" in text_of(as_user(w.member, repo.kg_neighbors, w.nb, w.member_shared))
 
 
+@pytest.mark.parametrize("hint", ["library", "omitted"])
+def test_pg_a_refused_focus_answers_like_an_unknown_id_before_the_neighbour_read(
+    repo, monkeypatch, hint,
+):
+    """The route passes the active notebook when the client gives no hint:
+    the hidden Knowhow object (found in the library) and, with the hint, the
+    cluster-id input answer and echo exactly what an unknown id does, and no
+    neighbour read is made for them."""
+    w = build_world(repo)
+    source = w.lib if hint == "library" else w.nb
+    lifecycle = repo._runtime.knowledge_lifecycle
+
+    def read(object_id):
+        return text_of(as_user(w.member, repo.kg_neighbors, w.nb, object_id,
+                               source_notebook_id=source))
+
+    unknown = read(NEVER_ID)
+    assert json.loads(unknown)["source_notebook_id"] == source
+    reads: list = []
+    unchecked = lifecycle._kg_neighbors_unchecked
+    monkeypatch.setattr(lifecycle, "_kg_neighbors_unchecked",
+                        lambda *a, **k: reads.append(a[1]) or unchecked(*a, **k))
+    for object_id in (w.kh, SEEDED_ID) if hint == "library" else (w.kh,):
+        view = read(object_id)
+        assert view.replace(object_id, "<id>") == unknown.replace(NEVER_ID, "<id>"), view
+    assert reads == [], reads
+
+
 @pytest.mark.parametrize("path", ["preview", "live"])
 @pytest.mark.parametrize("drop_source", [False, True])
 def test_pg_stale_names_left_by_a_pruned_knowhow_member_stay_out(

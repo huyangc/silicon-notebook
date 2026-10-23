@@ -5242,7 +5242,7 @@ class KnowledgeLifecycleService:
         active_notebook_id: str,
         object_id: str,
         source_notebook_id: str,
-    ) -> str:
+    ) -> Tuple[str, str]:
         """Resolve one globally unique raw object inside the active federation.
 
         The request is authorized against ``active_notebook_id`` by the route;
@@ -5250,11 +5250,20 @@ class KnowledgeLifecycleService:
         browser must not access them directly. Every probe is an indexed lookup
         for exactly one object id and the participant list is already bounded by
         the notebook's explicit mounts.
+
+        Returns ``(notebook, unknown_at)``: the participant holding the id,
+        and the one an id no participant holds resolves to -- where a focus
+        the viewer may not be shown is answered, so that it echoes exactly
+        what an unknown id would (``kg_neighbors``).
         """
         participants = self.participant_notebook_ids(active_notebook_id)
         if not participants:
-            return active_notebook_id
+            return active_notebook_id, active_notebook_id
         hint = source_notebook_id if source_notebook_id in participants else ""
+        # A canonical K-* id is synthetic and therefore has no object row. Its
+        # source hint came from a previously resolved neighborhood response; use
+        # it only after all raw-id probes miss.
+        unknown_at = hint or active_notebook_id
         ordered = ([hint] if hint else []) + [
             notebook_id for notebook_id in participants if notebook_id != hint
         ]
@@ -5263,15 +5272,12 @@ class KnowledgeLifecycleService:
                 if self.knowledge.object_meta_rows_for_notebook(
                     db, notebook_id, [object_id]
                 ):
-                    return notebook_id
+                    return notebook_id, unknown_at
                 if self.unified_kg.cluster_fold_rows(
                     db, notebook_id, [object_id]
                 ):
-                    return notebook_id
-        # A canonical K-* id is synthetic and therefore has no object row. Its
-        # source hint came from a previously resolved neighborhood response; use
-        # it only after all raw-id probes miss.
-        return hint or active_notebook_id
+                    return notebook_id, unknown_at
+        return unknown_at, unknown_at
 
     def kg_neighbors(
         self,
@@ -5291,11 +5297,17 @@ class KnowledgeLifecycleService:
         Ask anchors carry raw knowledge-object ids, while the visual graph folds
         Concepts to canonical K-* ids. Resolve just this one requested id through
         the indexed cluster table before either path; never load the full cluster
-        map on the indexed path."""
+        map on the indexed path.
+
+        A focus the viewer rule refuses (a hidden object, or a cluster id a
+        non-member of the library may not be shown) is answered exactly as an
+        id no participant holds: from the notebook such an id resolves to
+        (the hint, else the active notebook), echoed in
+        ``source_notebook_id`` -- never from the library that holds it."""
         self.get_notebook(notebook_id)
-        source_id = notebook_id
+        source_id = unknown_at = notebook_id
         if source_notebook_id:
-            source_id = self._participant_source_notebook(
+            source_id, unknown_at = self._participant_source_notebook(
                 notebook_id, object_id, source_notebook_id
             )
         scope = self._viewer_scope(source_id, notebook_id)
@@ -5310,8 +5322,16 @@ class KnowledgeLifecycleService:
             result = self._kg_neighbors_unchecked(
                 source_id, object_id, cap, artifacts=artifacts)
         else:
+            probe: dict = {}
             result = self._viewer_scoped_neighbors(
-                source_id, object_id, cap, scope, artifacts=artifacts)
+                source_id, object_id, cap, scope, artifacts=artifacts, probe=probe)
+            if result is None:
+                if unknown_at != source_id:
+                    # What this request probed was the holding library's.
+                    source_id, probe = unknown_at, {}
+                    artifacts = not self._memory_isolation_pending(source_id)
+                result = self._absent_focus_neighbors(
+                    source_id, object_id, artifacts=artifacts, probe=probe)
         result["source_notebook_id"] = source_id
         return result
 
@@ -5360,21 +5380,23 @@ class KnowledgeLifecycleService:
 
     def _viewer_scoped_neighbors(
         self, notebook_id: str, object_id: str, cap: int, scope,
-        *, artifacts: bool = True,
-    ) -> dict:
+        *, artifacts: bool = True, probe: Optional[dict] = None,
+    ) -> Optional[dict]:
         """PR-A·A5 (rulings Q4 / M1): neighbour hydration under the viewer
         rule (``KgViewerScope.answer_neighbourhood``): hidden objects,
         clusters whose every live member is hidden, and edges touching either
         are omitted; a cluster answered by its first visible member (one that
         may hold a hidden member -- whatever the isolation marker -- and, for
         a non-member reading a mounted library, every cluster) carries that
-        member's object id and name, the focus included; and a hidden focus
-        answers exactly what an unknown id does (``_absent_focus_neighbors``),
-        as does, for that non-member, a focus given as a cluster id.  A focus
-        the scope refuses outright (``KgViewerScope.refuses_focus``: a live
-        object owned by an unreadable source, and for that non-member any id
-        that is no visible raw object) is answered before any neighbour,
-        preview or cluster read is made for it.
+        member's object id and name, the focus included.  ``None`` for a
+        refused focus -- a hidden one, and for that non-member a focus given
+        as a cluster id -- which the caller answers exactly as an unknown id
+        (``_absent_focus_neighbors``, with what ``probe`` recorded of this
+        read).  A focus the scope refuses outright
+        (``KgViewerScope.refuses_focus``: a live object owned by an
+        unreadable source, and for that non-member any id that is no visible
+        raw object) is refused before any neighbour, preview or cluster read
+        is made for it.
 
         ``cap`` counts VISIBLE neighbours: both hydration paths apply their
         cap before this filter, so the raw read over-fetches (by the
@@ -5385,11 +5407,9 @@ class KnowledgeLifecycleService:
         ``viewer_id``) so a relation of a hidden source between two visible
         objects is not returned either."""
         if scope.refuses_focus(object_id):
-            return self._absent_focus_neighbors(
-                notebook_id, object_id, artifacts=artifacts)
+            return None
         budget = cap + min(len(scope.owned_hidden), cap)
         while True:
-            probe: dict = {}
             result = self._kg_neighbors_unchecked(
                 notebook_id, object_id, budget, artifacts=artifacts,
                 store_kwargs=store_viewer_kwargs(scope), probe=probe)
@@ -5400,8 +5420,7 @@ class KnowledgeLifecycleService:
                 inputs=(object_id,),
             )
             if judged is None:
-                return self._absent_focus_neighbors(
-                    notebook_id, object_id, artifacts=artifacts, probe=probe)
+                return None
             nodes, edges, answers = judged
             visible_neighbours = [n for n in nodes if n["id"] != focus_id]
             if len(visible_neighbours) >= cap or raw_neighbours < budget:

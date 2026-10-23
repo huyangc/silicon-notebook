@@ -411,6 +411,40 @@ def test_a_refused_focus_is_decided_before_the_neighbour_read(env, monkeypatch, 
     assert reads == [ids.widget], reads
 
 
+@pytest.mark.parametrize("hint", ["library", "omitted"])
+@pytest.mark.parametrize("large", [False, True])
+def test_a_hidden_focus_echoes_what_an_unknown_id_would_whatever_the_hint(
+    env, monkeypatch, hint, large,
+):
+    """Without a hint the route asks about the active notebook first: an
+    unknown id resolves there, while the hidden Knowhow object is found in
+    the library.  The refused focus must still answer -- and echo
+    ``source_notebook_id`` -- exactly what the unknown id does, with the
+    hint and without it, on a small library and on one too large for the
+    live path."""
+    ids = build_library(env)
+    if large:
+        monkeypatch.setattr(env.repo._runtime.knowledge_lifecycle.settings,
+                            "viz_sync_build_max_objects", 1)
+    params = {"source_notebook_id": ids.lib} if hint == "library" else {}
+
+    def read(object_id):
+        r = env.client.get(f"/api/notebooks/{env.nb}/objects/{object_id}/neighbors",
+                           headers=env.member, params=params)
+        assert r.status_code == 200, r.text
+        return r
+
+    unknown = read(NEVER_ID)
+    expected = ids.lib if hint == "library" else env.nb
+    assert unknown.json()["source_notebook_id"] == expected, unknown.text
+    for object_id in (ids.kh, SEEDED_ID):
+        r = read(object_id)
+        assert r.text.replace(object_id, "<id>") == unknown.text.replace(
+            NEVER_ID, "<id>"), (hint, object_id, r.text)
+    # A visible object of the library is still found there without a hint.
+    assert read(ids.widget).json()["source_notebook_id"] == ids.lib
+
+
 def drop_knowhow_member(repo, lib, *, drop_source: bool):
     """What a Knowhow re-projection that drops the object (or a table delete,
     ``drop_source``) does: the dropped object's cluster member rows go, the
