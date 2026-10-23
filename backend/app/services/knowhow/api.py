@@ -329,7 +329,7 @@ def knowhow_chunk_gap_exists(repo: Any, notebook_id: str) -> bool:
         mnt.missing_knowhow_chunk_embedding_ids(
             notebook_id, source_id=str(table["hidden_source_id"])
         )
-        for table in repo.list_knowhow_tables(notebook_id)
+        for table in repo._runtime.knowhow_store.knowhow_table_sources(notebook_id)
         if table.get("hidden_source_id")
     )
 
@@ -359,7 +359,8 @@ def fill_missing_knowhow_chunk_vectors(repo: Any, notebook_id: str) -> KnowhowCh
     page = max(size, (KNOWHOW_FILL_PAGE_ROWS // size) * size)
     found = written = remaining = 0
     failure = ""
-    for table in repo.list_knowhow_tables(notebook_id):
+    # Metadata only: the fill needs which source each table owns, never cell content.
+    for table in repo._runtime.knowhow_store.knowhow_table_sources(notebook_id):
         table_found = table_written = 0
         source_id = table.get("hidden_source_id")
         if not source_id:
@@ -376,13 +377,16 @@ def fill_missing_knowhow_chunk_vectors(repo: Any, notebook_id: str) -> KnowhowCh
                 table_found = len(ids)
                 for start in range(0, len(ids), page):
                     rows = mnt.chunk_texts_by_ids(ids[start:start + page])
-                    table_written += int(embedding.embed_knowhow_chunks_batch(
+                    committed = int(embedding.embed_knowhow_chunks_batch(
                         notebook_id,
                         [{"id": r["id"], "text": r["text"]} for r in sorted(
                             rows, key=lambda r: str(r["id"])
                         )],
                     ) or 0)
-                written += table_written
+                    # Counted as each page commits, so a later page raising cannot
+                    # drop the vectors earlier pages already wrote from the total.
+                    table_written += committed
+                    written += committed
                 # Still under the lock: what this table really still lacks.
                 remaining += len(mnt.missing_knowhow_chunk_embedding_ids(
                     notebook_id, source_id=str(source_id)

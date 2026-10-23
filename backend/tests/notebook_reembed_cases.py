@@ -959,9 +959,10 @@ def check_pipeline_switch_between_the_halves(repo, backend: Backend, monkeypatch
 
     monkeypatch.setattr(mnt, "embed_chunks_batch", _switch_after)
     tables_listed: list = []
-    real_list = repo.list_knowhow_tables
+    knowhow_store = repo._runtime.knowhow_store
+    real_list = knowhow_store.knowhow_table_sources
     monkeypatch.setattr(
-        repo, "list_knowhow_tables",
+        knowhow_store, "knowhow_table_sources",
         lambda notebook_id: tables_listed.append(notebook_id) or real_list(notebook_id),
     )
     with pytest.raises(IndexingPipelineUnavailableError):
@@ -973,3 +974,66 @@ def check_pipeline_switch_between_the_halves(repo, backend: Backend, monkeypatch
     assert not (chunks & have)
     assert world.embedders["knowhow_embedding"].calls == []
     assert nb not in notebook_reembed._active_runs
+
+
+def check_a_failing_later_page_still_counts_earlier_pages(
+    repo, backend: Backend, monkeypatch
+) -> None:
+    """When a table's second hydration page raises, the vectors its first page already
+    committed are counted as written (and not as remaining); the leg fails with the
+    exception's class name."""
+    world = build_world(repo, backend)
+    nb = world.notebook_id
+    chunks = sorted(knowhow_chunk_ids(repo, backend, world))
+    delete_chunk_vectors(repo, backend, chunks)
+    monkeypatch.setattr(knowhow_api, "KNOWHOW_FILL_PAGE_ROWS", BATCH)  # 6 chunks, 3 pages
+    mnt = repo.maintenance
+    real_texts = mnt.chunk_texts_by_ids
+    pages: list = []
+
+    def _second_page_fails(ids):
+        pages.append(list(ids))
+        if len(pages) == 2:
+            raise RuntimeError("page read failed")
+        return real_texts(ids)
+
+    monkeypatch.setattr(mnt, "chunk_texts_by_ids", _second_page_fails)
+    status = NotebookReembedService(repo).run(nb, legs=["chunks"])
+
+    leg = status.progress["chunks"]
+    assert (leg.state, leg.detail) == ("failed", "RuntimeError"), status
+    assert leg.embedded == BATCH
+    assert leg.remaining == len(chunks) - BATCH
+    assert len(set(chunks) & vector_ids(repo, backend, nb)["chunk_embeddings"]) == BATCH
+
+
+def check_fill_and_admission_never_read_cell_content(
+    repo, backend: Backend, monkeypatch
+) -> None:
+    """The Knowhow fill and the repair admission enumerate tables through the
+    metadata-only ``knowhow_table_sources``; the content-hydrating table listing is
+    never called."""
+    world = build_world(repo, backend)
+    nb = world.notebook_id
+    store = repo._runtime.knowhow_store
+    assert store.knowhow_table_sources(nb) == [
+        {"id": world.table_id, "hidden_source_id": world.knowhow_source_id}
+    ]
+
+    def _hydrating(*_args, **_kwargs):
+        raise AssertionError("the hydrating table listing must not be read")
+
+    for owner in (repo, store):
+        monkeypatch.setattr(owner, "list_knowhow_tables", _hydrating)
+    monkeypatch.setattr(store, "knowhow_table_health_inputs", _hydrating)
+    chunk = sorted(knowhow_chunk_ids(repo, backend, world))[0]
+    delete_chunk_vectors(repo, backend, [chunk])
+
+    original = repo.configured
+    monkeypatch.setattr(repo, "configured", lambda w: w != "chunk_embedding" and original(w))
+    assert NotebookReembedService(repo).chunk_gap_fixable(nb, 1) is True  # admission probe
+    monkeypatch.setattr(repo, "configured", original)
+    status = NotebookReembedService(repo).run(nb, legs=["chunks"])
+
+    assert status.state == "succeeded", status
+    assert chunk in vector_ids(repo, backend, nb)["chunk_embeddings"]

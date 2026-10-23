@@ -156,6 +156,14 @@ def test_pipeline_switch_between_the_halves(repo, monkeypatch):
     cases.check_pipeline_switch_between_the_halves(repo, BACKEND, monkeypatch)
 
 
+def test_a_failing_later_page_still_counts_earlier_pages(repo, monkeypatch):
+    cases.check_a_failing_later_page_still_counts_earlier_pages(repo, BACKEND, monkeypatch)
+
+
+def test_fill_and_admission_never_read_cell_content(repo, monkeypatch):
+    cases.check_fill_and_admission_never_read_cell_content(repo, BACKEND, monkeypatch)
+
+
 def test_relation_discovery_page_is_one_index_range(repo):
     """Each relation-backfill page is one range of
     ``idx_knowledge_relations_nb_source_id``, read in index order: no scan of the

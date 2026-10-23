@@ -5283,6 +5283,8 @@ class IndexProjectionStorePort(Protocol):
 @runtime_checkable
 class KnowhowStorePort(Protocol):
     def list_knowhow_tables(self, notebook_id: str) -> list[dict]: ...
+    # Metadata only (id, hidden_source_id): no cell content, unlike the listing above.
+    def knowhow_table_sources(self, notebook_id: str) -> list[dict]: ...
     def knowhow_enumeration_catalog(
         self, notebook_id: str, *, limit: int = 8, query: str = ""
     ) -> dict:

@@ -755,6 +755,19 @@ class KnowhowStore:
     def list_knowhow_tables(self, notebook_id: str) -> list[dict]:
         return self.knowhow_table_health_inputs(notebook_id)
 
+    def knowhow_table_sources(self, notebook_id: str) -> list[dict]:
+        """Twin of the SQLite store: ``[{"id", "hidden_source_id"}]`` in
+        ``list_knowhow_tables`` order, metadata only (no cell content)."""
+        with self.database.connect() as db:
+            return [
+                {"id": str(row["id"]), "hidden_source_id": row["hidden_source_id"]}
+                for row in db.execute(
+                    "SELECT id,hidden_source_id FROM knowhow_tables "
+                    "WHERE notebook_id=%s ORDER BY created_at,id COLLATE \"C\"",
+                    (notebook_id,),
+                ).fetchall()
+            ]
+
     def knowhow_table_id_by_title(self, notebook_id: str, title: str) -> str:
         """See the SQLite mirror for the full contract — a bounded point
         lookup on ``(notebook_id, title)`` in place of the health-aggregated
