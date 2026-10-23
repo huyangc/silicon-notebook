@@ -1411,6 +1411,18 @@ NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS  # max TOTAL rows a deep copy would materialise 
                                  # the notebook is offered as a read-only share (default 200000)
 ```
 
+A notebook import (`scripts/cli.sh notebook import`, docs/operations.md "Single-file notebook
+import") writes behind a hidden sentinel row whose `updated_at` is its heartbeat; a failed
+import larger than the two row bounds above is removed by the batched delete job instead of
+one transaction:
+
+```text
+NOTEBOOK_IMPORT_STALE_SECONDS    # an import sentinel whose heartbeat is older than this is
+                                 # reaped at server start (handed to the delete job): the
+                                 # importing process died. Only notebook imports (empty
+                                 # sync_origin), never a sync mirror (default 3600; 60..604800)
+```
+
 **Welcome question suggestions:**
 
 Automatic notebook titles/descriptions also use the `notebook_metadata` workload.

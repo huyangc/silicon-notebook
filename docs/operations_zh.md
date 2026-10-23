@@ -1729,14 +1729,15 @@ SHARE 锁；门开着
 
 `scripts/cli.sh notebook export` 把一本笔记本导出为一个 `.snbk` 文件（zip 包，格式
 `silicon-notebook.notebook-archive` v1，定义在 `app.domain.notebook_archive`）；
-`scripts/cli.sh notebook inspect` 校验这样的文件。把导出文件导入另一个部署不在本版本内。
+`scripts/cli.sh notebook inspect` 校验这样的文件；[`scripts/cli.sh notebook import`](#笔记本单文件导入)
+把它导入另一个部署。
 
 与[跨环境笔记本同步](#跨环境笔记本同步)的区别：同步在两个保持关联的环境之间搬目录型包（保留源
 id、按用户名映射、目标端成为只读镜像、记忆随行）。导出文件是一本笔记本一个文件，内容恰好是
 「复制笔记本」复制的那些：材料与原文件、附件、元素、切块、向量、知识图谱和 Knowhow 表。它从不
 携带 Memory 或任何由 Memory 派生的内容（保留行里夹带的 Memory 证据会被剥掉），也不带交互数据
-（对话、回答、报告、反馈）、成员、授权、分享链接和挂载的参考库；规划中的导入会建一本换了新 id、
-归导入者所有的独立新笔记本。
+（对话、回答、报告、反馈）、成员、授权、分享链接和挂载的参考库；导入会建一本换了新 id、归导入者
+所有的独立新笔记本。
 
 ```bash
 bash scripts/cli.sh notebook export --notebook nb-xxx --out ./nb-xxx.snbk
@@ -1782,6 +1783,69 @@ bash scripts/cli.sh notebook inspect ./exports/nb-a.snbk [--json]
 退出码：0 成功；1 文件校验失败或导出失败；2 参数错误、笔记本不存在或输出已存在；3 库不是本构建的
 schema。
 
+## 笔记本单文件导入
+
+`scripts/cli.sh notebook import` 把一个 `.snbk` 文件变成本部署的一本**独立的新笔记本**：全新的 id，
+归 `--owner` 所有，与他自己的笔记本一样可编辑，与导出的那本此后毫无关联。同一个文件可以导入
+多次，每次都是另一本笔记本。与[跨环境笔记本同步](#跨环境笔记本同步)的区别：同步保留源 id、按
+用户名映射、目标端成为只读镜像（`notebooks.sync_origin`），下一个包会刷新它；导入从不设置
+`sync_origin`、从不沿用 id、也不会被刷新。Memory、成员、授权、分享链接和挂载边都不在文件里，文件也
+无法指定其中任何一项（导出时去掉的挂载边只计数）。
+
+```bash
+bash scripts/cli.sh notebook import ./nb-a.snbk --owner alice --dry-run           # 只预检 + 预演，不写入
+bash scripts/cli.sh notebook import ./nb-a.snbk --owner alice --confirm-service-stopped --json
+bash scripts/cli.sh notebook import ./a.snbk ./b.snbk --owner alice --confirm-service-stopped
+bash scripts/cli.sh notebook import ./nb-a.snbk --owner alice --name "导入的副本" \
+  --reembed skip --rebuild-scale skip --confirm-service-stopped
+```
+
+- **走维护仓库写入。** schema guest（不迁移、不 seed；库不是本构建的 schema 时退出码 3），持全库运维
+  锁。PostgreSQL 上要求 `--confirm-service-stopped`，与批量导入工具同一口径：先停 API 与所有后台写入
+  方。`--dry-run` 只读（不取锁、不需要确认）。
+- **写入前先预检。** zip 目录与条目名（不许绝对路径、`..`、反斜杠、重名、链接、加密条目、压缩炸弹）、
+  manifest 与格式版本（更新的版本拒绝）、每张表和每个文件的大小、sha256 与行数、恰好一本笔记本、每个
+  列名都是本库有的普通标识符（本库没有的列会被拒绝：导出端版本较新，请先升级本部署），以及携带的文件
+  路径（在大小写不敏感或 Unicode 归一化的文件系统上会撞名的两条路径拒绝）。
+- **严格引用。** 结构列指向文件里没有的行时整份文件拒绝（「文件内容不完整」）——导出端已清掉所有越出
+  闭包的指针，这只会发生在不完整或被改过的文件上。存储的 JSON（payload、evidence、元素 id、元素的附件
+  id）里指向不存在之物的 id 置空并计数；所属来源不在文件里的附件连同文件一起丢弃并计数。表示「谁拥有或
+  编辑了它」的列改为导入者：笔记本的所有者、对象类型/Knowhow 表/附件的创建者、Knowhow 代码的最后编辑者
+  （`updated_by`）；`sources.uploaded_by` 与 `sources.agent_profile_id` 清空（上传者为空即视为笔记本
+  所有者，与复制一致）。导出时仍在解析或抽取的来源导入后为失败、需重新解析。JSON 列的值不是文本（导出端
+  只写文本或 NULL）、JSON 嵌套超过 64 层或根本不是 JSON 时，整份文件拒绝。
+- **向量。** 按 embedding 工作负载比较 manifest 的 `(model, dim)` 与本部署的绑定和 `EMBED_DIM`：一致
+  就逐字节搬入（逐行核对为 `4 x dim` 字节），否则丢弃（用 `--no-vectors` 导出的文件视为「全部不一致」）。
+  文档切块与 Knowhow 切块的向量分开判断（`chunk_embedding` / `knowhow_embedding`）。不能保留的问题向量
+  （`chunk_questions`，NOT NULL）在发布前用 `chunk_embedding` 重新嵌入；该模型未绑定或调用失败时丢弃
+  这些问题，并让对应切块重新进入问题索引。
+- **对象类型：本部署没有定义时，以源端实际生效的定义为准。** 图谱用到而本部署没有的全局自定义类型，建成
+  本笔记本自己的类型，并替换掉本笔记本里同类型的 `proposed` 行（报告记为 `proposals_superseded`：提议
+  只是待审，源端实际用的是全局定义）。本部署已有的类型以本部署的定义为准；本地 active 或 disabled 的行
+  遮蔽全局定义，原样保留；全局类型本身只是 `proposed` 的，在源端从未生效，不创建（`skipped_proposed`）。manifest
+  把同一类型列出两次时整份文件拒绝。
+- **概念簇保持原来的种子空间。** 文件记录簇所在的种子空间（`kg.concept_seed_version`），导入后记到新笔记本
+  上（与复制相同），新材料才能与携带来的概念正确归簇。没有这个字段的旧文件，簇的种子空间未知：笔记本
+  以「待重建」开始，报告注明 `seed_space_unknown`。
+- **发布后同步执行：** 先把每张 Knowhow 表重新投影一遍，再跑报告列出的重新嵌入腿（`notebook-reembed`；
+  有 Knowhow 表的笔记本一定带关系腿，因为投影会重写它的边）；`--reembed skip` 留给之后再跑（报告列出
+  这些腿）。然后在 `--rebuild-scale auto` 且重新嵌入成功或无需重新嵌入时，于 PostgreSQL 上全量重建 scale
+  索引（与 `sync import` 一样先核对迁移台账，再走 `scale_build_cli.run_build`）；向量没补齐时建出的索引
+  不完整，所以重新嵌入被跳过或失败时 scale 记为 `skipped:reembed_not_done`。SQLite 记为跳过。
+- **失败零残留。** 发布之前，导入写在一条 `status='importing'`、`sync_origin` 为空的隐藏行后面，
+  `updated_at` 就是心跳。这一行在写第一个文件之前就提交；读每一页、写每个文件、问题重新嵌入的每批之间
+  以及校验前后都会刷新心跳（最多每 30 秒一次），所以只有某一步本身超过 `NOTEBOOK_IMPORT_STALE_SECONDS`
+  时，下面的收割才可能收掉一个仍在进行的导入——它随即报错退出、不留任何东西。任何失败都会删掉它写的行和它新建的两棵目录：笔记本在复制上限
+  （`NOTEBOOK_COPY_MAX_ROWS` / `NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS`）以内时一个事务删完，超出时交给分批的
+  删除作业。导入进程被杀时隐藏行会留下；下次服务启动时，心跳早于 `NOTEBOOK_IMPORT_STALE_SECONDS`
+  （默认 3600）的这类行交给删除作业收割。正在同步导入的镜像（`status='importing'` 且 `sync_origin`
+  非空）永远不会被碰。
+
+退出码：0 全部文件导入完成（重新嵌入或 scale 的问题只报告，导入本身已完成）；1 某个文件被拒绝或因任何
+原因导入失败（该文件什么都不留；不是拒绝时错误只给出异常类名）；2 参数错误、用户不存在或缺 `--confirm-service-stopped`；3 库不是本构建的
+schema。多个文件按顺序导入，遇到第一个失败即停；`--json` 在任何情况下都输出
+`{"imported": [...], "failed": [...]}`，不含连接信息。
+
 ## 补齐笔记本缺失的向量（`notebook-reembed`）
 
 `app.services.notebook_reembed` 补齐一本笔记本缺的向量，分四条腿依次执行：chunk、元素、知识对象、
@@ -1790,8 +1854,8 @@ schema。
 - **`POST /api/notebooks/{id}/backfill-vectors`**（体检 H4/H5 的修复按钮）照旧在 KG 作业池里跑
   chunk 与元素两条腿：逐来源持该来源的分块锁，结束时刷新一次 H4/H5。
 - **`notebook-reembed` 后台作业**（重活池，受 `BACKGROUND_MAINTENANCE_CONCURRENCY` 约束；诊断里的
-  名字是 `notebook-reembed`）可跑任意几条腿。它暂时没有自己的按钮：计划中的笔记本导入在发布一本
-  归档向量与本部署 embedding 模型不一致的笔记本之后提交它。
+  名字是 `notebook-reembed`）可跑任意几条腿。它没有自己的按钮：笔记本导入在发布一本归档向量与本部署
+  embedding 模型不一致的笔记本之后跑它的腿（CLI 同步 `.run`；网页导入 `.submit` 提交）。
 
 需要知道的行为：
 
