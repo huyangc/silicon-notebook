@@ -28,6 +28,7 @@ import psycopg
 import pytest
 from psycopg import sql as pg_sql
 
+from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.id_binding import execute_ids
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.unified_kg_store import UnifiedKgStore
@@ -167,9 +168,7 @@ def _targets(db, **kwargs):
         db, NB, ["ko-s"], 2, 24, **kwargs))
 
 
-@pytest.mark.parametrize("backfilled", [1, 0])
-def test_pg_weak_support_matches_the_sqlite_twin(seeded, backfilled):
-    _set_backfilled(seeded, backfilled)
+def _assert_weak_support_matches_the_sqlite_twin(seeded):
     with seeded.connect() as db:
         unbounded = _targets(db)
         listed = _targets(db, allowed_source_ids=["src-vis"])
@@ -204,7 +203,7 @@ def test_pg_weak_support_gate_sits_before_the_limit(seeded, form):
     assert [r["canonical_tgt"] for r in rows] == ["ko-t1"]
 
 
-def test_pg_endpoint_names_carry_the_sample_source_and_honour_the_ceiling(seeded):
+def _assert_endpoint_names_carry_the_sample_source_and_honour_the_ceiling(seeded):
     with seeded.connect() as db:
         plain = UnifiedKgStore.relation_endpoint_name_rows(db, NB, ["kr-1", "kr-5"])
         sourced = UnifiedKgStore.relation_endpoint_name_rows(
@@ -226,9 +225,7 @@ def test_pg_endpoint_names_carry_the_sample_source_and_honour_the_ceiling(seeded
     assert denied == []
 
 
-@pytest.mark.parametrize("backfilled", [1, 0])
-def test_pg_object_support_sources(seeded, backfilled):
-    _set_backfilled(seeded, backfilled)
+def _assert_object_support_sources(seeded):
     with seeded.connect() as db:
         rows = UnifiedKgStore.object_support_source_rows(db, NB, ["ko-t1", "ko-t2", "ko-x"])
     assert sorted((r["object_id"], r["source_id"]) for r in rows) == [
@@ -307,9 +304,7 @@ def _assert_probe_shape(plan: str) -> None:
     assert "Index Cond: (ko.notebook_id" not in plan, plan
 
 
-@pytest.mark.parametrize("backfilled", [1, 0])
-def test_pg_weak_support_list_probe_plan(seeded, backfilled):
-    _set_backfilled(seeded, backfilled)
+def _assert_weak_support_list_probe_plan(seeded, backfilled):
     sql, params = _recorded(seeded, lambda db: UnifiedKgStore.weak_support_relation_rows(
         db, NB, ["ko-s"], 2, 24, allowed_source_ids=CEILING), unprepared=True)
     plan = _custom_plan(seeded, sql, params)
@@ -326,7 +321,7 @@ def test_pg_weak_support_list_probe_plan(seeded, backfilled):
     assert "string_to_array($" in generic, generic
 
 
-def test_pg_weak_support_viewer_probe_plan(seeded):
+def _assert_weak_support_viewer_probe_plan(seeded):
     sql, params = _recorded(seeded, lambda db: UnifiedKgStore.weak_support_relation_rows(
         db, NB, ["ko-s"], 2, 24, viewer_id=USER_A), unprepared=False)
     assert "string_to_array" not in sql
@@ -342,8 +337,7 @@ def test_pg_weak_support_viewer_probe_plan(seeded):
     assert "pk_sources" in forced and "pk_memory_items" in forced, forced
 
 
-@pytest.mark.parametrize("form", ["list", "viewer"])
-def test_pg_endpoint_name_plan(seeded, form):
+def _assert_endpoint_name_plan(seeded, form):
     kwargs = {"allowed_source_ids": CEILING} if form == "list" else {"viewer_id": USER_A}
     sql, params = _recorded(seeded, lambda db: UnifiedKgStore.relation_endpoint_name_rows(
         db, NB, ["kr-1", "kr-5"], **kwargs), unprepared=form == "list")
@@ -357,9 +351,7 @@ def test_pg_endpoint_name_plan(seeded, form):
         assert "string_to_array($" in _generic_plan(seeded, sql, params)
 
 
-@pytest.mark.parametrize("backfilled", [1, 0])
-def test_pg_object_support_sources_plan(seeded, backfilled):
-    _set_backfilled(seeded, backfilled)
+def _assert_object_support_sources_plan(seeded, backfilled):
     sql, params = _recorded(seeded, lambda db: UnifiedKgStore.object_support_source_rows(
         db, NB, ["ko-t1", "ko-t2"]), unprepared=True)
     plan = _custom_plan(seeded, sql, params)
@@ -455,7 +447,7 @@ def test_pg_mix_seam_is_byte_identical_to_master(postgres_settings, tmp_path, ow
     assert any(v["name"] == "Capacity factor" for v in id_map.values())
 
 
-def test_pg_unbound_statements_bind_no_list(seeded):
+def _assert_unbound_statements_bind_no_list(seeded):
     """Without the keywords neither statement goes through ``execute_ids``,
     and the viewer form binds no list either."""
     captured: list[str] = []
@@ -476,3 +468,39 @@ def test_pg_unbound_statements_bind_no_list(seeded):
     finally:
         psycopg.Connection.execute = original
     assert captured == []
+
+
+@pytest.mark.parametrize("backfilled", [1, 0])
+def test_pg_read_only_contracts_on_one_retrieval_corpus(seeded, backfilled):
+    """One real-migrated corpus per certificate, with cold pools per scenario.
+
+    The original thirteen read-only scenarios retain their result, binding and
+    custom/generic plan checks. The two DELETE scenarios and both writer-backed
+    seam scenarios keep independent schemas rather than changing this corpus.
+    """
+    _set_backfilled(seeded, backfilled)
+    checks = [
+        (_assert_weak_support_matches_the_sqlite_twin, ()),
+        (_assert_object_support_sources, ()),
+        (_assert_weak_support_list_probe_plan, (backfilled,)),
+        (_assert_object_support_sources_plan, (backfilled,)),
+    ]
+    if backfilled:
+        # These original scenarios ran only on the certified seed.
+        checks.extend([
+            (_assert_endpoint_names_carry_the_sample_source_and_honour_the_ceiling, ()),
+            (_assert_weak_support_viewer_probe_plan, ()),
+            (_assert_endpoint_name_plan, ("list",)),
+            (_assert_endpoint_name_plan, ("viewer",)),
+            (_assert_unbound_statements_bind_no_list, ()),
+        ])
+    for check, args in checks:
+        database = PostgresDatabase(seeded.settings, seeded.root_dir)
+        try:
+            check(database, *args)
+        except Exception as error:
+            label = check.__name__.removeprefix("_assert_")
+            error.add_note(f"Retrieval-leg scenario: {label}{args}")
+            raise
+        finally:
+            database.close()

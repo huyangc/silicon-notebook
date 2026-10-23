@@ -1001,6 +1001,28 @@ The id-binding repeated-execution cache test also retains its own schema: it
 toggles the reverse-index certificate and must not change the certified world
 used by the row-order checks.
 
+Retrieval-leg result and plan checks likewise share one unchanged corpus within
+each certified or fallback read-only matrix. The flag is set before the matrix,
+and every scenario opens and closes its own connection pool, preserving prepared
+statement controls and transaction-local planner settings. Gate tests that delete
+rows and seam tests that write through the repository keep independent migrated
+schemas. All original result, binding and custom/generic-plan assertions remain.
+
+Reasoning characterization still snapshots every table, column and row before
+and after each scenario, including duplicate rows in its Counters. PostgreSQL
+queues a snapshot's complete table reads in one pipeline on the same leased
+connection and transaction; each consumed cursor is closed promptly and closing
+the row generator also releases outstanding cursors on failure. With an active
+read budget, reads stay sequential through the connection's execute proxy so
+per-statement deadline and cancellation checks remain effective. SQLite retains
+its sequential path, and snapshots are never reused across scenarios.
+
+Memory KG write-side seeds use dependency-ordered batches, including the cost
+matrix's Memory embeddings. Every call builds fresh row data in its original
+write transaction, after real migration of that test's own schema. Data values,
+row order within each table, corpus sizes and measured application operations
+are unchanged; this introduces no shared mutable seed fixture.
+
 Local verification can still use an installed PostgreSQL 16 service and an explicit
 `TEST_POSTGRES_URL` for the serial lane; do not also set the parallel JSON variable.
 Auxiliary targets remain mandatory in authoritative CI. `scripts/check.sh` must never

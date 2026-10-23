@@ -30,8 +30,9 @@ import json
 import logging
 import re
 import threading
+from contextlib import closing
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Generator, Optional
 
 from app.models.ask import (
     AskIntentConfirmation,
@@ -623,6 +624,9 @@ class Backend:
     placeholder: str
     tables: Callable[[Any], list[str]]
     invalidate_caches: Callable[[], None]
+    read_table_rows: Optional[
+        Callable[[Any, list[str]], Generator[tuple[str, list[Any]], None, None]]
+    ] = None
 
 
 @dataclasses.dataclass
@@ -667,9 +671,17 @@ class Observation:
 def _dump_db(repo: Any, backend: Backend) -> dict:
     out: dict[str, collections.Counter] = {}
     with repo._runtime.database.connect() as db:
-        for table in backend.tables(repo):
-            rows = db.execute(f"SELECT * FROM {table}").fetchall()
-            out[table] = collections.Counter(_dumps(dict(row)) for row in rows)
+        tables = backend.tables(repo)
+        table_rows = (
+            backend.read_table_rows(db, tables) if backend.read_table_rows else (
+                (table, db.execute(f"SELECT * FROM {table}").fetchall())
+                for table in tables
+            )
+        )
+        # Close adapter cursors even if row normalisation raises midway.
+        with closing(table_rows):
+            for table, rows in table_rows:
+                out[table] = collections.Counter(_dumps(dict(row)) for row in rows)
     return out
 
 

@@ -751,6 +751,21 @@ KG findings、store-evidence、id-binding 和已认证 KG 枚举的计划检查�
 id-binding 的重复执行缓存测试也保留独立 schema：它会切换反向索引认证标记，不能改变
 行序检查所用的已认证世界。
 
+Retrieval-leg 的结果与计划检查也在各自已认证或回退只读矩阵中共用一份不变语料。
+标记在矩阵开始前设置，每个场景单独打开并关闭连接池，保留预编译语句对照与事务内
+计划器设置的隔离。会删除行的 gate 测试、通过仓储写入的 seam 测试仍各用独立迁移
+schema，全部原结果、绑定形式及 custom/generic 计划断言保留。
+
+推理刻画仍在每个场景前后读取所有表、所有列和所有行，Counter 保留重复行。
+PostgreSQL 在同一租用连接和事务中通过一次 pipeline 排队发送该快照的全部表查询；
+已消费的游标及时关闭，关闭行生成器也会在异常时释放未消费游标。存在 read budget 时，
+查询仍经连接的 execute 代理逐条执行，保留每语句 deadline 与取消检查。
+SQLite 保持原串行路径，不同场景之间从不复用快照。
+
+Memory KG 写侧种子按依赖顺序批量发送，包括成本矩阵中的 Memory embeddings。
+每次调用仍在本条测试 schema 的真实迁移之后、原有写事务内构造独立行数据。
+数据值、各表内部行序、语料规模和被计数的应用操作均不变，不引入共享可变种子 fixture。
+
 本地仍可使用已安装的 PostgreSQL 16 和显式 `TEST_POSTGRES_URL` 运行串行泳道，此时
 不得同时设置并行 JSON 变量；权威 CI 仍要求辅助目标齐全。`scripts/check.sh` 不得启动
 或连接 PostgreSQL。PG launcher 固定报告慢 setup/call/teardown，并输出
