@@ -783,7 +783,7 @@ def test_ask_chunk_lexical_failure_shows_no_chunk_fts_banner(repo, monkeypatch):
 
     scope = SourceScope(mode="include", source_ids=[sid], narrowed=False)
     with source_scope_context(nb.id, scope):
-        resp = ask_engine_as_current_user(repo._runtime.ask_component, 
+        resp = ask_engine_as_current_user(repo._runtime.ask_component,
             nb.id, AskRequest(question=query, mode="chunk", source_scope=scope)
         )
 
@@ -2040,6 +2040,28 @@ class _FakeLLM:
     def __init__(self, answer): self._answer = answer
     def chat_json(self, messages, schema_hint, **kw):
         return json.dumps({"answer": self._answer, "grounded": True})
+
+
+def test_payload_source_scope_alone_narrows_the_answer(repo):
+    """The request's own ``source_scope`` -- no outer scope installed -- is
+    what the production dispatch freezes into the ceiling: a narrowed include
+    of one of two equally matching sources cites only that source."""
+    from app.models.source_scope import SourceScope
+
+    text = "deepseek v3 mixture of experts routing " * 20
+    nb, first = _seed_chunks(repo, [text])
+    second = _add_chunked_source(repo, nb.id, [text])
+    unscoped = ask_engine_as_current_user(
+        repo._runtime.ask_component, nb.id, AskRequest(question="deepseek experts routing"))
+    assert {c.source_id for c in unscoped.citations} == {first, second}
+
+    scope = SourceScope(mode="include", source_ids=[second], narrowed=True)
+    resp = ask_engine_as_current_user(
+        repo._runtime.ask_component, nb.id,
+        AskRequest(question="deepseek experts routing", source_scope=scope),
+    )
+    assert resp.citations
+    assert {c.source_id for c in resp.citations} == {second}
 
 
 def test_ask_chunk_deterministic_without_llm(repo):

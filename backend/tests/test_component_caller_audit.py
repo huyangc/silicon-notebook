@@ -185,6 +185,18 @@ def test_a_member_called_only_from_a_test_only_member_is_a_candidate_too():
     assert verdicts[c.key].bucket == "keep"
 
 
+def test_the_fixed_point_follows_a_chain_of_any_length():
+    """c is called only by b, b only by a, a only by tests: one pass would
+    still see b's body as live and keep c; only the fixed point files it."""
+    a, b, c = _member("A", "a"), _member("B", "b"), _member("C", "c")
+    prod = [_ref("b", a), _ref("c", b)]
+    tests = [_ref("a", None, "backend/tests/test_x.py")]
+    verdicts = _classify([a, b, c], prod, tests)
+    assert verdicts[a.key].bucket == "test-only"
+    assert verdicts[b.key].bucket == "unreferenced"
+    assert verdicts[c.key].bucket == "unreferenced"
+
+
 def test_a_registered_member_keeps_what_it_calls_alive():
     a, b = _member("A", "a"), _member("B", "b")
     prod = [_ref("a", b)]

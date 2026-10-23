@@ -290,7 +290,7 @@ def test_strict_no_kg_keeps_the_trace_it_already_streamed(repo):
     _configure_ask(repo)
     nb = repo.create_notebook(NotebookCreate(name="n"))
     streamed = []
-    resp = ask_engine_as_current_user(repo._runtime.ask_component, 
+    resp = ask_engine_as_current_user(repo._runtime.ask_component,
         nb.id, AskRequest(question="q", mode="reasoning"), streamed.append,
     )
     assert resp.kg_required is True
@@ -320,7 +320,7 @@ def test_short_circuit_run_never_claims_memory_was_used(repo, monkeypatch):
     )
     nb = repo.create_notebook(NotebookCreate(name="n"))
     streamed = []
-    resp = ask_engine_as_current_user(repo._runtime.ask_component, 
+    resp = ask_engine_as_current_user(repo._runtime.ask_component,
         nb.id, AskRequest(question="q", mode="reasoning"), streamed.append,
     )
     assert resp.llm_mode == "deterministic"          # 确实走了短路,没有合成
