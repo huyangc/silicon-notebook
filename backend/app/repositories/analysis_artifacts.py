@@ -699,27 +699,6 @@ class AnalysisArtifactStore:
         )
         _atomic_json(redacted_path, issue)
 
-    def list_issues(
-        self,
-        *,
-        owner_id: str = "",
-        status: str = "",
-        category: str = "",
-        model_area: str = "",
-        limit: int = 200,
-        now: datetime | None = None,
-    ) -> list[dict[str, Any]]:
-        items, _total = self.page_issues(
-            owner_id=owner_id,
-            status=status,
-            category=category,
-            model_area=model_area,
-            offset=0,
-            limit=limit,
-            now=now,
-        )
-        return items
-
     def page_issues(
         self,
         *,

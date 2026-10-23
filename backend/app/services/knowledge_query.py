@@ -78,11 +78,7 @@ class KnowledgeQueryService:
         # lifecycle's reader once that exists; False = isolated (today).
         self.memory_isolation_pending: Callable[[str], bool] = lambda _nb: False
 
-    def backfill_kg_fts(self, notebook_id: str) -> int:
-        self.catalog.get_notebook(notebook_id)
-        with self.database.write() as db:
-            return self.knowledge.backfill_fts(db, notebook_id)
-
+    # 测试观察点:直写 chunks 的用例重建 chunks_fts 的构造点
     def backfill_chunk_fts(self, notebook_id: str) -> int:
         with self.database.write() as db:
             count = self.chunk_store.backfill_fts(db, notebook_id)
@@ -446,7 +442,7 @@ class KnowledgeQueryService:
           多付一次有界折叠 + 一次有界点查(各 ≤2·len(edges) 个绑定值、走 PK),
           换掉的是一次 8.35M 行的整表扫描 —— 方向明确。
 
-        ``edge_support_map`` 至此不再被本路径调用;它仍是
+        ``_edge_support_map`` 至此不再被本路径调用;它仍是
         ``graph_retrieval.relation_support_count`` 的实现细节(那条被刻意保留
         为语义真源、由差分测试钉住),所以 ``:edge_support`` 缓存键族**不**在
         本项里下线。

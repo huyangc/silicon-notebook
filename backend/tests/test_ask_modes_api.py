@@ -127,7 +127,7 @@ def test_auto_is_a_retired_alias_for_reasoning(tmp_path, monkeypatch):
     assert events[-1]["event"] == "final"
     assert events[-1]["response"]["mode"] == "reasoning"
     # 持久状态从建行那一刻起就是真正执行的引擎,没有事后改写。
-    job = repo._runtime.ask_state.ask_job_status(events[0]["job_id"])
+    job = repo._runtime.ask_state.ask_job_detail(events[0]["job_id"])
     assert job["mode"] == "reasoning"
 
     synchronous = client.post(

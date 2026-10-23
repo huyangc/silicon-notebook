@@ -18,8 +18,10 @@ def add_relations(repo, notebook_id: str, source_id, relations: list[dict]) -> i
     ``knowledge_counts_cache`` memos read ``knowledge_relations``, so they need
     no invalidation (codex #638 R1).
     """
-    result = repo._runtime.knowledge.add_relations_current(
-        notebook_id, source_id, relations
-    )
+    runtime = repo._runtime
+    with runtime.database.write() as db:
+        result = runtime.knowledge.add_relations(
+            db, notebook_id, source_id, relations, runtime.seams.now()
+        )
     repo._runtime.review_queue_memo.invalidate(notebook_id)
     return result

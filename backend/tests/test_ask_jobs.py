@@ -36,7 +36,7 @@ def test_begin_creates_running_job_and_conversation(repo):
     job_id, conv_id = repo.begin_ask_job(nb.id, payload, "chunk", ev)
     assert job_id and conv_id
     assert payload.conversation_id == conv_id          # 就地写回,handler 接续同一会话
-    st = repo._runtime.ask_state.ask_job_status(job_id)
+    st = repo._runtime.ask_state.ask_job_detail(job_id)
     assert st["status"] == "running" and st["conversation_id"] == conv_id
     assert st["created_by"] == repo.current_user().id
     assert repo._ask_cancel_events.get(job_id) is ev   # 注册表登记
@@ -106,7 +106,7 @@ def test_finish_done_records_answer_and_deregisters(repo):
     payload = AskRequest(question="Q?", mode="chunk")
     job_id, _ = repo.begin_ask_job(nb.id, payload, "chunk", ev)
     repo.finish_ask_job(job_id, "done", answer_id="ans-x")
-    st = repo._runtime.ask_state.ask_job_status(job_id)
+    st = repo._runtime.ask_state.ask_job_detail(job_id)
     assert st["status"] == "done" and st["answer_id"] == "ans-x"
     assert job_id not in repo._ask_cancel_events        # 注销
 
@@ -153,7 +153,7 @@ def test_recover_interrupted_marks_running_ask_jobs(repo):
     ev = threading.Event()
     job_id, _ = repo.begin_ask_job(nb.id, AskRequest(question="Q?", mode="chunk"), "chunk", ev)
     repo._recover_interrupted_jobs()
-    assert repo._runtime.ask_state.ask_job_status(job_id)["status"] == "interrupted"
+    assert repo._runtime.ask_state.ask_job_detail(job_id)["status"] == "interrupted"
 
 
 def _fake_answer(conv_id):
@@ -276,7 +276,7 @@ def test_cancel_endpoint_wins_before_final_answer_save_atomically(tmp_path, monk
     events = [json.loads(line) for line in stream.text.splitlines() if line.strip()]
     assert any(event["event"] == "cancelled" for event in events)
     assert not any(event["event"] == "final" for event in events)
-    assert repo._runtime.ask_state.ask_job_status(captured["job_id"])["status"] == "cancelled"
+    assert repo._runtime.ask_state.ask_job_detail(captured["job_id"])["status"] == "cancelled"
     with repo._connect() as db:
         count = db.execute(
             "SELECT COUNT(*) AS n FROM answers WHERE notebook_id=?", (nb,)
@@ -342,7 +342,7 @@ def test_sync_ask_cancel_endpoint_returns_no_final_answer_or_empty_conversation(
 
     assert response.status_code == 409
     assert response.json()["detail"] == "Ask cancelled"
-    assert repo._runtime.ask_state.ask_job_status(captured["job_id"])["status"] == "cancelled"
+    assert repo._runtime.ask_state.ask_job_detail(captured["job_id"])["status"] == "cancelled"
     with repo._connect() as db:
         assert db.execute(
             "SELECT COUNT(*) AS n FROM answers WHERE notebook_id=?", (nb,)

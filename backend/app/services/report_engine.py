@@ -1422,15 +1422,6 @@ class ReportEngine:
             "source_identity_uncertain": len(unidentified_source_ids),
         }
 
-    def _probe_queries(self, notebook_id: str, queries: List[str], *,
-                       max_queries: int = 4) -> dict:
-        """Return one coverage aggregate while sharing the batch scheduler."""
-        return self._summarize_probe_results(
-            self._load_probe_query_results(
-                notebook_id, [queries], max_queries=max_queries,
-            )[0]
-        )
-
     def _probe_intent_coverage(self, notebook_id: str, intent_contract: dict, *,
                                max_queries: int = 4) -> List[dict]:
         confirmed_question = self._confirmed_research_question(

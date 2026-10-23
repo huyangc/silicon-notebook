@@ -301,7 +301,7 @@ def test_admin_approval_is_idempotent_and_keeps_memory_private(repo, promotion_s
     assert current.created_by == owner.id
     with pytest.raises(KeyError):
         repo.get_memory(memory.id, other.id)
-    revisions = repo._runtime.memory_service.revisions(memory.id, owner.id)
+    revisions = repo._runtime.memory_service.store.revisions_for_user(memory.id, owner.id)
     assert revisions[-1].promotion_state == "approved"
     assert set(current.provenance["kg_promotion"]["base_object_ids"]) == set(
         first["base_object_ids"]
@@ -358,7 +358,7 @@ def test_admin_cannot_approve_after_owner_deprecates_proposed_memory(
 ):
     owner, _other, _notebook, base, memory = promotion_setup
     proposal = repo.propose_memory_promotion(memory.id, owner.id)
-    before = repo._runtime.memory_service.revisions(memory.id, owner.id)
+    before = repo._runtime.memory_service.store.revisions_for_user(memory.id, owner.id)
     deprecated = repo.deprecate_memory(memory.id, owner.id)
 
     assert deprecated.status == "deprecated"
@@ -381,7 +381,7 @@ def test_admin_cannot_approve_after_owner_deprecates_proposed_memory(
         "reason": "superseded_by_memory_terminal_status",
         "reviewed_by": owner.id,
     }
-    assert len(repo._runtime.memory_service.revisions(memory.id, owner.id)) == len(before) + 1
+    assert len(repo._runtime.memory_service.store.revisions_for_user(memory.id, owner.id)) == len(before) + 1
     assert not any(
         item["id"] == proposal["id"] for item in repo.list_promotion_queue()
     )

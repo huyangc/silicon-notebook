@@ -198,19 +198,6 @@ class SQLiteMaintenanceAdapter:
             )
         return source_id
 
-    def backfill_kg_fts(self, notebook_id: str) -> int:
-        self._runtime.catalog.get_notebook(notebook_id)  # KeyError when missing
-        with self._runtime.database.write() as db:
-            return self._runtime.knowledge.backfill_fts(db, notebook_id)
-
-    def backfill_chunk_fts(self, notebook_id: str) -> int:
-        with self._runtime.database.write() as db:
-            count = self._runtime.chunk_store.backfill_fts(db, notebook_id)
-        # Chunk set was just (re)indexed — drop the corpus-language hint so it
-        # re-samples (the runtime coordinator holds the shared cache dict).
-        self._runtime.kg_mutations.notebook_languages.pop(notebook_id, None)
-        return count
-
     def build_scale_index(
         self, notebook_id: str, on_stage: Optional[Callable[[str, int], None]] = None
     ) -> dict:
@@ -389,6 +376,7 @@ class SQLiteMaintenanceAdapter:
             ).fetchall()
         return [str(row["id"]) for row in rows]
 
+    # 测试观察点:旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)
     def kg_target_source_rows_page(
         self,
         notebook_id: str,
@@ -440,6 +428,7 @@ class SQLiteMaintenanceAdapter:
                 (doc_type, notebook_id),
             )
 
+    # 测试观察点:旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)
     def partial_kg_source_ids(self, notebook_id: str) -> set:
         """Sources whose latest KG run reports at least one failed window.
 
@@ -474,22 +463,7 @@ class SQLiteMaintenanceAdapter:
                 ).fetchall()
             }
 
-    def sources_with_elements(self, notebook_id: str) -> set:
-        """该 notebook 下已产出 source_elements(即已成功 parse)的 source_id 集合。
-        run_all 用它区分「已 parse、缺 KG → extract_source 补抽」与「无 elements →
-        必须 process_source 重新 parse」:无 elements 的源若被空抽,build_records 的
-        接地校验没有 element 可对照,LLM 抽出的节点会被整源丢弃、objects=0。"""
-        with self._runtime.database.connect() as db:
-            return {
-                r["source_id"]
-                for r in db.execute(
-                    "SELECT DISTINCT e.source_id FROM source_elements e "
-                    "JOIN sources s ON s.id = e.source_id "
-                    "WHERE s.notebook_id = ?",
-                    (notebook_id,),
-                ).fetchall()
-            }
-
+    # 测试观察点:旧批处理的抽取目标判据,用例拿来断言流水线目标集合(并断言生产不再调用旧查询)
     def count_sources_missing_kg(self, notebook_id: str) -> int:
         with self._runtime.database.connect() as db:
             return db.execute(
@@ -679,6 +653,7 @@ class SQLiteMaintenanceAdapter:
 
     # -- embeddings -----------------------------------------------------------
 
+    # 测试观察点:无界版缺向量判据,keyset 分页版按它做等价差分
     def missing_chunk_embedding_rows(
         self,
         notebook_id: str,
@@ -707,6 +682,7 @@ class SQLiteMaintenanceAdapter:
                 ).fetchall()
             ]
 
+    # 测试观察点:无界版缺向量判据,keyset 分页版按它做等价差分
     def missing_element_embedding_rows(
         self,
         notebook_id: str,
@@ -2150,6 +2126,7 @@ class SQLiteMaintenanceAdapter:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    # 测试观察点:整表清空 / 单页重建反向索引,用例用来构造「回填进行到一半」的状态测续跑
     def clear_source_index(self, notebook_id: str) -> int:
         """Reset knowledge_object_sources for one notebook; returns the
         knowledge_objects total the backfill loop must cover."""
@@ -2175,6 +2152,7 @@ class SQLiteMaintenanceAdapter:
         with self._runtime.database.connect() as db:
             return self._runtime.knowledge.source_index_backfilled(db, notebook_id)
 
+    # 测试观察点:整表清空 / 单页重建反向索引,用例用来构造「回填进行到一半」的状态测续跑
     def backfill_source_index_batch(
         self, notebook_id: str, last_id: str, batch_size: int
     ) -> tuple:

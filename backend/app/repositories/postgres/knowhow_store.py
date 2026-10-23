@@ -2547,6 +2547,7 @@ class KnowhowStore:
             ).fetchone()
         return _compat_row(row, "created_at") if row is not None else None
 
+    # 测试观察点:来源资产行观察点(生产走 delete_source_asset_rows)
     def source_asset_ids(self, source_id: str) -> list[str]:
         """Every ``notebook_assets.id`` linked to ``source_id`` (MinerU
         embedded-image extraction) — the read half of the source-view

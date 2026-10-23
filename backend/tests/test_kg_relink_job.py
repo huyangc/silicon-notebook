@@ -117,7 +117,7 @@ def test_a_stale_worker_does_not_clobber_a_newer_claim(repo):
     second = repo.start_notebook_relink(nb)
 
     # The older worker finally settles — it must not touch the newer claim.
-    repo._runtime.knowledge_lifecycle._settle_notebook_relink(
+    repo._runtime.knowledge_lifecycle.kg_maintenance.settle(
         nb, first["job_id"], "succeeded", {"edges_added": 99}
     )
     status = repo.notebook_relink_status(nb)

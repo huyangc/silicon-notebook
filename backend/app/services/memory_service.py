@@ -33,7 +33,6 @@ from app.models.identity import (
     AgentTokenSummary,
 )
 from app.models.memory import (
-    MemoryRevision,
     MemoryWrite,
     MemoryRecord,
     MemoryUpdate,
@@ -1480,9 +1479,6 @@ class MemoryService:
 
     def get(self, memory_id: str, user_id: str) -> MemoryRecord:
         return self.store.memory_for_user(memory_id, user_id)
-
-    def revisions(self, memory_id: str, user_id: str) -> list[MemoryRevision]:
-        return self.store.revisions_for_user(memory_id, user_id)
 
     def list_memories(
         self,

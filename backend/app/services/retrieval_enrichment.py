@@ -25,48 +25,6 @@ EnrichmentStatus = Literal[
 ]
 
 
-@dataclass
-class ReasoningLaneBudget:
-    """Two counters whose capacities cannot be borrowed across lanes."""
-
-    baseline_limit: int
-    enrichment_limit: int
-    baseline_used: int = 0
-    enrichment_used: int = 0
-
-    @staticmethod
-    def _consume(used: int, limit: int, amount: int) -> tuple[bool, int]:
-        amount = max(0, int(amount))
-        limit = max(0, int(limit))
-        if used + amount > limit:
-            return False, used
-        return True, used + amount
-
-    def consume_baseline(self, amount: int = 1) -> bool:
-        accepted, used = self._consume(
-            self.baseline_used, self.baseline_limit, amount
-        )
-        if accepted:
-            self.baseline_used = used
-        return accepted
-
-    def consume_enrichment(self, amount: int = 1) -> bool:
-        accepted, used = self._consume(
-            self.enrichment_used, self.enrichment_limit, amount
-        )
-        if accepted:
-            self.enrichment_used = used
-        return accepted
-
-    @property
-    def baseline_remaining(self) -> int:
-        return max(0, int(self.baseline_limit) - self.baseline_used)
-
-    @property
-    def enrichment_remaining(self) -> int:
-        return max(0, int(self.enrichment_limit) - self.enrichment_used)
-
-
 @dataclass(frozen=True)
 class ProtectedEnrichmentResult:
     """A shadow proposal plus the untouched baseline visible to the caller."""
@@ -80,13 +38,6 @@ class ProtectedEnrichmentResult:
     baseline_evicted_count: int = 0
     enrichment_tokens: int = 0
     dropped_enrichment_count: int = 0
-
-    @property
-    def visible_chunks(self) -> tuple[RetrievedChunk, ...]:
-        # PR 7 is shadow-only.  A caller cannot accidentally expose G merely by
-        # switching the provider on.
-        return self.baseline_chunks
-
 
 def _baseline_signature(chunk: RetrievedChunk) -> tuple[object, ...]:
     """Fields whose mutation would change evidence, ordering, or citation."""

@@ -6,7 +6,6 @@ from app.services.retrieval import RetrievedChunk, RetrievalSupport
 from app.services.retrieval_baseline import build_retrieval_baseline_manifest
 from app.services.retrieval_enrichment import (
     BaselineProtectedEnrichmentService,
-    ReasoningLaneBudget,
     baseline_evicted_count,
 )
 from app.services.source_scope import source_scope_context
@@ -76,7 +75,7 @@ def test_off_and_zero_budget_do_not_call_provider_or_change_baseline():
     assert calls == []
     for result in (off, zero):
         assert result.status == "off"
-        assert result.visible_chunks == tuple(baseline)
+        assert result.baseline_chunks == tuple(baseline)
         assert result.shadow_chunks == tuple(baseline)
         assert result.baseline_manifest is manifest
         assert result.baseline_manifest.manifest_hash == manifest.manifest_hash
@@ -93,7 +92,7 @@ def test_shadow_appends_graph_evidence_under_an_independent_budget():
     )
 
     assert result.status == "completed"
-    assert [row.chunk_id for row in result.visible_chunks] == ["b1", "b2"]
+    assert [row.chunk_id for row in result.baseline_chunks] == ["b1", "b2"]
     assert [row.chunk_id for row in result.shadow_chunks] == ["b1", "b2", "g1", "g3"]
     assert [row.chunk_id for row in result.enrichment_chunks] == ["g1", "g3"]
     assert result.enrichment_tokens == 3
@@ -117,7 +116,7 @@ def test_duplicate_only_merges_provenance_in_shadow_copy():
         max_enrichment_tokens=100, shadow_enabled=True,
     )
 
-    visible = result.visible_chunks[0]
+    visible = result.baseline_chunks[0]
     shadow = result.shadow_chunks[0]
     assert visible is not baseline[0]
     assert visible.retrieval_supports == (semantic,)
@@ -144,8 +143,8 @@ def test_provider_alias_cannot_mutate_the_frozen_visible_baseline():
     )
 
     assert result.status == "completed"
-    assert result.visible_chunks[0].text == "original"
-    assert result.visible_chunks[0].element_ids == ["element-b1"]
+    assert result.baseline_chunks[0].text == "original"
+    assert result.baseline_chunks[0].element_ids == ["element-b1"]
     assert result.baseline_evicted_count == 0
 
 
@@ -172,7 +171,7 @@ def test_failure_and_timeout_return_the_exact_baseline_manifest():
     assert failure.status == "failed"
     assert timeout.status == "timeout"
     for result in (failure, timeout):
-        assert result.visible_chunks == tuple(baseline)
+        assert result.baseline_chunks == tuple(baseline)
         assert result.shadow_chunks == tuple(baseline)
         assert result.baseline_manifest is manifest
         assert result.baseline_manifest.manifest_hash == manifest.manifest_hash
@@ -187,7 +186,7 @@ def test_malformed_provider_rows_fail_open_to_baseline():
     )
 
     assert result.status == "failed"
-    assert result.visible_chunks == tuple(baseline)
+    assert result.baseline_chunks == tuple(baseline)
     assert result.shadow_chunks == tuple(baseline)
 
 
@@ -218,19 +217,6 @@ def test_nonzero_baseline_guard_discards_the_entire_graph_lane(monkeypatch):
     assert result.baseline_evicted_count == 1
     assert result.shadow_chunks == tuple(baseline)
     assert result.enrichment_chunks == ()
-
-
-def test_reasoning_lanes_never_borrow_each_others_steps():
-    budget = ReasoningLaneBudget(baseline_limit=2, enrichment_limit=1)
-
-    assert budget.consume_enrichment()
-    assert not budget.consume_enrichment()
-    assert budget.enrichment_remaining == 0
-    assert budget.baseline_remaining == 2
-    assert budget.consume_baseline(2)
-    assert not budget.consume_baseline()
-    assert budget.baseline_remaining == 0
-    assert budget.enrichment_used == 1
 
 
 def test_repository_runtime_owns_the_shadow_enrichment_service(

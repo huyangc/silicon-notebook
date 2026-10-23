@@ -5,7 +5,7 @@
 Proves the two retrieval seams that let a knowhow cell KO (``object_type =
 列名``) surface in the KG-node scoring path (``_retrieve_scored``):
 
-  * gate i — type widening (``_scored_types`` / ``_knowhow_object_types``):
+  * gate i — type widening (``_scored_type_scope`` / ``_knowhow_object_types``):
     flag-off (or a non-knowhow notebook) is BYTE-IDENTICAL to the historical
     ``_KG_TYPES`` filter; flag-on + knowhow present unions the column-name
     types in.
@@ -57,7 +57,7 @@ FIX_CELL_TEXT = DATA_ROWS[0][3]
 
 def _candidates(client):
     """The real ``CandidateRetrievalService`` backing this app's repo — the
-    layer that OWNS ``_retrieve_scored`` / ``_scored_types`` / ``_knowhow_*``
+    layer that OWNS ``_retrieve_scored`` / ``_scored_type_scope`` / ``_knowhow_*``
     (the facade just delegates to it). Driving it directly tests the real
     implementation and keeps these tests off the facade's surface scan."""
     return client._repo.retrieval.candidates
@@ -139,9 +139,9 @@ def test_scored_types_byte_identical_when_flag_off(client, imported):
     previous = cand.settings.knowhow_kg_node_retrieval_enabled
     cand.settings.knowhow_kg_node_retrieval_enabled = False
     try:
-        assert cand._scored_types(nb, None) == list(_KG_TYPES)
-        assert cand._scored_types(nb, ["procedure", FIX_COLUMN]) == ["procedure"]
-        assert cand._scored_types(nb, [FIX_COLUMN]) == []
+        assert cand._scored_type_scope(nb, None)[0] == list(_KG_TYPES)
+        assert cand._scored_type_scope(nb, ["procedure", FIX_COLUMN])[0] == ["procedure"]
+        assert cand._scored_type_scope(nb, [FIX_COLUMN])[0] == []
     finally:
         cand.settings.knowhow_kg_node_retrieval_enabled = previous
 
@@ -153,11 +153,11 @@ def test_scored_types_widens_when_flag_on(client, imported):
     previous = cand.settings.knowhow_kg_node_retrieval_enabled
     cand.settings.knowhow_kg_node_retrieval_enabled = True
     try:
-        types = cand._scored_types(nb, None)
+        types = cand._scored_type_scope(nb, None)[0]
         assert set(_KG_TYPES) <= set(types)     # the 4 KG types still there
         assert set(HEADER) <= set(types)        # every column-name type unioned in
         # a caller can now explicitly reach a column-name type
-        assert cand._scored_types(nb, [FIX_COLUMN]) == [FIX_COLUMN]
+        assert cand._scored_type_scope(nb, [FIX_COLUMN])[0] == [FIX_COLUMN]
     finally:
         cand.settings.knowhow_kg_node_retrieval_enabled = previous
 
@@ -172,8 +172,8 @@ def test_non_knowhow_notebook_unaffected_when_flag_on(client):
     cand.settings.knowhow_kg_node_retrieval_enabled = True
     try:
         assert cand._knowhow_object_types(nb) == ()
-        assert cand._scored_types(nb, None) == list(_KG_TYPES)
-        assert cand._scored_types(nb, ["claim"]) == ["claim"]
+        assert cand._scored_type_scope(nb, None)[0] == list(_KG_TYPES)
+        assert cand._scored_type_scope(nb, ["claim"])[0] == ["claim"]
     finally:
         cand.settings.knowhow_kg_node_retrieval_enabled = previous
 
@@ -193,8 +193,8 @@ def test_unrelated_custom_schema_type_is_not_treated_as_knowhow(client):
 
     assert cand.settings.knowhow_kg_node_retrieval_enabled is True
     assert cand._knowhow_object_types(nb.id) == ()
-    assert cand._scored_types(nb.id, None) == list(_KG_TYPES)
-    assert cand._scored_types(nb.id, ["custom_metric"]) == []
+    assert cand._scored_type_scope(nb.id, None)[0] == list(_KG_TYPES)
+    assert cand._scored_type_scope(nb.id, ["custom_metric"])[0] == []
 
 
 # --------------------------------------------------------------------------

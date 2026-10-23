@@ -229,17 +229,6 @@ class ReportStore:
             )
         return cursor.rowcount > 0
 
-    def cancel_report(self, notebook_id: str, report_id: str) -> bool:
-        """Durably publish the sticky terminal state before signalling a worker."""
-        with self.database.write() as db:
-            cursor = db.execute(
-                "UPDATE reports SET status='cancelled',progress=?,updated_at=? "
-                "WHERE id=? AND notebook_id=? "
-                "AND status NOT IN ('done','failed','cancelled')",
-                ("已取消", self.now(), report_id, notebook_id),
-            )
-        return cursor.rowcount > 0
-
     # The columns one list row is made of. ``section_count`` and
     # ``generation_started_at`` live inside JSON columns; they are derived here,
     # by the same two expressions ``row_to_dict`` evaluates in Python (the

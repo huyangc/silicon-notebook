@@ -30,6 +30,12 @@ from app.services.source_scope import current_source_scope
 from app.services.sqlite_repository import SQLiteRepository
 
 
+def _admin_record(store, job_id, owner_id):
+    """What the administrator activity detail reads (``reader_id=None``)."""
+    with store.guarded_admin_job_record(job_id, owner_id, reader_id=None) as record:
+        return record
+
+
 class _EngineDouble:
     """``AskService`` 的替身,三个钩子分别对应作业层要摆布的三件事。
 
@@ -693,7 +699,7 @@ def test_job_errors_never_expose_raw_exception_content(setup, failure_stage):
 
 def test_failed_run_records_raw_error_detail_for_admin_only(setup):
     """记录平权:owner-facing ``job.error`` 保持固定文案,原始异常文本单独进
-    ``error_detail`` 列,只有 ``admin_job_record`` 这条管理员通道能读到它。"""
+    ``error_detail`` 列,只有 ``guarded_admin_job_record`` 这条管理员通道能读到它。"""
     service, _, _, _ = setup
 
     def fail(*args):
@@ -704,7 +710,7 @@ def test_failed_run_records_raw_error_detail_for_admin_only(setup):
     result = finished(service, job)
     assert result.status == "failed"
     assert result.error == "回答未完成，请检查模型服务和资料状态后重试。"
-    record = service.store.admin_job_record(job.job_id, "u")
+    record = _admin_record(service.store, job.job_id, "u")
     assert record is not None
     assert record["error_detail"] == "RuntimeError: boom"
 

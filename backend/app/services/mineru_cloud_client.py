@@ -33,13 +33,6 @@ class MinerUCloudClient:
     def configured(self) -> bool:
         return self.settings.mineru_cloud_enabled
 
-    def parse_url(self, url: str, *, data_id: str = "") -> List[dict]:
-        """提交 PDF URL 给云端并返回 content_list(向后兼容，委托 parse_url_with_images)。
-
-        未配置 token → MinerUCloudNotConfigured；云端失败/超时/结果不可用 → RuntimeError。
-        """
-        return self.parse_url_with_images(url, data_id=data_id)[0]
-
     def parse_url_with_images(
         self, url: str, *, data_id: str = ""
     ) -> tuple[List[dict], dict[str, bytes]]:

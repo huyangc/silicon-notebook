@@ -420,6 +420,7 @@ class GovernanceStore:
             (notebook_id, object_type, notebook_id),
         ).fetchall()
 
+    # 测试观察点:整库候选对读取,有界版按它对照;用例也借它断言生产不再整库扫描
     @staticmethod
     def merge_candidate_pairs(db: sqlite3.Connection, notebook_id: str, statuses):
         values = tuple(statuses)

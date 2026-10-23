@@ -90,7 +90,8 @@ unset PYTHONDONTWRITEBYTECODE
   "$ROOT_DIR/backend/app/api/debug_logs.py" \
   "$ROOT_DIR/backend/app/services/auth_utils.py" \
   "$ROOT_DIR/backend/app/domain/auth_utils.py" \
-  "$ROOT_DIR/scripts/audit_facade_callers.py"
+  "$ROOT_DIR/scripts/audit_facade_callers.py" \
+  "$ROOT_DIR/scripts/audit_component_callers.py"
 
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -c \
   "import markdown_it, numpy"
@@ -115,6 +116,8 @@ PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/check_claude_md_budget.py"
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/check_architecture_boundaries.py" --root "$ROOT_DIR"
+PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
+  "$ROOT_DIR/scripts/audit_component_callers.py" --check
 "$PYTHON_BIN" "$ROOT_DIR/scripts/check_backend_lint.py"
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/generate_ui_extension_contract.py" --check

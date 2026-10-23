@@ -425,6 +425,7 @@ class UnifiedKgStore:
             "WHERE e.notebook_id=%s ORDER BY s.ordinal", (run_id, notebook_id),
         )
 
+    # 测试观察点:直接写簇行的构造点,用例借它摆出指定的簇状态
     @staticmethod
     def replace_cluster_rows_streamed(
         db: Any,
@@ -1935,6 +1936,7 @@ class UnifiedKgStore:
             (notebook_id, int(level), int(generation)),
         )
 
+    # 测试观察点:已发布社区成员观察点
     @staticmethod
     def community_member_ids(
         db: Any, notebook_id: str, level: int

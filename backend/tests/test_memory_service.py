@@ -426,7 +426,7 @@ def test_confirm_writes_revision_and_duplicate_answer_is_idempotent(
 
     assert second.id == first.id
     assert second.title == "T"
-    assert memory_service.revisions(first.id, users.alice.id)[0].status == "confirmed"
+    assert memory_service.store.revisions_for_user(first.id, users.alice.id)[0].status == "confirmed"
     assert memory_service.get(first.id, users.alice.id).embedding_status == "ready"
     with repo._connect() as db:
         embedded = db.execute(
@@ -649,7 +649,7 @@ def test_candidate_lifecycle_updates_snapshots_and_rejects_invalid_transition(
     assert confirmed.status == "confirmed"
     assert confirmed.confirmed_by == users.alice.id
     assert deprecated.status == "deprecated"
-    assert [revision.status for revision in memory_service.revisions(item.id, users.alice.id)] == [
+    assert [revision.status for revision in memory_service.store.revisions_for_user(item.id, users.alice.id)] == [
         "candidate",
         "candidate",
         "confirmed",
@@ -761,7 +761,7 @@ def test_initial_revision_failure_rolls_back_agent_candidate_and_retry_is_idempo
         title="ignored retry",
     )
     assert duplicate.id == retry.id
-    assert len(memory_service.revisions(retry.id, users.alice.id)) == 1
+    assert len(memory_service.store.revisions_for_user(retry.id, users.alice.id)) == 1
 
 
 def test_initial_revision_failure_rolls_back_answer_memory_and_retry_is_idempotent(
@@ -810,7 +810,7 @@ def test_initial_revision_failure_rolls_back_answer_memory_and_retry_is_idempote
         [],
     )
     assert duplicate.id == retry.id
-    assert len(memory_service.revisions(retry.id, users.alice.id)) == 1
+    assert len(memory_service.store.revisions_for_user(retry.id, users.alice.id)) == 1
 
 
 def test_provenance_failure_rolls_back_answer_memory(

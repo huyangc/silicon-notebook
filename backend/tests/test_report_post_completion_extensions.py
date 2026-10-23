@@ -226,7 +226,12 @@ def test_composed_terminal_cas_drives_exactly_one_profile_signal(
 
         def generate(self, notebook_id, report_id, _question, depth=2):
             if self.lose:
-                assert runtime.report_store.cancel_report(notebook_id, report_id)
+                runtime.report_store.update_report(
+                    notebook_id, report_id, status="cancelled", progress="已取消"
+                )
+                assert runtime.report_store.get_report(
+                    notebook_id, report_id
+                )["status"] == "cancelled"
             committed = runtime.report_store.complete_report_generation(
                 notebook_id,
                 report_id,

@@ -35,7 +35,7 @@ def test_not_configured_raises(monkeypatch):
     c = MinerUCloudClient(Settings())
     assert c.configured is False
     with pytest.raises(MinerUCloudNotConfigured):
-        c.parse_url("https://a/x.pdf")
+        c.parse_url_with_images("https://a/x.pdf")[0]
 
 
 def test_happy_path_returns_content_list(monkeypatch):
@@ -48,7 +48,7 @@ def test_happy_path_returns_content_list(monkeypatch):
     ])
     c._http_json = lambda method, url, payload=None: next(responses)
     c._http_bytes = lambda url: _zip_with("out/abc_content_list.json", json.dumps(content).encode())
-    assert c.parse_url("https://a/x.pdf", data_id="src-1") == content
+    assert c.parse_url_with_images("https://a/x.pdf", data_id="src-1")[0] == content
 
 
 def test_url_submit_retries_two_empty_json_responses(monkeypatch):
@@ -72,7 +72,7 @@ def test_url_submit_retries_two_empty_json_responses(monkeypatch):
         "out/recovered_content_list.json", json.dumps(content).encode()
     )
 
-    assert c.parse_url("https://a/flaky.pdf") == content
+    assert c.parse_url_with_images("https://a/flaky.pdf")[0] == content
     assert submit_attempts == 3
     assert sleeps == [1.0, 2.0]
 
@@ -91,7 +91,7 @@ def test_url_submit_does_not_retry_explicit_http_400(monkeypatch):
     c._http_json = rejected_json
 
     with pytest.raises(HTTPError) as exc:
-        c.parse_url("https://a/rejected.pdf")
+        c.parse_url_with_images("https://a/rejected.pdf")[0]
 
     assert exc.value.code == 400
     assert attempts == 1
@@ -120,7 +120,7 @@ def test_result_download_retries_empty_2xx_bodies(monkeypatch):
     c._sleep = sleeps.append
     c._http_bytes = flaky_bytes
 
-    assert c.parse_url("https://a/flaky-download.pdf") == content
+    assert c.parse_url_with_images("https://a/flaky-download.pdf")[0] == content
     assert attempts == 3
     assert sleeps == [1.0, 2.0]
 
@@ -133,7 +133,7 @@ def test_failed_state_raises_with_err_msg(monkeypatch):
     ])
     c._http_json = lambda method, url, payload=None: next(responses)
     with pytest.raises(RuntimeError) as exc:
-        c.parse_url("https://a/x.pdf")
+        c.parse_url_with_images("https://a/x.pdf")[0]
     assert "超过页数限制" in str(exc.value)
     assert "超过页数限制" in c.last_error
 
@@ -143,7 +143,7 @@ def test_poll_timeout_raises(monkeypatch):
     seq = iter([{"code": 0, "data": {"task_id": "t1"}}])  # 提交一次；其后轮询恒 running
     c._http_json = lambda method, url, payload=None: next(seq, {"data": {"state": "running"}})
     with pytest.raises(RuntimeError) as exc:
-        c.parse_url("https://a/x.pdf")
+        c.parse_url_with_images("https://a/x.pdf")[0]
     assert "超时" in str(exc.value)
 
 
@@ -155,7 +155,7 @@ def test_markdown_fallback_when_no_content_list(monkeypatch):
     ])
     c._http_json = lambda method, url, payload=None: next(responses)
     c._http_bytes = lambda url: _zip_with("out/full.md", b"# Title\n\nFirst para.\n\nSecond para.")
-    out = c.parse_url("https://a/x.pdf")
+    out = c.parse_url_with_images("https://a/x.pdf")[0]
     texts = [b["text"] for b in out]
     assert "Title" in texts[0] and any("First para." in t for t in texts)
 

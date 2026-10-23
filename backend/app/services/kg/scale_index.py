@@ -302,6 +302,7 @@ class VizEdgeSet:
                 result[result_index] = edge_type
         return result
 
+    # 测试观察点:标量参考实现,批量 edge_types_at_many 按它做等价对照
     def edge_type_at(self, s_idx, t_idx, default=None):
         """有向边 (s_idx → t_idx) 的 edge_type;没有这条边返回 ``default``。
 

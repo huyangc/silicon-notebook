@@ -1628,42 +1628,6 @@ class KnowledgeStore:
         }
 
     @staticmethod
-    def source_build_rows(db: Any, notebook_id: str):
-        """Sources eligible for LLM KG extraction (build/rebuild) plus the
-        subset that already has KG objects. Excludes hidden Memory/Knowhow
-        projection sources: Memory owns its explicit confirmation-time KG
-        lifecycle, while Knowhow objects are the projector's deterministic
-        zero-LLM output, so a knowhow hidden source (whose KOs a rebuild wipe
-        deliberately preserves — see ``delete_notebook_graph_rows``) must never
-        be handed to the extraction pipeline as a target, and even a knowhow
-        table not yet projected (elements present, zero KOs) must not become an
-        empty-KG extraction target — either would fabricate LLM-derived
-        case/procedure objects, violating the feature's zero-LLM invariant.
-        A promotion source (PR-E8) is visible but never a target either:
-        re-extracting it would first delete the promoted objects its evidence
-        supports (``source_store.NOT_PROMOTION_SOURCE_PREDICATE``)."""
-        source_ids = [
-            row["id"] for row in db.execute(
-                "SELECT id FROM sources WHERE notebook_id = %s "
-                "AND source_type NOT IN ('memory','knowhow') "
-                f"AND {NOT_PROMOTION_SOURCE_PREDICATE}", (notebook_id,)
-            ).fetchall()
-        ]
-        kg_source_ids = {
-            row["source_id"] for row in db.execute(
-                "SELECT DISTINCT ko.source_id FROM knowledge_objects ko "
-                "WHERE ko.notebook_id = %s AND ko.source_id != '' "
-                "AND COALESCE(("
-                "  SELECT er.status FROM extraction_runs er "
-                "  WHERE er.source_id=ko.source_id AND er.run_type='kg' "
-                "  ORDER BY er.created_at DESC, er.ordinal DESC LIMIT 1"
-                "), 'completed')='completed'",
-                (notebook_id,),
-            ).fetchall()
-        }
-        return source_ids, kg_source_ids
-
-    @staticmethod
     def source_build_state_page(
         db: Any,
         notebook_id: str,
@@ -1711,24 +1675,6 @@ class KnowledgeStore:
                 max(1, int(limit)),
             ),
         ).fetchall()
-
-    @staticmethod
-    def sources_with_elements(db: Any, notebook_id: str) -> set:
-        """该 notebook 下已产出 source_elements(已成功 parse)的 source_id 集合。
-        build_notebook_kg 用它把无 elements 的源(parse 未落地)排除出抽取 targets——
-        否则接地校验(build_records)没有 element 可绑,抽出的节点被整源丢弃、objects=0。
-
-        问的是「哪些来源有元素」,答案的规模是来源数;所以从 sources 驱动、每个来源
-        用 EXISTS 探一次索引即可,那次探测命中第一行就停。等价的 DISTINCT-over-JOIN
-        写法要先把该 notebook 的**每一行元素**都取出来再去重,代价随元素数增长——
-        千万级元素的库为了得到几千个 id 扫全部元素行。集合本身逐字相同。"""
-        return {
-            row["source_id"] for row in db.execute(
-                "SELECT s.id AS source_id FROM sources s WHERE s.notebook_id = %s "
-                "AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id)",
-                (notebook_id,),
-            ).fetchall()
-        }
 
     @staticmethod
     def active_object_count(db: Any, notebook_id: str) -> int:
@@ -1881,14 +1827,6 @@ class KnowledgeStore:
             # update therefore needs an explicit post-commit invalidation.
             # PostgreSQL queries do not use SQLite's process-local count memo.
             pass
-
-    def add_relations_current(
-        self, notebook_id: str, source_id: str, relations: List[dict]
-    ) -> int:
-        with self.database.write() as db:
-            return self.add_relations(
-                db, notebook_id, source_id, relations, self.seams.now()
-            )
 
     @staticmethod
     def object_version_row(db: Any, notebook_id: str):
@@ -3012,6 +2950,7 @@ class KnowledgeStore:
             for r in rows
         ]
 
+    # 测试观察点:裸插关系的构造点(kg_relation_testkit 等夹具)
     def add_relations(
         self,
         db: Any,
@@ -4111,28 +4050,6 @@ class KnowledgeStore:
             }
             for row in rows
         ]
-
-    @staticmethod
-    def backfill_fts(db: Any, notebook_id: str) -> int:
-        """Re-populate kg_objects_fts from knowledge_objects for this notebook.
-        Idempotent: deletes existing FTS rows first, then re-inserts from
-        knowledge_objects (non-deprecated, non-empty name). Returns the number
-        of rows inserted."""
-        rows = db.execute(
-            "SELECT id, payload FROM knowledge_objects "
-            "WHERE notebook_id=%s AND status != 'deprecated'",
-            (notebook_id,),
-        ).fetchall()
-        count = 0
-        for r in rows:
-            try:
-                payload = json_value(r["payload"], {})
-            except Exception:
-                payload = {}
-            name = (payload.get("name") or "").strip()
-            if name:
-                count += 1
-        return count
 
     @staticmethod
     def object_meta_rows(

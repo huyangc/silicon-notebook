@@ -234,22 +234,6 @@ class ReportStore:
             ).fetchone()
         return row is not None
 
-    def cancel_report(self, notebook_id: str, report_id: str) -> bool:
-        """Durably publish the sticky terminal state before signalling a worker."""
-        with self.database.write() as db:
-            row = db.execute(
-                "UPDATE reports SET status='cancelled',progress=%s,updated_at=%s "
-                "WHERE id=%s AND notebook_id=%s "
-                "AND status NOT IN ('done','failed','cancelled') RETURNING id",
-                (
-                    "已取消",
-                    normalize_timestamp(self.now()),
-                    report_id,
-                    notebook_id,
-                ),
-            ).fetchone()
-        return row is not None
-
     # Mirror of the SQLite store's ``_SUMMARY_COLUMNS``: the columns one list
     # row is made of, with ``section_count`` and ``generation_started_at``
     # derived from the jsonb columns by the expressions ``row_to_dict``

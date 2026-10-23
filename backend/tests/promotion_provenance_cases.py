@@ -329,12 +329,10 @@ def the_promotion_source_is_never_a_pipeline_target(world: World) -> None:
     with runtime.database.connect() as db:
         build_rows = runtime.knowledge.source_build_state_page(
             db, world.base, None, "", 100)
-        build_ids, _with_kg = runtime.knowledge.source_build_rows(db, world.base)
         pending = runtime.queries.pending_kg_source_count(db, world.base)
         visible_pending = runtime.queries.visible_pending_kg_source_count(db, world.base)
         missing_chunks = runtime.queries.sources_missing_chunks(db, world.base)
     assert world.promotion_source not in {str(row["id"]) for row in build_rows}
-    assert world.promotion_source not in set(build_ids)
     assert (pending, visible_pending) == (0, 0)
     assert world.promotion_source not in missing_chunks
     targets = repo.maintenance.kg_target_source_rows_page(world.base)

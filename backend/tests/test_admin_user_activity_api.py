@@ -167,7 +167,7 @@ def _insert_global_conversation(db, conv_id, user_id, created_at, *,
 def _global_job_payload(job_id, conv_id, question, *, status="done",
                          notebook_ids=None, answer=None, response=None,
                          mode="chunk", created_at="2026-09-01T09:00:00+00:00") -> str:
-    """A ``GlobalAskJob``-shaped payload -- ``admin_job_record`` round-trips
+    """A ``GlobalAskJob``-shaped payload -- ``guarded_admin_job_record`` round-trips
     this through ``GlobalAskJob.model_validate_json``, so every field it
     requires (``job_id``, ``conversation_id``, ``status``, ``question``,
     ``created_at``, ``notebook_scope``, ``resolved_notebook_ids``) must be

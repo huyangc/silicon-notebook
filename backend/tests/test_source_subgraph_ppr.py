@@ -323,9 +323,9 @@ def test_ppr_ranks_only_g_and_protected_lane_keeps_b_unchanged(repo):
 
     assert ppr.hits
     assert protected.status == "completed"
-    assert protected.visible_chunks[0].chunk_id == "baseline"
-    assert protected.visible_chunks[0].score == 0.95
-    assert protected.visible_chunks[0].relevance == 0.9
+    assert protected.baseline_chunks[0].chunk_id == "baseline"
+    assert protected.baseline_chunks[0].score == 0.95
+    assert protected.baseline_chunks[0].relevance == 0.9
     assert protected.shadow_chunks[0].chunk_id == "baseline"
     assert all(chunk.chunk_id != "baseline" for chunk in protected.enrichment_chunks)
 

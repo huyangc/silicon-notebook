@@ -129,6 +129,7 @@ class AnswerLinkStore:
             "expired": row["expires_at"] <= self.now(),
         }
 
+    # 测试观察点:显式清扫入口,生产在签发时顺带清扫(同一 _sweep)
     def sweep_answer_links(self, *, grace_seconds: int) -> int:
         now = self.now()
         with self.database.write() as db:

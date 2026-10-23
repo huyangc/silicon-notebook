@@ -134,6 +134,7 @@ class RetrievalExperienceStore:
             ).fetchall()
         return [self._experience_row(row) for row in rows]
 
+    # 测试观察点:按 id 读一条检索经验的观察点
     def read_experience(self, experience_id: str) -> dict | None:
         with self.database.connect() as db:
             row = db.execute(

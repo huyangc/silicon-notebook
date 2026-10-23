@@ -31,6 +31,16 @@ def test_report_settings_defaults():
     assert s.report_sufficiency_max_top_family_share == 0.8
 
 
+def _probe_coverage(engine, notebook_id, queries, *, max_queries=4):
+    """One coverage aggregate, loaded through the batch probe scheduler the
+    report's probe plan uses."""
+    return engine._summarize_probe_results(
+        engine._load_probe_query_results(
+            notebook_id, [queries], max_queries=max_queries,
+        )[0]
+    )
+
+
 def test_report_settings_env(monkeypatch):
     from app.core.config import Settings
     monkeypatch.setenv("REPORT_MAX_SECTIONS", "4")
@@ -3063,16 +3073,16 @@ def test_probe_memo_dedupes_repeated_queries_within_one_planning_run(repo, monke
     )
 
     # 无 memo(plan_outline 之外的裸调用):历史行为,逐次检索。
-    eng._probe_queries("nb", ["shared", "a"])
-    eng._probe_queries("nb", ["shared", "b"])
+    _probe_coverage(eng, "nb", ["shared", "a"])
+    _probe_coverage(eng, "nb", ["shared", "b"])
     assert calls["federated"].count("shared") == 2
 
     # 有 memo(plan_outline 会在探针前设置):重复查询只打一次。
     calls["federated"].clear(); calls["elements"].clear()
     eng._probe_retrieval_memo = {}
-    eng._probe_queries("nb", ["shared", "a"])
-    eng._probe_queries("nb", ["shared", "b"])
-    eng._probe_queries("nb", ["shared"])
+    _probe_coverage(eng, "nb", ["shared", "a"])
+    _probe_coverage(eng, "nb", ["shared", "b"])
+    _probe_coverage(eng, "nb", ["shared"])
     # The two leaf channels run concurrently.  Memoization promises one call
     # per distinct query; worker start order is deliberately not a contract.
     assert sorted(calls["federated"]) == ["a", "b", "shared"]
@@ -3082,7 +3092,7 @@ def test_probe_memo_dedupes_repeated_queries_within_one_planning_run(repo, monke
     # duplicate-query behavior instead of racing two identical leaves.
     calls["federated"].clear(); calls["elements"].clear()
     eng._probe_retrieval_memo = {}
-    eng._probe_queries("nb", ["duplicate", "duplicate"])
+    _probe_coverage(eng, "nb", ["duplicate", "duplicate"])
     assert calls["federated"] == ["duplicate"]
     assert calls["elements"] == ["duplicate"]
 
@@ -3105,8 +3115,8 @@ def test_probe_memo_does_not_cache_failures(repo, monkeypatch):
         repo.retrieval, "retrieve_elements", lambda nb, q, limit=8: [],
     )
     eng._probe_retrieval_memo = {}
-    eng._probe_queries("nb", ["q"])   # 第一次:失败,吞掉,不缓存
-    eng._probe_queries("nb", ["q"])   # 第二次:必须真的重试
+    _probe_coverage(eng, "nb", ["q"])   # 第一次:失败,吞掉,不缓存
+    _probe_coverage(eng, "nb", ["q"])   # 第二次:必须真的重试
     assert attempts == ["q", "q"]
 
 
@@ -3123,7 +3133,7 @@ def test_probe_queries_propagates_cancellation(repo, monkeypatch):
     monkeypatch.setattr(eng, "_probe_element_hits", lambda *_args, **_kwargs: [])
 
     with pytest.raises(AskCancelled):
-        eng._probe_queries("nb", ["q"])
+        _probe_coverage(eng, "nb", ["q"])
 
 
 def test_probe_width_maps_report_depth_to_shared_tiers():
@@ -3156,7 +3166,7 @@ def test_probe_queries_honors_max_queries(repo, monkeypatch):
     monkeypatch.setattr(
         repo.retrieval, "retrieve_elements", lambda nb, q, limit=8: [],
     )
-    eng._probe_queries("nb", ["q1", "q2", "q3", "q4"], max_queries=2)
+    _probe_coverage(eng, "nb", ["q1", "q2", "q3", "q4"], max_queries=2)
     # Batch execution may start independent probes in either order; the
     # first-N membership remains the contract.
     assert sorted(probed) == ["q1", "q2"]

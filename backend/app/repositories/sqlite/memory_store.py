@@ -457,6 +457,7 @@ class MemoryStore:
         经这里的写语句同样落空 → 404)。定义点在 `access_sql`,这里是薄封装。"""
         return live_read_access_exists_clause(alias)
 
+    # 测试观察点:直写 Memory 行的构造点
     def insert_memory(self, write: MemoryWrite) -> MemoryRecord:
         with self.database.write() as db:
             item, _created = self._insert_memory_on(db, write)
@@ -1323,6 +1324,7 @@ class MemoryStore:
             reason=reason,
         )
 
+    # 测试观察点:修订历史观察点(生产不读修订列表)
     def revisions_for_user(self, memory_id: str, user_id: str) -> list[MemoryRevision]:
         self.memory_for_user(memory_id, user_id)
         with self.database.connect() as db:
@@ -1620,6 +1622,7 @@ class MemoryStore:
             }
         )
 
+    # 测试观察点:直写 Memory 行的构造点
     def update_fields(
         self, memory_id: str, user_id: str, fields: Mapping[str, Any]
     ) -> MemoryRecord:
@@ -2503,10 +2506,6 @@ class MemoryStore:
                 f"SELECT EXISTS (SELECT 1 FROM sources s WHERE {_ORPHAN_MEMORY_SOURCE_WHERE}) AS found"
             ).fetchone()
         return bool(row["found"])
-
-    def orphan_memory_source_ids(self, limit: int, after_id: str = "") -> list[str]:
-        """`orphan_memory_source_refs` 的 id 一列(同一条语句)。"""
-        return [source_id for source_id, _ in self.orphan_memory_source_refs(limit, after_id)]
 
     def orphan_memory_source_refs(
         self, limit: int, after_id: str = ""

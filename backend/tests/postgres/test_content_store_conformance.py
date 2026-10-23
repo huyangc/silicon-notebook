@@ -988,7 +988,7 @@ def test_ask_cleanup_preserves_other_running_job_and_terminal_states(
         first_job, "user-content"
     )["cancelled"] is True
     content_harness.ask.cleanup_empty_conversation(conversation_id)
-    assert content_harness.ask.ask_job_status(second_job)["status"] == "running"
+    assert content_harness.ask.ask_job_detail(second_job)["status"] == "running"
     assert content_harness.ask.get_conversation(conversation_id).id == conversation_id
 
     answer = AskResponse(
@@ -1004,7 +1004,7 @@ def test_ask_cleanup_preserves_other_running_job_and_terminal_states(
     )
     assert answer_id
     content_harness.ask.finish_job(second_job, "cancelled")
-    done = content_harness.ask.ask_job_status(second_job)
+    done = content_harness.ask.ask_job_detail(second_job)
     assert done["status"] == "done"
     assert done["answer_id"] == answer_id
 
@@ -1015,7 +1015,7 @@ def test_ask_cleanup_preserves_other_running_job_and_terminal_states(
     content_harness.ask.finish_job(failed_job, "failed", error="original")
     content_harness.ask.finish_job(failed_job, "cancelled", error="replacement")
     content_harness.ask.finish_job(failed_job, "done", answer_id="not-real")
-    failed = content_harness.ask.ask_job_status(failed_job)
+    failed = content_harness.ask.ask_job_detail(failed_job)
     assert failed["status"] == "failed"
     assert failed["answer_id"] == ""
     assert failed["error"] == "original"
@@ -1026,7 +1026,7 @@ def test_ask_cleanup_preserves_other_running_job_and_terminal_states(
     )
     content_harness.ask.cancel_running_job(cancelled_job, "user-content")
     content_harness.ask.finish_job(cancelled_job, "done", answer_id="not-real")
-    cancelled_job_state = content_harness.ask.ask_job_status(cancelled_job)
+    cancelled_job_state = content_harness.ask.ask_job_detail(cancelled_job)
     assert cancelled_job_state["status"] == "cancelled"
     assert cancelled_job_state["answer_id"] == ""
 
@@ -1156,7 +1156,7 @@ def test_cancel_before_job_bound_prepare_never_creates_a_replacement_conversatio
             assert any(event["event"] == "cancelled" for event in delivered)
             assert not any(event["event"] == "final" for event in delivered)
 
-    assert content_harness.ask.ask_job_status(job_id)["status"] == "cancelled"
+    assert content_harness.ask.ask_job_detail(job_id)["status"] == "cancelled"
     assert content_harness.ask.list_conversations(
         "nb-content", "user-content"
     ) == []
@@ -1243,7 +1243,7 @@ def test_bulk_delete_skips_an_old_conversation_with_a_running_job(content_harnes
     assert result.deleted == 0
     assert result.deleted_ids == []
     assert content_harness.ask.get_conversation(conversation_id).id == conversation_id
-    assert content_harness.ask.ask_job_status(job_id)["status"] == "running"
+    assert content_harness.ask.ask_job_detail(job_id)["status"] == "running"
 
 
 def test_explicit_conversation_delete_refuses_running_and_purges_terminal_job_state(
@@ -1262,7 +1262,7 @@ def test_explicit_conversation_delete_refuses_running_and_purges_terminal_job_st
     with pytest.raises(RuntimeError, match="conversation has a running Ask job"):
         content_harness.ask.delete_conversation(running_conversation)
     assert content_harness.ask.get_conversation(running_conversation).active_job is not None
-    assert content_harness.ask.ask_job_status(running_job)["status"] == "running"
+    assert content_harness.ask.ask_job_detail(running_job)["status"] == "running"
 
     terminal_request = AskRequest(question="terminal private question", mode="reasoning")
     terminal_job, terminal_conversation = content_harness.ask.begin_durable_job(
@@ -1430,7 +1430,7 @@ def test_sync_ask_running_job_protects_conversation_until_atomic_final_save(
     assert detail.turns[0].answer_id == response.answer_id
     assert detail.active_job is None
     assert "job_id" not in response.model_dump()
-    assert content_harness.ask.ask_job_status(captured["job_id"])["status"] == "done"
+    assert content_harness.ask.ask_job_detail(captured["job_id"])["status"] == "done"
     mark = "%s"
     with content_harness.database.connect() as connection:
         orphan_count = connection.execute(
@@ -1464,7 +1464,7 @@ def test_sync_ask_failure_and_explicit_cancel_leave_no_empty_conversation(
             "nb-content", AskRequest(question="failing sync", mode="chunk")
         )
     assert failed["job_id"]
-    assert content_harness.ask.ask_job_status(failed["job_id"])["status"] == "failed"
+    assert content_harness.ask.ask_job_detail(failed["job_id"])["status"] == "failed"
     with pytest.raises(KeyError):
         content_harness.ask.get_conversation(failed["conversation_id"])
 
@@ -1501,7 +1501,7 @@ def test_sync_ask_failure_and_explicit_cancel_leave_no_empty_conversation(
         with pytest.raises(AskCancelled):
             future.result(timeout=5)
 
-    assert content_harness.ask.ask_job_status(cancelled["job_id"])["status"] == "cancelled"
+    assert content_harness.ask.ask_job_detail(cancelled["job_id"])["status"] == "cancelled"
     with pytest.raises(KeyError):
         content_harness.ask.get_conversation(cancelled["conversation_id"])
 
@@ -1659,7 +1659,7 @@ def test_postgres_bulk_delete_cannot_remove_a_concurrently_continued_conversatio
     detail = store.get_conversation(old_turn.conversation_id)
     assert detail.turn_count == 1
     assert detail.turns[0].answer_id == answer_id
-    assert store.ask_job_status(job_id)["status"] == "done"
+    assert store.ask_job_detail(job_id)["status"] == "done"
     with postgres_database.connect() as connection:
         assert connection.execute(
             "SELECT COUNT(*) AS n FROM answers a LEFT JOIN conversations c "
@@ -1786,7 +1786,7 @@ def test_postgres_final_save_and_explicit_delete_do_not_deadlock_or_orphan(
         save_database.close()
 
     assert answer_id
-    assert store.ask_job_status(job_id)["status"] == "done"
+    assert store.ask_job_detail(job_id)["status"] == "done"
     detail = store.get_conversation(conversation_id)
     assert detail.turn_count == 1
     assert detail.turns[0].answer_id == answer_id

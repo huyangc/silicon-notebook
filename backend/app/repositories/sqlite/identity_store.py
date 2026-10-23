@@ -166,6 +166,7 @@ class IdentityStore:
             profile = self._create_user_in_txn(db, username, password)
             return (profile, self._insert_session_in_txn(db, profile.id))
 
+    # 测试观察点:生产登录刻意合成一个写事务(login_with_password);拆开的验密 / 建会话只给用例摆会话与核对口令
     def authenticate_user(self, username: str, password: str) -> UserProfile | None:
         from app.domain.auth_utils import verify_password
 
@@ -215,6 +216,7 @@ class IdentityStore:
             ).fetchone()
             return (self._user_profile(user, profile), self._insert_session_in_txn(db, user["id"]))
 
+    # 测试观察点:生产登录刻意合成一个写事务(login_with_password);拆开的验密 / 建会话只给用例摆会话与核对口令
     def create_session(self, user_id: str) -> str:
         with self.database.write() as db:
             return self._insert_session_in_txn(db, user_id)

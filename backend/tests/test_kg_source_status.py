@@ -257,10 +257,10 @@ def test_failed_latest_extraction_does_not_hide_partial_source_graph(repo):
         assert repo._source_has_kg(db, src_id) is False
         assert repo._count_pending_kg_sources(db, nb.id) == 1
     assert repo.get_source(src_id).kg_extracted is False
-    pages = list(repo._runtime.knowledge_lifecycle._kg_target_pages(
+    pages = list(repo._runtime.knowledge_lifecycle._kg_target_batches(
         nb.id, "incremental"
     ))
-    targets = [source for page, _skipped, _missing in pages for source in page]
+    targets = [source for page, _skipped, _missing in pages for source, _preserve in page]
     skipped = [source for _page, rows, _missing in pages for source in rows]
     assert targets == [src_id]
     assert skipped == []

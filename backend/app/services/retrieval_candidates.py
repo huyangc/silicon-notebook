@@ -2480,7 +2480,17 @@ class CandidateRetrievalService(_RetrievalState):
                 f"{notebook_id}:knowhow_types", version, _load)
 
     def _scored_type_scope(self, notebook_id: str, types) -> tuple[List[str], tuple]:
-        """Return ``(scored types, Knowhow-owned types)`` from one scoped read."""
+        """Return ``(scored types, Knowhow-owned types)`` from one scoped read.
+
+        The scored half is the object_types ``_retrieve_scored`` will
+        fetch+score. FLAG OFF (or a notebook with no knowhow types) ⇒
+        BYTE-IDENTICAL to the historical line: caller ``types`` (or all four
+        ``_KG_TYPES`` by default) filtered to ``_KG_TYPES``. FLAG ON + knowhow
+        present ⇒ the allowed set widens to ``_KG_TYPES ∪ knowhow-types`` and
+        the default (no caller ``types``) unions the knowhow types in too; a
+        caller-supplied list is still just filtered against the (now wider)
+        allowed set. ``_knowhow_object_types`` is only touched on the flag-on
+        branch, so flag-off issues no new query."""
         base = [t for t in (list(types) if types else list(_KG_TYPES)) if t in _KG_TYPES]
         if not self.settings.knowhow_kg_node_retrieval_enabled:
             return base, ()
@@ -2492,17 +2502,6 @@ class CandidateRetrievalService(_RetrievalState):
             t for t in knowhow_types if t not in _KG_TYPES
         )]
         return [t for t in source if t in allowed], knowhow_types
-
-    def _scored_types(self, notebook_id: str, types) -> List[str]:
-        """The object_types ``_retrieve_scored`` will fetch+score. FLAG OFF (or a
-        notebook with no knowhow types) ⇒ BYTE-IDENTICAL to the historical line:
-        caller ``types`` (or all four ``_KG_TYPES`` by default) filtered to
-        ``_KG_TYPES``. FLAG ON + knowhow present ⇒ the allowed set widens to
-        ``_KG_TYPES ∪ knowhow-types`` and the default (no caller ``types``)
-        unions the knowhow types in too; a caller-supplied list is still just
-        filtered against the (now wider) allowed set. ``_knowhow_object_types``
-        is only touched on the flag-on branch, so flag-off issues no new query."""
-        return self._scored_type_scope(notebook_id, types)[0]
 
     def _knowhow_ko_candidates(self, db, notebook_id: str, query: str,
                                query_vector) -> dict:
@@ -2582,7 +2581,7 @@ class CandidateRetrievalService(_RetrievalState):
         scoring_query = retrieval_query_head(query)
         # gate i (type widening): flag-off / non-knowhow ⇒ historical filter,
         # byte-identical. flag-on + knowhow present ⇒ column-name types join
-        # the fetch set (see _scored_types).
+        # the fetch set (see _scored_type_scope).
         type_list, knowhow_types = self._scored_type_scope(notebook_id, types)
         # gate 0/i are live only when the widening actually surfaced a knowhow
         # (column-name) type — exactly "flag on AND this notebook has knowhow

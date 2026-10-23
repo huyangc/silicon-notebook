@@ -238,5 +238,5 @@ def test_coordinator_run_replays_trace_via_conversation_active_job(repo):
     release.set()
     while events.get(timeout=2) is not None:
         pass
-    assert repo._runtime.ask_state.ask_job_status(job_id)["status"] == "done"
+    assert repo._runtime.ask_state.ask_job_detail(job_id)["status"] == "done"
     assert repo.get_conversation(payload.conversation_id).active_job is None

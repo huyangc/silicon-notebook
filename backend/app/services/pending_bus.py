@@ -199,6 +199,7 @@ class PendingBus:
         cutoff = self._now() - self._ttl
         return [(t, ev) for (t, ev) in entries if t >= cutoff]
 
+    # 测试观察点:缓冲区条数观察点,测 TTL 与出队
     def _buffered_count(self, user_id: str) -> int:  # 测试辅助
         with self._lock:
             return len(self._within_ttl(self._buffer.get(user_id, [])))

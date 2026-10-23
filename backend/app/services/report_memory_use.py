@@ -186,6 +186,7 @@ class RetrievalSourceLog:
         recorded.__watched_log__ = self  # type: ignore[attr-defined]
         return recorded
 
+    # 测试观察点:断言端口已被记录包装的观察点
     def watches(self, value: Any) -> bool:
         """Whether ``value`` (a port or a callable) records into this log."""
         if isinstance(value, _Watched):
