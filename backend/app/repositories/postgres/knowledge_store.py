@@ -1863,29 +1863,6 @@ class KnowledgeStore:
             batch_size=self.seams.in_chunk_size(),
         )
 
-    def begin_extraction(
-        self,
-        source_id: str,
-        notebook_id: str,
-        run_id: str,
-        created_at: str,
-        *,
-        preserve_existing: bool = False,
-        indexing_pipeline_id: str = "",
-        indexing_pipeline_version: str = "builtin.chunk.v1",
-    ) -> None:
-        with self.database.write() as db:
-            self.begin_extraction_run(
-                db,
-                source_id,
-                notebook_id,
-                run_id,
-                created_at,
-                preserve_existing=preserve_existing,
-                indexing_pipeline_id=indexing_pipeline_id,
-                indexing_pipeline_version=indexing_pipeline_version,
-            )
-
     def finish_extraction(self, run_id: str, status: str, message: str) -> None:
         notebook_id = ""
         with self.database.write() as db:
@@ -2134,13 +2111,6 @@ class KnowledgeStore:
                 (json.dumps(ids),),
             ).fetchall()
         return {row["id"]: row["notebook_id"] for row in rows}
-
-    def usable_object_rows(self, notebook_id: str, object_ids: Sequence[str]):
-        with self.database.connect() as db:
-            rows = self.usable_object_rows_on(
-                db, object_ids, ("reviewed", "approved", "project_specific", "conflict"),
-            )
-        return [dict(row) for row in rows if row["notebook_id"] == notebook_id]
 
     @staticmethod
     def usable_object_rows_on(db: Any, object_ids, statuses,
@@ -3216,14 +3186,6 @@ class KnowledgeStore:
         )
 
     @staticmethod
-    def completion_generation_is_current(
-        connection: Any, notebook_id: str, source_id: str, run_id: str
-    ) -> bool:
-        return _completion_generation_is_current(
-            connection, notebook_id, source_id, run_id
-        )
-
-    @staticmethod
     def completion_validate_scope(
         connection: Any, notebook_id: str, source_id: str, run_id: str,
         object_ids: Sequence[str], element_ids: Sequence[str]
@@ -3607,21 +3569,6 @@ class KnowledgeStore:
         return deleted
 
     @staticmethod
-    def delete_relations_by_source_object(
-        connection: Any, notebook_id: str, source_object_id: str
-    ) -> None:
-        """Delete every edge OUT of one case object (identified_by/
-        diagnosed_by/fixed_by/requires_tool all have the case as source, per
-        the knowhow projection spec) — one call cleans all of a row's prior
-        edges regardless of which cell changed. Uses idx_knowledge_relations_
-        nb_source (notebook_id, source_object_id)."""
-        connection.execute(
-            "DELETE FROM knowledge_relations WHERE notebook_id = %s "
-            "AND source_object_id = %s",
-            (notebook_id, source_object_id),
-        )
-
-    @staticmethod
     def delete_relations_by_source(
         connection: Any, source_id: str
     ) -> None:
@@ -3630,24 +3577,6 @@ class KnowledgeStore:
         idx_knowledge_relations_source."""
         connection.execute(
             "DELETE FROM knowledge_relations WHERE source_id = %s", (source_id,)
-        )
-
-    @staticmethod
-    def insert_object_if_missing(
-        connection: Any, row: tuple
-    ) -> None:
-        """Upsert-by-absence for tool objects: a tool's id is a stable hash of
-        (table_id, normalized name), so the SAME tool referenced by multiple
-        rows always maps to the SAME id — the first row to mention it creates
-        the row, later rows are a no-op (INSERT OR IGNORE on the id PRIMARY
-        KEY) rather than a second, redundant insert attempt."""
-        connection.execute(
-            "INSERT INTO knowledge_objects "
-            "(id, notebook_id, object_type, status, owner, payload, evidence, "
-            "source_candidate_id, source_id, created_at, updated_at) "
-            "VALUES (%s, %s, %s, %s, '', %s, %s, NULL, %s, %s, %s) "
-            "ON CONFLICT (id) DO NOTHING",
-            _object_insert_row(row),
         )
 
     @staticmethod
@@ -3884,19 +3813,6 @@ class KnowledgeStore:
             (notebook_id, after_id, source_id, page_limit),
         ).fetchall()
         return [row["object_id"] for row in rows]
-
-    @staticmethod
-    def _direct_object_ids_for_source_batch(
-        db: Any,
-        source_id: str,
-        limit: int = _DELETE_OBJECT_BATCH_SIZE,
-    ) -> List[str]:
-        page_limit = max(1, min(int(limit), _DELETE_OBJECT_BATCH_SIZE))
-        rows = db.execute(
-            "SELECT id FROM knowledge_objects WHERE source_id = %s LIMIT %s",
-            (source_id, page_limit),
-        ).fetchall()
-        return [row["id"] for row in rows]
 
     @classmethod
     def _delete_object_id_batch(
@@ -4309,12 +4225,6 @@ class KnowledgeStore:
         return _compat_schema_rows(db.execute("SELECT * FROM object_schemas").fetchall())
 
     @staticmethod
-    def active_schema_rows(db: Any) -> List[dict]:
-        return _compat_schema_rows(db.execute(
-            "SELECT * FROM object_schemas WHERE status = 'active'"
-        ).fetchall())
-
-    @staticmethod
     def schema_row(db: Any, object_type: str) -> "dict | None":
         row = db.execute(
             "SELECT * FROM object_schemas WHERE object_type = %s", (object_type,)
@@ -4370,40 +4280,6 @@ class KnowledgeStore:
                 jsonb(_json_document(
                     list_fields_json, expected=list, field="schema list fields"
                 )),
-                normalize_timestamp(now),
-                normalize_timestamp(now),
-            ),
-        )
-
-    @staticmethod
-    def insert_induced_schema(
-        db: Any,
-        object_type: str,
-        plural: str,
-        fields_json: str,
-        primary: str,
-        description: str,
-        label: str,
-        rationale: str,
-        notebook_id: str,
-        now: str,
-    ) -> None:
-        db.execute(
-            """
-            INSERT INTO object_schemas
-            (object_type, plural, fields, primary_field, description, label,
-             list_fields, source, status, rationale, notebook_id, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, '[]', 'induced', 'proposed', %s, %s, %s, %s)
-            """,
-            (
-                object_type,
-                plural,
-                jsonb(_json_document(fields_json, expected=list, field="schema fields")),
-                primary,
-                description,
-                label,
-                rationale,
-                notebook_id,
                 normalize_timestamp(now),
                 normalize_timestamp(now),
             ),

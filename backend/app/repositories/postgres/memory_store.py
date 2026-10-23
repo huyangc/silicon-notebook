@@ -649,14 +649,6 @@ class MemoryStore:
         ).fetchone()
         return self._record(row), True
 
-    def _create_with_initial_revision(
-        self, write: MemoryWrite, changed_by: str, reason: str
-    ) -> MemoryRecord:
-        with self.database.write() as db:
-            item, created = self._insert_memory_on(db, write)
-            self._ensure_initial_revision_on(db, item, created, changed_by, reason)
-        return item
-
     def _ensure_initial_revision_on(
         self,
         db: object,

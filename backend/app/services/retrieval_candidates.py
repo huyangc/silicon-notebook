@@ -392,10 +392,6 @@ class _RetrievalState:
         return self.snapshots.vector_cache
 
     @property
-    def _unified_cache(self):
-        return self.snapshots.unified_cache
-
-    @property
     def _MIX_KG_KEY_BASE(self):
         return 1000
 

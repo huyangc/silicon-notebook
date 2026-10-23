@@ -273,23 +273,6 @@ class PostgresMaintenanceAdapter:
                 ).fetchall()
             ]
 
-    def source_ids_page(
-        self, notebook_id: str, *, after_id: str = "", limit: int = 500
-    ) -> list[str]:
-        """Bounded keyset form for callers that drive very large notebooks."""
-        if limit <= 0:
-            raise ValueError("limit must be positive")
-        with self._runtime.database.connect() as db:
-            return [
-                str(row["id"])
-                for row in db.execute(
-                    "SELECT id FROM sources WHERE notebook_id=%s "
-                    "AND id COLLATE \"C\">%s "
-                    "ORDER BY id COLLATE \"C\" LIMIT %s",
-                    (notebook_id, after_id, max(1, int(limit))),
-                ).fetchall()
-            ]
-
     def user_source_ids_page(
         self, notebook_id: str, *, after_id: str = "", limit: int = 500
     ) -> list[str]:
@@ -417,17 +400,6 @@ class PostgresMaintenanceAdapter:
             }
             for row in rows
         ]
-
-    def source_title_rows(self, notebook_id: str) -> list[dict]:
-        with self._runtime.database.connect() as db:
-            return [
-                dict(row)
-                for row in db.execute(
-                    "SELECT id,title FROM sources WHERE notebook_id=%s "
-                    "ORDER BY id COLLATE \"C\"",
-                    (notebook_id,),
-                ).fetchall()
-            ]
 
     def set_sources_doc_type(self, notebook_id: str, doc_type: str) -> None:
         with self._runtime.database.write() as db:

@@ -79,10 +79,6 @@ class InferredChain:
         """Compatibility alias for consumers naming the inferred type edge_type."""
         return self.inferred_edge_type
 
-    @property
-    def intermediate_object_id(self) -> str:
-        return self.via_object_id
-
     # Short aliases keep call sites readable while the explicit fields document
     # that all three values are object ids.
     @property

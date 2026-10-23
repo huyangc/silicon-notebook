@@ -1217,21 +1217,9 @@ class KnowhowStore:
             ).fetchall()
         return {row["value"] for row in rows}
 
-    def table_exists(self, table_id: str) -> bool:
-        """Cheap existence probe (a single ``SELECT 1``, not the full
-        columns/rows/cells hydration ``get_knowhow_table`` does) — for a
-        caller that only needs to know whether the row is still there, e.g.
-        ``KnowhowProjector.project_table``'s pre-terminal-write re-check
-        guarding against a concurrent ``delete_knowhow_table`` (a move or a
-        plain delete) landing mid-pass."""
-        with self.database.connect() as db:
-            return db.execute(
-                "SELECT 1 FROM knowhow_tables WHERE id = ?", (table_id,)
-            ).fetchone() is not None
-
     @staticmethod
     def table_exists_tx(connection: sqlite3.Connection, table_id: str) -> bool:
-        """Same probe as ``table_exists``, but against a caller-supplied
+        """Cheap existence probe (a single ``SELECT 1``) against a caller-supplied
         connection instead of opening its own ``database.connect()`` —
         mirrors ``KnowledgeStore``'s tx-scoped statics (e.g.
         ``delete_relations_by_source``). For a caller that must check-then-
@@ -1663,73 +1651,6 @@ class KnowhowStore:
                     origin=origin,
                 )
         return {"row_ids": row_ids, "skipped_anchor_values": skipped}
-
-    def add_knowhow_rows(
-        self,
-        table_id: str,
-        rows: list[dict[str, str]],
-        actor: str = "",
-        origin: str = "user",
-    ) -> list[str]:
-        """Bulk-insert MULTIPLE rows in ONE write transaction, recording a
-        SINGLE ``import_append`` flow entry covering all of them — the
-        batch-import counterpart to ``add_knowhow_row`` (spec §5.4:
-        "commit_append（导入追加几十行）→ 一条 import_append，payload 含
-        所有新行"). Each element of ``rows`` is a ``cells`` dict, exactly
-        like ``add_knowhow_row``'s own ``cells`` parameter; position is
-        always append order (current row count + its index in ``rows``).
-        Empty ``rows`` is a no-op (no transaction opened, nothing recorded)
-        — mirrors ``update_knowhow_cells``'s empty-batch convention. Does
-        NOT bump the table's ``mutation_seq`` itself — same division of
-        labor as ``add_knowhow_row``: bulk callers (commit_append) bump once
-        at the end via ``bump_knowhow_mutation_seq``.
-
-        This is a SEPARATE method from ``add_knowhow_row`` (rather than a
-        loop calling it N times) precisely so the N new rows land as ONE
-        flow entry instead of N ``row_add`` entries — looping over the
-        single-row method would call ``record_change`` once per row,
-        exactly the per-row noise spec §5.4 says a batch import must not
-        produce, and would leave the revert engine's ``import_append``
-        branch of ``_apply_before`` permanently unreachable (it already
-        exists but nothing has ever produced this ``kind`` of flow entry)."""
-        if not rows:
-            return []
-        now = self.now()
-        row_ids: list[str] = []
-        payload_rows: list[dict] = []
-        with self.database.write() as db:
-            count_row = db.execute(
-                "SELECT COUNT(*) AS n FROM knowhow_rows WHERE table_id = ?",
-                (table_id,),
-            ).fetchone()
-            base_position = count_row["n"]
-            for offset, cells in enumerate(rows):
-                row_id = self.new_id("khrow")
-                position = base_position + offset
-                db.execute(
-                    "INSERT INTO knowhow_rows (id, table_id, position, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (row_id, table_id, position, now, now),
-                )
-                written_cells = dict(cells or {})
-                for column_id, content_md in written_cells.items():
-                    db.execute(
-                        "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (self.new_id("khcel"), row_id, column_id, content_md, now),
-                    )
-                row_ids.append(row_id)
-                payload_rows.append({
-                    "row_id": row_id, "position": position, "created_at": now,
-                    "cells": written_cells, "code": [],
-                })
-            record_change(
-                db, new_id=self.new_id, now=self.now, table_id=table_id,
-                kind="import_append",
-                payload={"rows": payload_rows},
-                actor=actor, origin=origin,
-            )
-        return row_ids
 
     def set_knowhow_row_projection(self, row_id: str, status: str) -> None:
         with self.database.write() as db:
