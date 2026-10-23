@@ -101,6 +101,8 @@ from app.services.retrieval_run import (
     memoized_query_embedding,
     memoized_retrieval_value,
     retrieval_fanout_slot,
+    share_query_vector,
+    shared_query_vector,
 )
 from app.services.source_display import source_display_title
 from app.services.source_element_selection import (
@@ -1442,12 +1444,24 @@ class CandidateRetrievalService(_RetrievalState):
         key = query[: self.settings.embed_truncate_chars]
 
         def _compute() -> Optional[List[float]]:
-            vec = self.embedder.embed_query(key)
+            # Memory recall usually embedded this very text already: read its
+            # NATIVE vector (``shared_query_vector`` -- same text, same
+            # embedder only) and truncate a copy below, exactly as a fresh
+            # embed would be.
+            embedder = self.embedder
+            native = shared_query_vector(embedder, key)
+            vec = native if native is not None else embedder.embed_query(key)
             from app.services.vector_index import resolve_runtime_dim, truncate_vec
             rd = resolve_runtime_dim(self.settings)
             if rd and vec is not None and len(vec) > rd:
                 import numpy as np
                 vec = truncate_vec(np.asarray(vec, dtype=np.float32), rd).tolist()
+            elif native is None:
+                # Untruncated, the memo's value IS the native vector: offering
+                # it to a later Memory recall costs no second copy. A truncated
+                # one is never offered (Memory would score it 0 against its
+                # native vectors), nor is the native kept beside it.
+                share_query_vector(embedder, key, vec)
             return vec
 
         try:

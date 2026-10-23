@@ -18,6 +18,7 @@ from app.services.retrieval import (
     keyword_basis,
 )
 from app.services.context_spans import entry_lines
+from app.services.retrieval_run import share_query_vector, shared_query_vector
 from app.services.source_scope import memory_channel_allowed
 from app.services.vector_index import decode_vector
 
@@ -120,10 +121,7 @@ class MemoryRetriever:
         # pool's vectors are never all held at once.
         query_vector = None
         if any(decode_vector(row.get("vector")) is not None for row in rows):
-            try:
-                query_vector = self.embedder.embed_query(candidate_query)
-            except Exception:
-                query_vector = None
+            query_vector = self._query_vector(candidate_query)
         basis = keyword_basis(clean_query)
         hits: list[MemoryHit] = []
         for row in rows:
@@ -153,6 +151,29 @@ class MemoryRetriever:
                 )
             )
         return rerank_eligible_memory_hits(hits)[:limit]
+
+    def _query_vector(self, text: str):
+        """The query's NATIVE vector, or ``None`` when the embed fails.
+
+        Inside a retrieval run the vector is shared with the retrieval stage
+        (``retrieval_run.shared_query_vector``): this recall usually runs
+        first and embeds the research question, and ``_embed_query`` then
+        reads that vector -- truncating its own copy to the runtime dimension
+        -- instead of embedding the same text again. Only the exact text with
+        the same embedder is shared, and only the native vector: Memory's
+        stored vectors are native-dimension, against which a truncated query
+        would score 0 without a word. A failure stays silent here, as before;
+        nothing is offered, so the retrieval stage embeds (and reports) on
+        its own."""
+        vector = shared_query_vector(self.embedder, text)
+        if vector is not None:
+            return vector
+        try:
+            vector = self.embedder.embed_query(text)
+        except Exception:
+            return None
+        share_query_vector(self.embedder, text, vector)
+        return vector
 
     def notebook_memory_hits(
         self, user_id: str, notebook_id: str, query: str, limit: int = 8

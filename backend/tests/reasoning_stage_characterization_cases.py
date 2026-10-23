@@ -1042,15 +1042,18 @@ def _between(obs: Observation, first: str, last: str) -> list[str]:
 #: How often a plain run embeds the research question in total. The scenarios
 #: that pin it (``answer_sync``, ``direct_entry_without_run``) run in
 #: ``library_world``, where the asker has no Memory: the Memory recall, which
-#: runs before the run's embedding memo exists and embeds outside it, finds no
-#: candidate with a vector and so does not embed at all -- only the retrieval
-#: stage embeds the question, once, inside the memo.
+#: runs first and embeds outside the run's embedding memo, finds no candidate
+#: with a vector and so does not embed at all -- only the retrieval stage
+#: embeds the question, once, inside the memo.
 QUESTION_EMBEDS_PER_RUN = 1
 #: ... and in ``memory_world``, where the asker owns a confirmed Memory with a
-#: stored vector: that recall embeds the question as well (outside the memo),
-#: so the run totals one more. The skip must not fire here -- dropping this
-#: embed would zero every vector score of the Memory.
-QUESTION_EMBEDS_WITH_VECTOR_MEMORY = QUESTION_EMBEDS_PER_RUN + 1
+#: stored vector: that recall does embed the question (the skip must not fire
+#: -- dropping this embed would zero every vector score of the Memory), and the
+#: retrieval stage reads that native vector back
+#: (``retrieval_run.shared_query_vector``) instead of embedding the same text
+#: again, so the run still totals one. The scores this leaves byte-identical
+#: are pinned in ``memory_embed_share_cases``.
+QUESTION_EMBEDS_WITH_VECTOR_MEMORY = QUESTION_EMBEDS_PER_RUN
 
 
 def _assert_embedded_once_in_memo(obs: Observation) -> None:
@@ -1110,14 +1113,14 @@ def _expect_streamed_memory(obs: Observation) -> None:
         obs, "self._primary_llm_unconfigured", "self._build_reasoning_retriever")
     assert obs.trace_kinds().count("retrieve") == 2  # the scripted add_subquery ran
     assert response.reasoning_trace[0].duration_ms == 37  # the client's understanding_ms
-    # The asker's Memory has a stored vector, so the recall still embeds the
-    # research question (outside the memo) on top of the retrieval stage's own
-    # embed: exactly that one text, which here is the question carrying the
-    # confirmed contract, is embedded twice and every other text once.
-    twice = [text for text, n in collections.Counter(obs.embedded()).items() if n > 1]
-    assert len(twice) == 1 and twice[0].startswith(QUESTION), twice
-    assert collections.Counter(obs.embedded())[twice[0]] == QUESTION_EMBEDS_WITH_VECTOR_MEMORY
-    assert max(collections.Counter(t for t in obs.embedded() if t != twice[0]).values()) == 1
+    # The asker's Memory has a stored vector, so the recall embeds the
+    # research question -- the question carrying the confirmed contract -- and
+    # the retrieval stage reuses that vector: every text, that one included,
+    # is embedded exactly once.
+    embedded = collections.Counter(obs.embedded())
+    (question,) = [text for text in embedded if text.startswith(QUESTION)]
+    assert embedded[question] == QUESTION_EMBEDS_WITH_VECTOR_MEMORY, embedded
+    assert set(embedded.values()) == {1}, embedded
 
 
 def _expect_clarified(obs: Observation) -> None:
