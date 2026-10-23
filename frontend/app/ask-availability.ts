@@ -126,3 +126,27 @@ export function kgBlockedByBaseScope(
   }
   return decomposition.some((id) => mounted.has(id));
 }
+
+
+/**
+ * 已挂载、带图谱、**这次却没勾选**的参考库 —— 「勾选带图谱的参考库」那个行内动作要勾回的
+ * 就是这几个。只在 `kgBlockedByBaseScope` 为真时有意义。
+ *
+ * skew(拿不到「哪几个带图」的分解)时退回「所有没勾选的挂载库」:勾回的可能多于需要,
+ * 但每一个都本来就挂在这本库上、用户随时能再取消,不会凭空引入范围外的库。
+ */
+export function unselectedKgBases(
+  notebook: NotebookSummary | null,
+  selectedBaseNotebookIds: readonly string[],
+): NotebookRef[] {
+  const mounted = notebook?.base_notebooks ?? [];
+  const selected = new Set(selectedBaseNotebookIds);
+  const decomposition = notebook?.base_kg_notebook_ids;
+  if (decomposition === undefined) {
+    return notebook?.base_kg_available === true
+      ? mounted.filter((base) => !selected.has(base.id))
+      : [];
+  }
+  const withKg = new Set(decomposition);
+  return mounted.filter((base) => !selected.has(base.id) && withKg.has(base.id));
+}

@@ -46,20 +46,6 @@ function staticClassName(opening, sourceFile) {
 }
 
 
-/** 某个 JSX 开标签上 onClick 绑定的源码;没有绑定则返回 ""。 */
-function dynamicOnClick(opening) {
-  for (const attribute of opening.attributes.properties) {
-    if (!ts.isJsxAttribute(attribute)) continue;
-    if (attribute.name.getText(opening.getSourceFile()) !== "onClick") continue;
-    const initializer = attribute.initializer;
-    if (initializer && ts.isJsxExpression(initializer) && initializer.expression) {
-      return initializer.expression.getText(opening.getSourceFile());
-    }
-  }
-  return "";
-}
-
-
 /**
  * 该元素**正文**里的静态文字,用来按人话认出是哪一句提示。
  *
@@ -657,7 +643,7 @@ test("「将借用参考库」只点名本轮参与且带图的那几个", () =>
 // 上面那道门开始按勾选集拦人之后,「取不到图谱」有了两种成因,出路差着真金白银:挂了
 // 带图的库、只是这次没勾 → 把勾点回来即可;一个带图的库都没挂 → 才真需要为本笔记本
 // 跑一次整库的图谱整理。混在一起就会在只需点回一个复选框时劝用户去花那笔钱。
-test("「取不到图谱」的两种成因分开提示,只有该建图那一支给整理按钮", () => {
+test("「取不到图谱」的两种成因分开提示,只有该建图那一支给整理按钮", async () => {
   const source = initializerOf("kgBlockedByScope").getText(page);
   assert.match(
     source,
@@ -665,41 +651,57 @@ test("「取不到图谱」的两种成因分开提示,只有该建图那一支�
     `成因判定必须由共用纯函数按勾选集算出:${source}`,
   );
 
-  const hints = byClassName("mode-hint");
-  assert.equal(hints.length, 2, `严格推理提示应有两支,实际 ${hints.length} 支`);
-
-  // 判据是「这支提示里到底有没有那颗按钮」——按后代节点判,不按 renders 数标识符:
-  // onClick 挂在按钮的属性上,不是提示正文的直接表达式子节点。
-  const startsKgBuild = (hint) => {
-    let found = false;
-    const visit = (child) => {
-      if (
-        (ts.isJsxOpeningElement(child) || ts.isJsxSelfClosingElement(child))
-        && String(dynamicOnClick(child)).includes("startKgBuild")
-      ) found = true;
-      ts.forEachChild(child, visit);
-    };
-    visit(hint.node);
-    return found;
+  // 接线(page 一侧):提示只挂一处,成因就是上面那个按勾选集算出的值——写死成 false
+  // 会让「没勾」那支永远劝人整理整库;「勾选带图谱的参考库」勾回的是没勾的带图库。
+  const hints = [];
+  const visitPage = (node) => {
+    if (
+      (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node))
+      && node.tagName.getText(page) === "KgUnavailableHint"
+    ) hints.push(node);
+    ts.forEachChild(node, visitPage);
   };
-
-  const withBuildButton = hints.filter(startsKgBuild);
-  assert.equal(
-    withBuildButton.length,
-    1,
-    "「整理知识图谱」按钮只能出现在**一支**里 —— 另一支的出路是重新勾选参考库,"
-      + "给按钮就是劝用户为一个复选框跑一次整库整理",
-  );
+  visitPage(page);
+  assert.equal(hints.length, 1, `page.tsx 应当恰好挂一处 KgUnavailableHint,实际 ${hints.length}`);
+  const attr = (name) => hints[0].attributes.properties.find(
+    (property) => ts.isJsxAttribute(property) && property.name.getText(page) === name,
+  )?.initializer?.expression?.getText(page) ?? "";
+  assert.equal(attr("blockedByScope"), "kgBlockedByScope", "提示的成因必须接 kgBlockedByScope");
   assert.match(
-    withBuildButton[0].text,
-    /该笔记本尚无知识图谱/,
-    `带整理按钮的那支必须是「本笔记本没图」那一支:${withBuildButton[0].text}`,
+    attr("onSelectKgBases"),
+    /selectBases\([\s\S]*unselectedKgBases\(\s*currentNotebook,\s*selectedBaseNotebookIds\s*\)/,
+    `「勾选带图谱的参考库」必须勾回本次没勾的带图库:${attr("onSelectKgBases")}`,
   );
+  assert.match(attr("onBuild"), /startKgBuild\(/, "整理动作必须接 startKgBuild");
 
-  const scopeHint = hints.find((hint) => !startsKgBuild(hint));
+  // 组件一侧:`if (blockedByScope)` 那一支只给「勾选」,不出现整理动作;整理动作只在另一支。
+  const hintModule = await parseModule("kg-readiness-hint.tsx");
+  let component;
+  const visitModule = (node) => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === "KgUnavailableHint") component = node;
+    ts.forEachChild(node, visitModule);
+  };
+  visitModule(hintModule);
+  assert.ok(component, "kg-readiness-hint.tsx 里没找到 KgUnavailableHint(改名或删除?守卫失效)");
+  const scopeBranch = component.body.statements.find(
+    (statement) => ts.isIfStatement(statement) && statement.expression.getText(hintModule) === "blockedByScope",
+  );
+  assert.ok(scopeBranch, "KgUnavailableHint 没有按 blockedByScope 单独分支");
+  const scopeText = scopeBranch.thenStatement.getText(hintModule);
+  assert.doesNotMatch(
+    scopeText,
+    /\bonBuild\b/,
+    "「没勾选」那一支给了整理动作 —— 那是劝用户为一个复选框跑一次整库整理",
+  );
+  assert.match(scopeText, /\bonSelectKgBases\b/, "「没勾选」那一支的出路必须是勾回带图谱的参考库");
+  const restText = component.body.statements
+    .filter((statement) => statement !== scopeBranch)
+    .map((statement) => statement.getText(hintModule))
+    .join("\n");
+  assert.match(restText, /\bonBuild\b/, "「本笔记本没图」那一支必须给整理动作");
   assert.match(
-    scopeHint.text,
-    /没勾选/,
-    `另一支必须说清成因是「没勾选」:${scopeHint.text}`,
+    component.getText(hintModule),
+    /已整理知识图谱的参考库这次都没勾选/,
+    "「没勾选」那一支必须说清成因",
   );
 });

@@ -52,6 +52,7 @@ function renderPanel(overrides: Partial<Parameters<typeof SourceListPanel>[0]> =
     onOpenSource: noop,
     onDeleteSource: noop,
     onPage: noop,
+    onAddSource: noop,
     ...overrides,
   };
   return { props, ...render(<SourceListPanel {...props} />) };
@@ -63,6 +64,19 @@ test("空库给出引导文案而不是一片空白", () => {
   expect(screen.getByText("已保存的来源将显示在此处")).toBeInTheDocument();
   // 单页时 Pagination 自己返回 null，不该出现翻页控件。
   expect(screen.queryByRole("button", { name: "下一页" })).not.toBeInTheDocument();
+});
+
+test("空库那句里的「添加来源」就是入口；只读成员没有这个入口，也不叫他去点", async () => {
+  const user = userEvent.setup();
+  const onAddSource = vi.fn();
+  const { unmount } = renderPanel({ onAddSource });
+  await user.click(screen.getByRole("button", { name: "添加来源" }));
+  expect(onAddSource).toHaveBeenCalledOnce();
+  unmount();
+
+  renderPanel({ readOnlyWorkspace: true });
+  expect(screen.getByText("这本笔记本还没有来源。")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "添加来源" })).toBeNull();
 });
 
 test("来源逐行渲染：标题去扩展名、勾选框可切换、打开与删除把 source 交回调用方", async () => {

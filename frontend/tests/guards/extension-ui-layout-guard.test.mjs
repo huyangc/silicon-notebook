@@ -15,7 +15,7 @@
 //   ② `.workspace-extension-entry` 前缀的规则里没有颜色字面量,颜色只能取
 //      `var(--…)` / `inherit` / `transparent` / `currentColor` / `none`;
 //   ③ page.tsx 里 slot 为 `workspace.side_panel` 的 outlet 位于 `.sources-panel`
-//      的 JSX 子树内(它现在是来源栏里的一行入口,不是工作区网格的直接子级)。
+//      的 JSX 子树内(它现在是来源栏工具排里的一颗小按钮,不是工作区网格的直接子级)。
 //      「固定区、不在滚动的 .source-list 里」那一半由 extension-ui-boundary.test.mjs
 //      的直接父级断言(`div.workspace-panel-body.sources-body`)承重,本条只钉子树与
 //      「不是网格直接子级」两个方向;
@@ -124,6 +124,18 @@ test("扩展点不再撑出自己的工作区列（任何位置、含 @media 内
   );
   // 空转保护:选择器扫描本身必须真的看得见这份样式表。
   assert.ok(ruleSelectors().length > 100, "样式表没解析出规则（守卫失效）");
+});
+
+
+test("工具排两样都不在时不占间距", () => {
+  // 入口住在来源栏的工具排(与「补全论文信息」同排);两样都不渲染时这一排是空 div,
+  // 不隐藏就会白占 .sources-body 的一格 gap。
+  const hidden = ruleSelectors()
+    .filter((rule) => rule.selector.split(",").map((part) => part.trim()).includes(".sources-tool-row:empty"))
+    .some((rule) => (rule.nodes ?? []).some(
+      (node) => node.type === "decl" && node.prop === "display" && node.value === "none",
+    ));
+  assert.ok(hidden, ".sources-tool-row:empty 必须 display: none");
 });
 
 

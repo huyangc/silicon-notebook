@@ -15,6 +15,7 @@ import {
   skippedLibrariesNotice,
   sourceIsSelected,
   sourceScopePayload,
+  selectBases,
   toggleBaseSelection,
   toggleSourceSelection,
 } from "../../app/source-scope.ts";
@@ -266,4 +267,19 @@ test("有来源但尚未解析出证据时仍按来源数放行(信号只增不�
   // local_evidence_available 为假(还没有任何 chunk),但 5 篇来源全勾着——
   // 这与该字段存在之前的行为逐字一致,不能因为新信号而多拦一次。
   assert.equal(localScopeIsEmpty(5, 5, false), false);
+});
+
+
+test("selectBases 勾上给定的参考库,其余勾选不动,两种表示法都成立", () => {
+  // 全选态(ids 为排除项):勾上 = 从排除里拿掉。
+  let selection = { allSelected: true, ids: new Set(["base-a", "base-b"]) };
+  selection = selectBases(selection, ["base-a"]);
+  assert.equal(baseIsSelected(selection, "base-a"), true);
+  assert.equal(baseIsSelected(selection, "base-b"), false);
+  // 包含态(ids 为包含项):勾上 = 加进去,已勾的保持。
+  selection = { allSelected: false, ids: new Set(["base-c"]) };
+  selection = selectBases(selection, ["base-a", "base-c"]);
+  assert.equal(baseIsSelected(selection, "base-a"), true);
+  assert.equal(baseIsSelected(selection, "base-c"), true);
+  assert.equal(baseIsSelected(selection, "base-b"), false);
 });

@@ -108,11 +108,19 @@ export function linkedReportCheckKey(
 }
 
 /**
- * 标签与在途轮次上的那句「关联报告：<题目>」。题目为空（读取出错的回执、报告已删除的
+ * 在途轮次与会话徽标上的那句「关联报告：<题目>」。题目为空（读取出错的回执、报告已删除的
  * 在途任务）时只说「关联报告」——不编一个题目，也不猜它为什么不在。
  */
 export function linkedReportLabel(title: string): string {
   return title ? `关联报告：${title}` : "关联报告";
+}
+
+/**
+ * 来源栏「关联报告」分组里那枚标签上的字：分组标题已经说了「关联报告」，标签只放题目。
+ * 题目为空时说「（无题目）」——同样不编题目、不猜原因。
+ */
+export function linkedReportTagText(title: string): string {
+  return title || "（无题目）";
 }
 
 /** 回答下方回执里的报告名：「关联报告《题目》」；题目为空时只说「关联报告」。 */

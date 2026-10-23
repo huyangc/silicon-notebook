@@ -133,6 +133,20 @@ export function baseIsSelected(
     : selection.ids.has(baseNotebookId);
 }
 
+/** 把这几个参考库都勾上,其余勾选状态不动。 */
+export function selectBases(
+  selection: BaseScopeSelection,
+  baseNotebookIds: readonly string[],
+): BaseScopeSelection {
+  const ids = new Set(selection.ids);
+  for (const id of baseNotebookIds) {
+    // 全选态下 ids 是排除项:勾上 = 从排除里拿掉;否则 ids 是包含项:勾上 = 加进去。
+    if (selection.allSelected) ids.delete(id);
+    else ids.add(id);
+  }
+  return { ...selection, ids };
+}
+
 export function toggleBaseSelection(
   selection: BaseScopeSelection,
   baseNotebookId: string,

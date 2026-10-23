@@ -115,7 +115,8 @@ test("重新解析排上之后按 id 跟到这一次跑完;面板一关就不再
   assert.match(text, /const \{ untrackSources \} = sourceLibrary;\s*useEffect\(\(\) => \{\s*if \(!kgGraph\.analysisOpen\) untrackSources\(\);\s*\}, \[kgGraph\.analysisOpen, untrackSources\]\);/);
   // 问题清单的占位就是来源库那一份(引用同一篇来源的每一行都按它置灰)。
   assert.equal(onlyElement(page, "KgAnalysisView").bindings.reparsingSourceIds, "sourceLibrary.reparsingSourceIds");
-  // 来源详情的两个「重新解析」(标题旁的图标、降级提示里的按钮)用同一份占位置灰并就地写状态;
+  // 来源详情的三个「重新解析」(标题旁的图标、降级提示里的按钮、解析失败那句话里的行内动作)
+  // 用同一份占位置灰并就地写状态;
   // 来源库的 reparseSource 自己也拒收(use-source-library 的用例钉住)。
   assert.match(
     text,
@@ -123,7 +124,7 @@ test("重新解析排上之后按 id 跟到这一次跑完;面板一关就不再
   );
   const reparseButtons = jsxElements(page, "button")
     .filter((element) => (element.bindings?.onClick ?? "").includes("reparseSource()"));
-  assert.equal(reparseButtons.length, 2, "来源详情应有两个重新解析按钮");
+  assert.equal(reparseButtons.length, 3, "来源详情应有三个重新解析按钮");
   for (const button of reparseButtons) {
     assert.equal(button.bindings.disabled, "reparsingSource || sourceDetailDeleting || sourceDetailReparseQueued");
   }

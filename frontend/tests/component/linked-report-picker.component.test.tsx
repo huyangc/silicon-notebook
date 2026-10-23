@@ -1,4 +1,4 @@
-// 问答输入框的「关联报告」：选择器、标签、在途轮次的报告名（linked-report-picker.tsx），
+// 问答的「关联报告」：来源栏里的分组（选择器 + 标签）、在途轮次的报告名（linked-report-picker.tsx），
 // 以及它们接上真实的 useAskSession 之后的挂 / 换 / 摘与标签旁的冲突说明。
 import { useState } from "react";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
@@ -83,8 +83,9 @@ function renderPicker(props: Partial<Parameters<typeof LinkedReportPicker>[0]> =
   return { ...view, onSelect };
 }
 
+/** 分组标题行上的「选择 / 更换」：没挂报告时叫「选择」，挂着时叫「更换」。 */
 function openButton() {
-  return screen.getByRole("button", { name: "关联报告" });
+  return screen.getByRole("button", { name: /^(选择|更换)关联报告$/ });
 }
 
 
@@ -94,9 +95,9 @@ test("只列本笔记本里已完成的报告，读取中就地说明，选中�
   reportApi.listReports.mockReturnValue(pending.promise);
   const { onSelect } = renderPicker();
 
-  expect(screen.queryByRole("dialog", { name: "选择关联报告" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "可关联的报告" })).toBeNull();
   await user.click(openButton());
-  const popover = screen.getByRole("dialog", { name: "选择关联报告" });
+  const popover = screen.getByRole("region", { name: "可关联的报告" });
   expect(openButton()).toHaveAttribute("aria-expanded", "true");
   expect(within(popover).getByText("正在读取报告…")).toBeVisible();
   expect(reportApi.listReports).toHaveBeenCalledWith("notebook-a");
@@ -116,7 +117,7 @@ test("只列本笔记本里已完成的报告，读取中就地说明，选中�
 
   await user.click(within(popover).getByRole("button", { name: /储能政策梳理/ }));
   expect(onSelect).toHaveBeenCalledWith({ id: "r-done-2", title: "储能政策梳理" });
-  expect(screen.queryByRole("dialog", { name: "选择关联报告" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "可关联的报告" })).toBeNull();
   expect(openButton()).toHaveAttribute("aria-expanded", "false");
 });
 
@@ -139,14 +140,14 @@ test("没有已完成的报告时就地说明", async () => {
   expect(await screen.findByText("这个笔记本里还没有你生成完成的报告")).toBeVisible();
 });
 
-test("读取失败时在弹出层里就地说明，重试再读一次", async () => {
+test("读取失败时在展开的清单里就地说明，重试再读一次", async () => {
   const user = userEvent.setup();
   reportApi.listReports
     .mockRejectedValueOnce(new Error("network down"))
     .mockResolvedValueOnce([summary("r-1", "电池安全综述")]);
   renderPicker();
   await user.click(openButton());
-  const popover = screen.getByRole("dialog", { name: "选择关联报告" });
+  const popover = screen.getByRole("region", { name: "可关联的报告" });
   expect(await within(popover).findByText("暂时无法读取报告列表，请重试")).toBeVisible();
 
   await user.click(within(popover).getByRole("button", { name: "重试" }));
@@ -160,7 +161,7 @@ test("清单超过一页时分页，每次打开都从第一页开始、重新�
   reportApi.listReports.mockResolvedValue(reports);
   renderPicker();
   await user.click(openButton());
-  const popover = screen.getByRole("dialog", { name: "选择关联报告" });
+  const popover = screen.getByRole("region", { name: "可关联的报告" });
   await within(popover).findByRole("button", { name: /报告01/ });
   expect(within(popover).getAllByRole("listitem")).toHaveLength(LINKED_REPORT_PICKER_PAGE_SIZE);
   const pager = within(popover).getByRole("navigation", { name: "关联报告分页" });
@@ -169,30 +170,30 @@ test("清单超过一页时分页，每次打开都从第一页开始、重新�
   expect(within(popover).getByRole("button", { name: /报告21/ })).toBeVisible();
 
   await user.click(openButton());
-  expect(screen.queryByRole("dialog", { name: "选择关联报告" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "可关联的报告" })).toBeNull();
   await user.click(openButton());
-  const reopened = screen.getByRole("dialog", { name: "选择关联报告" });
+  const reopened = screen.getByRole("region", { name: "可关联的报告" });
   expect(await within(reopened).findByRole("button", { name: /报告01/ })).toBeVisible();
   expect(reportApi.listReports).toHaveBeenCalledTimes(2);
 });
 
-test("Esc 与点外部都会收起弹出层", async () => {
+test("Esc 与点外部都会收起清单", async () => {
   const user = userEvent.setup();
   reportApi.listReports.mockResolvedValue([]);
   renderPicker();
   await user.click(openButton());
-  expect(screen.getByRole("dialog", { name: "选择关联报告" })).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "可关联的报告" })).toBeInTheDocument();
   await user.keyboard("{Escape}");
-  expect(screen.queryByRole("dialog", { name: "选择关联报告" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "可关联的报告" })).toBeNull();
 
   await user.click(openButton());
-  expect(screen.getByRole("dialog", { name: "选择关联报告" })).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "可关联的报告" })).toBeInTheDocument();
   await user.click(document.body);
-  expect(screen.queryByRole("dialog", { name: "选择关联报告" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "可关联的报告" })).toBeNull();
 });
 
-// 键盘用户:持焦点的节点随弹出层卸载时,焦点不能掉到 body。
-test("在弹出层里按 Esc 收起，焦点回到「关联报告」按钮", async () => {
+// 键盘用户:持焦点的节点随清单卸载时,焦点不能掉到 body。
+test("在清单里按 Esc 收起，焦点回到「选择」按钮", async () => {
   const user = userEvent.setup();
   reportApi.listReports.mockResolvedValue([summary("r-1", "电池安全综述")]);
   renderPicker();
@@ -203,7 +204,7 @@ test("在弹出层里按 Esc 收起，焦点回到「关联报告」按钮", asy
   await user.tab();
   expect(option).toHaveFocus();
   await user.keyboard("{Escape}");
-  expect(screen.queryByRole("dialog", { name: "选择关联报告" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "可关联的报告" })).toBeNull();
   expect(openButton()).toHaveFocus();
 });
 
@@ -218,11 +219,11 @@ test("点外部收起不抢焦点", async () => {
   );
   await user.click(openButton());
   await user.click(screen.getByRole("textbox", { name: "别处的输入框" }));
-  expect(screen.queryByRole("dialog", { name: "选择关联报告" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "可关联的报告" })).toBeNull();
   expect(screen.getByRole("textbox", { name: "别处的输入框" })).toHaveFocus();
 });
 
-test("按「重试」后重试键被替换，焦点留在弹出层里", async () => {
+test("按「重试」后重试键被替换，焦点留在清单里", async () => {
   const user = userEvent.setup();
   const retried = deferred<ReportSummaryT[]>();
   reportApi.listReports
@@ -230,7 +231,7 @@ test("按「重试」后重试键被替换，焦点留在弹出层里", async ()
     .mockReturnValueOnce(retried.promise);
   renderPicker();
   await user.click(openButton());
-  const popover = screen.getByRole("dialog", { name: "选择关联报告" });
+  const popover = screen.getByRole("region", { name: "可关联的报告" });
   const retry = await within(popover).findByRole("button", { name: "重试" });
   retry.focus();
   await user.keyboard("{Enter}");
@@ -243,7 +244,7 @@ test("按「重试」后重试键被替换，焦点留在弹出层里", async ()
   expect(within(popover).getByRole("button", { name: /电池安全综述/ })).toBeVisible();
 });
 
-test("提交中（禁用）时按钮不可点，已打开的弹出层随之收起", async () => {
+test("提交中（禁用）时按钮不可点，已展开的清单随之收起", async () => {
   const user = userEvent.setup();
   reportApi.listReports.mockResolvedValue([summary("r-1", "电池安全综述")]);
   const { rerender, onSelect } = renderPicker();
@@ -251,22 +252,22 @@ test("提交中（禁用）时按钮不可点，已打开的弹出层随之收�
   await screen.findByRole("button", { name: /电池安全综述/ });
 
   rerender(<LinkedReportPicker notebookId="notebook-a" linked={null} disabled onSelect={onSelect} />);
-  expect(screen.queryByRole("dialog", { name: "选择关联报告" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "可关联的报告" })).toBeNull();
   expect(openButton()).toBeDisabled();
 
   // 解除禁用后不会自己弹回来。
   rerender(<LinkedReportPicker notebookId="notebook-a" linked={null} disabled={false} onSelect={onSelect} />);
-  expect(screen.queryByRole("dialog", { name: "选择关联报告" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "可关联的报告" })).toBeNull();
 });
 
-test("换了笔记本，旧笔记本的弹出层与迟到的清单一起作废", async () => {
+test("换了笔记本，旧笔记本展开的清单与迟到的结果一起作废", async () => {
   const user = userEvent.setup();
   const pending = deferred<ReportSummaryT[]>();
   reportApi.listReports.mockReturnValue(pending.promise);
   const { rerender, onSelect } = renderPicker();
   await user.click(openButton());
   rerender(<LinkedReportPicker notebookId="notebook-b" linked={null} disabled={false} onSelect={onSelect} />);
-  expect(screen.queryByRole("dialog", { name: "选择关联报告" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "可关联的报告" })).toBeNull();
   await act(async () => {
     pending.resolve([summary("r-a", "A 库的报告")]);
   });
@@ -274,22 +275,44 @@ test("换了笔记本，旧笔记本的弹出层与迟到的清单一起作废",
 });
 
 
-test("标签显示「关联报告：题目」，题目整串放进 title，移除键调回调", async () => {
+test("分组是来源栏的一组：标题「关联报告」，标签排在标题行与展开的清单之间，挂着报告时按钮叫「更换」", async () => {
+  const user = userEvent.setup();
+  reportApi.listReports.mockResolvedValue([]);
+  const { rerender, onSelect } = renderPicker({ children: <div data-testid="tag">标签</div> });
+  const group = screen.getByRole("region", { name: "关联报告" });
+  expect(group).toHaveClass("scope-group");
+  expect(within(group).getByRole("heading", { name: "关联报告" })).toBeInTheDocument();
+  expect(openButton()).toHaveAccessibleName("选择关联报告");
+  expect(openButton()).toHaveTextContent("选择");
+
+  await user.click(openButton());
+  const list = screen.getByRole("region", { name: "可关联的报告" });
+  const tag = screen.getByTestId("tag");
+  expect(tag.previousElementSibling).toContainElement(openButton());
+  expect(tag.nextElementSibling).toBe(list);
+
+  rerender(
+    <LinkedReportPicker notebookId="notebook-a" linked={{ id: "r-1", title: "电池安全综述" }} disabled={false} onSelect={onSelect} />,
+  );
+  expect(openButton()).toHaveAccessibleName("更换关联报告");
+  expect(openButton()).toHaveTextContent("更换");
+});
+
+test("标签只显示题目（分组标题已说了「关联报告」），题目整串放进 title，移除键调回调", async () => {
   const user = userEvent.setup();
   const onRemove = vi.fn();
   const title = "一个很长很长的研究问题".repeat(12);
   render(<LinkedReportChip report={{ id: "r-1", title }} verdict={null} note="" onRemove={onRemove} />);
-  const text = screen.getByText(`关联报告：${title}`);
-  expect(text).toHaveAttribute("title", `关联报告：${title}`);
+  const text = screen.getByText(title);
+  expect(text).toHaveAttribute("title", title);
   expect(text.closest(".linked-report-chip")).not.toHaveClass("unreadable");
   await user.click(screen.getByRole("button", { name: "移除关联报告" }));
   expect(onRemove).toHaveBeenCalledOnce();
 });
 
-test("题目为空时用不含题目的兜底文案", () => {
+test("题目为空时如实说没有题目，不编一个", () => {
   render(<LinkedReportChip report={{ id: "r-1", title: "" }} verdict={null} note="" onRemove={vi.fn()} />);
-  expect(screen.getByText("关联报告")).toBeInTheDocument();
-  expect(screen.queryByText(/关联报告：/)).toBeNull();
+  expect(screen.getByText("（无题目）")).toBeInTheDocument();
 });
 
 test("判词说这一轮不读报告时，标签置灰、原因紧挨着标签显示", () => {
@@ -302,7 +325,7 @@ test("判词说这一轮不读报告时，标签置灰、原因紧挨着标签�
       onRemove={vi.fn()}
     />,
   );
-  const chip = screen.getByText("关联报告：电池安全综述").closest(".linked-report-chip");
+  const chip = screen.getByText("电池安全综述").closest(".linked-report-chip");
   expect(chip).toHaveClass("unreadable");
   const status = screen.getByRole("status");
   expect(status).toHaveTextContent(reason);
@@ -374,33 +397,35 @@ function AskBox() {
     effects: { notify: vi.fn(), reportError: vi.fn(), ensureAskVisible: vi.fn() },
   });
   return (
-    <AskComposer
-      value={question}
-      placeholder="提问"
-      onChange={setQuestion}
-      onSubmit={() => undefined}
-      onAbort={() => undefined}
-      running={false}
-      focusSignal={focusSignal}
-      attachment={(
-        <LinkedReportChip
-          report={session.linkedReport}
-          verdict={session.linkedReportCheck}
-          note={session.linkedReportNote}
-          onRemove={session.unlinkReport}
-        />
-      )}
-    >
-      <LinkedReportPicker
-        notebookId="notebook-a"
-        linked={session.linkedReport}
-        disabled={false}
-        onSelect={(report) => {
-          session!.linkReport(report);
-          setFocusSignal((value) => value + 1);
-        }}
+    <>
+      <aside className="sources-panel">
+        <LinkedReportPicker
+          notebookId="notebook-a"
+          linked={session.linkedReport}
+          disabled={false}
+          onSelect={(report) => {
+            session!.linkReport(report);
+            setFocusSignal((value) => value + 1);
+          }}
+        >
+          <LinkedReportChip
+            report={session.linkedReport}
+            verdict={session.linkedReportCheck}
+            note={session.linkedReportNote}
+            onRemove={session.unlinkReport}
+          />
+        </LinkedReportPicker>
+      </aside>
+      <AskComposer
+        value={question}
+        placeholder="提问"
+        onChange={setQuestion}
+        onSubmit={() => undefined}
+        onAbort={() => undefined}
+        running={false}
+        focusSignal={focusSignal}
       />
-    </AskComposer>
+    </>
   );
 }
 
@@ -412,7 +437,7 @@ function openNotebook() {
 }
 
 async function pick(user: ReturnType<typeof userEvent.setup>, name: RegExp) {
-  await user.click(screen.getByRole("button", { name: "关联报告" }));
+  await user.click(openButton());
   await user.click(await screen.findByRole("button", { name }));
 }
 
@@ -421,21 +446,25 @@ test("选择器挂上一份报告、换成另一份、再从标签上摘掉", as
   reportApi.listReports.mockResolvedValue([summary("r-1", "电池安全综述"), summary("r-2", "储能政策梳理")]);
   render(<AskBox />);
   openNotebook();
-  expect(screen.queryByText(/关联报告：/)).toBeNull();
+  expect(document.querySelector(".linked-report-chip")).toBeNull();
+  expect(openButton()).toHaveAccessibleName("选择关联报告");
 
   await pick(user, /电池安全综述/);
-  expect(screen.getByText("关联报告：电池安全综述")).toBeInTheDocument();
-  // 标签在输入框之上。
-  const bar = screen.getByText("关联报告：电池安全综述").closest(".linked-report-bar")!;
-  expect(bar.nextElementSibling).toHaveClass("chat-input-main");
+  expect(screen.getByText("电池安全综述")).toBeInTheDocument();
+  // 标签住在来源栏的「关联报告」分组里，不在问答输入框里。
+  const bar = screen.getByText("电池安全综述").closest(".linked-report-bar")!;
+  expect(bar.closest(".sources-panel")).toContainElement(openButton());
+  expect(bar.closest(".chat-input-bar")).toBeNull();
+  expect(openButton()).toHaveAccessibleName("更换关联报告");
 
   await pick(user, /储能政策梳理/);
-  expect(screen.queryByText("关联报告：电池安全综述")).toBeNull();
-  expect(screen.getByText("关联报告：储能政策梳理")).toBeInTheDocument();
+  expect(screen.queryByText("电池安全综述")).toBeNull();
+  expect(screen.getByText("储能政策梳理")).toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "移除关联报告" }));
-  expect(screen.queryByText(/关联报告：/)).toBeNull();
+  expect(document.querySelector(".linked-report-chip")).toBeNull();
   expect(session!.linkedReport).toBeNull();
+  expect(openButton()).toHaveAccessibleName("选择关联报告");
 });
 
 test("范围冲突时，这一轮不读报告的原因就地显示在标签旁", async () => {
@@ -450,7 +479,7 @@ test("范围冲突时，这一轮不读报告的原因就地显示在标签旁",
   // 去抖之后发预检；判词回来，标签置灰、原因紧挨着它。
   const status = await screen.findByRole("status");
   expect(status).toHaveTextContent(reason);
-  const chip = screen.getByText("关联报告：电池安全综述").closest(".linked-report-chip")!;
+  const chip = screen.getByText("电池安全综述").closest(".linked-report-chip")!;
   expect(chip).toHaveClass("unreadable");
   expect(status.parentElement).toBe(chip.parentElement);
   await waitFor(() => expect(askApi.checkReportLink).toHaveBeenCalledTimes(1));
@@ -462,12 +491,12 @@ test("用键盘选中报告：标签挂上，焦点送进输入框", async () =>
   reportApi.listReports.mockResolvedValue([summary("r-1", "电池安全综述")]);
   render(<AskBox />);
   openNotebook();
-  screen.getByRole("button", { name: "关联报告" }).focus();
+  openButton().focus();
   await user.keyboard("{Enter}");
   const option = await screen.findByRole("button", { name: /电池安全综述/ });
   option.focus();
   await user.keyboard("{Enter}");
-  expect(screen.queryByRole("dialog", { name: "选择关联报告" })).toBeNull();
-  expect(screen.getByText("关联报告：电池安全综述")).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "可关联的报告" })).toBeNull();
+  expect(screen.getByText("电池安全综述")).toBeInTheDocument();
   expect(screen.getByRole("textbox", { name: "提问" })).toHaveFocus();
 });

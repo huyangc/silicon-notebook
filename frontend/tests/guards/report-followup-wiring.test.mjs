@@ -7,7 +7,8 @@
 //  - `ReportsPanel` 不再收到 `onFollowUp`（按钮整颗消失），或收到的是一个不开会话的函数；
 //  - 「就此追问」先切页签、后取范围——`readFollowupScope` 只在报告页签仍是它的 owner
 //    时作数，切走之后读回的是 null，高级模式下的范围静默不切；
-//  - `AskComposer` 的 `attachment` 写成常量 null，或标签读的不是 askSession 的视图；
+//  - 标签读的不是 askSession 的视图，或被包了第二份出现条件；
+//  - 「关联报告」分组被挪回问答输入框（来源类控件与回答方式/档位混在一行）；
 //  - 选择器被挪进只在高级模式挂载的分支（自动模式也必须能挂/换/摘，计划 D16）。
 //
 // 判据全部是 AST 上的语义身份（JSX 元素、属性表达式文本、调用目标与遍历顺序），不用行号
@@ -133,52 +134,36 @@ test("「就此追问」先取报告的检索范围、再开会话切页签,最�
 });
 
 
-test("AskComposer 的 attachment 就是 askSession 关联报告视图上的标签,不另加条件", () => {
-  const composers = jsxNodes("AskComposer");
-  assert.equal(composers.length, 1, "page.tsx 应当恰好挂一处 AskComposer");
-  let attachment = attributeExpression(composers[0], "attachment");
-  assert.ok(attachment, "AskComposer 没有 attachment:关联报告标签无处显示");
-  while (ts.isParenthesizedExpression(attachment)) attachment = attachment.expression;
-  // 「什么时候出现」只在 LinkedReportChip 里判(报告与说明都为空时它渲染 null)。page 再包
-  // 一层条件就是第二份判据:写成只看 note,用选择器挂上的报告就不显示、也摘不掉,提交却
-  // 照样带着它——而条件表达式里 chip 自己的 report 属性会让文本匹配恒真,所以这里要求
-  // attachment **就是** chip 元素本身。
-  const chip = ts.isJsxSelfClosingElement(attachment)
-    ? attachment
-    : ts.isJsxElement(attachment) ? attachment.openingElement : null;
-  assert.ok(
-    chip && chip.tagName.getText(page) === "LinkedReportChip",
-    "AskComposer 的 attachment 不是直接的 <LinkedReportChip>(包了条件、写成常量或换了元素)",
-  );
-  assert.equal(jsxNodes("LinkedReportChip").length, 1, "page.tsx 应当恰好挂一处 LinkedReportChip");
-  const chips = [chip];
-  const bound = (name) => attributeExpression(chips[0], name)?.getText(page);
-  assert.equal(bound("report"), "askSession.linkedReport");
-  assert.equal(bound("verdict"), "askSession.linkedReportCheck");
-  assert.equal(bound("note"), "askSession.linkedReportNote");
-  const onRemove = attributeExpression(chips[0], "onRemove");
-  assert.ok(onRemove, "LinkedReportChip 没有 onRemove");
-  assert.ok(
-    orderedCalls(onRemove).some((call) => call.target === "askSession.unlinkReport"),
-    "标签的移除键没有调 askSession.unlinkReport",
-  );
-});
+/** 祖先链上是否有某个 className 含 `cls` 的 JSX 元素(字面量 className)。 */
+function insideClass(chain, cls) {
+  return chain.some((node) => {
+    if (!ts.isJsxElement(node)) return false;
+    const attr = node.openingElement.attributes.properties.find(
+      (property) => ts.isJsxAttribute(property) && property.name.getText(page) === "className",
+    );
+    return Boolean(attr?.initializer && ts.isStringLiteral(attr.initializer)
+      && attr.initializer.text.split(/\s+/).includes(cls));
+  });
+}
 
 
-test("「关联报告」选择器挂在 AskComposer 里,两种界面模式都挂", () => {
+test("「关联报告」分组住在来源栏、不住在问答输入框,两种界面模式都挂", () => {
   const pickers = jsxNodes("LinkedReportPicker");
   assert.equal(pickers.length, 1, "page.tsx 应当恰好挂一处 LinkedReportPicker");
   const chain = ancestors(pickers[0]);
+  // 分区:挂哪份报告回答「读什么」,与来源同栏;输入框下排只放「怎么答」(回答方式、检索档位)。
+  assert.ok(insideClass(chain, "sources-panel"), "LinkedReportPicker 不在来源栏(.sources-panel)里");
   assert.ok(
-    chain.some((node) => jsxTagOf(node) === "AskComposer"),
-    "LinkedReportPicker 不在 AskComposer 的下排控件里",
+    !chain.some((node) => jsxTagOf(node) === "AskComposer" || jsxTagOf(node) === "AskModePicker"),
+    "LinkedReportPicker 又回到了问答输入框里:来源类控件与回答方式/档位混在同一行",
   );
-  assert.ok(
-    !chain.some((node) => jsxTagOf(node) === "AskModePicker"),
-    "LinkedReportPicker 被挪进了 AskModePicker:自动模式下它不挂载,标签就没法更换",
+  assert.equal(
+    attributeExpression(jsxNodes("AskComposer")[0], "attachment"),
+    null,
+    "AskComposer 又收到了 attachment:关联报告标签应当住在来源栏的分组里",
   );
   for (const node of chain) {
-    if (ts.isJsxElement(node) && jsxTagOf(node) === "AskComposer") break;
+    if (ts.isJsxElement(node) && jsxTagOf(node) === "aside") break;
     if (ts.isBinaryExpression(node) || ts.isConditionalExpression(node)) {
       assert.doesNotMatch(
         node.getText(page),
@@ -193,8 +178,45 @@ test("「关联报告」选择器挂在 AskComposer 里,两种界面模式都挂
   assert.ok(onSelect, "LinkedReportPicker 没有 onSelect");
   const selectCalls = orderedCalls(onSelect).map((call) => call.target);
   assert.ok(selectCalls.includes("askSession.linkReport"), "选择器选中后没有调 askSession.linkReport");
-  // 选中后弹出层卸载,焦点要送进输入框,不能落在 body。
+  // 选中后清单卸载,焦点要送进输入框,不能落在 body。
   assert.ok(selectCalls.includes("setAskComposerFocusSignal"), "选择器选中后没有把焦点送进输入框");
+});
+
+
+test("分组里的标签就是 askSession 关联报告视图上的那枚,不另加条件", () => {
+  const chips = jsxNodes("LinkedReportChip");
+  assert.equal(chips.length, 1, "page.tsx 应当恰好挂一处 LinkedReportChip");
+  // 「什么时候出现」只在 LinkedReportChip 里判(报告与说明都为空时它渲染 null)。page 再包
+  // 一层条件就是第二份判据:写成只看 note,用选择器挂上的报告就不显示、也摘不掉,提交却
+  // 照样带着它——所以要求标签是选择器的**直接** JSX 子元素。
+  const parent = chips[0].parent;
+  assert.ok(
+    ts.isJsxElement(parent) && jsxTagOf(parent) === "LinkedReportPicker",
+    "LinkedReportChip 不是 LinkedReportPicker 的直接子元素(包了条件、或挪出了分组)",
+  );
+  const bound = (name) => attributeExpression(chips[0], name)?.getText(page);
+  assert.equal(bound("report"), "askSession.linkedReport");
+  assert.equal(bound("verdict"), "askSession.linkedReportCheck");
+  assert.equal(bound("note"), "askSession.linkedReportNote");
+  const onRemove = attributeExpression(chips[0], "onRemove");
+  assert.ok(onRemove, "LinkedReportChip 没有 onRemove");
+  assert.ok(
+    orderedCalls(onRemove).some((call) => call.target === "askSession.unlinkReport"),
+    "标签的移除键没有调 askSession.unlinkReport",
+  );
+});
+
+
+test("「就此追问」在来源栏收着时把它展开:挂上的标签住在那里", () => {
+  const handler = findFunctionIn(page, "Home", "followUpReport");
+  // 读 ref:高级模式在 await 取范围之后才判,闭包里的 sourcesCollapsed 可能是点击那一帧的旧值。
+  const branch = ifBranchesIn(handler).find((item) => item.condition === "sourcesCollapsedRef.current");
+  assert.ok(branch, "followUpReport 没有按 sourcesCollapsedRef.current 分支(读闭包会拿到 await 之前的旧值)");
+  const expand = orderedCalls(handler).find((call) => call.target === "setSourcesCollapsedWithMorph");
+  assert.ok(
+    branch.thenCalls.includes("setSourcesCollapsedWithMorph") && expand?.args[0] === "false",
+    "来源栏收着时 followUpReport 没有展开它(setSourcesCollapsedWithMorph(false)):「就此追问」挂上的标签看不见",
+  );
 });
 
 

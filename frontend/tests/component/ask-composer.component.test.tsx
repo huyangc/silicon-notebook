@@ -112,35 +112,7 @@ describe("AskComposer", () => {
     expect(onSubmit).toHaveBeenCalledOnce();
   });
 
-  test("an attachment renders above the input row without changing how Enter submits", async () => {
-    const user = userEvent.setup();
-    const onSubmit = vi.fn();
-    function WithAttachment() {
-      const [value, setValue] = useState("question");
-      return (
-        <AskComposer
-          value={value}
-          placeholder="提问"
-          onChange={setValue}
-          onSubmit={onSubmit}
-          onAbort={() => undefined}
-          running={false}
-          attachment={<div data-testid="attachment">关联报告：电池安全综述</div>}
-        />
-      );
-    }
-    render(<WithAttachment />);
-    const attachment = screen.getByTestId("attachment");
-    const input = screen.getByRole("textbox", { name: "提问" });
-    expect(attachment.parentElement).toHaveClass("chat-input-bar");
-    expect(attachment.nextElementSibling).toHaveClass("chat-input-main");
-    expect(attachment.nextElementSibling).toContainElement(input);
-
-    await user.type(input, "{Enter}");
-    expect(onSubmit).toHaveBeenCalledOnce();
-  });
-
-  test("without an attachment the input row is the first thing in the bar", () => {
+  test("the input row is the first thing in the bar", () => {
     const { container } = render(<ControlledComposer onSubmit={() => undefined} />);
     const bar = container.querySelector(".chat-input-bar")!;
     expect(bar.firstElementChild).toHaveClass("chat-input-main");

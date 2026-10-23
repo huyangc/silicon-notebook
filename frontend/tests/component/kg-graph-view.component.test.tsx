@@ -63,6 +63,11 @@ function graphView(overrides: Partial<Props["kgGraph"]> = {}): Props["kgGraph"] 
 
 const noop = () => undefined;
 
+/** 画布空态那一句(动作按钮嵌在句子里,按整句文本断言)。 */
+function canvasEmpty() {
+  return document.querySelector(".kg-canvas-empty");
+}
+
 function renderView(overrides: Partial<Props> = {}) {
   const props: Props = {
     kgGraph: graphView(),
@@ -91,6 +96,8 @@ function renderView(overrides: Partial<Props> = {}) {
     relinkFromKgView: noop,
     confirmRefreshUnifiedKg: noop,
     startKgRebuild: noop,
+    startKgBuild: noop,
+    canBuildKg: true,
     confirmDeleteKg: noop,
     handleKgSearchChange: noop,
     changeKgRange: noop,
@@ -136,8 +143,8 @@ test("画布四态各渲染自己的曲面，只有 graph 态才挂 ForceGraph2D
   // empty 态按成因各说一句，且**先看图本身是不是空的**：删除知识图谱或从没整理过的库
   // 既没搜索也没过滤；即便还有一个搜索词挂着，「清空搜索」也兑现不了。
   const empty = renderView({ kgCanvas: "empty" });
-  expect(screen.getByText("还没有知识图谱内容。整理来源后会显示在这里。")).toBeTruthy();
-  expect(screen.queryByText("没有匹配的节点。清空搜索后可查看完整图谱。")).toBeNull();
+  expect(canvasEmpty()).toHaveTextContent("还没有知识图谱内容。整理知识图谱后会显示在这里。");
+  expect(canvasEmpty()).not.toHaveTextContent("没有匹配的节点");
   expect(screen.queryByTestId("force-graph")).toBeNull();
   empty.unmount();
 
@@ -146,8 +153,8 @@ test("画布四态各渲染自己的曲面，只有 graph 态才挂 ForceGraph2D
     kgSearching: true,
     kgGraph: graphView({ graph: { nodes: [], edges: [] }, merged: { nodes: [], edges: [] }, selectedTypes: ["claim"] }),
   });
-  expect(screen.getByText("还没有知识图谱内容。整理来源后会显示在这里。")).toBeTruthy();
-  expect(screen.queryByText("没有匹配的节点。清空搜索后可查看完整图谱。")).toBeNull();
+  expect(canvasEmpty()).toHaveTextContent("还没有知识图谱内容。整理知识图谱后会显示在这里。");
+  expect(canvasEmpty()).not.toHaveTextContent("没有匹配的节点");
   emptyGraphWhileSearching.unmount();
 
   // 构建轮询 20 分钟封顶后 vizBuilding 已归位、响应里的 viz_building 仍为 true：画布与
@@ -171,18 +178,60 @@ test("画布四态各渲染自己的曲面，只有 graph 态才挂 ForceGraph2D
     kgSearching: true,
     kgGraph: graphView({ graph: nonEmptyGraph, merged: nonEmptyGraph }),
   });
-  expect(screen.getByText("没有匹配的节点。清空搜索后可查看完整图谱。")).toBeTruthy();
+  expect(canvasEmpty()).toHaveTextContent("没有匹配的节点。清空搜索后可查看完整图谱。");
   emptySearch.unmount();
 
   const emptyFiltered = renderView({
     kgCanvas: "empty",
     kgGraph: graphView({ graph: nonEmptyGraph, merged: nonEmptyGraph, selectedTypes: ["claim"] }),
   });
-  expect(screen.getByText("当前类型过滤下没有节点。清除过滤后可查看完整图谱。")).toBeTruthy();
+  expect(canvasEmpty()).toHaveTextContent("当前类型过滤下没有节点。清除过滤后可查看完整图谱。");
   emptyFiltered.unmount();
 
   renderView({ kgCanvas: "graph" });
   expect(screen.getByTestId("force-graph")).toBeTruthy();
+});
+
+
+test("画布空态里说到的出路就是可点的字：清空搜索 / 清除过滤 / 整理知识图谱", async () => {
+  const user = userEvent.setup();
+  const nonEmptyGraph = {
+    nodes: [{ id: "K-1", object_type: "concept", payload: { name: "阈值" } }],
+    edges: [],
+  };
+  const handleKgSearchChange = vi.fn();
+  const searching = renderView({
+    kgCanvas: "empty",
+    kgSearching: true,
+    kgGraph: graphView({ graph: nonEmptyGraph, merged: nonEmptyGraph }),
+    handleKgSearchChange,
+  });
+  await user.click(screen.getByRole("button", { name: "清空搜索" }));
+  expect(handleKgSearchChange).toHaveBeenCalledWith("");
+  // 这句随图恢复而卸载:焦点落到搜索框,不掉到 body。
+  expect(screen.getByPlaceholderText("搜索节点名称或类型…")).toHaveFocus();
+  searching.unmount();
+
+  const onClearTypes = vi.fn();
+  const filtered = renderView({
+    kgCanvas: "empty",
+    kgGraph: graphView({ graph: nonEmptyGraph, merged: nonEmptyGraph, selectedTypes: ["claim"] }),
+    onClearTypes,
+  });
+  await user.click(screen.getByRole("button", { name: "清除过滤" }));
+  expect(onClearTypes).toHaveBeenCalledOnce();
+  filtered.unmount();
+
+  const startKgBuild = vi.fn();
+  const empty = renderView({ kgCanvas: "empty", startKgBuild });
+  await user.click(within(canvasEmpty() as HTMLElement).getByRole("button", { name: "整理知识图谱" }));
+  expect(startKgBuild).toHaveBeenCalledWith("nb-1");
+  empty.unmount();
+
+  // 只读成员、或这本库还没有来源(整理不出图谱):只说现状,不给死按钮。
+  renderView({ kgCanvas: "empty", readOnlyWorkspace: true, canBuildKg: false });
+  expect(canvasEmpty()).toHaveTextContent("还没有知识图谱内容。");
+  expect(within(canvasEmpty() as HTMLElement).queryByRole("button")).toBeNull();
 });
 
 

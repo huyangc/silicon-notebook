@@ -199,6 +199,8 @@ export function KgGraphView({
   relinkFromKgView,
   confirmRefreshUnifiedKg,
   startKgRebuild,
+  startKgBuild,
+  canBuildKg,
   confirmDeleteKg,
   handleKgSearchChange,
   changeKgRange,
@@ -282,6 +284,10 @@ export function KgGraphView({
   relinkFromKgView: () => void;
   confirmRefreshUnifiedKg: () => void;
   startKgRebuild: (notebookId: string) => void;
+  /** 从没整理过(或删掉之后)的空图上那句「整理知识图谱后会显示在这里」里的动作。 */
+  startKgBuild: (notebookId: string) => void;
+  /** 能不能整理(可写且这本库有来源;空库整理不出图谱)。为假时空图那句只说现状。 */
+  canBuildKg: boolean;
   confirmDeleteKg: () => void;
   handleKgSearchChange: (value: string) => void;
   changeKgRange: (limit: number) => void;
@@ -309,6 +315,23 @@ export function KgGraphView({
   children?: ReactNode;
 }) {
   const mergesPage = useClientPagination(kgGraph.pendingMerges, KG_PENDING_MERGE_PAGE_SIZE);
+  const kgSearchInputRef = useRef<HTMLInputElement | null>(null);
+  const emptyGraphHint = !canBuildKg || !currentNotebookId
+    ? "还没有知识图谱内容。"
+    : (
+      <>
+        还没有知识图谱内容。
+        <button
+          type="button"
+          className="link-button inline-action"
+          disabled={kgGraph.buildingKg || kgGraph.deleting}
+          onClick={() => startKgBuild(currentNotebookId)}
+        >
+          {kgGraph.buildingKg ? "整理中…" : "整理知识图谱"}
+        </button>
+        后会显示在这里。
+      </>
+    );
   const [mergeFocus, setMergeFocus] = useState<{ id: string; seq: number } | null>(null);
   const pendingMergesRef = useRef(kgGraph.pendingMerges);
   pendingMergesRef.current = kgGraph.pendingMerges;
@@ -376,7 +399,7 @@ export function KgGraphView({
     </div>
     <div className="kg-view-body">
       <aside className="kg-rail">
-        <input className="kg-search" placeholder="搜索节点名称或类型…" value={kgGraph.search} onChange={(e) => handleKgSearchChange(e.target.value)} />
+        <input ref={kgSearchInputRef} className="kg-search" placeholder="搜索节点名称或类型…" value={kgGraph.search} onChange={(e) => handleKgSearchChange(e.target.value)} />
         {!readOnlyWorkspace && (
         <div className="kg-rail-section">
           <h3>图谱处理</h3>
@@ -631,16 +654,50 @@ export function KgGraphView({
           // 从没整理过的库）。其中图谱索引构建轮询 20 分钟封顶后 vizBuilding 已归位、而
           // 响应里的 viz_building 仍为 true（kg-workspace-model.ts 的 kgCanvasState 登记的
           // 那个角落），这时与封顶那句 toast 说同一句话。图不空才轮到搜索 / 过滤两种成因。
+          //
+          // 每种成因的出路就是句子里可点的字(清空搜索 / 清除过滤 / 整理知识图谱),不让人
+          // 读完再去侧栏找;只读成员整理不了,那半句就不说。
           <p className="tool-hint kg-canvas-empty">
             {(kgGraph.merged?.nodes.length ?? 0) === 0
               ? kgGraph.graph?.viz_building
                 ? "图谱索引仍在后台构建，请稍后重新打开查看"
-                : "还没有知识图谱内容。整理来源后会显示在这里。"
+                : emptyGraphHint
               : kgSearching
-                ? "没有匹配的节点。清空搜索后可查看完整图谱。"
+                ? (
+                  <>
+                    没有匹配的节点。
+                    <button
+                      type="button"
+                      className="link-button inline-action"
+                      // 这句随图恢复而卸载:焦点落到刚被清空的搜索框,不掉到 body。
+                      onClick={() => {
+                        handleKgSearchChange("");
+                        kgSearchInputRef.current?.focus();
+                      }}
+                    >
+                      清空搜索
+                    </button>
+                    后可查看完整图谱。
+                  </>
+                )
                 : kgGraph.selectedTypes.length > 0
-                  ? "当前类型过滤下没有节点。清除过滤后可查看完整图谱。"
-                  : "还没有知识图谱内容。整理来源后会显示在这里。"}
+                  ? (
+                    <>
+                      当前类型过滤下没有节点。
+                      <button
+                        type="button"
+                        className="link-button inline-action"
+                        onClick={() => {
+                          onClearTypes();
+                          kgSearchInputRef.current?.focus();
+                        }}
+                      >
+                        清除过滤
+                      </button>
+                      后可查看完整图谱。
+                    </>
+                  )
+                  : emptyGraphHint}
           </p>
         ) : (
           <ForceGraph2D

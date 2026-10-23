@@ -1962,11 +1962,11 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     if (currentPolicy.askUnavailable || currentPolicy.scopeBlocked) {
       effectsRef.current.notify(currentPolicy.scopeBlocked && currentPolicy.advanced
         ? "当前检索范围为空，请至少选择一个来源或参考库。"
-        : "请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
+        : "请先添加来源，或在「笔记本设置」的「参考库」里挂载一个参考库，再开始对话。");
       return false;
     }
     if (requiresKg(selectedMode, askModesRef.current) && !currentPolicy.kgAvailable) {
-      effectsRef.current.notify(`${groupLabel(groupOf(selectedMode, askModesRef.current))}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
+      effectsRef.current.notify(`${groupLabel(groupOf(selectedMode, askModesRef.current))}需要知识图谱 — 可先整理该笔记本的知识图谱，或在「笔记本设置」的「参考库」里挂一个已整理的参考库`);
       return false;
     }
     return startAskRun(
@@ -2262,12 +2262,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     if (currentPolicy.askUnavailable || currentPolicy.scopeBlocked) {
       effectsRef.current.notify(currentPolicy.scopeBlocked && currentPolicy.advanced
         ? "当前检索范围为空，请至少选择一个来源或参考库。"
-        : "请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
+        : "请先添加来源，或在「笔记本设置」的「参考库」里挂载一个参考库，再开始对话。");
       return;
     }
     const submitMode = submissionAskMode(currentPolicy.advanced, mode);
     if (requiresKg(submitMode, askModesRef.current) && !currentPolicy.kgAvailable) {
-      effectsRef.current.notify(`${groupLabel(groupOf(submitMode, askModesRef.current))}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
+      effectsRef.current.notify(`${groupLabel(groupOf(submitMode, askModesRef.current))}需要知识图谱 — 可先整理该笔记本的知识图谱，或在「笔记本设置」的「参考库」里挂一个已整理的参考库`);
       return;
     }
     const askedAt = new Date().toISOString();
