@@ -2463,4 +2463,3 @@ class QueryStore:
                 one("SELECT COUNT(*) AS value FROM knowledge_objects WHERE notebook_id=%s"),
                 one("SELECT COUNT(*) AS value FROM knowledge_relations WHERE notebook_id=%s"),
             )
-

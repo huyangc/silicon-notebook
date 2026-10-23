@@ -2637,4 +2637,3 @@ class QueryStore:
                 one("SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id = ?"),
                 one("SELECT COUNT(*) FROM knowledge_relations WHERE notebook_id = ?"),
             )
-

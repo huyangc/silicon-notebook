@@ -8517,4 +8517,3 @@ class KnowledgeLifecycleService:
                         for sid, state in states.items() if state["exists"]
                     })
         return draft.result()
-
