@@ -347,6 +347,12 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "UnifiedKgStore.kg_finding_member_name_rows": KEY_BOUNDED,
         # retrieval legs
         "UnifiedKgStore.comention_peers": CEILING_BOUNDED,
+        # comparison-peer names (R3, plan 2026-10-23 T2): the first live
+        # members of the peer cluster ids the caller already holds (those
+        # that passed the ceiling gate), each with its own source_id; the
+        # caller names a peer only from members whose source_id is in the
+        # run's frozen ceiling, so a member outside it never names anything
+        "UnifiedKgStore.comparison_peer_members": KEY_BOUNDED,
         "_canonical_support_exists": CEILING_BOUNDED,
         "_object_support_exists": CEILING_BOUNDED,
         # PR-E2 E2-1: the weak-support hint's target probe (``SELECT 1``, judged

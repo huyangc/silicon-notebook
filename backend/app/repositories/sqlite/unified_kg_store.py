@@ -1744,17 +1744,23 @@ class UnifiedKgStore:
     def community_member_peers(
         self, notebook_id: str, community_id: str, exclude_canonical_id: str, limit: int,
         *, allowed_source_ids: Sequence[str] | None = None,
+        with_canonical_id: bool = False,
     ) -> List[sqlite3.Row]:
         """``allowed_source_ids`` 缺省 → SQL 与来源闸落地之前逐字相同。
 
         传进来时是本 run 给**该库**冻结的来源天花板:只留还有天花板内来源
         支撑的成员。空清单是显式 deny,不是「不限」(见 ``source_scope
         .source_ceiling_for`` 的 None / frozenset() 之分)。
+
+        ``with_canonical_id``:每行多带一列 ``canonical_id``——对比兄弟名的
+        R3 出口按它读天花板内成员(``communities.CommunityQueryService
+        ._ceiling_peer_names``);缺省 → 语句逐字不变。
         """
+        columns = "canonical_id, " if with_canonical_id else ""
         with self.database.connect() as db:
             if allowed_source_ids is None:
                 return db.execute(
-                    "SELECT canonical_name, centrality FROM community_members "
+                    f"SELECT {columns}canonical_name, centrality FROM community_members "
                     "WHERE notebook_id=? AND community_id=? AND canonical_id!=? "
                     f"AND generation = {_PUBLISHED_COMMUNITY_GEN} "
                     "ORDER BY centrality DESC, canonical_id ASC LIMIT ?",
@@ -1770,7 +1776,7 @@ class UnifiedKgStore:
                 bound=ceiling,
             )
             return db.execute(
-                "SELECT canonical_name, centrality FROM community_members "
+                f"SELECT {columns}canonical_name, centrality FROM community_members "
                 "WHERE notebook_id=? AND community_id=? AND canonical_id!=? "
                 f"AND generation = {_PUBLISHED_COMMUNITY_GEN} AND {gate} "
                 "ORDER BY centrality DESC, canonical_id ASC LIMIT ?",
@@ -1781,13 +1787,18 @@ class UnifiedKgStore:
     def comention_peers(
         self, notebook_id: str, canonical_id: str, min_bridge: int, limit: int,
         *, allowed_source_ids: Sequence[str] | None = None,
-    ) -> List[Tuple[str, int]]:
+        with_canonical_id: bool = False,
+    ) -> List[tuple]:
         """concept_comentions 两侧按 bridge_claims 降序取对端 canonical_name。
 
         ``allowed_source_ids`` 同 ``community_member_peers``:缺省 → 结果与来源闸
         落地之前逐值相同;传进来时闸挂两处——**取名字**的那条查询(出口:无
         天花板内来源支撑的对端一个名字都不出去)与共提行的 ``LIMIT`` **之前**
         (否则无支撑的高位对端占满名额,合格的低位对端被挤掉)。
+
+        ``with_canonical_id``:返回 ``(canonical_id, canonical_name, bridge_claims)``
+        三元组(对端的 canonical id 本来就是名字读的键,SQL 一字不变);缺省 →
+        ``(canonical_name, bridge_claims)``,与之前逐值相同。
 
         名字是**一条**按 canonical_id 集合的批量读,不是逐行一次:
         ① 逐行版本本来就是 N+1(N = ``limit``,默认 8);
@@ -1851,10 +1862,62 @@ class UnifiedKgStore:
                     (notebook_id, peers.param, notebook_id,
                      *gate_params)).fetchall()
             }
+            if with_canonical_id:
+                return [
+                    (other, names[other], claims)
+                    for other, claims in ordered if names.get(other)
+                ]
             return [
                 (names[other], claims)
                 for other, claims in ordered if names.get(other)
             ]
+
+    def comparison_peer_members(
+        self, notebook_id: str, canonical_ids: Sequence[str], *, limit: int,
+        after: str = "",
+    ) -> List[sqlite3.Row]:
+        """对比兄弟名 R3 的成员读:每个列出的簇在 member-id 序里的前 ``limit``
+        个活成员,**一条**语句。
+
+        行:``canonical_id``、``member_object_id``、成员**自己的** ``source_id``
+        (``knowledge_objects.source_id``,不是 evidence)、``member_name``
+        (payload 的 ``name``)。活成员的谓词与 ``KnowledgeStore
+        .concept_cluster_detail_rows`` 相同:已发布代的簇行、对象未 deprecated。
+        天花板判定不在这里——调用方拿冻结的天花板逐行判
+        (``communities.CommunityQueryService._ceiling_peer_names``)。
+
+        簇 id 清单是一个 JSON 数组参数(有界于调用方的兄弟名额:``limit`` 条
+        共提行或 ``candidates`` 条社区成员行),每个 id 驱动一次按
+        ``(notebook_id, canonical_id, member_object_id, …)`` 索引的有界读——与
+        ``concept_cluster_detail_rows(canonical_ids=...)`` 同形(SQLite 没有
+        LATERAL,用相关的 ``rowid IN (… LIMIT ?)`` 把枢纽簇也压在 ``limit`` 行)。
+        ``after`` 是 keyset 游标,只在单簇往后翻页时传;空清单不发语句。
+        """
+        values = sorted({str(value) for value in canonical_ids if value})
+        if not values or limit <= 0:
+            return []
+        peers = bind_ids(values)
+        seek, seek_params = (
+            ("AND cc2.member_object_id > ? AND ko2.id > ? ", (after, after))
+            if after else ("", ())
+        )
+        with self.database.connect() as db:
+            return db.execute(
+                "SELECT CAST(c.value AS TEXT) AS canonical_id, cc.member_object_id, "
+                "ko.source_id AS source_id, CASE WHEN json_valid(ko.payload) "
+                "THEN json_extract(ko.payload, '$.name') END AS member_name "
+                f"FROM {peers.sql} c "
+                "JOIN concept_clusters cc ON cc.rowid IN ("
+                "SELECT cc2.rowid FROM concept_clusters cc2 "
+                "JOIN knowledge_objects ko2 ON ko2.id=cc2.member_object_id "
+                "WHERE cc2.notebook_id=? AND cc2.canonical_id=CAST(c.value AS TEXT) "
+                "AND ko2.status!='deprecated' "
+                f"AND cc2.generation = {_PUBLISHED_CLUSTER_GEN} {seek}"
+                "ORDER BY cc2.member_object_id LIMIT ?) "
+                "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
+                "ORDER BY canonical_id, cc.member_object_id",
+                (peers.param, notebook_id, notebook_id, *seek_params, int(limit)),
+            ).fetchall()
 
     def source_index_backfilled(self, notebook_id: str) -> bool:
         """上面那道闸这次会不会走权威支,给**服务层**的可观测入口。
