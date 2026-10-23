@@ -309,14 +309,3 @@ class EmbeddingStore:
                 (notebook_id,),
             ).fetchall()
         }
-
-    @staticmethod
-    def embedded_relation_ids(db, notebook_id: str) -> set:
-        """relation_ids that already hold a relation vector (Task 26)."""
-        return {
-            row["relation_id"]
-            for row in db.execute(
-                "SELECT relation_id FROM relation_embeddings WHERE notebook_id=?",
-                (notebook_id,),
-            ).fetchall()
-        }
