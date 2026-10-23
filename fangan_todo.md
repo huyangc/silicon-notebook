@@ -90,10 +90,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       之前先量。
 - [ ] **首轮原文播种的人工抽问验收未做**：`docs/superpowers/specs/2026-09-07-reasoning-chunk-parity-keyword-arm-design_zh.md`
       「验收」一节给出的人工抽问（点名子部件 / 周期性 / 方向三句式 + 一句对比题，无图库与有图库各跑一遍）未做。
-- [ ] **首轮原文播种与 KG 初检索并行提交**：`_run_first_round` 里播种排在 PPR / 精确 seed
-      之后串行执行（为了 `seen_chunks` 去重与计数顺序），脱钩后有图 run 也要多等这一段。
-      可以把播种的 I/O 与 KG 初检索一起提前提交、在原位置按序合并（与 PPR 预取同形），
-      去掉串行等待。未做。
 - [ ] **首轮播种脱钩的已知残余（2026-09-29 评审登记，不修代码）**：
       ① `source_graph_activation.py` 约 419-424 行的 kg_source 邻居段 relevance 恒为 1.0，
       既不是 PPR 归一分也不是绝对融合分，按量纲判道会落进检索道——只在选中来源图
