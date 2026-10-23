@@ -46,9 +46,13 @@ written in.
 from __future__ import annotations
 
 import ast
+import os
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
+
+from tests.architecture.source_trees import read_source_tree
 
 ROOT = Path(__file__).resolve().parents[2]
 SCANNED = ("backend/app", "scripts", "examples")
@@ -170,7 +174,13 @@ def _local_constructor_names(tree: ast.AST) -> tuple[set[str], set[str]]:
 def _constructions(path: Path) -> list[tuple[str, ast.Call]]:
     """``(enclosing top-level function, call)`` for every construction; a
     finding is identified by its scope and source text, never a line number."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return list(_tree_constructions(read_source_tree(path)))
+
+
+@lru_cache(maxsize=4096)
+def _tree_constructions(tree: ast.Module) -> tuple[tuple[str, ast.Call], ...]:
+    # The shared tree is immutable; cache only its semantic projection. A path
+    # lookup still discovers and reads current source before reaching this cache.
     names, server_modules = _local_constructor_names(tree)
     found: list[tuple[str, ast.Call]] = []
 
@@ -190,7 +200,7 @@ def _constructions(path: Path) -> list[tuple[str, ast.Call]]:
                             and func.value.id in server_modules
                         )
                         # ``import app.api.deps`` then ``app.api.deps.x()``
-                        or ast.unparse(func.value) == SERVER_MODULE
+                        or _is_server_module(func.value)
                     )
                 )
                 if hit:
@@ -198,7 +208,17 @@ def _constructions(path: Path) -> list[tuple[str, ast.Call]]:
             visit(child, child_scope)
 
     visit(tree, "<module>")
-    return found
+    return tuple(found)
+
+
+def _is_server_module(node: ast.AST) -> bool:
+    # Avoid rendering every attribute expression in the repository just to
+    # recognize the one dotted module spelling accepted by this guard.
+    return (
+        isinstance(node, ast.Attribute) and node.attr == "deps"
+        and isinstance(node.value, ast.Attribute) and node.value.attr == "api"
+        and isinstance(node.value.value, ast.Name) and node.value.value.id == "app"
+    )
 
 
 def _call_names_in_source_order(node: ast.AST) -> list[str]:
@@ -223,10 +243,25 @@ def _call_names_in_source_order(node: ast.AST) -> list[str]:
 def _ungated_scale_entry_callers(path: Path) -> tuple[list[str], list[str]]:
     """``(callers, callers that never ran the gate first)`` of the one guest
     entry whose version gate lives in its callers."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    callers, ungated = _tree_scale_entry_callers(read_source_tree(path))
+    return list(callers), list(ungated)
+
+
+@lru_cache(maxsize=4096)
+def _tree_scale_entry_callers(tree: ast.Module) -> tuple[tuple[str, ...], tuple[str, ...]]:
     callers: list[str] = []
     ungated: list[str] = []
-    for function in ast.walk(tree):
+    nodes = tuple(ast.walk(tree))
+    if not any(
+        isinstance(node, ast.Call)
+        and (
+            isinstance(node.func, ast.Name) and node.func.id == CALLER_GATED_ENTRY
+            or isinstance(node.func, ast.Attribute) and node.func.attr == CALLER_GATED_ENTRY
+        )
+        for node in nodes
+    ):
+        return (), ()
+    for function in nodes:
         if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         if function.name == CALLER_GATED_ENTRY:
@@ -237,7 +272,7 @@ def _ungated_scale_entry_callers(path: Path) -> tuple[list[str], list[str]]:
         callers.append(function.name)
         if CALLER_GATE not in calls[: calls.index(CALLER_GATED_ENTRY)]:
             ungated.append(function.name)
-    return callers, ungated
+    return tuple(callers), tuple(ungated)
 
 
 def _verdict(relative: str, scope: str, call: ast.Call) -> tuple[str | None, str | None]:
@@ -275,6 +310,7 @@ def _scan() -> tuple[list[str], set[str]]:
 
 
 @pytest.mark.architecture_contract
+@pytest.mark.xdist_group(name="schema_guest_scans")
 def test_only_listed_places_compose_a_repository():
     violations, _ = _scan()
     assert not violations, (
@@ -287,6 +323,7 @@ def test_only_listed_places_compose_a_repository():
 
 
 @pytest.mark.architecture_contract
+@pytest.mark.xdist_group(name="schema_guest_scans")
 def test_every_listed_place_still_exists():
     _, used = _scan()
     listed = set(SCHEMA_OWNERS) | set(SERVING_PROCESS) | set(GUEST_ENTRIES)
@@ -295,6 +332,7 @@ def test_every_listed_place_still_exists():
 
 
 @pytest.mark.architecture_contract
+@pytest.mark.xdist_group(name="schema_guest_scans")
 def test_every_scale_build_entry_caller_runs_the_ledger_check_first():
     """``open_scale_build_repository`` composes with the guest keywords but
     leaves the version gate to its callers; each of them must call
@@ -326,6 +364,45 @@ def test_the_scan_catches_a_caller_that_skips_the_ledger_check(tmp_path):
         encoding="utf-8",
     )
     assert _ungated_scale_entry_callers(sample) == (["gated", "late"], ["late"])
+
+
+def test_scan_projections_see_changed_contents_and_discovered_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(f"{__name__}.ROOT", tmp_path)
+    sample = tmp_path / "scripts" / "tool.py"
+    sample.parent.mkdir()
+    sample.write_text("def run():\n    innocent_function()\n", encoding="utf-8")
+    assert _scan() == ([], set())
+    original_stat = sample.stat()
+    replacement = "def run():\n    create_repository()\n"
+    assert len(replacement.encode()) == original_stat.st_size
+    sample.write_text(replacement, encoding="utf-8")
+    os.utime(sample, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    violations, used = _scan()
+    assert used == set()
+    assert violations == [
+        "scripts/tool.py::run: would migrate and seed (re-hash the admin password): create_repository()"
+    ]
+    sample.unlink()
+    other = sample.with_name("other.py")
+    other.write_text(replacement, encoding="utf-8")
+    assert _scan()[0][0].startswith("scripts/other.py::run:")
+
+
+def test_scale_projection_sees_reordered_same_size_gate_calls(tmp_path):
+    sample = tmp_path / "caller.py"
+    gated = (
+        "def outer():\n"
+        "    def inner():\n"
+        "        verify_migration_ledger()\n"
+        "        open_scale_build_repository()\n"
+    )
+    sample.write_text(gated, encoding="utf-8")
+    assert _ungated_scale_entry_callers(sample) == (["outer", "inner"], [])
+    original_stat = sample.stat()
+    lines = gated.splitlines(keepends=True)
+    sample.write_text("".join([*lines[:2], lines[3], lines[2]]), encoding="utf-8")
+    os.utime(sample, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    assert _ungated_scale_entry_callers(sample) == (["outer", "inner"], ["outer", "inner"])
 
 
 def test_the_scan_catches_a_dotted_deps_call_and_a_bundle_factory(tmp_path):

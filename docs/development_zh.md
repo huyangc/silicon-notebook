@@ -387,6 +387,18 @@ G1 标准门并发运行 backend、contracts、frontend 三个 lane。`check_bac
 
 种子世界模板（`backend/tests/world_templates.py`）让一个模块按 pytest 进程只构建一次昂贵的种子世界，再给每条测试复制一份，每条测试仍只改自己的副本。构建在 `MonkeyPatch.context()` 内从进程基线环境开始，而不是继承触发构建的那条测试的环境；世界依赖的设置全部经 `env=` 显式给出，并计入模板身份，同一个 key 换了设置会直接报错；构建返回的 payload 只能是 JSON 纯数据，不能夹带活对象。构建结束必须关掉自己打开的一切：每个 SQLite 文件执行 `PRAGMA wal_checkpoint(TRUNCATE)` 且 WAL 必须为空，进程里不能再有指向世界目录的文件描述符。世界必须重开稳定（只屏蔽种子管理员每次打开都会重新派生的凭据列），中断作业恢复、种子补插这类打开即规范化在构建期就报红。`relocatable` 世界的任何行、存储文件和 payload 里都不能出现构建根路径；存了绝对路径的世界（上传源）使用 `pinned`，每条测试都从未被触碰的 `pristine` 副本重建固定的 `live` 目录。每次 materialize 都复核 pristine 的文件，并先复位按身份作键的进程级缓存，因为同一 worker 的测试现在共享 notebook 与用户 id；随后只回填构建期为本世界自己的 id 留下的条目（版本来自本世界历史的计数 memo、按原有时长回填的资产清扫节流），让每份副本开局时的缓存状态与以前自建世界时一致；`backend/app` 新增模块级缓存而没有在 helper 的清单里分类时，`test_world_templates.py` 会报红。
 
+MCP 协议 fixture 按 worker 为用户、笔记本、档案、成员关系和 token 构建一份
+`relocatable` 种子世界。payload 只保存实体 ID；每条测试从自己的数据库副本读取对象
+与 token 原文，并重新构建 app 和服务图。协议客户端与 lifespan 上下文仍按测试独立，
+整个模块不强制集中到单个 worker。一个副本中的 token 撤销、成员变更、token 使用记录
+或 app 状态变更不得影响另一个副本。构建时逐一核对原创建返回值与重读对象的具体类型
+和完整字段（包括签发的 token 原文），防止正确落库掩盖错误的接口返回值。
+
+Schema guest、第三方导入与笔记本生命周期源码守卫也经共享的按内容 AST 入口读取。
+Schema guest 扫描缓存每棵树的不可变语义投影，并把三条真实树检查放在同一小分组；
+笔记本生命周期扫描把所属函数信息放在独立投影中，不向共享 AST 节点写入 parent 属性。
+目录发现与源码读取仍每次执行，包括文件大小与时间戳不变的编辑；缓存投影不替代变异覆盖。
+
 同步测试（`test_sync_incremental_import.py`、`test_sync_import.py`、`test_sync_export.py`、`test_sync_incremental.py`）的种子库、全量导出与基线导入走 `pinned` 世界模板：上传源保存绝对 `file_path`，导入报告写在包目录旁。导出/导入报告以纯数据随 payload 携带（`backend/tests/sync_world_cases.py`），构建期先证明重建出的报告与原对象逐字段相等、类型不变，每条测试再各自重建一份。`test_sync_import.py` 另有一级「默认导入之后」的世界：只有测试体是「用默认参数导入一次、随后只读断言」的用例才经 `first_import` 读取构建期用真实代码跑出的导入结果；打补丁、观察导入过程或事件、换参数、或导入之后还要再行动的用例，仍在测试体内自己导入；模块收集时会拒绝请求 `first_import` 却又用 `monkeypatch`、`MonkeyPatch`、`setattr` 或再次调用导入的用例。把用例改成读这一级世界之前，必须证明给导入代码注入的缺陷仍让它变红。
 
 测试 fixture 的成本应跟随被测行为。Scale-build 的锁准入与接力测试使用尚未建索引

@@ -28,8 +28,10 @@ from app.api.mcp_server import TOOL_TIERS
 from app.core.config import get_settings
 from app.core.request_context import reset_request_user, set_request_user
 from app.api.source_routes import document_capacity_message
+from app.models.identity import AgentTokenIssued
 from app.models.schemas import MemoryHit, NotebookCreate
 from tests.model_testkit import bind_chat_client
+from tests.world_templates import world_env, world_template
 
 
 # DERIVED from the manifest, deliberately not a third hand-copied list.
@@ -245,35 +247,34 @@ def _route_fake_asks_through_ask_with_job(service, monkeypatch) -> None:
     monkeypatch.setattr(service, "ask_with_job", ask_with_job)
 
 
-@pytest.fixture
-def mcp_env(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'mcp.db'}")
-    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
-    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
-    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
-    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "")
-    monkeypatch.setenv("EMBED_PROVIDER", "")
+_MCP_WORLD_ENV = {
+    "SILICON_NOTEBOOK_AUTH_OPTIONAL": "false",
+    "EVENT_LOG_ENABLED": "false",
+    "LLM_LOG_ENABLED": "false",
+    "OPENAI_COMPAT_API_KEY": "",
+    "EMBED_PROVIDER": "",
     # MinerU must be cleared EXPLICITLY (repo red line): pydantic-settings would
     # otherwise read the repository-root .env and give these tests a real cloud
     # token, at which point add_source_url's probe path could reach the network.
     # Cleared here rather than per-test because Settings is captured when the
     # fixture builds the app — a later monkeypatch would not reach the runtime.
-    monkeypatch.setenv("MINERU_MODE", "off")
-    monkeypatch.setenv("MINERU_API_URL", "")
-    monkeypatch.setenv("MINERU_API_TOKEN", "")
+    "MINERU_MODE": "off",
+    "MINERU_API_URL": "",
+    "MINERU_API_TOKEN": "",
     # Startup declares the public deployment as HTTPS and pins the strict
     # (fail-closed) policy so the runtime transport still rejects a remote
     # client that reaches ASGI over plain HTTP. The product default is now
     # open (MCP_REQUIRE_HTTPS unset); these tests exercise the strict path.
-    monkeypatch.setenv("MCP_PUBLIC_URL", "https://memory.example.test/mcp")
-    monkeypatch.setenv("MCP_REQUIRE_HTTPS", "1")
-    get_settings.cache_clear()
-    repository.cache_clear()
+    "MCP_PUBLIC_URL": "https://memory.example.test/mcp",
+    "MCP_REQUIRE_HTTPS": "1",
+}
 
+
+def _seed_mcp_world(root):
+    """Only persisted seed data is shared; no app or service survives the build."""
     from app.main import create_app
 
-    app = create_app()
+    create_app()
     identity = identity_repository()
     catalog = notebook_catalog_repository()
     sharing = notebook_sharing_repository()
@@ -307,23 +308,163 @@ def mcp_env(tmp_path, monkeypatch):
     bob_token = service.issue_agent_token(
         bob.id, bob_profile.id, scopes, notebook.id, [notebook.id], None
     )
+    created = {
+        "alice": alice, "bob": bob, "notebook": notebook, "other": other,
+        "profile_a": profile_a, "profile_b": profile_b,
+        "bob_profile": bob_profile, "token_a": token_a, "token_b": token_b,
+        "restricted": restricted, "bob_token": bob_token,
+    }
+    ids = {name: item.id for name, item in created.items()}
+    _assert_mcp_seed_returns(created, _read_mcp_seed(ids))
+    return ids
+
+
+def _reopen_mcp_world(root):
+    from app.main import create_app
+
+    create_app()
+    return repository()
+
+
+def _mcp_template(tmp_path_factory):
+    return world_template(
+        tmp_path_factory, "mcp-auth-world", _seed_mcp_world, _reopen_mcp_world,
+        env=_MCP_WORLD_ENV,
+    )
+
+
+def _read_mcp_seed(ids):
+    """Rebuild the creation results from this test's persisted world."""
+    identity = identity_repository()
+    catalog = notebook_catalog_repository()
+    service = mcp_memory_repository()
+    users = {}
+    with repository()._runtime.database.connect() as db:
+        for name in ("alice", "bob"):
+            user = db.execute("SELECT * FROM users WHERE id = ?", (ids[name],)).fetchone()
+            profile = db.execute(
+                "SELECT * FROM user_profiles WHERE user_id = ?", (ids[name],)
+            ).fetchone()
+            users[name] = identity._user_profile(user, profile)
+    marker = set_request_user(users["alice"])
+    try:
+        notebooks = {
+            name: catalog.get_notebook(ids[name]) for name in ("notebook", "other")
+        }
+    finally:
+        reset_request_user(marker)
+    profiles = {
+        profile.id: profile for user in users.values()
+        for profile in service.list_agent_profiles(user.id)
+    }
+    tokens = {
+        token.id: AgentTokenIssued(
+            **token.model_dump(include=set(AgentTokenIssued.model_fields) - {"token"}),
+            token=service.agent_token_secret(user.id, token.id),
+        )
+        for user in users.values() for token in service.list_agent_tokens(user.id)
+    }
+    return {
+        **users,
+        **notebooks,
+        **{name: profiles[ids[name]] for name in ("profile_a", "profile_b", "bob_profile")},
+        **{name: tokens[ids[name]] for name in ("token_a", "token_b", "restricted", "bob_token")},
+    }
+
+
+def _assert_mcp_seed_returns(created, persisted):
+    # The old fixture handed production's creation returns to every test.
+    # Reject a seed whose re-read would hide a wrong return value (especially
+    # an issued raw token differing from the one the database authenticates).
+    # Avoid pytest's value-rich equality diff: these models carry credentials.
+    __tracebackhide__ = True
+    for name, original in created.items():
+        restored = persisted[name]
+        if type(original) is not type(restored) or original.model_dump() != restored.model_dump():
+            raise AssertionError(f"MCP seed creation return differs from storage: {name}")
+
+
+def _open_mcp_world(root, ids, monkeypatch):
+    for name, value in {**_MCP_WORLD_ENV, **world_env(root)}.items():
+        monkeypatch.setenv(name, value)
+    get_settings.cache_clear()
+    repository.cache_clear()
+    from app.main import create_app
+
+    app = create_app()
+    service = mcp_memory_repository()
     _route_fake_asks_through_ask_with_job(service, monkeypatch)
     return {
         "app": app,
-        "sharing": sharing,
+        "sharing": notebook_sharing_repository(),
         "service": service,
-        "alice": alice,
-        "bob": bob,
-        "notebook": notebook,
-        "other": other,
-        "profile_a": profile_a,
-        "profile_b": profile_b,
-        "bob_profile": bob_profile,
-        "token_a": token_a,
-        "token_b": token_b,
-        "restricted": restricted,
-        "bob_token": bob_token,
+        **_read_mcp_seed(ids),
     }
+
+
+@pytest.fixture
+def mcp_env(tmp_path, tmp_path_factory, monkeypatch):
+    # Each worker seeds once; each test gets a new database, storage directory,
+    # app, service graph and protocol session. Do not group this whole module
+    # onto one worker: the actual MCP traffic remains independently parallel.
+    root, ids = _mcp_template(tmp_path_factory).materialize(tmp_path)
+    return _open_mcp_world(root, ids, monkeypatch)
+
+
+def test_mcp_seed_rejects_an_issued_token_that_differs_from_storage(tmp_path, monkeypatch):
+    from app.services.memory_service import MemoryService
+
+    issue = MemoryService.issue_agent_token
+
+    def wrong_return(self, *args, **kwargs):
+        result = issue(self, *args, **kwargs)
+        return result.model_copy(update={"token": "wrong-issued-token"})
+
+    monkeypatch.setattr(MemoryService, "issue_agent_token", wrong_return)
+    for name, value in {**_MCP_WORLD_ENV, **world_env(tmp_path)}.items():
+        monkeypatch.setenv(name, value)
+    get_settings.cache_clear()
+    with pytest.raises(AssertionError, match="creation return differs from storage: token_a"):
+        _seed_mcp_world(tmp_path)
+
+
+def test_mcp_world_copies_restore_auth_and_application_isolation(
+    tmp_path, tmp_path_factory, monkeypatch,
+):
+    template = _mcp_template(tmp_path_factory)
+    first_root, first_ids = template.materialize(tmp_path, "first")
+    first = _open_mcp_world(first_root, first_ids, monkeypatch)
+    first_app, first_service = first["app"], first["service"]
+    raw = first["token_a"].token
+    assert first_service.resolve_agent_token(raw) is not None
+    first_service.revoke_agent_token(first["alice"].id, first["token_a"].id)
+    first["sharing"].remove_member(first["notebook"].id, first["bob"].id)
+    assert not first["sharing"].user_can_read_notebook(
+        first["notebook"].id, first["bob"].id
+    )
+    first_app.dependency_overrides[repository] = lambda: "first copy only"
+    first_app.state.mcp_copy_sentinel = True
+    repository().close()
+    repository.cache_clear()
+
+    second_root, second_ids = template.materialize(tmp_path, "second")
+    second = _open_mcp_world(second_root, second_ids, monkeypatch)
+    assert second_root != first_root
+    assert second["service"] is not first_service
+    assert second["app"] is not first_app
+    assert second["app"].dependency_overrides == {}
+    assert not hasattr(second["app"].state, "mcp_copy_sentinel")
+    assert second["token_a"].token == raw
+    initial = next(
+        token for token in second["service"].list_agent_tokens(second["alice"].id)
+        if token.id == second["token_a"].id
+    )
+    assert initial.revoked_at is None and initial.last_used_at is None
+    assert second["service"].resolve_agent_token(raw) is not None
+    assert second["service"].resolve_agent_token(second["bob_token"].token) is not None
+    assert second["sharing"].user_can_read_notebook(
+        second["notebook"].id, second["bob"].id
+    )
 
 
 @pytest.mark.anyio
