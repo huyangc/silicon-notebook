@@ -78,11 +78,13 @@ HANDLED_RELINKED = "relinked"
 DECIDED_CANDIDATE_STATUSES = ("confirmed", "rejected", "deferred")
 
 # Stored evidence the read side uses and never returns (codex #941 R3). F4's
-# ``member_seeds`` are the v1 seeds of EVERY member of the group's canonicals,
-# hidden (Memory / Knowhow) members included — normalised, readable names past
-# the reader-visible boundary (docs/development.md: who may read a Memory- or
-# Knowhow-derived source). They exist to match stored merge decisions
-# (`f4_member_seeds`); ``seeds_truncated`` only qualifies them. Everything else
+# ``member_seeds`` are the v1 seeds of EVERY member of the group's canonicals:
+# internal keys that match stored merge decisions (`f4_member_seeds`), nothing
+# a reader needs; ``seeds_truncated`` only qualifies them. The findings' readers
+# are the notebook's own, who may read every member a shared cluster holds
+# (Knowhow projections are notebook-wide; no shared cluster holds Memory once
+# the notebook is isolated -- docs/development.md on merged knowledge object
+# ids), so leaving them out is economy, not the visibility boundary. Everything else
 # a row carries is a count, a visible source's id / title, a canonical id (the
 # identifier pending merges and the graph return to the same readers) or a
 # name read from visible sources' own objects.

@@ -187,6 +187,15 @@ contributor constraints, not a second implementation history.
     viewer may not read. The assembly tripwires in `test_kg_viewer_scope_assembly.py` verify
     that the switch (`STORE_READERS_TAKE_VIEWER_ID`) matches the keywords the stores take and
     that the isolation-marker reader is wired.
+  - A merged knowledge object's id (`K-` / `KL-` / `KF-` / `KP-` plus the smallest seed of all
+    its members) and its stored `canonical_name` can spell any member, so return them only to a
+    reader who may read every member's source: the notebook's own readers (Knowhow projections
+    are notebook-wide, and no shared cluster holds Memory once a notebook is isolated). A mounted
+    library read by a non-member answers every cluster by its first visible member, and treats a
+    cluster id given as input as unknown (`KgViewerScope` built for the non-member); a name taken
+    out of a library under a source ceiling comes from a member whose own source is in that
+    ceiling (comparison peers in `communities.py`). A new surface that hands a cluster id or name
+    to anyone else follows the same split.
   - For a notebook without a Memory source, scale and viz artifacts are byte-identical to those
     built before the Memory isolation except in three manifests: the main and viz manifests gain
     `memory_isolation`, `memory_sources_digest` and `shared_content_digest`, and every version
