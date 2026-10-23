@@ -29,9 +29,9 @@ _CANCEL_POLL_SECONDS = 0.05
 #: after it; a report scout's stage embed and its Memory recall, repeated per
 #: library -- so two suffice; a report's per-section recalls, each with its own
 #: text and none ever read back, can then never pile up. On top of the limit,
-#: a Memory recall that has to embed first drops the vectors earlier Memory
-#: recalls offered (``drop_query_vectors``), so the run never holds an
-#: unread Memory vector while the next one is computed.
+#: whichever side has to embed first drops the vectors Memory recalls offered
+#: (``drop_query_vectors``), so an unread Memory vector lives only until the
+#: run's next embed and the run never holds more than it did before.
 QUERY_VECTOR_SHARE_LIMIT = 2
 _RUN_KINDS = frozenset({
     "ask_chunk",
@@ -447,12 +447,13 @@ def share_query_vector(embedder: Any, text: str, vector: Any, *,
 def drop_query_vectors(owner: str) -> None:
     """Forget the vectors ``owner`` offered earlier in this run.
 
-    Memory recall calls it before it embeds a text nobody offered: its own
-    earlier offers were for other texts, and a report recalls Memory once per
-    section with a new text each time that nothing reads back. Dropping them
-    first keeps a run from holding one more native vector than before the
-    hand-over existed while the next one is computed. A stage offer is the
-    very list the embedding memo already holds, so it costs nothing to keep.
+    Both sides call it with ``"memory"`` before they embed a text nobody
+    offered: a Memory vector not read by then is for another text, and a
+    report recalls Memory once per section with a new text each time that
+    nothing reads back. Dropping it first keeps a run from holding one more
+    native vector than before the hand-over existed while the next one is
+    computed and used. A stage offer is the very list the embedding memo
+    already holds, so it costs nothing to keep and is never dropped.
     """
     state = current_retrieval_run()
     if state is not None:
