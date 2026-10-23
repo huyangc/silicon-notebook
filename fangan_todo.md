@@ -1,6 +1,10 @@
 # silicon-notebook 待办（fangan_todo.md）
 
-更新日期：2026-10-19（用户当日四条裁决已落地并记入 `fangan_done.md` §61：本机热门禁目标改 100 秒；
+更新日期：2026-10-23（图谱分析「问题清单」特性已全部合入并记入 `fangan_done.md` §64，本文件相应补登：
+第二节「知识图谱」新增三条（换描述模型或提示词后没有重写概念描述的路径、隐藏成员名字经 canonical id 暴露、
+问题清单阈值待生产演练复核），第四节「其它残余」新增两条（Uvicorn 访问日志里其它路由的查询串、`.snbk`
+归档不带种子空间与板块分区列），`communities.title` / `summary` / `findings` 一条补记 v102 / 0083 增列时
+未一并删列；此前 2026-10-19：用户当日四条裁决已落地并记入 `fangan_done.md` §61：本机热门禁目标改 100 秒；
 `facade_surface.json` 细节字段守卫不上、全局回答 synthesis-only 重合成不做、退役 chunk 流水线不做，三者登记在第四节
 「产品与守卫裁决」组；第四节新增「整改计划刻意不做、只登记」：整改计划里标为只登记、此前只留在程序
 台账的性能 / 结构 / 工程卫生项逐条按代码复核后补登；移除过时的「BM25 / FTS5 / tsvector 全文索引：暂缓」
@@ -33,6 +37,8 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
   交付表 2026-09-07 各行），不再是待办来源；需拍板的项留在本文件。
 - 2026-10-12 起的「技术债整改程序」已合入的各项见 `fangan_done.md` §59；其登记的残余债与整改计划
   裁定「不做、只登记」的项集中在本文件第四节，不必再翻程序台账。
+- 2026-10-19～23 的图谱分析「问题清单」特性已全部合入（`fangan_done.md` §64）；它遗留的后续项登记在第二节
+  「知识图谱」与第四节「其它残余」，不必再翻实施计划。
 
 ---
 
@@ -130,6 +136,33 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       Hypothesis 对象。
 - [ ] schema 归纳只提议新类型，不对既有类型提议新字段。
 - [ ] KG refine 自我修正只有总开关 `KG_REFINE_ENABLED`，无抽样 / 比率控制。
+- [ ] **换描述模型或提示词后，没有任何路径能重写概念描述**（来源：PR #939）：概念描述按签名复用，签名是
+      `_concept_desc_sig(name, quotes)`（`backend/app/services/knowledge_lifecycle.py`）的 sha1，输入只有概念名与
+      去重排序后的前 8 条引文，不含描述模型（`kg_concept_description` 工作负载绑定的服务），也不含
+      `concept_description_prompt`（`backend/app/services/prompts.py`）的版本。所以换了描述模型、或改了描述提示词
+      之后，名字与引文都没变的概念，下一次统一重建照样命中旧描述、不调模型；`batch_ingest --fresh` 只清 rebuild
+      checkpoint，描述阶段仍按签名复用，同样不重写（`docs/operations*.md` 已如实写）。目前没有任何入口能让一个
+      已发布的库按新模型 / 新提示词把描述整批重写，只能等名字或引文变化逐个触发。要补一条显式路径（签名里带模型
+      身份与提示词版本，或一个只重写描述的维护命令）；动手前先定「换模型是否应当整批重写」——整批重写是一大笔
+      描述模型调用，按签名复用正是为了避免种子归一后几乎每个多词概念都被重调一遍。
+- [ ] **隐藏成员名字经 canonical id 暴露，需全产品统一处理**（来源：PR #941 评审，PR #940 同形；非本特性引入）：
+      合并后知识对象的 canonical id = `K-` + 该合并组全体成员的最小种子；最小种子恰好来自隐藏的 Memory / Knowhow
+      成员时，id 本身就带着这个成员的规范化名字。已有的返回面：`GET /notebooks/{id}/unified-kg/pending-merges`
+      （`backend/app/api/kg_routes.py`）、统一图谱 `GET /notebooks/{id}/unified-kg`、问题清单 F4 证据里的
+      `canonical_ids`（`backend/app/services/kg_findings.py`）；图谱分析早先的 `largest_clusters`
+      （`backend/app/repositories/kg_analysis_payloads.py::largest_clusters_payload`）更直接，返回的是存储的 canonical
+      名。#941 评审里同类的 `evidence.member_seeds` 暴露（P1）已由 `public_evidence()`
+      （`backend/app/services/kg_findings_view.py`）去掉；上面几处是既有暴露，本特性没有扩大、也没有修。
+      修法要全产品一起定，不能只改某一个返回面：id 同时是跨库桥接的枢纽键（`docs/operations_zh.md`「跨库混合期」）
+      和无种子候选行的回退键（`concept_merge_candidates` 的 `canonical_a` / `canonical_b`）。
+- [ ] **问题清单阈值是本机标定的初值，生产只读演练数据回来后复核**（来源：PR #941，规格 §14③ 的用户裁决「先按本机
+      初值实现」）：F1 / F2 / F3 / F4 的各阈值与 F2 排除「通用概念」的界（出现在超过 30 个来源里）只在一个 84 个来源的
+      本机库（`nb-b37185f4ae`）上标定过，F3 在本机没有正样本；规格 §14③ 写明 4.9 万个来源上 30 可能太小。精确值在
+      `backend/app/domain/kg_findings_contracts.py` 的具名常量与产品/API 参考「问题清单」一段。待办是拿生产只读
+      演练的数据复核规格 §14③ 列的量项：F1 共享占比分布、F2 候选对数与 Jaccard 分布、概念出现在几个来源里的分布
+      （定「通用概念」的界）、F3 各子信号分布、F4 窄 / 宽两档各多少组、F5 数量与补上关联的历史、新增计算的耗时与
+      RSS。仓库内的演练脚本是 `scripts/kg_findings_rehearsal.py`（与引擎同口径、只读、默认不输出标题与概念名）；
+      生产侧用的 `kg_findings_prod_probe.py` 不在仓库内。
 
 ### 检索
 
@@ -270,7 +303,8 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 - [ ] **`communities.title` / `summary` / `findings` 三列已无写入方**（来源：PR #853）：社区摘要生成
       已删除，这三列除 `copy_forward_communities`（翻转事务内把未重建层级的旧行复制进新代）原样带过之外
       没有写入方。本轮不做迁移（SQLite 与 PostgreSQL 的 `communities` 表都还有这三列）；是否删列留到
-      下一次 `communities` 结构变更时一并决定。
+      下一次 `communities` 结构变更时一并决定。**补记（PR #988）**：SQLite v102 / PostgreSQL 0083 给 `communities`
+      增了 `board_key`，那次没有一并删这三列，三列原样保留；是否删列仍留到下一次 `communities` 结构变更时决定。
 - [ ] **C6 生产信号：可见性图未设好时计划可能被劫持**（来源：PR #854 / #897 / #908）：测试里的计划钉
       已改成不依赖可见性图，但生产同形问题没有测量：表的可见性图（visibility map）没设好时，
       `version_facts` 与 skip-gate 的 count 可能被 `idx_clusters_nb_canonical_name_lower` 劫持
@@ -305,6 +339,23 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 - [ ] **S2-D：组件层「仅测试调用」成员未清点**（来源：PR #862）：审计脚本只统计 facade，看不到组件层
       （`AskService.ask_chunk_current` / `ask_reasoning_current`、两端 store 与 `AskStateStorePort` 的
       `ask_job_status` 等）只被测试调用的成员；登记为一类待清点项。
+- [ ] **Uvicorn 访问日志里其它路由的查询串仍原样记录，是否改为只记键待拍板**（来源：PR #969 codex 第 8 轮）：
+      `backend/app/core/auth_logging.py::AuthenticationAccessFilter` 只处理两类请求：`/api/auth/` 下的丢弃整个查询串
+      （OAuth 回调带凭据），以及 `backend/app/core/log_paths.py` 登记的几类内容路径段（问题清单豁免的 subject、
+      邀请与公开分享口令、自定义对象类型名）换成占位符。其它路由的查询串——如 `/api/search?q=…`——仍原样写进
+      `uvicorn.access`，`backend/tests/test_auth_logging.py::test_unrelated_access_logs_remain_unchanged` 钉住了这一点。
+      前端共享传输层的请求日志已改为查询串只记键；后端访问日志是否对所有路由同样只记键，与 `AGENTS.md`
+      「日志不带内容」的口径相比是缺口，但会改变运维排障时能在日志里看到的查询内容，待用户拍板；拍板前不要放宽
+      或改写那条用例。
+- [ ] **`.snbk` 归档导出带 `concept_clusters`，但不带种子空间与板块分区列**（来源：PR #988）：归档的
+      复制闭包（`backend/app/domain/notebook_archive.py::ARCHIVE_TABLES`，导出在
+      `backend/app/services/notebook_transfer/export.py`）含 `concept_clusters`，却不含 `unified_kg_state`——所以没有
+      `concept_seed_version`（这个库已发布的合并所用的概念种子空间）——也不含 `communities`，板块的 `board_key`
+      与 `unified_kg_state.community_partition_version` / `community_partition_mode` 同样不在其中。导入尚未实现
+      （`docs/operations*.md`「笔记本单文件导出」写明不在本版本内，计划见
+      `docs/superpowers/plans/2026-10-22-notebook-export-import.md`）；将来实现导入时需一并携带：没有状态行的库读作
+      种子空间 2，旧部署导出的空间 1 簇会被读歪（v102 / 0083 迁移注释记着同一风险）；板块分区列随板块一起——归档
+      目前整个不含 `communities`，要么连同板块一起带，要么接受导入后的第一次重建冷启动重新划分。
 
 ### 整改计划刻意不做、只登记
 
