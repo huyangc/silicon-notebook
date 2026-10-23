@@ -1,20 +1,26 @@
 """The deep copy's row writer: every table of a notebook's copy closure, phase by
 phase, with each id remapped onto the copy.
 
-``NotebookCopyService.copy_notebook`` (``notebook_sharing``) owns the run around it
-— the start-of-copy sweep, the source directory, the snapshot read, validation,
-publish, the compensation and the post-publish projections, and every file on
-disk. This module owns what happens between the snapshot and the validation: the
-hidden ``copying`` sentinel, the mounts carried for the recipient, the remapped
-rows of all the copied tables in their frozen FK-safe order, and the SQLite FTS
-mirrors.
+Two runs drive it, and ``CopyProfile`` holds every way they differ:
+
+* ``NotebookCopyService.copy_notebook`` (``notebook_sharing``): a same-database
+  deep copy, rows from ``SnapshotRowSource``, profile ``COPY_PROFILE``;
+* ``NotebookImportService.import_notebook``
+  (``notebook_transfer.import_``): a ``.snbk`` archive written by another
+  deployment, rows from ``ArchiveRowSource``, a profile from ``import_profile``.
+
+Each service owns the run around the writer -- the sweep, the rows' origin, the
+files on disk, validation, publish, the compensation and the post-publish steps.
+This module owns what happens between reading the rows and validating them: the
+hidden sentinel, the mounts, the remapped rows of every copied table in their
+frozen FK-safe order, and the SQLite FTS mirrors.
 
 The writer reads its rows through a ``CopyRowSource``, table by table, in
-batches. ``SnapshotRowSource`` (the only source today) wraps the dict
-``store.snapshot_copy_rows`` returns and gives every table as ONE batch, so the
-store sees exactly one ``insert_copy_rows`` per table, in the frozen order the
-copy characterization tests pin. ``NotebookCopyWriter``'s docstring lists the
-phases that need more than one batch at a time.
+batches. ``SnapshotRowSource`` wraps the dict ``store.snapshot_copy_rows``
+returns and gives every table as ONE batch, so the store sees exactly one
+``insert_copy_rows`` per table, in the frozen order the copy characterization
+tests pin. ``NotebookCopyWriter``'s docstring lists the phases that need more
+than one batch at a time.
 
 Logs go to the ``silicon_notebook.sharing`` logger, the same one the copy service
 uses.
@@ -29,12 +35,184 @@ from pathlib import Path
 from typing import Callable, Iterable, Protocol
 
 from app.domain.indexing_pipeline import BUILTIN_INDEXING_PIPELINE_VERSION
+from app.domain.portable_rows import is_safe_relative_path
 from app.domain.repository import RepositoryCompatibilitySeams
-from app.models.notebooks import NotebookSummary
 from app.repositories.ports import SharingStorePort
 from app.services.knowhow.ids import cell_chunk_id, element_id
 
 _log = logging.getLogger("silicon_notebook.sharing")
+
+
+COPYING = "copying"
+IMPORTING = "importing"
+
+
+class CopyRowRejected(ValueError):
+    """A strict run (``CopyProfile.strict_references``) refused a row of the
+    rows being written. ``column`` is ``<table>.<column>``; the message never
+    quotes the value."""
+
+    def __init__(self, column: str, reason: str) -> None:
+        super().__init__(f"{column} {reason}")
+        self.column = column
+
+
+class CopyReferenceError(CopyRowRejected):
+    """The column's value names a row the rows being written do not contain."""
+
+    def __init__(self, column: str) -> None:
+        super().__init__(column, "引用了文件中不存在的行")
+
+
+@dataclass(frozen=True)
+class VectorPolicy:
+    """What a strict run does with the vectors it reads (import only).
+
+    ``kept_workloads``: the embedding workloads whose vectors were produced by the
+    model this deployment binds to them (same model, same ``dim``); a vector of
+    any other workload is dropped, and so is one whose byte length is not
+    ``4 * dim`` (float32). ``reembed_questions`` turns question texts into vector
+    bytes with this deployment's ``chunk_embedding`` model, for the
+    ``chunk_questions`` rows whose stored vector cannot be kept (the column is
+    NOT NULL); ``None`` (the model is not bound) drops those rows, and so does a
+    call that raises."""
+
+    dim: int
+    kept_workloads: frozenset[str]
+    reembed_questions: "Callable[[list[str]], list[bytes]] | None" = None
+
+    def keeps(self, workload: str, vector: object) -> bool:
+        return (
+            workload in self.kept_workloads
+            and isinstance(vector, (bytes, bytearray, memoryview))
+            and len(vector) == 4 * self.dim
+        )
+
+
+@dataclass(frozen=True)
+class CopyProfile:
+    """Every way an import differs from a deep copy, in one place.
+
+    =====================  ==========================  ==============================
+    difference             copy (``COPY_PROFILE``)     import (``import_profile``)
+    =====================  ==========================  ==============================
+    hidden sentinel        ``copying``                 ``importing``, ``sync_origin=''``
+                           (``insert_copy_rows``)      (``insert_import_sentinel``)
+    references             lenient: an id with no      strict: a reference column
+                           remap entry passes through  with no remap entry rejects
+                           unchanged                   the file; an id inside stored
+                                                       JSON is cleared and counted; an
+                                                       attachment of a missing source
+                                                       is dropped with its file
+    user columns           the notebook, its object    every owner/editor column, also
+                           schemas and Knowhow tables  ``knowhow_cell_code.updated_by``
+                           go to the new owner;        and ``notebook_assets.created_by``;
+                           ``sources.uploaded_by`` /   the two source columns cleared
+                           ``agent_profile_id`` cleared  likewise
+    mount edges            re-judged for the new owner all dropped, counted
+    vectors                carried                     per workload (``VectorPolicy``)
+    source files           ``<dir>/<file name>``       ``<dir>/<archive relative path>``
+    unfinished sources     carried                     failed, to be parsed again
+    FTS mirrors            once, after the last phase  per batch (no chunk text held)
+    =====================  ==========================  ==============================
+
+    Two more differences live in the services because they are about the run,
+    not the rows: where the files come from (the copy's ``copytree`` of the
+    source notebook's trees; the import's verified archive entries, written
+    ``O_EXCL | O_NOFOLLOW``) and how the result is validated (the copy's
+    ``validate_copy`` row parity with the source notebook; the import's
+    ``validate_import`` against the rows it wrote, plus dangling-reference
+    checks).
+    """
+
+    sentinel_status: str
+    #: ``str.format`` templates, filled with the source notebook's name.
+    default_name: str
+    genesis_note: str
+    strict_references: bool = False
+    importer_owns_all_user_columns: bool = False
+    drop_mount_edges: bool = False
+    relative_file_paths: bool = False
+    reset_unfinished_sources: bool = False
+    fts_per_batch: bool = False
+    #: The archive said the source's KG was dirty, or left Memory rows out.
+    starts_dirty: bool = False
+    #: The concept seed space the carried clusters were built in, when it is not
+    #: the one a new state row starts in (``CONCEPT_SEED_VERSION``); ``None``
+    #: otherwise. The store records it on the sentinel's KG state row.
+    concept_seed_version: "int | None" = None
+    #: Object types whose local ``proposed`` schema row the import replaces with
+    #: the source's effective (deployment-wide) definition; those rows are not
+    #: written.
+    superseded_proposals: frozenset = frozenset()
+    vectors: "VectorPolicy | None" = None
+
+    @property
+    def importing(self) -> bool:
+        return self.sentinel_status == IMPORTING
+
+
+COPY_PROFILE = CopyProfile(
+    sentinel_status=COPYING,
+    default_name="{name} (副本)",
+    genesis_note="随笔记本《{name}》复制而来",
+)
+
+
+def import_profile(
+    *,
+    starts_dirty: bool,
+    vectors: VectorPolicy,
+    concept_seed_version: "int | None" = None,
+    superseded_proposals: frozenset = frozenset(),
+) -> CopyProfile:
+    return CopyProfile(
+        sentinel_status=IMPORTING,
+        default_name="{name}",
+        genesis_note="随笔记本《{name}》导入而来",
+        strict_references=True,
+        importer_owns_all_user_columns=True,
+        drop_mount_edges=True,
+        relative_file_paths=True,
+        reset_unfinished_sources=True,
+        fts_per_batch=True,
+        starts_dirty=starts_dirty,
+        concept_seed_version=concept_seed_version,
+        superseded_proposals=superseded_proposals,
+        vectors=vectors,
+    )
+
+
+#: ``sources.parse_status`` values of a source still being processed: the
+#: restart recovery (``_recover_interrupted_jobs``) settles exactly these. An
+#: import has no worker that will finish them, so they arrive failed.
+UNFINISHED_PARSE_STATUSES = frozenset({"queued", "parsing", "extracting"})
+UNFINISHED_SOURCE_MESSAGE = "导入时该文档尚未处理完成；文件已保留，可重新解析。"
+#: ``sources.source_type`` of a Memory projection: never in an export (ruling M2),
+#: so an archive that carries one was not written by an export.
+_MEMORY_SOURCE_TYPE = "memory"
+#: A remapped id keeps the old id's prefix only when it is this plain; a strict
+#: run mints ``imp-...`` otherwise (an id from a file must not steer a new id,
+#: which can end up in a file name -- ``notebook_assets``).
+_SAFE_ID_PREFIX = re.compile(r"[A-Za-z0-9_]{1,32}")
+_STRICT_FALLBACK_PREFIX = "imp"
+
+
+def cluster_seed_object_id(canonical_id: str) -> "str | None":
+    """The knowledge object id a cluster's canonical id was minted from, or None.
+
+    ``concept_clusters.canonical_id`` is never a bare object id: every writer
+    builds it as ``<type prefix><seed>`` (``kg_merge``: ``id_prefix + seed``,
+    prefixes ``K-`` / ``KL-`` / ``KF-`` / ``KP-``). Only when an object's name
+    normalises to nothing does the seed fall back to ``~<object id>``
+    (``kg_merge.seed_or_unique``), so the id embeds an object id after the
+    prefix. Python twin of ``memory_sql.cluster_seed_object_id`` (both
+    backends): ``K-~ko-...`` -> from offset 3, ``K?-~ko-...`` -> from offset 4."""
+    if canonical_id.startswith("K-~ko-"):
+        return canonical_id[3:]
+    if canonical_id[:1] == "K" and canonical_id[2:7] == "-~ko-":
+        return canonical_id[4:]
+    return None
 
 
 # PR-2+3 Task 13: a knowhow cell's content_md embeds pasted images as
@@ -100,6 +278,128 @@ def _remap_element_asset_id(raw, asset_map: dict):
     return json.dumps(metadata, ensure_ascii=False)
 
 
+class _LenientRefs:
+    """The deep copy's reference rule: an id with no remap entry passes through
+    unchanged (``map.get(x, x)``), exactly as the copy always did."""
+
+    def __init__(self, seams: RepositoryCompatibilitySeams) -> None:
+        self._seams = seams
+
+    @staticmethod
+    def pointer(mapping: dict, value, column: str):
+        """A column naming a row of the copy (``knowledge_objects.source_id``...)."""
+        del column
+        return mapping.get(value, value)
+
+    @staticmethod
+    def embedded(mapping: dict, value, label: str):
+        """An id stored inside another value (element metadata)."""
+        del label
+        return mapping.get(value, value)
+
+    def json(self, value, json_maps: dict, label: str):
+        del label
+        return self._seams.remap_json_ids(value, json_maps)
+
+    @staticmethod
+    def element_asset(raw, asset_map: dict):
+        return _remap_element_asset_id(raw, asset_map)
+
+    @staticmethod
+    def asset_refs(text: str, asset_map: dict) -> str:
+        return _rewrite_asset_refs(text, asset_map)
+
+
+class _StrictRefs:
+    """An import's reference rule (``CopyProfile.strict_references``): a pointer
+    column whose non-empty value has no remap entry rejects the file
+    (``CopyReferenceError``) -- the export clears every pointer that leaves the
+    closure, so an unmapped one means the file is incomplete or was edited; an id
+    stored inside JSON, or inside an element's metadata, is cleared and counted
+    in ``run.cleared`` (passing it through could make it name a row of the target
+    deployment). A Knowhow cell's ``asset://`` reference with no entry is kept
+    and counted: it resolves only inside the notebook's own participant set,
+    where no such asset exists."""
+
+    def __init__(self, run: "NotebookCopyRun") -> None:
+        self._run = run
+
+    def _clear(self, label: str) -> None:
+        self._run.cleared[label] = self._run.cleared.get(label, 0) + 1
+
+    @staticmethod
+    def pointer(mapping: dict, value, column: str):
+        if not value:
+            return value
+        mapped = mapping.get(value)
+        if mapped is None:
+            raise CopyReferenceError(column)
+        return mapped
+
+    def embedded(self, mapping: dict, value, label: str):
+        if not value:
+            return value
+        mapped = mapping.get(value)
+        if mapped is None:
+            self._clear(label)
+        return mapped
+
+    def json(self, value, json_maps: dict, label: str):
+        if isinstance(value, dict):
+            out = {}
+            for key, item in value.items():
+                if key in ("element_id", "source_id", "object_id") and isinstance(item, str):
+                    out[key] = self.embedded(json_maps.get(key, {}), item, f"{label}.{key}")
+                elif key == "element_ids" and isinstance(item, list):
+                    mapping = json_maps.get("element_ids", {})
+                    kept = []
+                    for child in item:
+                        if not isinstance(child, str):
+                            kept.append(self.json(child, json_maps, label))
+                        elif child in mapping:
+                            kept.append(mapping[child])
+                        else:
+                            self._clear(f"{label}.element_ids")
+                    out[key] = kept
+                else:
+                    out[key] = self.json(item, json_maps, label)
+            return out
+        if isinstance(value, list):
+            return [self.json(item, json_maps, label) for item in value]
+        return value
+
+    def element_asset(self, raw, asset_map: dict):
+        if not isinstance(raw, str) or '"asset_id"' not in raw:
+            return raw
+        try:
+            metadata = json.loads(raw)
+        except (ValueError, RecursionError):
+            return raw
+        if not isinstance(metadata, dict) or "asset_id" not in metadata:
+            return raw
+        old = metadata["asset_id"]
+        new = asset_map.get(old) if isinstance(old, str) else None
+        if new is None:
+            if old is None:
+                return raw
+            self._clear("source_elements.metadata.asset_id")
+        metadata["asset_id"] = new
+        return json.dumps(metadata, ensure_ascii=False)
+
+    def asset_refs(self, text: str, asset_map: dict) -> str:
+        if "asset://" not in text:
+            return text
+
+        def replace(match: "re.Match[str]") -> str:
+            new = asset_map.get(match.group(1))
+            if new is None:
+                self._run.unresolved_asset_refs += 1
+                return match.group(0)
+            return f"asset://{new}"
+
+        return _ASSET_REF_RE.sub(replace, text)
+
+
 def _copy_source_elements(
     rows: list[dict],
     *,
@@ -112,6 +412,7 @@ def _copy_source_elements(
     element_map: dict,
     element_row_new: dict,
     remapped_id: Callable[[str], str],
+    refs: "_LenientRefs | _StrictRefs",
 ) -> list[dict]:
     """Remap the snapshot's ``source_elements`` rows for a deep copy, in place.
 
@@ -137,8 +438,8 @@ def _copy_source_elements(
             new_element_id = element_id(new_row_id, new_column_id)
             element_map[old_element_id] = new_element_id
             element_row_new[old_element_id] = new_row_id
-            kh_meta["table_id"] = khtbl_map.get(
-                kh_meta.get("table_id"), kh_meta.get("table_id")
+            kh_meta["table_id"] = refs.embedded(
+                khtbl_map, kh_meta.get("table_id"), "source_elements.metadata.knowhow.table_id"
             )
             kh_meta["row_id"] = new_row_id
             kh_meta["column_id"] = new_column_id
@@ -154,7 +455,7 @@ def _copy_source_elements(
             # images point into the ORIGINAL notebook (404 through the asset
             # proxy, gone once the original deletes the source).
             if "metadata" in data:
-                data["metadata"] = _remap_element_asset_id(data["metadata"], asset_map)
+                data["metadata"] = refs.element_asset(data["metadata"], asset_map)
         data["source_id"] = source_map[data["source_id"]]
         elements_out.append(data)
     return elements_out
@@ -186,8 +487,15 @@ def _reset_copied_notebook_row(
     new_owner_id: str,
     now: str,
     manual_name: bool = False,
+    status: str = COPYING,
+    clear_delete_window: bool = False,
 ) -> None:
     """Rewrite the copied notebooks row's identity/lifecycle/authority columns.
+
+    ``status`` is the hidden sentinel the row is born with (``CopyProfile.
+    sentinel_status``). ``clear_delete_window`` (import) also resets the four
+    deletion-window columns: a copy reads only a live notebook, whose window
+    columns are already empty, while an archive row is just a file's content.
 
     索引管线四列一律复位成内建：published identity 住在 unified_kg_state 里而它
     刻意不进深拷贝（副本至多得到 insert_copy_rows 写的一条状态行——标脏行，或只带
@@ -212,6 +520,11 @@ def _reset_copied_notebook_row(
     """
     if manual_name:
         notebook_row["name_auto"] = 0
+    if clear_delete_window:
+        notebook_row.update(
+            delete_after=None, delete_requested_at=None, delete_requested_by=None,
+            status_before_delete="",
+        )
     notebook_row.update(
         id=new_id,
         name=name,
@@ -219,7 +532,7 @@ def _reset_copied_notebook_row(
         tier="personal",
         is_shared=0,
         share_token=None,
-        status="copying",
+        status=status,
         created_at=now,
         updated_at=now,
         indexing_pipeline=None,
@@ -341,35 +654,30 @@ def _insert_copy_fts_mirrors(
 
 @dataclass
 class NotebookCopyRun:
-    """One deep copy's state, threaded through ``NotebookCopyWriter``'s phases and
-    back to ``copy_notebook`` (compensation, post-publish projections).
+    """One run's row state, threaded through ``NotebookCopyWriter``'s phases and
+    back to the service that drives it (compensation, post-publish steps).
 
     The identity values (``new_id``/``now``/``chunk_size``) are read from the seams
-    ONCE, at the start of ``copy_notebook``, exactly as before the split. The remap
-    maps are shared by identity: each phase fills the ones later phases read
-    (``json_maps`` holds the very same dicts, so an object id remapped earlier in
-    the objects loop is already visible to the next object's payload). The two
-    ``*_copied`` flags record what this copy actually wrote to disk — set the moment
-    it happens, by whichever step does it — so the compensation removes only
-    those directories.
+    ONCE, at the start of the run. ``source_name`` is the source notebook's name
+    (the default new name and the Knowhow genesis note read it);
+    ``destination_dir`` is the new notebook's file tree, which
+    ``sources.file_path`` is rewritten into. What the run wrote to disk is the
+    service's own state, not the writer's. The remap maps are shared by identity:
+    each phase fills the ones later phases read (``json_maps`` holds the very
+    same dicts, so an object id remapped earlier in the objects loop is already
+    visible to the next object's payload).
+
+    The counters at the end are filled by a strict run only (``CopyProfile``):
+    what it cleared, dropped or could not resolve, and what it did with vectors.
     """
 
     source_notebook_id: str
-    source_notebook: NotebookSummary
+    source_name: str
     new_owner_id: str
     new_id: str
     now: str
     chunk_size: int
     destination_dir: Path
-    # PR-2+3 Task 13: notebook_assets' on-disk files live in a SEPARATE
-    # tree from source_dir (storage_dir/assets/<nb>/, not
-    # storage_dir/notebooks/<nb>/ — see app.services.knowhow.assets.
-    # AssetService.path_for), so they need their own copied-flag +
-    # destination path for the same "compensate only what we actually
-    # wrote" discipline as destination_dir.
-    assets_dest_dir: Path
-    copied_files: bool = False
-    assets_copied: bool = False
     source_map: dict = field(default_factory=dict)
     element_map: dict = field(default_factory=dict)
     chunk_map: dict = field(default_factory=dict)
@@ -400,6 +708,26 @@ class NotebookCopyRun:
     # built from the very same dict objects as the fields above — never a copy —
     # so every phase sees the entries the earlier phases have added.
     json_maps: dict = field(init=False)
+    # --- strict runs (import) only -----------------------------------------
+    #: ``<table>.<column>[.<key>]`` -> ids inside stored values cleared because
+    #: they named no row of the archive.
+    cleared: dict = field(default_factory=dict)
+    #: ``<table>.<reason>`` -> rows not written (an attachment of a missing
+    #: source; a vector of a workload whose model differs, or of the wrong length).
+    dropped: dict = field(default_factory=dict)
+    #: Knowhow ``asset://`` references left as they are (no such attachment).
+    unresolved_asset_refs: int = 0
+    mount_edges_dropped: int = 0
+    #: Old ids of the Knowhow chunks: their vectors belong to ``knowhow_embedding``.
+    knowhow_chunk_ids_old: set = field(default_factory=set)
+    #: ``kept`` / ``reembedded`` / ``dropped`` question rows, and why rows dropped.
+    questions: dict = field(
+        default_factory=lambda: {"kept": 0, "reembedded": 0, "dropped": 0, "reason": ""}
+    )
+    #: New chunk ids whose questions were dropped (their index mark is cleared).
+    question_dropped_chunks: set = field(default_factory=set)
+    #: Sources still being processed when exported, rewritten as failed.
+    sources_reset: int = 0
 
     def __post_init__(self) -> None:
         self.json_maps = {
@@ -464,11 +792,14 @@ class NotebookCopyWriter:
     compensating try.
 
     Seams are read during the write, never cached: ``seams.new_id()`` mints every
-    remapped id, ``seams.remap_json_ids`` rewrites stored JSON.
+    remapped id, ``seams.remap_json_ids`` rewrites stored JSON (lenient runs).
+    ``profile`` (``CopyProfile``) says how this run differs from a deep copy;
+    ``COPY_PROFILE`` is the copy itself.
 
     What needs more than the batch in hand. ``SnapshotRowSource`` holds every
-    table whole, so none of this costs anything today; a streaming source (PR4)
-    has to keep each point working:
+    table whole, so none of this costs it anything; a streaming source
+    (``ArchiveRowSource``) re-reads its storage for every pass, and each point
+    below is one more pass or one more in-memory set:
 
     * ``notebooks`` (the root row) and ``notebook_bases`` are read whole: the mount
       edges are judged together, in one ``valid_copied_mount_base_ids`` call. Both
@@ -476,18 +807,19 @@ class NotebookCopyWriter:
     * ``knowhow_source_ids_old`` is a pass over ``knowhow_tables`` before
       ``sources`` are written, so that table is read twice. The result is one id
       per knowhow table.
+    * A strict run reads ``knowledge_objects`` twice: a pre-pass mints every
+      object's new id before any payload is rewritten, so a payload naming an
+      object later in the table resolves instead of being cleared.
     * ``_insert_copy_generation_runs`` scans all three source-fact tables before any
       fact is written: each source's ``extraction_runs`` row needs every
       generation of that source, and its active one, first. The fact tables are
-      read twice; a streaming source serves the first read as a pre-pass that
-      keeps only the per-source aggregates.
-    * The FTS mirrors are written after the last phase from every copied
-      ``knowledge_objects`` and ``chunks`` row the writer keeps (``write``). A
-      streaming source keeps the whole chunk text in memory that way; mirroring
-      each batch as it lands instead moves the FTS calls inside the frozen store
-      call sequence, which the copy characterization tests pin.
+      read twice; the first read keeps only the per-source aggregates.
+    * The FTS mirrors: a lenient run writes them after the last phase from every
+      copied ``knowledge_objects`` and ``chunks`` row it keeps (``write``), which
+      keeps the frozen store call sequence the copy characterization tests pin;
+      a ``fts_per_batch`` run mirrors each batch as it lands and keeps none.
     * Every remap map (``source_map``, ``chunk_map``, ``object_map`` ...) holds one
-      entry per copied row of its table for the whole copy.
+      entry per copied row of its table for the whole run.
     """
 
     def __init__(
@@ -498,17 +830,34 @@ class NotebookCopyWriter:
         rows: CopyRowSource,
         run: NotebookCopyRun,
         materialize_assets: Callable[[list[tuple[str, str, str]]], None],
+        profile: CopyProfile = COPY_PROFILE,
     ) -> None:
         self._store = store
         self._seams = seams
         self._rows = rows
         self._run = run
         self._materialize_assets = materialize_assets
+        self._profile = profile
+        self._refs: "_LenientRefs | _StrictRefs" = (
+            _StrictRefs(run) if profile.strict_references else _LenientRefs(seams)
+        )
 
     def write(self, *, new_name: "str | None", actor_label: "str | None") -> None:
-        """Every row of the copy in the frozen FK-safe order, then the FTS mirrors."""
-        run = self._run
+        """Every row of the copy in the frozen FK-safe order, then the FTS mirrors:
+        ``write_sentinel``, then ``write_rows``."""
+        self.write_sentinel(new_name=new_name)
+        self.write_rows(actor_label=actor_label)
+
+    def write_sentinel(self, *, new_name: "str | None") -> None:
+        """The hidden sentinel ``notebooks`` row and the mounts. An import commits
+        it on its own, before it writes any file, so everything the import puts
+        on disk afterwards belongs to a row the stale-import sweep can find."""
         self._insert_copy_sentinel(new_name=new_name)
+
+    def write_rows(self, *, actor_label: "str | None") -> None:
+        """Every table after the sentinel, in the frozen FK-safe order, then the
+        FTS mirrors."""
+        run = self._run
         run.knowhow_source_ids_old = {
             t["hidden_source_id"]
             for batch in self._rows.batches("knowhow_tables")
@@ -530,9 +879,25 @@ class NotebookCopyWriter:
         )
 
     def _remapped_id(self, old: str) -> str:
-        """A fresh id for a copied row, keeping the old id's prefix."""
+        """A fresh id for a copied row, keeping the old id's prefix (a strict
+        run keeps it only when it is plain, see ``_SAFE_ID_PREFIX``)."""
         prefix = old.split("-", 1)[0] if old else "id"
+        if self._profile.strict_references and not _SAFE_ID_PREFIX.fullmatch(prefix):
+            prefix = _STRICT_FALLBACK_PREFIX
         return self._seams.new_id(prefix)
+
+    def _kept_for_fts(self, kept: list[dict], batch: list[dict], *, chunks: bool) -> None:
+        """Keep a written batch for the end-of-run FTS mirror, or (``fts_per_batch``)
+        mirror it now and keep nothing."""
+        if not self._profile.fts_per_batch:
+            kept.extend(batch)
+            return
+        run = self._run
+        _insert_copy_fts_mirrors(
+            self._store, new_id=run.new_id,
+            objects_out=[] if chunks else batch, chunks_out=batch if chunks else [],
+            chunk_size=run.chunk_size,
+        )
 
     def _whole_table(self, table: str) -> list[dict]:
         """All of ``table``'s rows in one list, for the phases that read a table
@@ -543,23 +908,36 @@ class NotebookCopyWriter:
         return rows
 
     def _insert_copy_sentinel(self, *, new_name: "str | None") -> None:
-        """Insert the copy's hidden 'copying' notebooks row, then carry the mounts
-        that are valid for the recipient."""
-        run = self._run
+        """Insert the run's hidden sentinel notebooks row, then carry the mounts
+        that are valid for the recipient (an import drops and counts them all)."""
+        run, profile = self._run, self._profile
         new_id, now = run.new_id, run.now
         new_owner_id, chunk_size = run.new_owner_id, run.chunk_size
         notebook_row = self._whole_table("notebooks")[0]
         _reset_copied_notebook_row(
             notebook_row,
             new_id=new_id,
-            name=new_name or f"{run.source_notebook.name} (副本)",
+            name=new_name or profile.default_name.format(name=run.source_name),
             new_owner_id=new_owner_id,
             now=now,
             manual_name=bool(new_name),
+            status=profile.sentinel_status,
+            clear_delete_window=profile.importing,
         )
-        # 哨兵行必须先**提交**（不只是"已插入"）：下一步的挂载有效性判定跑在
-        # store 的另一条连接上，还要 join 目的地这一行取 created_by。
-        self._store.insert_copy_rows("notebooks", [notebook_row], chunk_size=chunk_size)
+        if profile.importing:
+            self._store.insert_import_sentinel(
+                notebook_row, starts_dirty=profile.starts_dirty,
+                concept_seed_version=profile.concept_seed_version,
+            )
+        else:
+            # 哨兵行必须先**提交**（不只是"已插入"）：下一步的挂载有效性判定跑在
+            # store 的另一条连接上，还要 join 目的地这一行取 created_by。
+            self._store.insert_copy_rows("notebooks", [notebook_row], chunk_size=chunk_size)
+        if profile.drop_mount_edges:
+            run.mount_edges_dropped = sum(
+                len(batch) for batch in self._rows.batches("notebook_bases")
+            )
+            return
         _carry_valid_mount_edges(
             self._store, self._whole_table("notebook_bases"), new_id=new_id,
             new_owner_id=new_owner_id, now=now, chunk_size=chunk_size,
@@ -568,17 +946,19 @@ class NotebookCopyWriter:
     def _copy_source_tables(self) -> None:
         """sources (fills ``source_map``), paper metadata, authors, object schemas."""
         run = self._run
-        new_id, new_owner_id, chunk_size = run.new_id, run.new_owner_id, run.chunk_size
-        source_map, destination_dir = run.source_map, run.destination_dir
+        new_id, chunk_size = run.new_id, run.chunk_size
+        source_map = run.source_map
         remapped_id = self._remapped_id
 
         for batch in self._rows.batches("sources"):
             sources_out = []
             for data in batch:
+                if self._profile.strict_references:
+                    self._check_archive_source(data)
                 data["id"] = source_map.setdefault(data["id"], remapped_id(data["id"]))
                 data["notebook_id"] = new_id
                 if data.get("file_path"):
-                    data["file_path"] = str(destination_dir / Path(data["file_path"]).name)
+                    data["file_path"] = self._destination_file_path(data["file_path"])
                 # Task 6: memory_id is NOT an id that gets remapped — it points
                 # at a Memory row that is owner-private and never travels with
                 # a copy. Force it empty (insert_source's own "no link"
@@ -625,9 +1005,45 @@ class NotebookCopyWriter:
                 "source_authors", authors_out, chunk_size=chunk_size
             )
 
+        self._copy_object_schemas()
+
+    def _check_archive_source(self, data: dict) -> None:
+        """A strict run's checks on one ``sources`` row, before it is remapped:
+        a Memory projection never travels (an archive holding one was not
+        written by an export), and a source still being processed arrives
+        failed, to be parsed again (no worker of this deployment will finish
+        it)."""
+        if data.get("source_type") == _MEMORY_SOURCE_TYPE:
+            raise CopyRowRejected("sources.source_type", "是私有记忆来源，导出文件不会携带")
+        if self._profile.reset_unfinished_sources and (
+            data.get("parse_status") in UNFINISHED_PARSE_STATUSES
+        ):
+            data.update(
+                status="failed", parse_status="failed",
+                error_message=UNFINISHED_SOURCE_MESSAGE,
+            )
+            self._run.sources_reset += 1
+
+    def _destination_file_path(self, recorded: str) -> str:
+        """``sources.file_path`` in the new notebook's tree: a copy keeps the
+        file's name (``copytree`` put every file there), an import the archive's
+        relative path (``files/notebooks/<this>``), checked to stay inside."""
+        destination_dir = self._run.destination_dir
+        if not self._profile.relative_file_paths:
+            return str(destination_dir / Path(recorded).name)
+        if not is_safe_relative_path(recorded):
+            raise CopyRowRejected("sources.file_path", "不是安全的相对路径")
+        return str(destination_dir / recorded)
+
+    def _copy_object_schemas(self) -> None:
+        run = self._run
+        new_id, new_owner_id, chunk_size = run.new_id, run.new_owner_id, run.chunk_size
+        superseded = self._profile.superseded_proposals
         for batch in self._rows.batches("notebook_object_schemas"):
             schema_rows = []
             for data in batch:
+                if data.get("object_type") in superseded and data.get("status") == "proposed":
+                    continue  # replaced by the source's effective definition
                 data["notebook_id"] = new_id
                 data["created_by"] = new_owner_id
                 schema_rows.append(data)
@@ -661,7 +1077,8 @@ class NotebookCopyWriter:
                 data["created_by"] = new_owner_id
                 old_hidden = data.get("hidden_source_id")
                 data["hidden_source_id"] = (
-                    source_map.get(old_hidden, old_hidden) if old_hidden else old_hidden
+                    self._refs.pointer(source_map, old_hidden, "knowhow_tables.hidden_source_id")
+                    if old_hidden else old_hidden
                 )
                 tables_out.append(data)
             self._store.insert_copy_rows("knowhow_tables", tables_out, chunk_size=chunk_size)
@@ -697,7 +1114,7 @@ class NotebookCopyWriter:
                 data["id"] = khcel_map.setdefault(data["id"], remapped_id(data["id"]))
                 data["row_id"] = khrow_map[data["row_id"]]
                 data["column_id"] = khcol_map[data["column_id"]]
-                data["content_md"] = _rewrite_asset_refs(
+                data["content_md"] = self._refs.asset_refs(
                     data.get("content_md") or "", asset_map
                 )
                 cells_out.append(data)
@@ -709,6 +1126,8 @@ class NotebookCopyWriter:
                 data["id"] = khcode_map.setdefault(data["id"], remapped_id(data["id"]))
                 data["row_id"] = khrow_map[data["row_id"]]
                 data["column_id"] = khcol_map[data["column_id"]]
+                if self._profile.importer_owns_all_user_columns:
+                    data["updated_by"] = new_owner_id
                 cell_code_out.append(data)
             self._store.insert_copy_rows(
                 "knowhow_cell_code", cell_code_out, chunk_size=chunk_size
@@ -722,7 +1141,7 @@ class NotebookCopyWriter:
             new_id=self._seams.new_id,
             now=self._seams.now,
             actor=new_owner_id if actor_label is None else actor_label,
-            note=f"随笔记本《{run.source_notebook.name}》复制而来",
+            note=self._profile.genesis_note.format(name=run.source_name),
         )
 
     def _copy_notebook_assets(self) -> None:
@@ -736,14 +1155,25 @@ class NotebookCopyWriter:
         source_map, asset_map = run.source_map, run.asset_map
         remapped_id = self._remapped_id
 
+        strict = self._profile.strict_references
         for batch in self._rows.batches("notebook_assets"):
             assets_out = []
             asset_files: list[tuple[str, str, str]] = []  # (old_id, new_id, mime)
             for data in batch:
+                old_source_id = data.get("source_id")
+                if strict and old_source_id is not None and old_source_id not in source_map:
+                    # The attachment of a source the archive does not carry:
+                    # dropped with its file (the export drops these too).
+                    run.dropped["notebook_assets.source_id"] = (
+                        run.dropped.get("notebook_assets.source_id", 0) + 1
+                    )
+                    continue
                 old_asset_id = data["id"]
                 new_asset_id = asset_map.setdefault(old_asset_id, remapped_id(old_asset_id))
                 data["id"] = new_asset_id
                 _remap_copied_asset_row(data, new_id, source_map)
+                if self._profile.importer_owns_all_user_columns:
+                    data["created_by"] = run.new_owner_id
                 asset_files.append((old_asset_id, new_asset_id, data["mime"]))
                 assets_out.append(data)
             self._store.insert_copy_rows("notebook_assets", assets_out, chunk_size=chunk_size)
@@ -772,6 +1202,7 @@ class NotebookCopyWriter:
                 element_map=element_map,
                 element_row_new=element_row_new,
                 remapped_id=remapped_id,
+                refs=self._refs,
             )
             self._store.insert_copy_rows(
                 "source_elements", elements_out, chunk_size=chunk_size
@@ -812,6 +1243,8 @@ class NotebookCopyWriter:
                     new_chunk_id = cell_chunk_id(new_row_id, part)
                     chunk_map[old_chunk_id] = new_chunk_id
                     data["id"] = new_chunk_id
+                    if self._profile.vectors is not None:
+                        run.knowhow_chunk_ids_old.add(old_chunk_id)
                 else:
                     data["id"] = chunk_map.setdefault(
                         old_chunk_id, remapped_id(old_chunk_id)
@@ -820,7 +1253,7 @@ class NotebookCopyWriter:
                 data["source_id"] = source_map[data["source_id"]]
                 element_ids = {"element_ids": json.loads(data.get("element_ids") or "[]")}
                 data["element_ids"] = json.dumps(
-                    self._seams.remap_json_ids(element_ids, json_maps)["element_ids"]
+                    self._refs.json(element_ids, json_maps, "chunks")["element_ids"]
                 )
                 chunks_out.append(data)
             # chunk_elements（element→chunk 反查表，v46）刻意**不**随深拷贝复制：
@@ -836,7 +1269,7 @@ class NotebookCopyWriter:
             # 理由就在这里：那张表自描述（有行即可用），而 chunk_elements 的可用性
             # 由一个**不随拷贝走**的标记声明，所以「不拷贝」才是自洽的那一侧。
             self._store.insert_copy_rows("chunks", chunks_out, chunk_size=chunk_size)
-            chunks_copied.extend(chunks_out)
+            self._kept_for_fts(chunks_copied, chunks_out, chunks=True)
         return chunks_copied
 
     def _copy_knowledge_objects(self) -> list[dict]:
@@ -845,7 +1278,13 @@ class NotebookCopyWriter:
         run = self._run
         new_id, chunk_size = run.new_id, run.chunk_size
         source_map, object_map, json_maps = run.source_map, run.object_map, run.json_maps
-        remapped_id = self._remapped_id
+        remapped_id, refs = self._remapped_id, self._refs
+        if self._profile.strict_references:
+            # Pre-pass (class docstring): every object's new id first, so a
+            # payload naming an object further down the table resolves.
+            for batch in self._rows.batches("knowledge_objects"):
+                for data in batch:
+                    object_map.setdefault(data["id"], remapped_id(data["id"]))
 
         objects_copied: list[dict] = []
         for batch in self._rows.batches("knowledge_objects"):
@@ -855,22 +1294,26 @@ class NotebookCopyWriter:
                 old_candidate_id = data.get("source_candidate_id")
                 data["id"] = object_map.setdefault(data["id"], remapped_id(data["id"]))
                 data["notebook_id"] = new_id
-                data["source_id"] = source_map.get(old_source_id, old_source_id)
+                data["source_id"] = refs.pointer(
+                    source_map, old_source_id, "knowledge_objects.source_id"
+                )
                 if old_candidate_id:
-                    data["source_candidate_id"] = source_map.get(
-                        old_candidate_id, old_candidate_id
+                    data["source_candidate_id"] = refs.pointer(
+                        source_map, old_candidate_id, "knowledge_objects.source_candidate_id"
                     )
-                data["payload"] = json.dumps(
-                    self._seams.remap_json_ids(json.loads(data.get("payload") or "{}"), json_maps)
-                )
-                data["evidence"] = json.dumps(
-                    self._seams.remap_json_ids(json.loads(data.get("evidence") or "[]"), json_maps)
-                )
+                data["payload"] = json.dumps(refs.json(
+                    json.loads(data.get("payload") or "{}"), json_maps,
+                    "knowledge_objects.payload",
+                ))
+                data["evidence"] = json.dumps(refs.json(
+                    json.loads(data.get("evidence") or "[]"), json_maps,
+                    "knowledge_objects.evidence",
+                ))
                 objects_out.append(data)
             self._store.insert_copy_rows(
                 "knowledge_objects", objects_out, chunk_size=chunk_size
             )
-            objects_copied.extend(objects_out)
+            self._kept_for_fts(objects_copied, objects_out, chunks=False)
         return objects_copied
 
     def _insert_copy_generation_runs(self) -> None:
@@ -988,18 +1431,20 @@ class NotebookCopyWriter:
                     data["source_generation"] = generation_map[
                         (old_source_id, old_generation)
                     ]
-                data["global_object_id"] = object_map.get(
-                    data.get("global_object_id") or "",
-                    data.get("global_object_id") or "",
+                data["global_object_id"] = self._refs.pointer(
+                    object_map, data.get("global_object_id") or "",
+                    "knowledge_source_facts.global_object_id",
                 )
                 data["payload"] = json.dumps(
-                    self._seams.remap_json_ids(
-                        json.loads(data.get("payload") or "{}"), json_maps
+                    self._refs.json(
+                        json.loads(data.get("payload") or "{}"), json_maps,
+                        "knowledge_source_facts.payload",
                     )
                 )
                 data["evidence"] = json.dumps(
-                    self._seams.remap_json_ids(
-                        json.loads(data.get("evidence") or "[]"), json_maps
+                    self._refs.json(
+                        json.loads(data.get("evidence") or "[]"), json_maps,
+                        "knowledge_source_facts.evidence",
                     )
                 )
                 source_facts_out.append(data)
@@ -1039,7 +1484,12 @@ class NotebookCopyWriter:
                         (old_source_id, old_generation)
                     ]
                 old_after = data.get("after_object_id") or ""
-                data["after_object_id"] = object_map.get(old_after, "")
+                data["after_object_id"] = (
+                    self._refs.pointer(
+                        object_map, old_after, "knowledge_source_fact_backfills.after_object_id"
+                    )
+                    if self._profile.strict_references else object_map.get(old_after, "")
+                )
                 source_fact_backfills_out.append(data)
             self._store.insert_copy_rows(
                 "knowledge_source_fact_backfills",
@@ -1061,12 +1511,15 @@ class NotebookCopyWriter:
                 old_source_id = data["source_id"]
                 data["id"] = relation_map.setdefault(data["id"], remapped_id(data["id"]))
                 data["notebook_id"] = new_id
-                data["source_id"] = source_map.get(old_source_id, old_source_id)
+                data["source_id"] = self._refs.pointer(
+                    source_map, old_source_id, "knowledge_relations.source_id"
+                )
                 data["source_object_id"] = object_map[data["source_object_id"]]
                 data["target_object_id"] = object_map[data["target_object_id"]]
-                data["evidence"] = json.dumps(
-                    self._seams.remap_json_ids(json.loads(data.get("evidence") or "[]"), json_maps)
-                )
+                data["evidence"] = json.dumps(self._refs.json(
+                    json.loads(data.get("evidence") or "[]"), json_maps,
+                    "knowledge_relations.evidence",
+                ))
                 relations_out.append(data)
             self._store.insert_copy_rows(
                 "knowledge_relations", relations_out, chunk_size=chunk_size
@@ -1074,12 +1527,16 @@ class NotebookCopyWriter:
 
     def _copy_chunk_and_vector_rows(self) -> None:
         """chunk_questions, the four vector tables and concept_clusters — rows that
-        only point at already-copied rows."""
+        only point at already-copied rows. Under a ``VectorPolicy`` (import) a
+        vector the target cannot use is not written (``_vector_kept``), and a
+        question whose vector cannot be kept is re-embedded or dropped
+        (``_settle_question_vectors``)."""
         run = self._run
         new_id, chunk_size = run.new_id, run.chunk_size
         source_map, element_map, chunk_map = run.source_map, run.element_map, run.chunk_map
         object_map, relation_map = run.object_map, run.relation_map
         remapped_id = self._remapped_id
+        vectors = self._profile.vectors
 
         for batch in self._rows.batches("chunk_questions"):
             chunk_questions_out = []
@@ -1089,6 +1546,8 @@ class NotebookCopyWriter:
                 data["notebook_id"] = new_id
                 data["source_id"] = source_map[data["source_id"]]
                 chunk_questions_out.append(data)
+            if vectors is not None:
+                chunk_questions_out = self._settle_question_vectors(chunk_questions_out, vectors)
             self._store.insert_copy_rows(
                 "chunk_questions", chunk_questions_out, chunk_size=chunk_size
             )
@@ -1096,6 +1555,12 @@ class NotebookCopyWriter:
         for batch in self._rows.batches("chunk_embeddings"):
             chunk_embeddings_out = []
             for data in batch:
+                workload = (
+                    "knowhow_embedding" if data["chunk_id"] in run.knowhow_chunk_ids_old
+                    else "chunk_embedding"
+                )
+                if not self._vector_kept("chunk_embeddings", workload, data):
+                    continue
                 data["chunk_id"] = chunk_map[data["chunk_id"]]
                 data["notebook_id"] = new_id
                 chunk_embeddings_out.append(data)
@@ -1106,6 +1571,8 @@ class NotebookCopyWriter:
         for batch in self._rows.batches("element_embeddings"):
             element_embeddings_out = []
             for data in batch:
+                if not self._vector_kept("element_embeddings", "source_element_embedding", data):
+                    continue
                 data["element_id"] = element_map[data["element_id"]]
                 data["source_id"] = source_map[data["source_id"]]
                 data["notebook_id"] = new_id
@@ -1117,6 +1584,10 @@ class NotebookCopyWriter:
         for batch in self._rows.batches("knowledge_embeddings"):
             knowledge_embeddings_out = []
             for data in batch:
+                if not self._vector_kept(
+                    "knowledge_embeddings", "knowledge_object_embedding", data
+                ):
+                    continue
                 data["object_id"] = object_map[data["object_id"]]
                 data["notebook_id"] = new_id
                 knowledge_embeddings_out.append(data)
@@ -1127,6 +1598,8 @@ class NotebookCopyWriter:
         for batch in self._rows.batches("relation_embeddings"):
             relation_embeddings_out = []
             for data in batch:
+                if not self._vector_kept("relation_embeddings", "relation_embedding", data):
+                    continue
                 data["relation_id"] = relation_map[data["relation_id"]]
                 data["notebook_id"] = new_id
                 relation_embeddings_out.append(data)
@@ -1139,11 +1612,78 @@ class NotebookCopyWriter:
             for data in batch:
                 data["id"] = remapped_id(data["id"])
                 data["notebook_id"], data["generation"] = new_id, 0
-                data["canonical_id"] = object_map.get(data["canonical_id"], data["canonical_id"])
-                data["member_object_id"] = object_map.get(
-                    data["member_object_id"], data["member_object_id"]
-                )
+                if self._profile.strict_references:
+                    self._remap_cluster_strictly(data)
+                else:
+                    data["canonical_id"] = object_map.get(
+                        data["canonical_id"], data["canonical_id"]
+                    )
+                    data["member_object_id"] = object_map.get(
+                        data["member_object_id"], data["member_object_id"]
+                    )
                 clusters_out.append(data)
             self._store.insert_copy_rows(
                 "concept_clusters", clusters_out, chunk_size=chunk_size
             )
+
+    def _vector_kept(self, table: str, workload: str, data: dict) -> bool:
+        """Every vector is kept without a ``VectorPolicy`` (the copy); under one,
+        a vector is kept only when ``VectorPolicy.keeps`` says so, otherwise it
+        is counted in ``run.dropped`` as ``<table>.<workload>``."""
+        vectors = self._profile.vectors
+        if vectors is None or vectors.keeps(workload, data.get("vector")):
+            return True
+        key = f"{table}.{workload}"
+        self._run.dropped[key] = self._run.dropped.get(key, 0) + 1
+        return False
+
+    def _settle_question_vectors(self, rows: list[dict], vectors: VectorPolicy) -> list[dict]:
+        """The batch's question rows that can be written: the ones whose vector
+        is kept, plus the others with a vector embedded now by
+        ``VectorPolicy.reembed_questions``. When that is unavailable or fails,
+        those rows are dropped (``run.questions``); after the first failure no
+        later batch calls the model again."""
+        run = self._run
+        kept: list[dict] = []
+        pending: list[dict] = []
+        for data in rows:
+            (kept if vectors.keeps("chunk_embedding", data.get("vector")) else pending).append(data)
+        run.questions["kept"] += len(kept)
+        if not pending:
+            return kept
+        if vectors.reembed_questions is None:
+            run.questions["reason"] = run.questions["reason"] or "not_configured"
+        elif not run.questions["reason"]:
+            try:
+                fresh = vectors.reembed_questions(
+                    [str(data.get("question") or "") for data in pending]
+                )
+                if len(fresh) != len(pending) or any(
+                    len(vector) != 4 * vectors.dim for vector in fresh
+                ):
+                    raise ValueError("embedding result does not match the questions")
+            except Exception as exc:  # noqa: BLE001 -- the rows are dropped and reported
+                run.questions["reason"] = f"embedding_failed:{type(exc).__name__}"
+            else:
+                for data, vector in zip(pending, fresh):
+                    data["vector"] = vector
+                run.questions["reembedded"] += len(pending)
+                return kept + pending
+        run.questions["dropped"] += len(pending)
+        run.question_dropped_chunks.update(data["chunk_id"] for data in pending)
+        return kept
+
+    def _remap_cluster_strictly(self, data: dict) -> None:
+        """A strict run's cluster row: the member must be a written object, and a
+        canonical id minted from an object (``<prefix>~ko-<id>``,
+        ``cluster_seed_object_id``) is re-minted from that object's new id, so
+        the next copy of the imported notebook still finds its seed object."""
+        object_map = self._run.object_map
+        data["member_object_id"] = self._refs.pointer(
+            object_map, data.get("member_object_id"), "concept_clusters.member_object_id"
+        )
+        canonical = str(data.get("canonical_id") or "")
+        seed = cluster_seed_object_id(canonical)
+        if seed is not None:
+            new_seed = self._refs.pointer(object_map, seed, "concept_clusters.canonical_id")
+            data["canonical_id"] = canonical[: len(canonical) - len(seed)] + new_seed

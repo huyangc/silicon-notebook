@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import secrets
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, TYPE_CHECKING
 
@@ -21,6 +22,24 @@ from app.services.notebook_catalog import NotebookCatalogService, NotebookSummar
 from app.services.notebook_copy_writer import NotebookCopyRun, NotebookCopyWriter, SnapshotRowSource
 
 _log = logging.getLogger("silicon_notebook.sharing")
+
+
+@dataclass
+class _CopiedTrees:
+    """What one deep copy wrote to disk. ``copied_files``/``assets_copied`` are
+    set the moment the copy creates each destination directory, so the
+    compensation removes only those. The attachment files live in their own
+    tree (``storage/assets/<nb>/``, ``AssetService.path_for``), apart from the
+    source files' ``storage/notebooks/<nb>/``."""
+
+    destination_dir: Path
+    assets_dest_dir: Path
+    copied_files: bool = False
+    assets_copied: bool = False
+
+    @classmethod
+    def under(cls, storage_dir: Path, notebook_id: str) -> "_CopiedTrees":
+        return cls(storage_dir / "notebooks" / notebook_id, storage_dir / "assets" / notebook_id)
 
 
 class NotebookCopyService:
@@ -123,20 +142,20 @@ class NotebookCopyService:
         now = self._seams.now()
         chunk_size = self._seams.copy_chunk_size()
         source_dir = self._storage_dir() / "notebooks" / source_notebook_id
+        trees = _CopiedTrees.under(self._storage_dir(), new_id)
         run = NotebookCopyRun(
             source_notebook_id=source_notebook_id,
-            source_notebook=source_notebook,
+            source_name=source_notebook.name,
             new_owner_id=new_owner_id,
             new_id=new_id,
             now=now,
             chunk_size=chunk_size,
-            destination_dir=self._storage_dir() / "notebooks" / new_id,
-            assets_dest_dir=self._storage_dir() / "assets" / new_id,
+            destination_dir=trees.destination_dir,
         )
         try:
             if source_dir.exists():
-                shutil.copytree(source_dir, run.destination_dir)
-                run.copied_files = True
+                shutil.copytree(source_dir, trees.destination_dir)
+                trees.copied_files = True
 
             # snapshot_copy_rows enforces the copyable-row bound ATOMICALLY inside
             # its own stable-snapshot read transaction (raises
@@ -151,13 +170,13 @@ class NotebookCopyService:
                 seams=self._seams,
                 rows=SnapshotRowSource(snapshot),
                 run=run,
-                materialize_assets=lambda files: self._copy_asset_files(run, files),
+                materialize_assets=lambda files: self._copy_asset_files(run, trees, files),
             ).write(new_name=new_name, actor_label=actor_label)
 
             self._store.validate_copy(source_notebook_id, new_id)
             self._store.publish_copy(new_id, source_notebook.status)
         except Exception:
-            self._compensate_failed_copy(run)
+            self._compensate_failed_copy(run, trees)
             raise
         # Success-only path — publish_copy above flipped the sentinel off
         # 'copying', and compensate_copy can no longer reap the notebooks row
@@ -170,33 +189,36 @@ class NotebookCopyService:
         self._schedule_copied_projections(run)
         return self._catalog.get_notebook(new_id)
 
-    def _compensate_failed_copy(self, run: NotebookCopyRun) -> None:
+    def _compensate_failed_copy(self, run: NotebookCopyRun, trees: _CopiedTrees) -> None:
         """Remove ONLY what this copy wrote: the destination rows, and the two
         destination directories if (and only if) this copy created them."""
         self._store.compensate_copy(run.new_id)
-        if run.copied_files:
-            shutil.rmtree(run.destination_dir, ignore_errors=True)
-        if run.assets_copied:
-            shutil.rmtree(run.assets_dest_dir, ignore_errors=True)
+        if trees.copied_files:
+            shutil.rmtree(trees.destination_dir, ignore_errors=True)
+        if trees.assets_copied:
+            shutil.rmtree(trees.assets_dest_dir, ignore_errors=True)
 
     def _copy_asset_files(
-        self, run: NotebookCopyRun, asset_files: "list[tuple[str, str, str]]"
+        self,
+        run: NotebookCopyRun,
+        trees: _CopiedTrees,
+        asset_files: "list[tuple[str, str, str]]",
     ) -> None:
         """The files of one batch of copied ``notebook_assets`` rows
         (``(old_id, new_id, mime)``), from the source notebook's asset tree into
         the copy's — ``NotebookCopyWriter``'s ``materialize_assets``.
 
-        ``run.assets_copied`` is set the moment the destination directory is
+        ``trees.assets_copied`` is set the moment the destination directory is
         created, before any file lands in it, so a failure mid-way through the
         files still has the directory removed by the compensation."""
         assets_src_dir = self._storage_dir() / "assets" / run.source_notebook_id
-        run.assets_dest_dir.mkdir(parents=True, exist_ok=True)
-        run.assets_copied = True
+        trees.assets_dest_dir.mkdir(parents=True, exist_ok=True)
+        trees.assets_copied = True
         for old_asset_id, new_asset_id, mime in asset_files:
             ext = ALLOWED_MIME_EXTENSIONS.get(mime, "bin")
             src_path = assets_src_dir / f"{old_asset_id}.{ext}"
             if src_path.is_file():
-                shutil.copy2(src_path, run.assets_dest_dir / f"{new_asset_id}.{ext}")
+                shutil.copy2(src_path, trees.assets_dest_dir / f"{new_asset_id}.{ext}")
 
     def _schedule_copied_projections(self, run: NotebookCopyRun) -> None:
         """PR-2+3 Task 13: schedule ONE structural reprojection per copied
