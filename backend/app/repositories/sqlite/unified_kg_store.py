@@ -1732,6 +1732,33 @@ class UnifiedKgStore:
                 (notebook_id, focal_key, notebook_id)).fetchone()
         return row["canonical_id"] if row else None
 
+    def focal_name_members(
+        self, notebook_id: str, canonical_id: str, focal_key: str,
+    ) -> List[sqlite3.Row]:
+        """对比焦点 R4 的成员读:``canonical_id`` 这个簇里 payload 名字
+        ``lower(name) == focal_key`` 的活成员(已发布代、对象未 deprecated),
+        每行带成员**自己的** ``source_id``,按 member id 排序。
+
+        只按名字过滤,不带天花板:天花板判定由调用方拿冻结的天花板集合逐行做
+        (``communities.CommunityQueryService._ceiling_focal``),一整库的来源清单
+        不进这条语句。成本有界于这一个簇的成员数(按
+        ``(notebook_id, canonical_id, …)`` 索引取簇行,对象按主键探查);只在
+        天花板在绑且焦点已按存储名解析出来时才被调。
+        """
+        with self.database.connect() as db:
+            return db.execute(
+                "SELECT cc.member_object_id, ko.source_id AS source_id "
+                "FROM concept_clusters cc "
+                "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
+                "WHERE cc.notebook_id=? AND cc.canonical_id=? "
+                "AND ko.status!='deprecated' "
+                f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN} "
+                "AND lower(CASE WHEN json_valid(ko.payload) "
+                "THEN json_extract(ko.payload, '$.name') END)=? "
+                "ORDER BY cc.member_object_id",
+                (notebook_id, canonical_id, notebook_id, focal_key),
+            ).fetchall()
+
     def top_community_for(self, notebook_id: str, canonical_id: str) -> Optional[str]:
         with self.database.connect() as db:
             row = db.execute(
