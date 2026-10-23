@@ -764,6 +764,21 @@ class KnowhowStore:
     def list_knowhow_tables(self, notebook_id: str) -> list[dict]:
         return self.knowhow_table_health_inputs(notebook_id)
 
+    def knowhow_table_sources(self, notebook_id: str) -> list[dict]:
+        """``[{"id", "hidden_source_id"}]`` of the notebook's tables, in
+        ``list_knowhow_tables`` order -- metadata only: no row statistics and none of
+        the cell content ``list_knowhow_tables`` hydrates for its health view (the
+        vector fill and the repair admission need only which source each table owns)."""
+        with self.database.connect() as db:
+            return [
+                {"id": str(row["id"]), "hidden_source_id": row["hidden_source_id"]}
+                for row in db.execute(
+                    "SELECT id,hidden_source_id FROM knowhow_tables "
+                    "WHERE notebook_id=? ORDER BY created_at,id",
+                    (notebook_id,),
+                ).fetchall()
+            ]
+
     def knowhow_table_id_by_title(self, notebook_id: str, title: str) -> str:
         """See ``KnowhowStorePort.knowhow_table_id_by_title`` for the
         contract. A bounded point lookup on ``(notebook_id, title)`` — never
