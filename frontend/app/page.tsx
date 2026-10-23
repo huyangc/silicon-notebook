@@ -79,6 +79,7 @@ import {
   toMountedBases,
   type MountedBase,
 } from "./notebook-bases";
+import { PromotionTargetHint, type MountBasesAccess } from "./promotion-target-hint";
 import {
   describeScaleIndex, latestScaleIndexDoneKey, queuedScaleIndexImmediateOp, queuedScheduleHint, scaleIndexOpConfirm, SCALE_OP_MODE, UNINDEXED_SCOPE_HINT,
   type ScaleIndexOp, type ScaleIndexStatus,
@@ -1658,6 +1659,8 @@ export default function Home() {
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
   // 「编辑问题」把焦点送回提问输入框:输入框的 ref 归 AskComposer 自己,这里只递增信号。
   const [askComposerFocusSignal, setAskComposerFocusSignal] = useState(0);
+  // 「关闭并管理来源」之后把焦点交给本库来源的搜索框(一次性请求,SourceListPanel 聚焦后撤掉)。
+  const [sourceSearchFocusRequested, setSourceSearchFocusRequested] = useState(false);
   const memoryLinksAbortRef = useRef<AbortController | null>(null);
   const memorySessionAbortRef = useRef(new AbortController());
   const sessionPopoverRef = useRef<HTMLDivElement | null>(null);
@@ -3240,6 +3243,15 @@ export default function Home() {
    *  因而必定结清 bundle choice、暂存批次和迟到解包 generation。 */
   function closeSourceModal(reason: "button" | "backdrop" = "button") {
     rootModals.requestClose("source-add", reason);
+  }
+
+  // 文档数量到上限那句的「关闭并管理来源」:关掉弹窗,来源栏收着就展开,焦点交给本库来源的
+  // 搜索框——删文档的入口在来源列表的每一行上。弹窗关闭时协调器把焦点还给打开它的按钮
+  // (layout effect),搜索框的聚焦在其后的被动 effect 里,所以落在搜索框上。
+  function closeSourceModalToManageSources() {
+    if (!rootModals.requestClose("source-add", "button")) return;
+    if (sourcesCollapsedRef.current) setSourcesCollapsedWithMorph(false);
+    setSourceSearchFocusRequested(true);
   }
 
   // 选择器与拖放共用的入列逻辑（**同步**部分）。被跳过的文件（类型不支持/超大小/
@@ -5218,6 +5230,21 @@ export default function Home() {
     notebookCollection.menu.notebook?.can_manage_content ?? false,
     notebookCollection.menu.notebook?.sync_origin ?? "",
   );
+  // 「贡献到公共知识库」因没挂公共库而禁用时,按钮旁那半句由谁来挂:同样只走
+  // workspaceCapabilities 一处判据。全局记忆页里一条记忆可能来自任意一本库,按行判;
+  // 列表里找不到那一行(还没加载)时按「库主」说,不给一个打不开的入口。
+  function mountBasesAccessFor(notebookId: string): MountBasesAccess {
+    const row = notebookCollection.rows.find((item) => item.id === notebookId);
+    if (!row) return "owner";
+    const rowCapabilities = workspaceCapabilities(
+      row.access,
+      currentUser?.role ?? "",
+      row.can_manage_content ?? false,
+      row.sync_origin ?? "",
+    );
+    if (rowCapabilities.canMountBases) return "self";
+    return rowCapabilities.mirrored ? "none" : "owner";
+  }
   const notebookEditorIndexingNotice = describeIndexingPipelineState(
     notebookCollection.editor?.indexingPipeline ?? null,
   );
@@ -5604,6 +5631,11 @@ export default function Home() {
             initialNotebookId={memoryNavigationTarget.notebookId}
             initialStatus={memoryNavigationTarget.status}
             initialMemoryId={memoryNavigationTarget.itemId}
+            onOpenPromotionQueue={currentUser?.role === "admin"
+              ? () => { promotionQueue.openPromoQueue().catch(reportError); }
+              : undefined}
+            mountBasesAccess={mountBasesAccessFor}
+            onMountBases={(notebookId) => { void presentNotebookEditor(notebookId, { focusBases: true }); }}
           />
         </main>
       )}
@@ -6102,6 +6134,8 @@ export default function Home() {
                   onDeleteSource={(source) => confirmDeleteSource(source)}
                   onPage={(p) => { if (currentNotebookId) loadSourcesPage(currentNotebookId, { page: p, q: sourceQuery }).catch(reportError); }}
                   onAddSource={() => { setLinkSectionOpen(false); openSourceModal(); }}
+                  focusSearchRequested={sourceSearchFocusRequested}
+                  onSearchFocused={() => setSourceSearchFocusRequested(false)}
                 />
               </div>
             </aside>
@@ -6307,6 +6341,17 @@ export default function Home() {
                             onOpenModelStatus={(serviceId) => { openModelPanel(serviceId); }}
                             testingModelServices={modelTestActivity.services}
                             testingAllModels={modelTestActivity.all}
+                            // 「有参考库没能及时读取」那句的「再问一次」：用当前的回答方式与范围
+                            // 重提这一轮的问题。提交会清空输入框，所以里面有没发的内容时禁用，
+                            // 不替用户丢掉草稿。
+                            onReask={() => { askSession.submit(turn.question).catch(reportError); }}
+                            reaskDisabledReason={
+                              askInFlight || sessionLoading
+                                ? "上一个问题还在进行中，请稍候"
+                                : question.trim()
+                                  ? "输入框里还有没发送的内容，先发送或清空它再重问"
+                                  : undefined
+                            }
                           />
                         </ChatAnswer>
                       </div>
@@ -6367,6 +6412,10 @@ export default function Home() {
                     tier={currentNotebook?.tier}
                     onPropose={(id) => submitPromotion(id).catch(reportError)}
                     proposeDisabledReason={promotionTarget.kind === "none" ? PROMOTION_TARGET_NONE_REASON : undefined}
+                    proposeMountAccess={capabilities.canMountBases ? "self" : capabilities.mirrored ? "none" : "owner"}
+                    onMountBases={() => {
+                      if (currentNotebook) void presentNotebookEditor(currentNotebook.id, { focusBases: true });
+                    }}
                     total={kgKnowledge.total}
                     page={kgKnowledge.page}
                     onPage={kgWorkspace.goToKnowledgePage}
@@ -6386,6 +6435,23 @@ export default function Home() {
                     creationDisabledReason={isAdvanced(uiMode)
                       ? "当前检索范围为空，请至少选择一个来源或参考库"
                       : "请先添加来源，再开始生成报告"}
+                    // 输入框旁那句的出路：「全选」与来源栏的「全选」是同一个动作（本库来源与
+                    // 参考库一起），当前用户做不了的「添加来源」/「挂载参考库」不说。
+                    creationBlockedHint={{
+                      advanced: isAdvanced(uiMode),
+                      canSelectAll: notebookSourceTotal > 0 || hasMountedBase,
+                      canAddSources: !readOnlyWorkspace,
+                      canMountBases: capabilities.canMountBases,
+                      mirrored: capabilities.mirrored,
+                      onSelectAll: () => {
+                        sourceLibrary.selectAllSources();
+                        setBaseScopeSelection(defaultBaseScopeSelection());
+                      },
+                      onAddSources: () => { setLinkSectionOpen(false); openSourceModal(); },
+                      onMountBases: () => {
+                        if (currentNotebook) void presentNotebookEditor(currentNotebook.id, { focusBases: true });
+                      },
+                    }}
                     maxSections={reportMaxSections}
                     maxSubqueriesPerSection={reportMaxSubqueriesPerSection}
                     // 报告正文的引用图片与问答共用同一格 root modal（answer-image-preview）：
@@ -6403,6 +6469,11 @@ export default function Home() {
                     bases={notebookPromotionBases}
                     sessionSignal={memorySessionAbortRef.current.signal}
                     onOpenSource={onOpenSourceElement}
+                    onOpenPromotionQueue={currentUser?.role === "admin"
+                      ? () => { promotionQueue.openPromoQueue().catch(reportError); }
+                      : undefined}
+                    mountBasesAccess={mountBasesAccessFor}
+                    onMountBases={(notebookId) => { void presentNotebookEditor(notebookId, { focusBases: true }); }}
                   />
                 )}
               </div>
@@ -6819,7 +6890,11 @@ export default function Home() {
                 <span className="source-doc-capacity-count">文档 {docCapacity.count} / {docCapacity.limit}</span>
                 {docCapacity.atCapacity && (
                   <span className="source-doc-capacity-hint">
-                    已达该笔记本的文档数量上限，如需继续添加，请先删除部分文档，或联系管理员调整上限。
+                    已达该笔记本的文档数量上限，如需继续添加，请先删除部分文档（
+                    <button type="button" className="link-button inline-action" onClick={closeSourceModalToManageSources}>
+                      关闭并管理来源
+                    </button>
+                    ），或联系管理员调整上限。
                   </span>
                 )}
               </div>
@@ -8486,6 +8561,8 @@ function KnowledgeBrowser({
   tier,
   onPropose,
   proposeDisabledReason,
+  proposeMountAccess = "owner",
+  onMountBases,
   total,
   page,
   onPage,
@@ -8522,6 +8599,9 @@ function KnowledgeBrowser({
   tier?: string;
   onPropose?: (id: string) => void;
   proposeDisabledReason?: string;
+  /** 「提交贡献」因没挂公共知识库而禁用时,按钮旁那半句由谁来挂(见 PromotionTargetHint)。 */
+  proposeMountAccess?: MountBasesAccess;
+  onMountBases?: () => void;
   total: number;
   page: number;
   onPage: (p: number) => void;
@@ -8652,6 +8732,11 @@ function KnowledgeBrowser({
                   >
                     ↑ 提交贡献
                   </button>
+                )}
+                {/* 禁用原因与 proposeDisabledReason 同一判据(没挂公共知识库),紧挨按钮说出来。 */}
+                {!readOnly && tier === "personal" && item.status !== "deprecated" && onPropose
+                  && proposeDisabledReason && onMountBases && (
+                  <PromotionTargetHint access={proposeMountAccess} onMountBases={onMountBases} />
                 )}
               </div>
               <EvidenceLine evidence={item.evidence} />

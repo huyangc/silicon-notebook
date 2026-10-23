@@ -214,9 +214,10 @@ export function retrievalScopeSummary(
 }
 
 /**
- * 回答下方那句「哪些参考库没有参与」的文案（``AskResponse.skipped_libraries``）。
- * 只说现象：提问开始时没能及时读出这个库，本次回答没有用到它；再问一次通常就会包含。
- * 名称缺失（读不到挂载列表）时说「一个参考库」，不显示裸 id。
+ * 回答下方那句「哪些参考库没有参与」的前半句（``AskResponse.skipped_libraries``）。
+ * 只说现象：提问开始时没能及时读出这个库，本次回答没有用到它。后半句「再问一次通常
+ * 就会包含」由 AnswerView 拼上——能重问的宿主把「再问一次」做成可点的字，所以它不在
+ * 这个纯字符串里。名称缺失（读不到挂载列表）时说「一个参考库」，不显示裸 id。
  */
 export function skippedLibrariesNotice(
   libraries: readonly { notebook_id: string; name: string }[],
@@ -228,7 +229,7 @@ export function skippedLibrariesNotice(
   const subject = named.length > 0
     ? `参考库${parts.join("、")}`
     : (unnamed === 1 ? "一个参考库" : `${unnamed} 个参考库`);
-  return `${subject}这次没能及时读取，本次回答没有用到${libraries.length > 1 ? "它们" : "它"}的资料；再问一次通常就会包含。`;
+  return `${subject}这次没能及时读取，本次回答没有用到${libraries.length > 1 ? "它们" : "它"}的资料`;
 }
 
 export function removeSourceFromSelection(

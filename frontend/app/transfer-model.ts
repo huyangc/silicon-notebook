@@ -167,7 +167,7 @@ export type TransferResultsSummary = {
   // status === "failed" 且 error_code === "promotion_proposed" 的子集(round 8
   // P2-A):这条 Memory 正在公共知识库审批队列里,move 被拒绝——同样不是能靠
   // "重试"解决的普通失败(在提案被审批中心处理完之前,重试永远还是这个结果),
-  // 需要单独一条「去待确认中心处理提案」的可操作提示,不能和其它失败一起被
+  // 需要单独一条指向「内容审核」(管理员)或「等审核完成」(其他人)的提示,不能和其它失败一起被
   // 压进"N 条失败,请稍后重试"。
   promotionBlocked: TransferResult[];
 };

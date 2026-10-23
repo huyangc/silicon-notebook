@@ -2180,6 +2180,13 @@ button.chat-session-card {
   font-size: 12px;
 }
 
+/* 范围为空那句带着可点的出路，不能被省略号截掉：换行显示全句。 */
+.report-compose-hint.scope-blocked {
+  overflow: visible;
+  white-space: normal;
+  line-height: 1.6;
+}
+
 /* 超限时这句话是此刻唯一挡着提交的东西，必须与常规提示区分开——同色的话按钮变灰
    而用户看不出为什么（codex #525 R3）。 */
 .report-compose-hint.over-limit {
@@ -5859,6 +5866,12 @@ button.chat-session-card {
   margin: 0 2px;
   font-size: 13px;
   line-height: 1.6;
+}
+
+/* 「贡献到公共知识库」没挂公共库而禁用时紧挨按钮的那半句：与旁边的小按钮同字号。 */
+.tool-hint.promotion-target-hint {
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .knowledge-kind-tabs {

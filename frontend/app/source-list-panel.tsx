@@ -1,4 +1,5 @@
 "use client";
+import { useEffect, useRef } from "react";
 import { ExternalLink, FileText, Loader2, Search, Trash2 } from "lucide-react";
 
 import { AnomalyBadge } from "./anomaly-badge";
@@ -41,6 +42,8 @@ export function SourceListPanel({
   onDeleteSource,
   onPage,
   onAddSource,
+  focusSearchRequested = false,
+  onSearchFocused,
 }: {
   sources: SourceSummary[];
   uiMode: UiMode;
@@ -62,7 +65,18 @@ export function SourceListPanel({
   onPage: (page: number) => void;
   /** 空列表那句「添加来源」的动作（与来源栏顶部那颗按钮同一个入口）。 */
   onAddSource: () => void;
+  /** 为 true 时把焦点交给搜索框，然后调 `onSearchFocused` 让宿主把请求撤掉：「添加来源」
+   *  弹窗里那句「关闭并管理来源」关掉弹窗后，让人直接从这里找要删的文档。是一次性的请求
+   *  而不是计数器——来源栏收起再展开会重新挂载本组件，计数器会在每次挂载时再抢一次焦点。 */
+  focusSearchRequested?: boolean;
+  onSearchFocused?: () => void;
 }) {
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!focusSearchRequested) return;
+    searchInputRef.current?.focus();
+    onSearchFocused?.();
+  }, [focusSearchRequested]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <>
       {/* 标题 + 搜索框成组，但**不**把 .source-list 包进来：那个列表靠
@@ -86,6 +100,7 @@ export function SourceListPanel({
             ? <Loader2 size={15} className="busy-spin source-search-icon" aria-hidden="true" />
             : <Search size={15} className="source-search-icon" aria-hidden="true" />}
           <input
+            ref={searchInputRef}
             className="source-search"
             type="search"
             placeholder="搜索标题/作者/文件名"

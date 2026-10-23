@@ -173,3 +173,20 @@ test("问答在途时检索勾选框整体禁用", () => {
   renderPanel({ sources: [source("alpha")], askInFlight: true });
   expect(screen.getByRole("checkbox", { name: "检索来源：alpha" })).toBeDisabled();
 });
+
+test("「关闭并管理来源」的聚焦请求落在搜索框上，聚焦后请求被撤掉、重新挂载不再抢焦点", () => {
+  const onSearchFocused = vi.fn();
+  const { rerender, props, unmount } = renderPanel({ onSearchFocused });
+  expect(screen.getByRole("searchbox", { name: "搜索本库来源" })).not.toHaveFocus();
+  expect(onSearchFocused).not.toHaveBeenCalled();
+
+  rerender(<SourceListPanel {...props} focusSearchRequested />);
+  expect(screen.getByRole("searchbox", { name: "搜索本库来源" })).toHaveFocus();
+  expect(onSearchFocused).toHaveBeenCalledOnce();
+  unmount();
+
+  // 宿主撤掉请求之后(来源栏收起再展开 = 重新挂载)不再聚焦。
+  renderPanel({ onSearchFocused, focusSearchRequested: false });
+  expect(screen.getByRole("searchbox", { name: "搜索本库来源" })).not.toHaveFocus();
+  expect(onSearchFocused).toHaveBeenCalledOnce();
+});

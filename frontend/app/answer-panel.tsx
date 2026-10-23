@@ -1175,6 +1175,8 @@ export function AnswerView({
   onOpenModelStatus,
   testingModelServices,
   testingAllModels,
+  onReask,
+  reaskDisabledReason,
 }: {
   answer: AskResponse;
   feedbackSent: string;
@@ -1241,6 +1243,11 @@ export function AnswerView({
   onOpenModelStatus?: (serviceId: string) => void;
   testingModelServices?: Record<string, boolean>;
   testingAllModels?: boolean;
+  /** 「有参考库没能及时读取」那句里的「再问一次」：用当前设置把这条回答的问题重新提一次。
+   *  可选——只读排障视图不传，那半句照样说，只是不成按钮（同上面的既有惯例）。 */
+  onReask?: () => void;
+  /** 非空时「再问一次」禁用，`title` 说明为什么（在途提问、输入框里有未发送的内容）。 */
+  reaskDisabledReason?: string;
 }) {
   const [copied, setCopied] = useState(false);
   const [citePopover, setCitePopover] = useState<{
@@ -1454,7 +1461,19 @@ export function AnswerView({
           只说现象，不猜原因；没有这个字段（健康的回答、历史回答）时一个节点都不多。 */}
       {(answer.skipped_libraries?.length ?? 0) > 0 && (
         <p className="answer-skipped-libraries-notice" role="note">
-          {skippedLibrariesNotice(answer.skipped_libraries ?? [])}
+          {skippedLibrariesNotice(answer.skipped_libraries ?? [])}；
+          {onReask ? (
+            <button
+              type="button"
+              className="link-button inline-action"
+              disabled={Boolean(reaskDisabledReason)}
+              title={reaskDisabledReason || "用当前设置把这个问题再问一次"}
+              onClick={onReask}
+            >
+              再问一次
+            </button>
+          ) : "再问一次"}
+          通常就会包含。
         </p>
       )}
       {hasFailedCitationCheck(answer.citation_check) && (
