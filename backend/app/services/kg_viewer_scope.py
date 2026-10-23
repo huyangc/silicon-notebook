@@ -868,23 +868,52 @@ def answer_graph_by(
 ) -> Tuple[List[dict], List[dict]]:
     """``nodes`` / ``edges`` with every id in ``renames`` replaced by its
     answer id (``KgViewerScope.member_answer_ids`` or the third value of
-    ``KgViewerScope.answer_neighbourhood``); unchanged when empty."""
+    ``KgViewerScope.answer_neighbourhood``); unchanged when empty.
+
+    An answer id can already be a raw node of the same response -- a stale
+    preview holds a raw object the live re-merge has since put into the
+    cluster it answers -- so the rewrite merges instead of duplicating: one
+    node per id (the first in node order), a rewritten edge dropped when an
+    edge with the same endpoints and type is already in the response, and
+    no self-loop manufactured by the rewrite (an edge between the cluster
+    and its own answering member).  Edges the rewrite does not touch stay as
+    they are."""
     if not renames:
         return nodes, edges
 
     def answer(value: Any) -> Any:
         return renames.get(str(value), value)
 
-    return (
-        [{**n, "id": answer(n["id"])} if str(n["id"]) in renames else n for n in nodes],
-        [
-            {**e, "source_object_id": answer(e["source_object_id"]),
-             "target_object_id": answer(e["target_object_id"])}
-            if str(e["source_object_id"]) in renames or str(e["target_object_id"]) in renames
-            else e
-            for e in edges
-        ],
-    )
+    def key(edge: dict) -> tuple:
+        return (str(edge["source_object_id"]), str(edge["target_object_id"]),
+                edge.get("edge_type"))
+
+    answered_nodes: List[dict] = []
+    node_ids: set = set()
+    for node in nodes:
+        if str(node["id"]) in renames:
+            node = {**node, "id": answer(node["id"])}
+        if str(node["id"]) in node_ids:
+            continue
+        node_ids.add(str(node["id"]))
+        answered_nodes.append(node)
+
+    def rewritten(edge: dict) -> bool:
+        return (str(edge["source_object_id"]) in renames
+                or str(edge["target_object_id"]) in renames)
+
+    seen = {key(e) for e in edges if not rewritten(e)}
+    answered_edges: List[dict] = []
+    for edge in edges:
+        if rewritten(edge):
+            edge = {**edge, "source_object_id": answer(edge["source_object_id"]),
+                    "target_object_id": answer(edge["target_object_id"])}
+            if (str(edge["source_object_id"]) == str(edge["target_object_id"])
+                    or key(edge) in seen):
+                continue
+            seen.add(key(edge))
+        answered_edges.append(edge)
+    return answered_nodes, answered_edges
 
 
 def member_name(row: Any) -> str:
