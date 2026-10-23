@@ -37,6 +37,7 @@ import {
 } from "./inline-citation-images";
 import { Pagination } from "./Pagination";
 import { quotedPhraseHint } from "./query-syntax";
+import { ReportScopeHint, type ReportScopeHintProps } from "./report-scope-hint";
 import { ReportShareConfirm } from "./report-share-confirm";
 import { useClientPagination } from "./use-client-pagination.ts";
 import {
@@ -1359,6 +1360,11 @@ export interface ReportsPanelProps {
   readOnly?: boolean;
   creationDisabled?: boolean;
   creationDisabledReason?: string;
+  /**
+   * 输入框锁住时，输入框旁那句的出路（「全选」/「添加来源」/「挂载参考库」）。placeholder
+   * 只能是纯文字，可点的字写在这里。不传时那一格照旧显示平常的说明。
+   */
+  creationBlockedHint?: ReportScopeHintProps;
   maxSections?: number;
   maxSubqueriesPerSection?: number;
   uiMode?: UiMode;
@@ -1453,6 +1459,7 @@ export function ReportsPanel({
   readOnly = false,
   creationDisabled = false,
   creationDisabledReason = "",
+  creationBlockedHint,
   maxSections = DEFAULT_REPORT_MAX_SECTIONS,
   maxSubqueriesPerSection = DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
   uiMode = "advanced",
@@ -1532,6 +1539,15 @@ export function ReportsPanel({
     const current = document.activeElement;
     if (!current || current === document.body) shareButtonRef.current?.focus();
   }, [shareBusy]);
+  // 「全选」按下后那句提示随范围恢复而消失：焦点交给刚解锁的输入框（按下那一刻它还禁用着，
+  // 拿不到焦点，等它解锁再给）。
+  const composeInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const composeFocusPending = useRef(false);
+  useEffect(() => {
+    if (creationDisabled || !composeFocusPending.current) return;
+    composeFocusPending.current = false;
+    composeInputRef.current?.focus();
+  }, [creationDisabled]);
   const reportsPage = useClientPagination(reports ?? NO_REPORTS, REPORT_LIST_PAGE_SIZE, notebookId);
   // 打开的报告要落在列表当前页上:返回列表时停在它所在的页。只跟随 active id 变化与
   // 清单(重新)加载完成,不跟随原地刷新——见 groups-page.tsx「选中的群组要落在侧栏
@@ -1813,11 +1829,14 @@ export function ReportsPanel({
   // 超限只拦提交,不动用户输入(codex #525 R3):按码点数,与后端同一把尺。
   const questionLimitHint = reportQuestionLimitHint(question);
   const questionTooLong = questionLimitHint !== null;
+  // 范围为空排在最前：此刻是它锁着输入框，出路是这句里可点的字。
+  const scopeBlockedHint = creationDisabled ? creationBlockedHint : undefined;
 
   return (
     <div className="report-panel">
       {!readOnly && <div className="report-compose">
         <textarea
+          ref={composeInputRef}
           className="report-compose-input"
           rows={2}
           placeholder={creationDisabled
@@ -1833,11 +1852,24 @@ export function ReportsPanel({
           {/* 逐节检索走的就是问答那套逐步推理,英文双引号在这里同样生效——
               回执与提问框共用同一份规则,不另写一套措辞。 */}
           {/* 超限提示优先于引号回执：它是此刻唯一挡着提交的东西。 */}
-          <span className={`report-compose-hint${questionTooLong ? " over-limit" : ""}`}>
-            {questionLimitHint
-              ?? quotedPhraseHint(question)
-              ?? "后台多轮检索并逐节撰写，约 5–15 分钟，期间可离开此页"}
-          </span>
+          {scopeBlockedHint ? (
+            // 这句带着可点的出路，换行显示全句，不被省略号截掉（scope-blocked）。
+            <span className="report-compose-hint scope-blocked">
+              <ReportScopeHint
+                {...scopeBlockedHint}
+                onSelectAll={() => {
+                  composeFocusPending.current = true;
+                  scopeBlockedHint.onSelectAll();
+                }}
+              />
+            </span>
+          ) : (
+            <span className={`report-compose-hint${questionTooLong ? " over-limit" : ""}`}>
+              {questionLimitHint
+                ?? quotedPhraseHint(question)
+                ?? "后台多轮检索并逐节撰写，约 5–15 分钟，期间可离开此页"}
+            </span>
+          )}
           <div className="report-compose-controls">
             {isAdvanced(uiMode) && (
               <EffortPicker

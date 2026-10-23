@@ -1686,7 +1686,7 @@ class MemoryService:
                     # PR review round 8 P2-A：_TransferRejected（普通
                     # ValueError 的薄子类）带上 error_code="promotion_proposed"
                     # ——前端靠它把这一条从"N 条失败，请稍后重试"的通用兜底里
-                    # 摘出来，单独给一条"去待确认中心处理提案"的可操作提示
+                    # 摘出来，单独给一条指向审核（管理员的「内容审核」）的提示
                     # （重试对这一条永远无效，通用文案在这里是误导）。
                     raise _TransferRejected(
                         "该 Memory 正在提升到公共知识库的审批队列中，无法移动；"

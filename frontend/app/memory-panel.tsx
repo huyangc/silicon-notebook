@@ -9,6 +9,7 @@ import { requestTaskStream } from "./request-task-stream.ts";
 import { humanizedError, logDiagnostic, toUserMessage } from "./errors.ts";
 import { FloatingModalCard } from "./floating-modal-card";
 import { PROMOTION_TARGET_NONE_REASON, resolvePromotionTarget, type MountedBase } from "./notebook-bases";
+import { PromotionTargetHint, type MountBasesAccess } from "./promotion-target-hint";
 import { PromotionTargetModal } from "./promotion-target-modal";
 import { useFloatingWindow } from "./use-floating-window";
 import {
@@ -67,7 +68,9 @@ type MemoryDraft = { title: string; content_md: string; tags: string };
 // 或「弃用源」(弃用会真的清理掉源的 KG 派生源,删除不会——MemoryService.
 // delete 只删行本身,是 deprecate 才会调 remove_memory_source);promotionBlocked
 // 对应它的 promotionBlocked 子集(round 8 P2-A:该 Memory 正在公共知识库审批
-// 队列中,move 被拒绝——同样不能引导"重试",得指向待确认中心);failure 对应
+// 队列中,move 被拒绝——同样不能引导"重试",得指向审核入口:提案只有系统管理员能在
+// 「内容审核」里处理,铃铛也只给管理员列它;所以管理员看到可点的「内容审核」,其他人
+// 只被告知等审核完成,不被指去一个看不到这条提案的地方);failure 对应
 // 剩下的普通 status==="failed"。四者渲染成不同文案的横幅,不能合并成一条消息
 // ——AMENDMENT 2 明确要求 warning/failure 视觉上可区分,promotionBlocked/
 // sourceChanged 是同一原则的延伸:原因不同,提示和后续动作也该不同。
@@ -82,7 +85,8 @@ type MemoryDraft = { title: string; content_md: string; tags: string };
 type TransferNotice = {
   warning: string | null;
   sourceChanged: string | null;
-  promotionBlocked: string | null;
+  /** 正在审批中、这次没能移动的条数(文案在渲染处拼,其中的「内容审核」是可点的字)。 */
+  promotionBlocked: number | null;
   failure: string | null;
   success: string | null;
 };
@@ -142,6 +146,34 @@ function MemoryEditor({
   );
 }
 
+/**
+ * 「N 条正在公共知识库审批中，暂不能移动」。提案只有系统管理员能在「内容审核」里处理
+ * (铃铛也只给管理员列它),所以只有拿到 `onOpenPromotionQueue` 的宿主(管理员)把「内容
+ * 审核」做成可点的字;其他人只被告知等审核完成。
+ */
+export function PromotionBlockedNotice({
+  count,
+  onOpenPromotionQueue,
+}: {
+  count: number;
+  onOpenPromotionQueue?: () => void;
+}) {
+  return (
+    <div className="memory-transfer-notice" role="status">
+      {count} 条正在公共知识库审批中，暂不能移动；
+      {onOpenPromotionQueue ? (
+        <>
+          请先在
+          <button type="button" className="link-button inline-action" onClick={onOpenPromotionQueue}>
+            内容审核
+          </button>
+          里处理这些提案。
+        </>
+      ) : "等管理员审核完成后再移动。"}
+    </div>
+  );
+}
+
 export function MemoryPanel({
   scope,
   notebookId,
@@ -152,6 +184,9 @@ export function MemoryPanel({
   initialStatus,
   initialMemoryId,
   onOpenSource,
+  onOpenPromotionQueue,
+  mountBasesAccess,
+  onMountBases,
 }: {
   scope: MemoryScope;
   notebookId: string | null;
@@ -172,6 +207,14 @@ export function MemoryPanel({
   initialStatus?: MemoryStatus | null;
   initialMemoryId?: string | null;
   onOpenSource?: (sourceId: string, elementId?: string) => void;
+  /** 打开「内容审核」(公共知识库的提案队列)。只有系统管理员处理得了提案,宿主只对
+   *  管理员传;不传时「正在审批中」那句只说等审核,不给入口。 */
+  onOpenPromotionQueue?: () => void;
+  /** 这条记忆所在的笔记本由谁来挂公共知识库(自己 / 库主 / 镜像谁都不行)。「贡献到
+   *  公共知识库」因为没挂公共库而禁用时,按它决定按钮旁那半句说什么。不传按「库主」说。 */
+  mountBasesAccess?: (notebookId: string) => MountBasesAccess;
+  /** 打开那本笔记本的设置并停在「参考库」一节。 */
+  onMountBases?: (notebookId: string) => void;
 }) {
   // 晋升目标三态按记忆各自的 notebook 解析，两个 scope 共用同一套
   // resolvePromotionTarget 判定(不另写一份规则)。notebook 视图里所有记忆
@@ -579,7 +622,7 @@ export function MemoryPanel({
             ? `${summary.sourceChanged.length} 条源记忆有更新的修改已被保留；请核对后删除目标笔记本里的旧副本，或重新发起一次移动。`
             : null,
           promotionBlocked: summary.promotionBlocked.length > 0
-            ? `${summary.promotionBlocked.length} 条正在公共知识库审批中，暂不能移动；请先在待确认中心处理提案。`
+            ? summary.promotionBlocked.length
             : null,
           failure: plainFailedCount > 0
             ? `${plainFailedCount} 条复制/移动失败，请稍后重试`
@@ -775,8 +818,11 @@ export function MemoryPanel({
       {transferNotice?.sourceChanged && (
         <div className="memory-transfer-notice" role="status">{transferNotice.sourceChanged}</div>
       )}
-      {transferNotice?.promotionBlocked && (
-        <div className="memory-transfer-notice" role="status">{transferNotice.promotionBlocked}</div>
+      {transferNotice?.promotionBlocked != null && (
+        <PromotionBlockedNotice
+          count={transferNotice.promotionBlocked}
+          onOpenPromotionQueue={onOpenPromotionQueue}
+        />
       )}
       {transferNotice?.failure && (
         <div className="memory-error" role="alert">{transferNotice.failure}</div>
@@ -930,15 +976,24 @@ export function MemoryPanel({
                       {memory.status === "confirmed" && (
                         <>
                           {canPromoteMemory(memory) ? (
-                            <button
-                              type="button"
-                              className="memory-promote-action"
-                              disabled={busy || promotionTarget.kind === "none"}
-                              title={promotionTarget.kind === "none" ? PROMOTION_TARGET_NONE_REASON : undefined}
-                              onClick={() => promoteMemory(memory)}
-                            >
-                              <ArrowUpCircle size={14} /> 贡献到公共知识库
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                className="memory-promote-action"
+                                disabled={busy || promotionTarget.kind === "none"}
+                                title={promotionTarget.kind === "none" ? PROMOTION_TARGET_NONE_REASON : undefined}
+                                onClick={() => promoteMemory(memory)}
+                              >
+                                <ArrowUpCircle size={14} /> 贡献到公共知识库
+                              </button>
+                              {/* 禁用的原因不只放在 title 里:紧挨按钮说出来,能挂的人直接点。 */}
+                              {promotionTarget.kind === "none" && onMountBases && (
+                                <PromotionTargetHint
+                                  access={mountBasesAccess?.(memory.notebook_id) ?? "owner"}
+                                  onMountBases={() => onMountBases(memory.notebook_id)}
+                                />
+                              )}
+                            </>
                           ) : (
                             <span className={`memory-promotion-state state-${memory.promotion_state}`}>
                               {memoryPromotionLabel(memory.promotion_state)}
