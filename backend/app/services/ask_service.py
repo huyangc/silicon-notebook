@@ -2907,9 +2907,14 @@ class AskService:
             return []
         if self.memory_retriever is None:
             return []
-        return self.memory_retriever.notebook_memory_hits(
-            user_id, notebook_id, query, 8
-        )
+        from app.services.retrieval_run import offering_query_vectors
+
+        # The retrieval stage embeds this same question next: let the recall
+        # hand its vector over (``retrieval_run.shared_query_vector``).
+        with offering_query_vectors():
+            return self.memory_retriever.notebook_memory_hits(
+                user_id, notebook_id, query, 8
+            )
 
     def preview_reasoning_intent(
         self,

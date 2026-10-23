@@ -98,18 +98,33 @@ def test_hand_over_keeps_the_most_recently_used_vectors():
     assert QUERY_VECTOR_SHARE_LIMIT == 2
     with retrieval_run(run_kind="ask_reasoning"):
         share_query_vector(embedder, "question", [1.0], owner="memory")
-        share_query_vector(embedder, "other", [2.0], owner="stage")
+        # A side evicts only its own: three stage offers push out the oldest
+        # stage one and never Memory's question.
+        for index in range(3):
+            share_query_vector(embedder, f"s{index}", [float(index)], owner="stage")
         assert shared_query_vector(embedder, "question") == [1.0]
-        share_query_vector(embedder, "third", [3.0], owner="stage")
-        assert shared_query_vector(embedder, "question") == [1.0]
-        assert shared_query_vector(embedder, "other") is None
-        assert shared_query_vector(embedder, "third") == [3.0]
+        assert shared_query_vector(embedder, "s0") is None
+        # LRU, not FIFO: s1 read back outlives s2 offered after it.
+        assert shared_query_vector(embedder, "s1") == [1.0]
+        share_query_vector(embedder, "s3", [3.0], owner="stage")
+        assert shared_query_vector(embedder, "s1") == [1.0]
+        assert shared_query_vector(embedder, "s2") is None
         share_query_vector(embedder, "none", None, owner="stage")
+        assert shared_query_vector(embedder, "s3") == [3.0]
+        # Memory's own limit, LRU as well.
+        share_query_vector(embedder, "m1", [5.0], owner="memory")
+        assert shared_query_vector(embedder, "question") == [1.0]
+        share_query_vector(embedder, "m2", [6.0], owner="memory")
+        assert shared_query_vector(embedder, "m1") is None
         assert shared_query_vector(embedder, "question") == [1.0]
         # A Memory recall about to embed drops only Memory's own offers.
         drop_query_vectors("memory")
         assert shared_query_vector(embedder, "question") is None
-        assert shared_query_vector(embedder, "third") == [3.0]
+        assert shared_query_vector(embedder, "s3") == [3.0]
     # Outside a run nothing is kept.
     share_query_vector(embedder, "question", [1.0], owner="memory")
     assert shared_query_vector(embedder, "question") is None
+
+
+def test_stage_siblings_do_not_push_the_question_out(world):
+    cases.stage_siblings_do_not_push_the_question_out(world)

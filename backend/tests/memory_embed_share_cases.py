@@ -210,14 +210,27 @@ def recall_without_memory(world: World, text: str) -> tuple[str, str]:
     return recall, vector
 
 
-def _memory(world: World, text: str) -> list[str]:
-    return as_bytes(world.retriever.notebook_memory_hits(
-        world.asker.id, world.notebook_id, text, 8))
+def _memory(world: World, text: str, *, offering: bool = True) -> list[str]:
+    """A notebook-plane recall; ``offering`` as an Ask's Memory phase or a
+    report scout does (``offering_query_vectors``), off as a report section."""
+    from app.services.retrieval_run import offering_query_vectors
+
+    def recall():
+        return as_bytes(world.retriever.notebook_memory_hits(
+            world.asker.id, world.notebook_id, text, 8))
+
+    if not offering:
+        return recall()
+    with offering_query_vectors():
+        return recall()
 
 
 def _agent_memory(world: World, text: str) -> list[str]:
-    return as_bytes(world.retriever.agent_memory_hits(
-        world.asker.id, world.notebook_id, text, True, 8))
+    from app.services.retrieval_run import offering_query_vectors
+
+    with offering_query_vectors():
+        return as_bytes(world.retriever.agent_memory_hits(
+            world.asker.id, world.notebook_id, text, True, 8))
 
 
 def _vector(world: World, text: str) -> Optional[list[float]]:
@@ -432,36 +445,48 @@ def _table() -> tuple[int, int]:
 
 def report_run_keeps_the_hand_over_bounded(world: World) -> None:
     """A report recalls Memory once per section, each with its own text that
-    nothing reads back; the run must not keep every one of those vectors."""
+    nothing reads back: those recalls do not offer, so the run keeps none of
+    their vectors; the stage's own offers stay within the limit."""
     from app.services.retrieval_run import QUERY_VECTOR_SHARE_LIMIT
 
     remember(world)
     sizes = []
     with one_run(world):
-        # Two recalls back to back, no stage embed between (a report's
-        # per-section Memory reads can run that way): the second drops the
-        # first's unread vector before embedding its own.
+        # Two offering recalls back to back: the second drops the first's
+        # unread vector before embedding its own.
         _memory(world, f"{PLAIN} opening")
         _memory(world, f"{PLAIN} closing")
         assert _table() == (1, 1), _table()
+        _memory(world, f"{PLAIN} scout done", offering=True)
         for index in range(12):
             section = f"{PLAIN} section {index} corner review"
-            assert _memory(world, section) == oracle_memory(world, section)
+            assert _memory(world, section, offering=False) == oracle_memory(world, section)
             sizes.append(_table())
             _vector(world, f"section {index} sub query")
-            # The stage embedded another text: the unread Memory vector went.
-            assert _table()[1] == 0, _table()
             sizes.append(_table())
-        # The Ask-shaped hand-over still works at the end of a long run.
-        world.embedder.queries.clear()
+    # Section recalls never add a Memory vector (the scout's one stays alone),
+    # and the stage keeps at most the limit of its own.
+    assert all(memory == 1 for _, memory in sizes), sizes
+    assert max(total - memory for total, memory in sizes) <= QUERY_VECTOR_SHARE_LIMIT, sizes
+    with one_run(world):
+        for index in range(3):
+            _memory(world, f"{PLAIN} section {index}", offering=False)
+        assert _table() == (0, 0), _table()
+
+
+def stage_siblings_do_not_push_the_question_out(world: World) -> None:
+    """The stage fans sub-queries out on parallel workers, so a sibling's miss
+    on another text can come before the worker that reads the question Memory
+    handed over -- the order the streamed-Memory characterization lost in CI.
+    That order, made deterministic: the question is still read, embedded once."""
+    remember(world)
+    world.embedder.queries.clear()
+    with one_run(world):
         notebook = _memory(world, PLAIN)
+        for index in range(4):
+            _vector(world, f"sibling sub query {index}")
         vector = _vector(world, PLAIN)
-        sizes.append(_table())
-    # Never more than the limit, and never more than ONE unread Memory vector:
-    # each recall dropped the previous recall's before embedding its own.
-    assert max(total for total, _ in sizes) <= QUERY_VECTOR_SHARE_LIMIT, sizes
-    assert max(memory for _, memory in sizes) == 1, sizes
-    assert world.embedder.queries == [PLAIN]
+    assert world.embedder.queries.count(PLAIN) == 1, world.embedder.queries
     assert notebook == oracle_memory(world, PLAIN) and notebook
     assert vector == reference_vector(world, PLAIN)
 

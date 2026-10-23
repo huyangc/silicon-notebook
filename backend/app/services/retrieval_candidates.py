@@ -98,7 +98,6 @@ from app.services.retrieval import (
 from app.services.retrieval_run import (
     current_retrieval_run,
     current_viewer_id,
-    drop_query_vectors,
     memoized_query_embedding,
     memoized_retrieval_value,
     retrieval_fanout_slot,
@@ -1448,13 +1447,11 @@ class CandidateRetrievalService(_RetrievalState):
             # back as is (a malformed vector Memory got is reused too) and
             # keys on the embedder object (a hot reload behind the same
             # adapter does not split it) -- see ``shared_query_vector``.
-            # On a miss the stage is about to embed another text, so a Memory
-            # vector it has not read never will be: drop it first, keeping the
-            # run's footprint what it was before the hand-over.
+            # The stage never drops Memory's offers: it fans sub-queries out
+            # on parallel workers, and a drop on one worker's miss would race
+            # the sibling about to read the handed-over question.
             embedder = self.embedder
             native = shared_query_vector(embedder, key)
-            if native is None:
-                drop_query_vectors("memory")
             vec = native if native is not None else embedder.embed_query(key)
             from app.services.vector_index import resolve_runtime_dim, truncate_vec
             rd = resolve_runtime_dim(self.settings)

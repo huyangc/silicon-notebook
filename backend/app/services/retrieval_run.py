@@ -23,16 +23,21 @@ from app.services.cancellation import CancelEvent, raise_if_cancelled
 
 T = TypeVar("T")
 _CANCEL_POLL_SECONDS = 0.05
-#: How many native query vectors one run keeps for the hand-over
-#: (``share_query_vector``), least recently used out first. The hand-overs it
-#: serves are adjacent -- an Ask's Memory recall and the retrieval stage right
-#: after it; a report scout's stage embed and its Memory recall, repeated per
-#: library -- so two suffice; a report's per-section recalls, each with its own
-#: text and none ever read back, can then never pile up. On top of the limit,
-#: whichever side has to embed first drops the vectors Memory recalls offered
-#: (``drop_query_vectors``), so an unread Memory vector lives only until the
-#: run's next embed and the run never holds more than it did before.
+#: How many native query vectors one run keeps per offering side ("memory" /
+#: "stage") for the hand-over (``share_query_vector``), least recently used out
+#: first. A side's offers only ever push out its OWN older ones: the retrieval
+#: stage fans its sub-queries out on parallel workers, and a sibling worker's
+#: offer must not evict the question Memory handed over before the worker
+#: that wants it has read it (the streamed-Memory characterization flake).
 QUERY_VECTOR_SHARE_LIMIT = 2
+#: Whether a Memory recall in this context offers its vector at all
+#: (``offering_query_vectors``). Off by default: only a recall whose question
+#: the retrieval stage is about to embed (an Ask's Memory phase, a report
+#: scout) keeps its vector; a report's per-section recalls, each with its own
+#: text that nothing reads back, keep nothing -- the run holds no more than
+#: it did before the hand-over.
+_OFFERING_QUERY_VECTORS: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "offering_query_vectors", default=False)
 _RUN_KINDS = frozenset({
     "ask_chunk",
     "ask_reasoning",
@@ -74,7 +79,7 @@ class RetrievalRunState:
         self._value_pending: dict[Hashable, _PendingEmbedding] = {}
         # Native query vectors handed between the run's consumers of one
         # embedder (``share_query_vector``): (id(embedder), text) -> (embedder,
-        # vector, owner), at most QUERY_VECTOR_SHARE_LIMIT of them, LRU. The
+        # vector, owner), at most QUERY_VECTOR_SHARE_LIMIT per owner, LRU. The
         # owner names the side that offered it ("memory" / "stage"). The embedder
         # is kept beside the vector so a lookup can check identity, never only
         # an id that a freed object could reuse.
@@ -168,8 +173,10 @@ class RetrievalRunState:
         with self._lock:
             self._query_vectors[key] = (embedder, vector, owner)
             self._query_vectors.move_to_end(key)
-            while len(self._query_vectors) > QUERY_VECTOR_SHARE_LIMIT:
-                self._query_vectors.popitem(last=False)
+            owned = [k for k, entry in self._query_vectors.items()
+                     if entry[2] == owner]
+            for stale in owned[:-QUERY_VECTOR_SHARE_LIMIT]:
+                del self._query_vectors[stale]
 
     def drop_query_vectors(self, owner: str) -> None:
         """Forget every vector ``owner`` offered (see ``drop_query_vectors``)."""
@@ -416,8 +423,11 @@ def shared_query_vector(embedder: Any, text: str) -> Any:
     * it never waits, retries, counts or checks cancellation: a miss is the
       caller's ordinary embed with its own fail-soft handling, a failed or
       ``None`` embed is never offered, and outside a run nothing is shared;
-    * at most ``QUERY_VECTOR_SHARE_LIMIT`` vectors are kept per run (LRU), so
-      a run that offers many texts nobody reads back holds no more than that.
+    * a Memory recall offers its vector only inside
+      ``offering_query_vectors()``, and at most ``QUERY_VECTOR_SHARE_LIMIT``
+      vectors per offering side are kept per run (LRU, a side evicting only
+      its own), so a run that offers many texts nobody reads back holds no
+      more than that, and nothing at all for recalls that never offer.
 
     Two limits it shares with the run's embedding memo, deliberately: a vector
     is reused as it came back, so a malformed answer (a wrong width, all
@@ -447,17 +457,33 @@ def share_query_vector(embedder: Any, text: str, vector: Any, *,
 def drop_query_vectors(owner: str) -> None:
     """Forget the vectors ``owner`` offered earlier in this run.
 
-    Both sides call it with ``"memory"`` before they embed a text nobody
-    offered: a Memory vector not read by then is for another text, and a
-    report recalls Memory once per section with a new text each time that
-    nothing reads back. Dropping it first keeps a run from holding one more
-    native vector than before the hand-over existed while the next one is
-    computed and used. A stage offer is the very list the embedding memo
-    already holds, so it costs nothing to keep and is never dropped.
+    Only Memory recall calls it (with ``"memory"``), before it embeds a text
+    nobody offered: its own earlier offers were for other texts, so dropping
+    them first keeps the run from holding an extra native vector while the
+    next one is computed. The retrieval stage never drops anything: its
+    workers run in parallel, and dropping on one worker's miss would race the
+    sibling that is about to read the handed-over question. A stage offer is
+    the very list the embedding memo already holds, so keeping it is free.
     """
     state = current_retrieval_run()
     if state is not None:
         state.drop_query_vectors(owner)
+
+
+@contextmanager
+def offering_query_vectors() -> Iterator[None]:
+    """Let the Memory recalls inside this block offer their query vector to
+    the retrieval run (see ``_OFFERING_QUERY_VECTORS`` for who opts in)."""
+    token = _OFFERING_QUERY_VECTORS.set(True)
+    try:
+        yield
+    finally:
+        _OFFERING_QUERY_VECTORS.reset(token)
+
+
+def offers_query_vectors() -> bool:
+    """Whether a Memory recall here offers its vector (``offering_query_vectors``)."""
+    return _OFFERING_QUERY_VECTORS.get()
 
 
 def _shares(embedder: Any) -> bool:
@@ -491,6 +517,8 @@ __all__ = [
     "current_viewer_id",
     "memoized_query_embedding",
     "memoized_retrieval_value",
+    "offering_query_vectors",
+    "offers_query_vectors",
     "retrieval_fanout_slot",
     "retrieval_run",
     "drop_query_vectors",

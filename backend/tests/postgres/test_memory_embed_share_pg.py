@@ -83,3 +83,7 @@ def test_report_run_keeps_the_hand_over_bounded_pg(world):
 
 def test_scout_shares_across_libraries_pg(world):
     cases.scout_shares_across_libraries(world)
+
+
+def test_stage_siblings_do_not_push_the_question_out_pg(world):
+    cases.stage_siblings_do_not_push_the_question_out(world)
