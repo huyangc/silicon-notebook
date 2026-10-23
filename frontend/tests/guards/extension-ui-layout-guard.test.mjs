@@ -127,18 +127,6 @@ test("扩展点不再撑出自己的工作区列（任何位置、含 @media 内
 });
 
 
-test("工具排两样都不在时不占间距", () => {
-  // 入口住在来源栏的工具排(与「补全论文信息」同排);两样都不渲染时这一排是空 div,
-  // 不隐藏就会白占 .sources-body 的一格 gap。
-  const hidden = ruleSelectors()
-    .filter((rule) => rule.selector.split(",").map((part) => part.trim()).includes(".sources-tool-row:empty"))
-    .some((rule) => (rule.nodes ?? []).some(
-      (node) => node.type === "decl" && node.prop === "display" && node.value === "none",
-    ));
-  assert.ok(hidden, ".sources-tool-row:empty 必须 display: none");
-});
-
-
 test("理解入口的样式只用系统 token，没有颜色字面量", () => {
   const rules = ruleSelectors().filter((rule) => rule.selector.includes(PLUGIN_PREFIX));
   // 匹配为 0 说明类被改名/删了 —— 守卫必须响亮失败,不能静默变成空断言。

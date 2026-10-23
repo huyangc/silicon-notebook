@@ -8,7 +8,7 @@
 //  - 「参考库」一节的 ref 回调不再消费标志（之后每次打开设置都会被拽到这一节）。
 //
 // 判据是 AST 上的语义身份，不用行号与源码偏移。工具排 `:empty` 的 CSS 规则由
-// extension-ui-layout-guard.test.mjs 钉住（它是登记过可以读样式表的那一份）。
+// sources-panel-style-guard.test.mjs 钉住（登记过可以读样式表的那一份）。
 import test from "node:test";
 import assert from "node:assert/strict";
 import ts from "typescript";
