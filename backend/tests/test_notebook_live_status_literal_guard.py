@@ -81,11 +81,15 @@ from __future__ import annotations
 import ast
 import functools
 import importlib.util
+import os
 import pathlib
 import re
 import sys
+from collections import deque
 
 import pytest
+
+from tests.architecture.source_trees import read_source_tree
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 APP_DIR = ROOT / "backend" / "app"
@@ -110,45 +114,10 @@ def _scan_targets() -> list[pathlib.Path]:
     return [f for f in files if "__pycache__" not in f.parts]
 
 
-def _docstring_constant_ids(tree: ast.AST) -> set[int]:
-    """收集「首语句是 docstring」的那个 ``ast.Constant`` 节点的 id 集合。"""
-    ids: set[int] = set()
-    for node in ast.walk(tree):
-        if not isinstance(
-            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
-        ):
-            continue
-        body = node.body
-        if not body:
-            continue
-        first = body[0]
-        if (
-            isinstance(first, ast.Expr)
-            and isinstance(first.value, ast.Constant)
-            and isinstance(first.value.value, str)
-        ):
-            ids.add(id(first.value))
-    return ids
-
-
-def _annotate_parents(tree: ast.AST) -> None:
-    for node in ast.walk(tree):
-        for child in ast.iter_child_nodes(node):
-            child.parent = node  # type: ignore[attr-defined]
-
-
-def _enclosing_function_name(node: ast.AST) -> str | None:
-    current = getattr(node, "parent", None)
-    while current is not None:
-        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            return current.name
-        current = getattr(current, "parent", None)
-    return None
-
-
-def _non_docstring_string_constants(path: pathlib.Path) -> tuple[ast.Constant, ...]:
-    """返回该文件里非 docstring 的 ``ast.Constant(str)`` 节点本身(不抽取
-    ``.lineno``)。
+@functools.lru_cache(maxsize=4096)
+def _constants_with_scopes(tree: ast.Module) -> tuple[tuple[ast.Constant, str | None], ...]:
+    """返回非 docstring 的 ``ast.Constant(str)`` 节点及最近函数名(不抽取
+    ``.lineno``),不修改共享语法树。
 
     ⚠ 必修 1(codex 评审):``backend/tests/architecture/policy.py`` 的
     ``_lineno_is_identity`` line-number-identity 判据禁止把 ``.lineno`` 存进
@@ -159,35 +128,82 @@ def _non_docstring_string_constants(path: pathlib.Path) -> tuple[ast.Constant, .
     诊断 f-string 时才现取 ``.lineno``,且必须直接嵌进
     ``violations.append(f"...")`` 这一条语句,不经中间变量。
     """
-    source = path.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(path))
-    _annotate_parents(tree)
-    skip_ids = _docstring_constant_ids(tree)
-    out: list[ast.Constant] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
-            continue
-        if id(node) in skip_ids:
-            continue
-        out.append(node)
+    # Carry the nearest function alongside breadth-first traversal, preserving
+    # ast.walk's diagnostic order without putting parent links on shared ASTs.
+    pending: deque[tuple[ast.AST, str | None]] = deque([(tree, None)])
+    skip_ids: set[int] = set()
+    out: list[tuple[ast.Constant, str | None]] = []
+    while pending:
+        node, scope = pending.popleft()
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.body:
+                first = node.body[0]
+                if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                    if isinstance(first.value.value, str):
+                        skip_ids.add(id(first.value))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in skip_ids:
+            out.append((node, scope))
+        child_scope = node.name if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else scope
+        pending.extend((child, child_scope) for child in ast.iter_child_nodes(node))
     return tuple(out)
 
 
-@functools.lru_cache(maxsize=None)
-def _cached_constants_for(path: pathlib.Path) -> tuple[ast.Constant, ...]:
-    """按文件缓存一次 AST 解析结果(顺手项 7):三条源码扫描断言共享同一次
-    ``ast.parse`` + 同一批节点,不必每条断言各自重新解析全部扫描目标。"""
-    return _non_docstring_string_constants(path)
-
-
-def _all_scanned_constants() -> list[tuple[str, ast.Constant]]:
-    """``(ROOT 相对路径, 节点)`` 列表,跨全部扫描目标、跨全部断言复用缓存。"""
-    out: list[tuple[str, ast.Constant]] = []
+def _all_scanned_constants() -> list[tuple[str, ast.Constant, str | None]]:
+    """每次重读目录与内容;只复用不可变语法树的字符串/作用域投影。"""
+    out: list[tuple[str, ast.Constant, str | None]] = []
     for path in _scan_targets():
         rel = path.relative_to(ROOT).as_posix()
-        for node in _cached_constants_for(path):
-            out.append((rel, node))
+        for node, scope in _constants_with_scopes(read_source_tree(path)):
+            out.append((rel, node, scope))
     return out
+
+
+def test_literal_projection_preserves_scopes_without_mutating_shared_trees(tmp_path):
+    sample = tmp_path / "sample.py"
+    sample.write_text(
+        '\"\"\"module documentation\"\"\"\n'
+        'module_value = "module"\n'
+        'class Holder:\n'
+        '    "class documentation"\n'
+        '    value = "class"\n'
+        '    def outer(self):\n'
+        '        "function documentation"\n'
+        '        value = "outer"\n'
+        '        class Local:\n'
+        '            value = "local class"\n'
+        '        async def inner():\n'
+        '            "nested documentation"\n'
+        '            return "inner"\n',
+        encoding="utf-8",
+    )
+    tree = read_source_tree(sample)
+    assert {(node.value, scope) for node, scope in _constants_with_scopes(tree)} == {
+        ("module", None), ("class", None), ("outer", "outer"),
+        ("local class", "outer"), ("inner", "inner"),
+    }
+    assert not any(hasattr(node, "parent") for node in ast.walk(tree))
+
+
+def test_literal_scan_reads_changed_contents_and_discovers_new_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "APP_DIR", tmp_path / "app")
+    monkeypatch.setattr(sys.modules[__name__], "SCRIPTS_DIR", tmp_path / "scripts")
+    sample = tmp_path / "app" / "sample.py"
+    sample.parent.mkdir()
+    sample.write_text('value = "first"\n', encoding="utf-8")
+    assert [(rel, node.value, scope) for rel, node, scope in _all_scanned_constants()] == [
+        ("app/sample.py", "first", None)
+    ]
+    original_stat = sample.stat()
+    sample.write_text('value = "other"\n', encoding="utf-8")
+    os.utime(sample, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    assert [(rel, node.value, scope) for rel, node, scope in _all_scanned_constants()] == [
+        ("app/sample.py", "other", None)
+    ]
+    sample.rename(sample.with_name("renamed.py"))
+    assert [(rel, node.value, scope) for rel, node, scope in _all_scanned_constants()] == [
+        ("app/renamed.py", "other", None)
+    ]
 
 
 # These scans share one immutable AST cache; loadgroup keeps that cache in
@@ -196,7 +212,7 @@ def _all_scanned_constants() -> list[tuple[str, ast.Constant]]:
 def test_no_raw_copying_read_side_literal_outside_the_constant():
     """常量之外不该再出现裸的 `status != 'copying'` / `status <> 'copying'`。"""
     violations: list[str] = []
-    for rel, node in _all_scanned_constants():
+    for rel, node, _scope in _all_scanned_constants():
         if _READ_SIDE_VIOLATION.search(node.value):
             violations.append(f"{rel}:{node.lineno}: {node.value!r}")
     assert not violations, (
@@ -209,10 +225,9 @@ def test_no_raw_copying_read_side_literal_outside_the_constant():
 def test_copying_write_side_sentinel_confined_to_sharing_store_whitelist():
     """`status='copying'` 等值形只许出现在两个 sharing_store.py 的两个方法里。"""
     violations: list[str] = []
-    for rel, node in _all_scanned_constants():
+    for rel, node, func in _all_scanned_constants():
         if not _WRITE_SIDE_SENTINEL.search(node.value):
             continue
-        func = _enclosing_function_name(node)
         key = (rel, func or "")
         if key not in _WRITE_SIDE_WHITELIST:
             violations.append(f"{rel}:{node.lineno} (in {func!r}): {node.value!r}")
@@ -233,8 +248,7 @@ def test_deleting_never_folds_into_the_copying_write_side_sentinel():
     ``test_write_side_sentinel_actually_executed_never_folds_deleting``。
     """
     violations: list[str] = []
-    for rel, node in _all_scanned_constants():
-        func = _enclosing_function_name(node)
+    for rel, node, func in _all_scanned_constants():
         if func is None:
             continue
         if (rel, func) not in _WRITE_SIDE_WHITELIST:
@@ -415,7 +429,7 @@ _PENDING_DELETE_LITERAL_FILES = frozenset({
 @pytest.mark.xdist_group(name="notebook_live_status_literals")
 def test_pending_delete_sql_literal_confined_to_the_constants():
     violations: list[str] = []
-    for rel, node in _all_scanned_constants():
+    for rel, node, _scope in _all_scanned_constants():
         if _PENDING_DELETE_SQL_LITERAL not in node.value:
             continue
         if rel not in _PENDING_DELETE_LITERAL_FILES:

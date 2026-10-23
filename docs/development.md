@@ -500,6 +500,24 @@ Python source guards that scan `backend/app` read it through `app_source_trees()
 
 Seeded world templates (`backend/tests/world_templates.py`) let a module build an expensive seeded world once per pytest process and copy it per test, while every test still mutates its own copy. The builder runs inside `MonkeyPatch.context()` from the process baseline environment rather than the requesting test's, sets every setting the world depends on through `env=` (which is part of the template identity; reusing a key with different settings fails), and returns pure JSON data, never live objects. The build must close everything it opened: each SQLite file is checkpointed with `PRAGMA wal_checkpoint(TRUNCATE)`, its WAL must be empty, and no descriptor may still point into the world. A world must be reopen-stable (only the seeded admin's per-open credential re-derivation is masked), so open-time normalisation such as interrupted-job recovery or seed inserts fails at build time. `relocatable` worlds may not contain their build root in any row, storage file, or payload; worlds that store absolute paths (uploaded sources) use `pinned`, which rebuilds a fixed `live` directory from an untouched `pristine` copy for every test. The pristine copy's files are re-verified on every materialize, and identity-keyed process caches are reset first because the tests of one worker now share notebook and user ids, then given back exactly the entries the build left for the world's own ids (count memos from the world's version history, the asset-sweep throttle at the same age), so every copy starts with the warm state a self-built world had; `test_world_templates.py` fails when a new module-level cache in `backend/app` is not classified in the helper's inventory.
 
+The MCP protocol fixture uses a relocatable seeded world per worker for its users,
+notebooks, profiles, membership and tokens. Its payload contains only entity IDs;
+each test reads its objects and token secrets from its own copied database and
+constructs a fresh app and service graph. Protocol clients and lifespan contexts
+remain per test, and the module is not grouped onto one worker. Revoking a token,
+changing membership, recording token use, or changing app state in one copy must
+not affect another copy. The build checks every original creation return against
+the re-read object's concrete type and complete fields, including issued token
+secrets, so a correct database write cannot hide an incorrect API return value.
+
+Schema-guest, third-party-import and notebook-lifecycle source guards also read
+through the shared content-keyed AST entry point. Schema-guest scans cache immutable
+per-tree semantic projections and co-locate their three real-tree checks in one
+small group. Notebook-lifecycle scans keep enclosing-function information in a
+separate projection rather than adding parent attributes to shared AST nodes.
+Directory discovery and source reads remain live, including when an edit preserves
+file size and timestamps; cached projections never replace mutation coverage.
+
 The sync tests (`test_sync_incremental_import.py`, `test_sync_import.py`, `test_sync_export.py`, `test_sync_incremental.py`) take their seeded libraries, full export and baseline import from `pinned` world templates: uploaded sources store an absolute `file_path`, and the import report is written beside the package. Export and import reports travel in the payload as pure data (`backend/tests/sync_world_cases.py`); the build first proves that the rebuilt report equals the original field for field with every type kept, and each test then rebuilds its own. `test_sync_import.py` also has a second-level world taken after the default import: only tests whose body is "import once with the default arguments, then read-only assertions" read that outcome, produced by the real code at build time, through `first_import`. Tests that patch, observe the import's progress or events, pass other arguments, or act again after the import still run the import in their own body; collecting the module rejects a `first_import` test that also uses `monkeypatch`, `MonkeyPatch`, `setattr`, or calls the import again. Before a test is switched to that world, a deliberate bug injected into the import code must be shown to still turn it red.
 
 Test fixture cost follows the behavior under test. Scale-build lock admission and

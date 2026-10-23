@@ -22,8 +22,11 @@ from dataclasses import dataclass, field
 import importlib
 from importlib import metadata
 import importlib.util
+import os
 from pathlib import Path
 import sys
+
+from tests.architecture.source_trees import read_source_tree
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -93,8 +96,9 @@ def _third_party_imports(root: Path) -> dict[str, ImportUse]:
         return entry
 
     for path in sorted(root.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
+        tree = read_source_tree(path)
+        nodes = tuple(ast.walk(tree))
+        for node in nodes:
             if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                 entry = use(node.module, path)
                 if entry is not None:
@@ -103,10 +107,11 @@ def _third_party_imports(root: Path) -> dict[str, ImportUse]:
                 for alias in node.names:
                     use(alias.name, path)
         # Attribute reads on a module imported inside the function that reads it.
-        for function in ast.walk(tree):
+        for function in nodes:
             if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             bound: dict[str, str] = {}
+            attributes: list[ast.Attribute] = []
             for node in ast.walk(function):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
@@ -114,12 +119,10 @@ def _third_party_imports(root: Path) -> dict[str, ImportUse]:
                             bound[alias.asname or alias.name.split(".")[0]] = (
                                 alias.name if alias.asname else alias.name.split(".")[0]
                             )
-            for node in ast.walk(function):
-                if (
-                    isinstance(node, ast.Attribute)
-                    and isinstance(node.value, ast.Name)
-                    and node.value.id in bound
-                ):
+                elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                    attributes.append(node)
+            for node in attributes:
+                if node.value.id in bound:
                     entry = use(bound[node.value.id], path)
                     if entry is not None:
                         entry.attributes.add(node.attr)
@@ -200,3 +203,41 @@ def test_the_scan_reports_a_module_that_imports_but_lacks_a_name(tmp_path, monke
     # TYPE_CHECKING-only and try/except ImportError imports get no exemption.
     assert any(problem.startswith("typedpkg ") and "import failed" in problem for problem in problems)
     assert any(problem.startswith("optionalpkg ") and "import failed" in problem for problem in problems)
+
+
+def test_scan_keeps_nested_binding_semantics_and_reads_current_tree(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
+    sample = tmp_path / "lazy.py"
+    source = (
+        "def outer():\n"
+        "    def inner():\n"
+        "        import firstpkg as lazy\n"
+        "        return lazy.inner\n"
+        "    return lazy.outer\n"
+    )
+    sample.write_text(source, encoding="utf-8")
+    uses = _third_party_imports(tmp_path)
+    # The guard deliberately scans descendants of each function, including
+    # imports in nested functions; both reads remain part of that contract.
+    assert uses["firstpkg"].attributes == {"inner", "outer"}
+    original_stat = sample.stat()
+    sample.write_text(source.replace("firstpkg", "otherpkg"), encoding="utf-8")
+    os.utime(sample, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    fresh = _third_party_imports(tmp_path)
+    assert set(fresh) == {"otherpkg"}
+    assert fresh["otherpkg"].attributes == {"inner", "outer"}
+    assert set(uses) == {"firstpkg"}
+    sample.unlink()
+    sample.with_name("new.py").write_text("from addedpkg import required\n", encoding="utf-8")
+    assert set(_third_party_imports(tmp_path)) == {"addedpkg"}
+
+
+def test_provider_checks_observe_current_environment(monkeypatch):
+    uses = {"guard_probe": ImportUse("guard_probe", files={"probe.py"})}
+    monkeypatch.setattr(importlib, "import_module", lambda name: object())
+    monkeypatch.setattr(metadata, "packages_distributions", lambda: {"guard_probe": ["locked-provider"]})
+    assert _problems(uses, frozenset({"locked-provider"})) == []
+    monkeypatch.setattr(metadata, "packages_distributions", lambda: {"guard_probe": ["other-provider"]})
+    assert _problems(uses, frozenset({"locked-provider"})) == [
+        "guard_probe (probe.py): provided by ['other-provider'], none of them locked"
+    ]
