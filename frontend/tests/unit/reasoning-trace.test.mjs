@@ -1119,8 +1119,12 @@ test("read_document 步的 detail 显示《标题》与新增取样段数,不被
 
 // 章节导航检索(PR-2):browse_sections / read_section 两个 reflect 动作的轨迹步。
 test("browse_sections / read_section 有专属标签,不与已有步同名", () => {
-  assert.equal(TRACE_STEP_LABELS.browse_sections, "章节目录");
-  assert.equal(TRACE_STEP_LABELS.read_section, "按章节读取");
+  assert.equal(TRACE_STEP_LABELS.browse_sections, "目录");
+  assert.equal(TRACE_STEP_LABELS.read_section, "章节");
+  // 徽章列固定宽度,只放得下两个字:章节导航的两个标签不得超过两个字。
+  for (const key of ["browse_sections", "read_section"]) {
+    assert.ok([...TRACE_STEP_LABELS[key]].length <= 2, `${key} label must fit the badge`);
+  }
   for (const key of ["browse_sections", "read_section"]) {
     for (const other of ["fallback", "search_chunks", "read_document"]) {
       assert.notEqual(TRACE_STEP_LABELS[key], TRACE_STEP_LABELS[other]);
