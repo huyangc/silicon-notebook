@@ -438,6 +438,12 @@ def report_run_keeps_the_hand_over_bounded(world: World) -> None:
     remember(world)
     sizes = []
     with one_run(world):
+        # Two recalls back to back, no stage embed between (a report's
+        # per-section Memory reads can run that way): the second drops the
+        # first's unread vector before embedding its own.
+        _memory(world, f"{PLAIN} opening")
+        _memory(world, f"{PLAIN} closing")
+        assert _table() == (1, 1), _table()
         for index in range(12):
             section = f"{PLAIN} section {index} corner review"
             assert _memory(world, section) == oracle_memory(world, section)
