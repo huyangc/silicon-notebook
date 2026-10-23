@@ -42,3 +42,47 @@ def test_comparison_peer_names(world, monkeypatch, scenario):
 @pytest.mark.parametrize("scenario", cases.PATH_SCENARIOS, ids=lambda s: s.__name__)
 def test_comparison_peer_names_per_path(world, monkeypatch, scenario, path):
     scenario(world, monkeypatch, path)
+
+
+class _HubStore:
+    """A hub cluster of ``total`` members in member-id order, all owned by a
+    source outside the ceiling except (optionally) the one at ``inside``; it
+    records the page size of every read. Pure Python: the paging policy
+    under test lives in the service, the store SQL is pinned above."""
+
+    def __init__(self, total: int, inside: int | None = None) -> None:
+        self.total, self.inside, self.limits = total, inside, []
+
+    def comparison_peer_members(self, notebook_id, canonical_ids, *, limit, after=""):
+        self.limits.append(limit)
+        start = int(after.rsplit("-", 1)[1]) + 1 if after else 0
+        return [
+            {"canonical_id": canonical_ids[0], "member_object_id": f"ko-{index:06d}",
+             "source_id": "s-in" if index == self.inside else "s-out",
+             "member_name": "Hub" if index == self.inside else "Hidden Hub"}
+            for index in range(start, min(start + limit, self.total))
+        ]
+
+
+@pytest.mark.parametrize("inside", [None, 3000], ids=["no-member", "member-deep"])
+def test_member_paging_window_is_capped(inside):
+    """``_scan_peer_members`` doubles its page while a full page holds no
+    in-ceiling member, but never past ``_PEER_MEMBER_PAGE_MAX`` rows; it still
+    reads to the member it needs or to the end of the cluster."""
+    from app.services import communities
+
+    store = _HubStore(5000, inside)
+    service = communities.CommunityQueryService(
+        notebooks=None, unified_kg=store, event_log=None)
+    name = service._scan_peer_members(
+        "nb", "K-hub", "Hidden Hub", frozenset({"s-in"}),
+        after="ko-000007", window=2 * communities._PEER_MEMBER_WINDOW)
+    cap = communities._PEER_MEMBER_PAGE_MAX
+    assert cap == 512
+    assert store.limits[:6] == [16, 32, 64, 128, 256, 512]
+    assert max(store.limits) == cap and len(store.limits) > 6
+    read = sum(store.limits[:-1])
+    if inside is None:
+        assert name is None and 8 + read < 5000 <= 8 + sum(store.limits)
+    else:
+        assert name == "Hub" and 8 + read <= inside < 8 + sum(store.limits)

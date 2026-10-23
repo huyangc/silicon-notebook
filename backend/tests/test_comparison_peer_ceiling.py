@@ -78,7 +78,11 @@ def _objects(source_id, names):
 
 @pytest.fixture
 def library(repo):
-    """一本库:FOCAL 与 MIXED 由 s-open 支撑,MIXED 与 HIDDEN 由 s-hidden 支撑。
+    """一本库:FOCAL 与 MIXED 由 s-open 支撑,FOCAL、MIXED 与 HIDDEN 由 s-hidden 支撑。
+
+    FOCAL 两个来源各有一个成员:R4 起焦点写法必须属于一个天花板内成员,
+    天花板只含 s-hidden 的反向用例(``test_entity_with_mixed_support_survives``
+    的第二段)因此也要能解析出焦点。
 
     共提对与社区成员行按真实表结构播种(代次取 ``unified_kg_state`` 的当前
     published 值,与 ``_PUBLISHED_*_GEN`` 谓词同源)。
@@ -94,7 +98,7 @@ def library(repo):
     repo.store_kg(notebook.id, OPEN_SOURCE,
                   _objects(OPEN_SOURCE, [FOCAL, MIXED]), [])
     repo.store_kg(notebook.id, HIDDEN_SOURCE,
-                  _objects(HIDDEN_SOURCE, [MIXED, HIDDEN]), [])
+                  _objects(HIDDEN_SOURCE, [FOCAL, MIXED, HIDDEN]), [])
     repo.rebuild_unified_kg(notebook.id)
     with repo._write() as db:
         row = db.execute(
@@ -539,11 +543,13 @@ def test_only_communities_reads_the_two_peer_store_methods():
     两个消费点因此不可能各拿一份口径——绕过 ``communities.py`` 就是新开一条
     未过闸的通道,这条断言会响亮失败。R3 的成员读 ``comparison_peer_members``
     同理:它带回天花板外成员的写法,只有在 ``communities.py`` 的名字出口里按
-    冻结天花板逐行判过才算数,所以同样只许这一个文件读。逐方法统计,任何一个
-    方法多出一个读者(或在 ``communities.py`` 里消失)都会红。
+    冻结天花板逐行判过才算数,所以同样只许这一个文件读;R4 的焦点成员读
+    ``focal_name_members`` 也一样(天花板判定在 ``_ceiling_focal`` 里)。逐方法
+    统计,任何一个方法多出一个读者(或在 ``communities.py`` 里消失)都会红。
     """
     app_root = Path(__file__).resolve().parents[1] / "app"
-    methods = {"comention_peers", "community_member_peers", "comparison_peer_members"}
+    methods = {"comention_peers", "community_member_peers", "comparison_peer_members",
+               "focal_name_members"}
     readers: dict[str, set[str]] = {method: set() for method in methods}
     for path in app_root.rglob("*.py"):
         if path.parts[-2:] in {("sqlite", "unified_kg_store.py"),

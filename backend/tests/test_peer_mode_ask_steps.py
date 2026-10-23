@@ -510,6 +510,11 @@ class _FakeUnifiedKg:
             return [(f"K-{name}", name, 3) for name in names]
         return [(name, 3) for name in names]
 
+    def focal_name_members(self, notebook_id, canonical_id, focal_key):
+        # R4 的焦点成员读:焦点写法属于一个天花板内成员(本文件不测 R4)。
+        return [{"member_object_id": f"ko-{canonical_id}",
+                 "source_id": f"src-{notebook_id}"}]
+
     def comparison_peer_members(self, notebook_id, canonical_ids, *, limit, after=""):
         # R3 的成员读(``_peer_scope`` 装了逐库天花板,所以名字出口会来读):
         # 每个兄弟簇恰一个天花板内成员,名字就是存储名——本文件不测改名。

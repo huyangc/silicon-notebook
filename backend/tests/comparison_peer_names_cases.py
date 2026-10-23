@@ -1,4 +1,4 @@
-"""Backend-neutral scenarios for rule R3 of the comparison-peer name exit
+"""Backend-neutral scenarios for rules R3 and R4 of the comparison peers
 (plan 2026-10-23 "经挂载读的合并知识对象", task T2).
 
 Comparison peers (co-mention siblings first, Louvain community peers as the
@@ -7,10 +7,13 @@ source ceiling the SQL gate only asks whether a peer cluster has SOME
 in-ceiling support, so the stored name could still be the spelling of a member
 owned by an out-of-ceiling source (a Knowhow projection or a Memory), or a
 stale name left on the surviving member rows after such a member was pruned.
-R3: while a ceiling binds the library, a peer is named only from members whose
-OWN ``source_id`` is in the ceiling -- the stored name when one of the
-in-ceiling members read carries it, else the first in-ceiling member's name;
-a cluster with no in-ceiling member is dropped.
+R3: while a ceiling binds the library, a peer is named only from in-ceiling
+members -- the stored name when one of the in-ceiling members read carries
+it, else the first in-ceiling member with a non-empty name; a cluster with no
+such member is dropped. An in-ceiling member follows the object rule: its OWN
+``source_id`` is empty (a promoted object) or in the ceiling. R4: the focal
+cluster resolved by its stored name must also have an in-ceiling member whose
+name is the focal key, else the focal is unresolved.
 
 The world is one library with a visible source ``s-open`` (the ceiling) and a
 Knowhow source ``s-hidden`` outside it, built through the real ``store_kg`` /
@@ -27,15 +30,18 @@ known):
   is carried by an in-ceiling member that is not the first one.
 * ``K-mixedwidget``: ``Mixed Widget`` from both sources (stored name kept).
 * ``K-ghostwidget``: owned by ``s-hidden`` but citing ``s-open`` -- the SQL gate
-  admits it, R3 drops it.
+  admits it, R3 drops it. It is the strongest co-mention peer, so under a
+  ceiling it would take a ``top_k`` slot if the SQL limit were applied before R3.
 * ``K-hiddenwidget``: ``s-hidden`` only -- the SQL gate drops it.
 
 Co-mention and community rows are seeded in the real table shapes (as the
 existing ``test_comparison_peer_ceiling.py`` fixture does).
 
 The scenarios of each tuple are ordered so that one world can serve them in
-turn: whatever a scenario changes (co-mention rows dropped for the community
-path, a deprecated member, pruned member rows) is tolerated by every later one.
+turn: whatever a scenario changes and does not put back (co-mention rows
+dropped for the community path, a deprecated member, pruned member rows) is
+tolerated by every later one; a scenario that re-owns or renames a member for
+its own case (promoted, empty-named, focal carrier) restores it before it ends.
 SQLite builds a fresh world per scenario; the PostgreSQL twin, where the
 rebuild and the schema migration dominate the cost, runs each tuple (and each
 path) on one world.
@@ -78,11 +84,11 @@ QUESTION = f"{FOCAL} 相比其他"
 # (canonical id, forced stored name or None, co-mention claims, community
 #  centrality)
 PEERS = (
+    ("K-ghostwidget", None, 10, 0.9),
     ("K-quietzebraxylophone", QZX_HIDDEN, 9, 0.1),
     ("K-pagedgammawidget", PGW_HIDDEN, 8, 0.6),
     ("K-alphabetagamma", ABG_LONG, 7, 0.7),
     ("K-mixedwidget", None, 6, 0.8),
-    ("K-ghostwidget", None, 5, 0.9),
     ("K-hiddenwidget", None, 4, 1.0),
 )
 FOCAL_ID = "K-focalwidget"
@@ -109,7 +115,7 @@ HIDDEN_OBJECTS = (
 
 # Expected names, in each path's own order.
 COMENTION_IN_CEILING = [QZX, PGW, ABG_LONG, MIXED]
-COMENTION_NO_CEILING = [QZX_HIDDEN, PGW_HIDDEN, ABG_LONG, MIXED, GHOST, HIDDEN_ONLY]
+COMENTION_NO_CEILING = [GHOST, QZX_HIDDEN, PGW_HIDDEN, ABG_LONG, MIXED, HIDDEN_ONLY]
 COMMUNITY_IN_CEILING = [MIXED, ABG_LONG, PGW, QZX]
 COMMUNITY_NO_CEILING = [HIDDEN_ONLY, GHOST, MIXED, ABG_LONG, PGW_HIDDEN, QZX_HIDDEN]
 
@@ -119,6 +125,7 @@ class World:
     repo: Any
     nb: str
     ph: str
+    js: str
     service: CommunityQueryService
     events: list = field(default_factory=list)
 
@@ -133,7 +140,20 @@ class World:
 
     def execute(self, sql: str, params: tuple = ()) -> None:
         with self.repo._write() as db:
-            db.execute(sql.replace("{ph}", self.ph), params)
+            db.execute(sql.replace("{ph}", self.ph).replace("{js}", self.js), params)
+
+    def set_owner(self, suffix: str, source_id: str) -> None:
+        """Re-own one object (``''`` is what promotion writes)."""
+        self.execute("UPDATE knowledge_objects SET source_id={ph} WHERE id={ph}",
+                     (source_id, self.oid(suffix)))
+
+    def set_name(self, suffix: str, name: str) -> None:
+        self.execute("UPDATE knowledge_objects SET payload={js} WHERE id={ph}",
+                     (json.dumps({"name": name, "section_path": "1"}), self.oid(suffix)))
+
+    def owner(self, suffix: str) -> Any:
+        return self.rows("SELECT source_id FROM knowledge_objects WHERE id={ph}",
+                         (self.oid(suffix),))[0]["source_id"]
 
     def rows(self, sql: str, params: tuple = ()) -> list:
         with self.repo._write() as db:
@@ -196,7 +216,7 @@ def build_world(repo, *, postgres: bool) -> World:
     events: list = []
     world = World(
         repo=repo, nb=repo.create_notebook(NotebookCreate(name="peer-names")).id,
-        ph="%s" if postgres else "?",
+        ph="%s" if postgres else "?", js="%s::jsonb" if postgres else "?",
         service=CommunityQueryService(
             notebooks=runtime.notebook_store, unified_kg=runtime.unified_kg,
             event_log=_RecordingLog(runtime.event_log, events),
@@ -255,12 +275,12 @@ def _drop_comentions(world: World) -> None:
 
 
 def _names(world: World, path: str, *, question: str = "compare",
-           top_k: int = 8) -> list[str]:
+           top_k: int = 8, focal: str = FOCAL) -> list[str]:
     if path == "comention":
         return [name for name, _claims in world.service.sibling_peers(
-            world.nb, FOCAL, top_k=top_k)]
+            world.nb, focal, top_k=top_k)]
     return world.service.community_peers(
-        world.nb, FOCAL, question, top_k=top_k, candidates=16)
+        world.nb, focal, question, top_k=top_k, candidates=16)
 
 
 def assert_clean(payload: Any, *, expect_short: bool = True) -> None:
@@ -273,10 +293,11 @@ def assert_clean(payload: Any, *, expect_short: bool = True) -> None:
 
 
 @contextlib.contextmanager
-def recorded_statements(world: World) -> Iterator[list[str]]:
-    """Every statement the unified store sends while the block runs (both
-    backends: the store opens each read through ``database.connect()``)."""
-    log: list[str] = []
+def recorded_statements(world: World) -> Iterator[list[tuple[str, tuple]]]:
+    """Every ``(statement, params)`` the unified store sends while the block
+    runs (both backends: the store opens each read through
+    ``database.connect()``)."""
+    log: list[tuple[str, tuple]] = []
     unified = world.unified
     original = unified.database
 
@@ -285,7 +306,7 @@ def recorded_statements(world: World) -> Iterator[list[str]]:
             self._inner = inner
 
         def execute(self, sql, *args, **kwargs):
-            log.append(str(sql))
+            log.append((str(sql), tuple(args[0]) if args else ()))
             return self._inner.execute(sql, *args, **kwargs)
 
         def __getattr__(self, name):
@@ -307,13 +328,25 @@ def recorded_statements(world: World) -> Iterator[list[str]]:
         unified.database = original
 
 
-def member_reads(statements: list[str]) -> tuple[list[str], list[str]]:
+def member_reads(statements) -> tuple[list[str], list[str]]:
     """``(batched first-window reads, keyset page reads)`` of
     ``comparison_peer_members``."""
-    reads = [sql for sql in statements if "member_name" in sql]
+    reads = [sql for sql, _params in statements if "member_name" in sql]
     paged = [sql for sql in reads
              if "ko2.id > ?" in sql or 'ko.id COLLATE "C" > %s' in sql]
     return [sql for sql in reads if sql not in paged], paged
+
+
+def focal_reads(statements) -> list[str]:
+    """R4's ``focal_name_members`` statements (the only read that lowers a
+    payload name)."""
+    return [sql for sql, _params in statements if "lower(" in sql and "payload" in sql]
+
+
+def comention_row_limits(statements) -> list[Any]:
+    """The ``LIMIT`` bound to each co-mention row read (its last parameter)."""
+    return [params[-1] for sql, params in statements
+            if "FROM concept_comentions cm" in sql]
 
 
 # --------------------------------------------------------------------- scenarios
@@ -338,7 +371,7 @@ def world_preconditions(world: World, monkeypatch) -> None:
     gated = world.unified.comention_peers(
         world.nb, FOCAL_ID, 1, 8, allowed_source_ids=[world.open])
     assert [name for name, _claims in gated] == [
-        QZX_HIDDEN, PGW_HIDDEN, ABG_LONG, MIXED, GHOST]
+        GHOST, QZX_HIDDEN, PGW_HIDDEN, ABG_LONG, MIXED]
     # ... but no member of it is owned by s-open.
     owners = {row["source_id"] for row in world.rows(
         "SELECT source_id FROM knowledge_objects WHERE id={ph}", (world.oid("g-a"),))}
@@ -374,8 +407,17 @@ def store_member_read_shape(world: World, monkeypatch) -> None:
     assert unified.comention_peers(
         world.nb, FOCAL_ID, 1, 2, allowed_source_ids=[world.open],
         with_canonical_id=True,
-    ) == [("K-quietzebraxylophone", QZX_HIDDEN, 9), ("K-pagedgammawidget", PGW_HIDDEN, 8)]
-    assert unified.comention_peers(world.nb, FOCAL_ID, 1, 1) == [(QZX_HIDDEN, 9)]
+    ) == [("K-ghostwidget", GHOST, 10), ("K-quietzebraxylophone", QZX_HIDDEN, 9)]
+    assert unified.comention_peers(world.nb, FOCAL_ID, 1, 1) == [(GHOST, 10)]
+    # R4's focal read: only the members whose name is the key, own source_id.
+    hidden = unified.focal_name_members(
+        world.nb, "K-quietzebraxylophone", QZX_HIDDEN.lower())
+    assert [(r["member_object_id"], r["source_id"]) for r in hidden] == [
+        (oid("q-a2"), world.hidden)]  # q-a1 is deprecated above
+    carried = unified.focal_name_members(world.nb, "K-alphabetagamma", ABG_LONG.lower())
+    assert [(r["member_object_id"], r["source_id"]) for r in carried] == [
+        (oid("a-b"), world.open), (oid("a-c"), world.hidden)]
+    assert unified.focal_name_members(world.nb, "K-alphabetagamma", "nope") == []
     with_ids = unified.community_member_peers(
         world.nb, world.community, FOCAL_ID, 2, allowed_source_ids=[world.open],
         with_canonical_id=True)
@@ -394,6 +436,23 @@ def ranking_reads_the_in_ceiling_name(world: World, monkeypatch) -> None:
     with world.ceiling():
         assert _names(world, "community", question=question, top_k=1) == [MIXED]
     assert _names(world, "community", question=question, top_k=1) == [QZX_HIDDEN]
+
+
+def comention_top_k_counts_named_peers(world: World, monkeypatch) -> None:
+    """Under a ceiling the co-mention read asks SQL for twice ``top_k`` and
+    cuts to ``top_k`` after R3, so Ghost -- the strongest pair, admitted by the
+    gate, dropped by R3 -- does not take the only slot; without a ceiling the
+    read keeps ``LIMIT top_k`` and answers as before."""
+    with world.ceiling():
+        with recorded_statements(world) as statements:
+            one = world.service.sibling_peers(world.nb, FOCAL, top_k=1)
+            two = world.service.sibling_peers(world.nb, FOCAL, top_k=2)
+    assert one == [(QZX, 9)]
+    assert two == [(QZX, 9), (PGW, 8)]
+    assert comention_row_limits(statements) == [2, 4]
+    with recorded_statements(world) as bare:
+        assert world.service.sibling_peers(world.nb, FOCAL, top_k=1) == [(GHOST, 10)]
+    assert comention_row_limits(bare) == [1]
 
 
 def hidden_spelling_never_names_a_peer(world: World, monkeypatch, path: str) -> None:
@@ -417,32 +476,44 @@ def hidden_spelling_never_names_a_peer(world: World, monkeypatch, path: str) -> 
 
 
 def absent_ceiling_reads_no_member(world: World, monkeypatch, path: str) -> None:
-    """No ceiling: stored names, and not one member read (zero extra
+    """No ceiling: stored names, and not one member or focal read (zero extra
     statements -- the statement set itself is pinned byte for byte by
-    ``test_comparison_peer_ceiling.py::test_absent_ceiling_is_byte_identical``)."""
+    ``test_comparison_peer_ceiling.py::test_absent_ceiling_is_byte_identical``);
+    the co-mention read keeps ``LIMIT top_k``."""
     if path == "community":
         _drop_comentions(world)
     with recorded_statements(world) as statements:
         names = _names(world, path)
+        hidden_focal = _names(world, path, focal=QZX_HIDDEN)
     assert names == (COMENTION_NO_CEILING if path == "comention"
                      else COMMUNITY_NO_CEILING)
+    assert hidden_focal, "without a ceiling the stored spelling resolves as before"
     assert member_reads(statements) == ([], [])
-    assert not [sql for sql in statements if "canonical_id, canonical_name" in sql]
+    assert focal_reads(statements) == []
+    assert not [sql for sql, _params in statements if "canonical_id, canonical_name" in sql]
+    if path == "comention":
+        assert comention_row_limits(statements) == [8, 8]
 
 
 def one_batched_member_read(world: World, monkeypatch, path: str) -> None:
     """Five peers survive the SQL gate (QZX, PGW, ABG, Mixed, Ghost): their
     first windows come back in ONE statement; only PGW, whose whole first
-    window is hidden, is paged on its own."""
+    window is hidden, is paged on its own. The focal check (R4) is one more
+    statement per resolved focal; a focal the stored names do not resolve
+    costs none."""
     if path == "community":
         _drop_comentions(world)
     with world.ceiling():
         with recorded_statements(world) as statements:
             names = _names(world, path)
+        with recorded_statements(world) as unresolved:
+            assert _names(world, path, focal="No Such Widget") == []
     assert sorted(names) == sorted(COMENTION_IN_CEILING)
     batched, paged = member_reads(statements)
     assert len(batched) == 1, batched
     assert len(paged) == 1, paged
+    assert len(focal_reads(statements)) == 1, statements
+    assert focal_reads(unresolved) == [] and member_reads(unresolved) == ([], [])
 
 
 def stale_stored_name_is_not_used(world: World, monkeypatch, path: str) -> None:
@@ -462,6 +533,96 @@ def stale_stored_name_is_not_used(world: World, monkeypatch, path: str) -> None:
         names = _names(world, path)
     assert sorted(names) == sorted([QZX, PGW, ABG_LONG, MIXED])
     assert_clean(names)
+
+
+def promoted_member_names_its_cluster(world: World, monkeypatch, path: str) -> None:
+    """A promoted object is written with ``source_id=''`` (its evidence cites
+    the library's visible promotion source): by the object rule it is an
+    in-ceiling member, so a cluster whose only visible members are promoted is
+    kept and named by them -- Mixed keeps its name, QZX is still named QZX."""
+    if path == "community":
+        _drop_comentions(world)
+    for suffix in ("m-b", "q-b"):
+        world.set_owner(suffix, "")
+        assert world.owner(suffix) == ""
+    try:
+        with world.ceiling():
+            names = _names(world, path)
+        assert names == (COMENTION_IN_CEILING if path == "comention"
+                         else COMMUNITY_IN_CEILING)
+        assert_clean(names)
+    finally:
+        for suffix in ("m-b", "q-b"):
+            world.set_owner(suffix, world.open)
+
+
+def empty_named_member_does_not_drop(world: World, monkeypatch, path: str) -> None:
+    """The first in-ceiling member of QZX in member-id order has an empty
+    name: it cannot name the cluster, the next in-ceiling member (``QZX``) does,
+    and the cluster is not dropped."""
+    if path == "community":
+        _drop_comentions(world)
+    world.set_owner("q-a2", world.open)
+    world.set_name("q-a2", "")
+    try:
+        with world.ceiling():
+            names = _names(world, path)
+        assert names == (COMENTION_IN_CEILING if path == "comention"
+                         else COMMUNITY_IN_CEILING)
+    finally:
+        world.set_owner("q-a2", world.hidden)
+        world.set_name("q-a2", QZX_HIDDEN)
+
+
+def _focal_unresolved_events(world: World, focal: str) -> list[dict]:
+    return [event for event in world.events
+            if event == {"kind": "community_unavailable", "notebook_id": world.nb,
+                         "reason": "focal_unresolved", "focal": focal}]
+
+
+def hidden_spelling_focal_is_unresolved(world: World, monkeypatch, path: str) -> None:
+    """R4: the stored name of QZX is the hidden spelling, so the stored-name
+    match resolves it -- but no in-ceiling member is spelled that way, so under
+    a ceiling the focal is unresolved: no peers on either path, and the
+    community path's existing ``focal_unresolved`` event. Without a ceiling
+    the spelling resolves exactly as before."""
+    if path == "community":
+        _drop_comentions(world)
+    before = len(_focal_unresolved_events(world, QZX_HIDDEN))
+    with world.ceiling():
+        assert _names(world, path, focal=QZX_HIDDEN) == []
+        assert world.service.resolve_comparison_peers(
+            world.nb, QZX_HIDDEN, "compare", top_k=8, candidates=16,
+        ) == ([], "community")
+    unresolved = _focal_unresolved_events(world, QZX_HIDDEN)
+    # community path: its own call + resolve's fallback; co-mention: resolve's
+    assert len(unresolved) - before == (2 if path == "community" else 1)
+    if path == "comention":
+        assert _names(world, path, focal=QZX_HIDDEN) == [FOCAL]
+    else:
+        assert _names(world, path, focal=QZX_HIDDEN) == [
+            HIDDEN_ONLY, GHOST, MIXED, ABG_LONG, PGW_HIDDEN, FOCAL]
+
+
+def focal_carried_in_ceiling_resolves(world: World, monkeypatch, path: str) -> None:
+    """R4: ABG's stored name (its long form) is also the spelling of the
+    in-ceiling member ``a-b``, so it resolves under a ceiling as before; a
+    promoted carrier (``source_id=''``) counts the same; once the only
+    in-ceiling carrier is re-owned by the hidden source the focal is
+    unresolved."""
+    if path == "community":
+        _drop_comentions(world)
+    expected = ([FOCAL] if path == "comention" else [MIXED, PGW, FOCAL, QZX])
+    try:
+        with world.ceiling():
+            assert _names(world, path, focal=ABG_LONG) == expected
+            world.set_owner("a-b", "")
+            assert _names(world, path, focal=ABG_LONG) == expected
+            world.set_owner("a-b", world.hidden)
+            assert _names(world, path, focal=ABG_LONG) == []
+        assert _names(world, path, focal=ABG_LONG)  # no ceiling: resolves
+    finally:
+        world.set_owner("a-b", world.open)
 
 
 def chunk_sub_queries_carry_no_hidden_spelling(world: World, monkeypatch, path: str) -> None:
@@ -584,6 +745,7 @@ def _reasoning_run(world: World, monkeypatch):
 SCENARIOS = (
     world_preconditions,
     store_member_read_shape,
+    comention_top_k_counts_named_peers,
     ranking_reads_the_in_ceiling_name,
 )
 #: Each runs once per path: ``comention`` (the world as built) and
@@ -595,6 +757,10 @@ PATH_SCENARIOS = (
     one_batched_member_read,
     chunk_sub_queries_carry_no_hidden_spelling,
     reasoning_trace_carries_no_hidden_spelling,
+    hidden_spelling_focal_is_unresolved,
+    focal_carried_in_ceiling_resolves,
+    promoted_member_names_its_cluster,
+    empty_named_member_does_not_drop,
     stale_stored_name_is_not_used,
 )
 PATHS = ("comention", "community")
