@@ -4,39 +4,27 @@ on SQLite.
 The world, the scenarios, the observation and the behaviour assertions live in
 ``tests/reasoning_stage_characterization_cases.py`` (its docstring explains what is
 observed and what is asserted); PostgreSQL runs the same scenarios in
-``tests/postgres/test_reasoning_stage_characterization_pg.py``. This module only says
-which tables SQLite has.
+``tests/postgres/test_reasoning_stage_characterization_pg.py``. Ordinary SQLite
+library seeds are copied per test; every Ask and its full observation still runs.
 """
 from __future__ import annotations
 
 import pytest
 
 from app.core.config import Settings
-from app.repositories.sqlite import knowledge_counts_cache
 from app.services.sqlite_repository import SQLiteRepository
 from tests import reasoning_stage_characterization_cases as cases
+from tests import reasoning_stage_world as world
 
-_FTS_SHADOW = ("_fts_config", "_fts_content", "_fts_data", "_fts_docsize", "_fts_idx")
-
-
-def _tables(repo) -> list[str]:
-    with repo._runtime.database.connect() as db:
-        names = [row[0] for row in db.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")]
-    return [n for n in names if not n.startswith("sqlite_") and not n.endswith(_FTS_SHADOW)]
-
-
-BACKEND = cases.Backend(
-    name="sqlite",
-    placeholder="?",
-    tables=_tables,
-    invalidate_caches=knowledge_counts_cache.invalidate,
-)
+BACKEND = world.BACKEND
 
 
 @pytest.mark.parametrize("scenario", cases.SCENARIOS, ids=lambda s: s.name)
-def test_run_reasoning_stage_characterization(scenario, tmp_path, monkeypatch):
-    cases.scrub_environment(monkeypatch, tmp_path, f"sqlite:///{tmp_path / 'ask.db'}")
+def test_run_reasoning_stage_characterization(scenario, tmp_path_factory, tmp_path, monkeypatch):
+    seeded = world.materialize(scenario, tmp_path_factory, tmp_path)
+    root, payload = seeded if seeded is not None else (tmp_path, None)
+    db_name = "world.db" if seeded is not None else "ask.db"
+    cases.scrub_environment(monkeypatch, root, f"sqlite:///{root / db_name}")
     for key, value in scenario.env.items():
         monkeypatch.setenv(key, value)
     repo = SQLiteRepository(
@@ -44,7 +32,10 @@ def test_run_reasoning_stage_characterization(scenario, tmp_path, monkeypatch):
         gap_consult_host=cases.make_gap_host() if scenario.gap_plugin else None,
     )
     try:
-        observation = cases.observe(repo, BACKEND, scenario, tmp_path, monkeypatch)
+        observation = cases.observe(
+            repo, BACKEND, scenario, root, monkeypatch,
+            prepare_world=(lambda rig: world.restore_rig(rig, payload)) if seeded else None,
+        )
     finally:
         repo.close()
     scenario.expect(observation)

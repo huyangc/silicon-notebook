@@ -812,12 +812,13 @@ def scrub_environment(monkeypatch: Any, tmp_path: Path, database_url: str) -> No
     monkeypatch.setenv("LLM_LOG_PATH", str(tmp_path / "logs" / "llm.jsonl"))
 
 
-def _clear_process_caches(backend: Backend) -> None:
+def _clear_process_caches(backend: Backend, *, invalidate_counts: bool = True) -> None:
     from app.services import reasoning_retrieval
 
     with reasoning_retrieval._EXPERIENCE_CACHE_LOCK:
         reasoning_retrieval._EXPERIENCE_CACHE.clear()
-    backend.invalidate_caches()
+    if invalidate_counts:
+        backend.invalidate_caches()
 
 
 def make_gap_host():
@@ -866,22 +867,35 @@ def make_gap_host():
     return build_extension_runtime((bundle,)).gap_consult
 
 
-def observe(repo: Any, backend: Backend, scenario: Scenario, tmp_path: Path,
-            monkeypatch: Any) -> Observation:
-    """Build the scenario's world, run one reasoning Ask with its collaborators
-    recorded, and return what the behaviour assertions read."""
+def make_rig(repo: Any, backend: Backend, script: Script, tmp_path: Path) -> Rig:
+    """Fresh collaborators, including the model state that ingestion may consume."""
     canon = Canon()
     recorder = Recorder(canon)
     hooks = Hooks()
-    models = ScriptedModels(recorder, scenario.script)
+    models = ScriptedModels(recorder, script)
     rig = Rig(repo=repo, backend=backend, recorder=recorder, hooks=hooks, models=models,
               tmp_path=tmp_path)
     bind_all_embedding_clients(repo, RecordingEmbedder(recorder))
     for workload_id, workload in WORKLOADS.items():
         if workload.kind == "chat":
             bind_chat_client(repo, workload_id, ScriptedChat(workload_id, models))
-    _clear_process_caches(backend)
-    scenario.world(rig)
+    return rig
+
+
+def observe(repo: Any, backend: Backend, scenario: Scenario, tmp_path: Path,
+            monkeypatch: Any, *,
+            prepare_world: Optional[Callable[[Rig], None]] = None) -> Observation:
+    """Prepare the world, then run and record the complete reasoning Ask.
+
+    SQLite may restore a validated ordinary seed; PostgreSQL and specialized
+    scenarios leave ``prepare_world`` unset and build the real world here.
+    """
+    rig = make_rig(repo, backend, scenario.script, tmp_path)
+    canon, recorder, hooks = rig.recorder.canon, rig.recorder, rig.hooks
+    # Materialization already reset identity caches and restored exactly the
+    # seed's warm entries. Do not discard those before scenario.install/request.
+    _clear_process_caches(backend, invalidate_counts=prepare_world is None)
+    (prepare_world or scenario.world)(rig)
     _install_recording(rig, monkeypatch)
     if scenario.install is not None:
         scenario.install(rig)

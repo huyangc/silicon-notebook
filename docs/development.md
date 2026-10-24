@@ -525,6 +525,25 @@ separate projection rather than adding parent attributes to shared AST nodes.
 Directory discovery and source reads remain live, including when an edit preserves
 file size and timestamps; cached projections never replace mutation coverage.
 
+The Memory chunk-write guard also reuses each content-and-path-keyed module's
+immutable SQL write recognition and updating scopes. Statements keep their own
+module's AST expressions; every overlay still rebuilds evaluation, helper traversal,
+sites and violations, so edits to imported constants, subclasses or callers remain
+visible even when the writing module itself has not changed. Guard decisions and
+mutable report collections are never cached.
+
+SQLite reasoning characterization may copy the ordinary `library_world` from a
+`pinned` seed only with the exact default model script, no scenario environment
+overrides and no gap plugin. The seed uses the real upload, processing and KG
+paths under the corpus's scrubbed environment; creation returns are checked
+against equivalent reads and reflection state must match a fresh default model.
+Every case gets independent database/storage contents, repository, rig, recorder,
+hooks and models. Seed-warmed count caches are restored for scenario installation;
+the existing full cache reset before Ask remains. Every Ask, collaborator
+observation, full-database before/after comparison and assertion still runs.
+Specialized SQLite scenarios and all PostgreSQL scenarios still build their own
+world through the original path.
+
 The sync tests (`test_sync_incremental_import.py`, `test_sync_import.py`, `test_sync_export.py`, `test_sync_incremental.py`) take their seeded libraries, full export and baseline import from `pinned` world templates: uploaded sources store an absolute `file_path`, and the import report is written beside the package. Export and import reports travel in the payload as pure data (`backend/tests/sync_world_cases.py`); the build first proves that the rebuilt report equals the original field for field with every type kept, and each test then rebuilds its own. `test_sync_import.py` also has a second-level world taken after the default import: only tests whose body is "import once with the default arguments, then read-only assertions" read that outcome, produced by the real code at build time, through `first_import`. Tests that patch, observe the import's progress or events, pass other arguments, or act again after the import still run the import in their own body; collecting the module rejects a `first_import` test that also uses `monkeypatch`, `MonkeyPatch`, `setattr`, or calls the import again. Before a test is switched to that world, a deliberate bug injected into the import code must be shown to still turn it red.
 
 Test fixture cost follows the behavior under test. Scale-build lock admission and
