@@ -23,8 +23,8 @@ unset PYTHONDONTWRITEBYTECODE
 declare -a LANES=(contracts backend frontend)
 
 # With no arguments check.sh is all of G1. `--lane <name>` (repeatable) runs
-# only the named lanes, still concurrently, in LANES order: CI gives the
-# backend lane a job of its own and runs the other two together with
+# only the named lanes, still concurrently, in LANES order: CI runs its two
+# backend parts explicitly, then runs the other two together with
 # `--lane contracts --lane frontend`.
 declare -a SELECTED_LANES=()
 while (( $# )); do

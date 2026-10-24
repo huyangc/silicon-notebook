@@ -10,7 +10,8 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 #
 # --complement-only skips the G1 step and runs only what G2 adds. It exists for
 # .github/workflows/daily-extended.yml alone, which runs G1's lanes as sibling
-# jobs on their own runners (the backend in the same two shards as PR CI) and
+# jobs on their own runners (the same backend split and sequential placement
+# of the smaller part before contracts/frontend as PR CI) and
 # fails the day's run unless every one of them and this job succeed. One 4-vCPU
 # runner cannot fit G1 and the complement inside a job timeout: from
 # 2026-10-07 every single-job run was cancelled before reaching the end.

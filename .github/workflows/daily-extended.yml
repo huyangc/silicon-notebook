@@ -14,9 +14,9 @@ concurrency:
   cancel-in-progress: true
 
 # G2 is G1 plus the complement in scripts/check_extended.sh, in at most three
-# jobs. G1 runs as in ci.yml (the backend lane alone, then contracts and
-# frontend together), the contracts-and-frontend job also forces the frontend
-# lane's parallel path, and the complement job runs check_extended.sh with
+# jobs. G1 runs as in ci.yml (the primary backend shard and a second runner's
+# smaller backend shard followed by contracts/frontend). The second job also
+# forces the frontend lane's parallel path; the complement runs check_extended.sh with
 # --complement-only. One 4-vCPU runner running G1 and then the complement in
 # sequence no longer fits a job timeout: from 2026-10-07 every single-job run
 # was cancelled at 25 minutes. There is no summary job: the workflow passes
@@ -27,7 +27,7 @@ concurrency:
 # SIGILL on a runner with different CPU features.
 jobs:
   extended-backend:
-    name: level-2-backend
+    name: level-2-backend-primary
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -46,27 +46,27 @@ jobs:
           HNSWLIB_NO_NATIVE: "1"
         run: python -m pip install --no-cache-dir --require-hashes -r backend/requirements.txt -r backend/requirements-dev.txt
 
-      - name: Run standard backend lane
+      - name: Run standard backend primary shard
         env:
           PYTHON_BIN: python
           BACKEND_PYTEST_WORKERS: "4"
-        run: bash scripts/check_backend.sh
+        run: bash scripts/check_backend.sh --shard-index 0 --shard-count 2
 
       - name: Upload backend test timings
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: daily-backend-test-timings
+          name: daily-backend-test-timings-shard-0
           path: |
-            backend/.local/backend-junit.xml
-            backend/.local/backend-metrics.json
+            backend/.local/backend-shard0-junit.xml
+            backend/.local/backend-shard0-metrics.json
           if-no-files-found: warn
           retention-days: 7
 
   extended-contracts-frontend:
-    name: level-2-contracts-frontend
+    name: level-2-backend-rest-contracts-frontend
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -93,7 +93,15 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --prefix frontend
 
+      - name: Run standard backend remaining shard
+        if: ${{ !cancelled() }}
+        env:
+          PYTHON_BIN: python
+          BACKEND_PYTEST_WORKERS: "4"
+        run: bash scripts/check_backend.sh --shard-index 1 --shard-count 2
+
       - name: Run standard contracts and frontend lanes
+        if: ${{ !cancelled() }}
         env:
           PYTHON_BIN: python
         run: bash scripts/check.sh --lane contracts --lane frontend
@@ -115,6 +123,17 @@ jobs:
         with:
           name: daily-contracts-test-timings
           path: backend/.local/contracts-junit.xml
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload remaining backend test timings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: daily-backend-test-timings-shard-1
+          path: |
+            backend/.local/backend-shard1-junit.xml
+            backend/.local/backend-shard1-metrics.json
           if-no-files-found: warn
           retention-days: 7
 

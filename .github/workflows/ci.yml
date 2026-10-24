@@ -18,11 +18,10 @@ jobs:
   # At most three jobs per workflow: G1 is these two jobs, G3 the third. No
   # summary job: each job's name says what it gates, and every one must pass.
   standard-backend:
-    name: level-1-backend
+    name: level-1-backend-primary
     runs-on: ubuntu-24.04
-    # One 4-vCPU runner runs the whole backend G1 lane with four workers. The
-    # limit includes dependency installation; see docs/development.md for the
-    # measured duration it leaves headroom over.
+    # The primary backend shard uses four workers. The other existing G1
+    # runner executes its smaller shard before contracts/frontend.
     timeout-minutes: 30
     env:
       PIP_CACHE_DIR: ${{ github.workspace }}/.local/pip-portable-v1
@@ -48,27 +47,27 @@ jobs:
           HNSWLIB_NO_NATIVE: "1"
         run: python -m pip install --require-hashes -r backend/requirements.txt -r backend/requirements-dev.txt
 
-      - name: Run standard backend lane
+      - name: Run standard backend primary shard
         env:
           PYTHON_BIN: python
           BACKEND_PYTEST_WORKERS: "4"
-        run: bash scripts/check_backend.sh
+        run: bash scripts/check_backend.sh --shard-index 0 --shard-count 2
 
       - name: Upload backend test timings
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: backend-test-timings
+          name: backend-test-timings-shard-0
           path: |
-            backend/.local/backend-junit.xml
-            backend/.local/backend-metrics.json
+            backend/.local/backend-shard0-junit.xml
+            backend/.local/backend-shard0-metrics.json
           if-no-files-found: warn
           retention-days: 7
 
   standard-contracts-frontend:
-    name: level-1-contracts-frontend
+    name: level-1-backend-rest-contracts-frontend
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       PIP_CACHE_DIR: ${{ github.workspace }}/.local/pip-portable-v1
     steps:
@@ -103,10 +102,29 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --prefix frontend
 
+      - name: Run standard backend remaining shard
+        if: ${{ !cancelled() }}
+        env:
+          PYTHON_BIN: python
+          BACKEND_PYTEST_WORKERS: "4"
+        run: bash scripts/check_backend.sh --shard-index 1 --shard-count 2
+
       - name: Run standard contracts and frontend lanes
+        if: ${{ !cancelled() }}
         env:
           PYTHON_BIN: python
         run: bash scripts/check.sh --lane contracts --lane frontend
+
+      - name: Upload remaining backend test timings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: backend-test-timings-shard-1
+          path: |
+            backend/.local/backend-shard1-junit.xml
+            backend/.local/backend-shard1-metrics.json
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload contract test timings
         if: always()
