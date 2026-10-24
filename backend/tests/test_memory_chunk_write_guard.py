@@ -111,7 +111,9 @@ memory_sql.memory_derived_in_notebook("c")``) when ``_COPY_DIRTY_SQL`` finds a
 Memory source or a dirty flag, and the pre-M2 ``_COPY_SNAPSHOT_QUERIES`` otherwise.
 
 The scan parses each file once per test session (``lru_cache`` keyed by path and
-text, all tests of this file in one xdist group). The guard is entered through
+text, all tests of this file in one xdist group), and reuses that module's immutable
+statement/write recognition. Evaluation, helper traversal and guard results are
+fresh for every tree. The guard is entered through
 ``guard_problems(tree)`` everywhere: the repository test passes the real tree,
 the controls pass the real tree with one file changed (every surviving
 experiment of the reviews of this task is a control) or a small fake tree.
@@ -205,11 +207,11 @@ class Scope:
         return self.qual.rsplit(".", 1)[-1]
 
 
-@dataclass(eq=False)
+@dataclass(eq=False, frozen=True)
 class Statement:
     node: ast.AST
     text: str
-    exprs: list[ast.AST | None]
+    exprs: tuple[ast.AST | None, ...]
     scope: Scope | None
 
 
@@ -235,7 +237,26 @@ class Module:
             func = call.func
             callee = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
             self.calls_by_name.setdefault(callee, []).append(call)
-        self.statements = self._statements()
+        self.statements = tuple(self._statements())
+
+    @functools.cached_property
+    def write_projection(self) -> tuple[tuple[Statement, tuple[Write, ...]], ...]:
+        """Only syntactic recognition; expressions keep this module's AST identity.
+
+        No table evaluation or refusal decision belongs here: another file in an
+        overlay may change imported constants, class overrides or helper callers.
+        """
+        return tuple(
+            (statement, writes) for statement in self.statements
+            if (writes := tuple(_writes(statement)))
+        )
+
+    @functools.cached_property
+    def updating_scopes(self) -> frozenset[Scope]:
+        return frozenset(
+            statement.scope for statement in self.statements
+            if statement.scope is not None and _UPSERT.search(statement.text)
+        )
 
     # ------------------------------------------------------------- building
     def _mark_docstring(self, node: ast.AST) -> None:
@@ -349,7 +370,7 @@ class Module:
             exprs: list[ast.AST | None] = []
             text = self._fold(node, exprs)
             text = self._apply_format(node, text, exprs)
-            out.append(Statement(node, text, exprs, self.scope_of.get(node)))
+            out.append(Statement(node, text, tuple(exprs), self.scope_of.get(node)))
         return out
 
     @staticmethod
@@ -445,7 +466,7 @@ def _sql_statements(text: str) -> tuple[Statement, ...]:
     """The statements of a scanned ``.sql`` file (comments blanked, split at ``;``)."""
     body = _SQL_COMMENT.sub(" ", text)
     return tuple(
-        Statement(node=ast.Constant(part), text=part, exprs=[], scope=None)
+        Statement(node=ast.Constant(part), text=part, exprs=(), scope=None)
         for part in body.split(";") if part.strip()
     )
 
@@ -485,7 +506,7 @@ def _assigns(segment: str, column: str) -> bool:
     return bool(re.search(simple, segment, re.I) or re.search(row, segment, re.I))
 
 
-@dataclass
+@dataclass(frozen=True)
 class Write:
     verb: str          # insert | update | copy
     table: str | None  # literal table (lower-case, unqualified) or None if interpolated
@@ -1220,13 +1241,9 @@ class Analysis:
     # ----------------------------------------------------------------- run
     def _run(self) -> None:
         for module in self.modules.values():
-            updating_scopes = {
-                id(s.scope) for s in module.statements
-                if s.scope is not None and _UPSERT.search(s.text)
-            }
-            for statement in module.statements:
-                for write in _writes(statement):
-                    self._statement_write(module, statement, write, id(statement.scope) in updating_scopes)
+            for statement, writes in module.write_projection:
+                for write in writes:
+                    self._statement_write(module, statement, write, statement.scope in module.updating_scopes)
         for path, statements in self.sql_files.items():
             for statement in statements:
                 for write in _writes(statement):
@@ -2554,6 +2571,107 @@ def test_statement_shapes_through_the_entry_point(statement):
         return
     flagged = any("x.py::f writes the chunks table" in p for p in problems)
     assert flagged is expected, problems
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "problem"),
+    [
+        (
+            "def put(db):\n    db.execute('INSERT INTO notes (id) VALUES (1)')\n",
+            "def put(db):\n    db.execute('INSERT INTO chunks (id) VALUES (1)')\n",
+            "writes the chunks table",
+        ),
+        (
+            "def put(db):\n    table = 'notes'\n    db.execute(f'INSERT INTO {table} (id) VALUES (1)')\n",
+            "def put(db):\n    table = 'chunks'\n    db.execute(f'INSERT INTO {table} (id) VALUES (1)')\n",
+            "writes the chunks table",
+        ),
+        (
+            "def put(db):\n    db.execute('UPDATE sources SET title=1')\n",
+            "def put(db):\n    db.execute('UPDATE sources SET source_type=1')\n",
+            "sources.source_type",
+        ),
+    ],
+)
+def test_warm_recognition_observes_changed_source(before, after, problem):
+    path = "backend/app/warm_writer.py"
+    assert not guard_problems({path: before}, reviewed={}, generic_updaters={})
+    problems = guard_problems({path: after}, reviewed={}, generic_updaters={})
+    assert any(problem in item for item in problems), problems
+    assert not guard_problems({path: before}, reviewed={}, generic_updaters={})
+
+
+def test_warm_recognition_evaluates_imports_in_each_overlay():
+    tree = {
+        "backend/app/warm_tables.py": "TABLE = 'notes'\n",
+        "backend/app/warm_import_writer.py": (
+            "from app.warm_tables import TABLE\n"
+            "def put(db):\n    db.execute(f'INSERT INTO {TABLE} (id) VALUES (1)')\n"
+        ),
+    }
+    assert not guard_problems(tree, reviewed={}, generic_updaters={})
+    changed = overlay(tree, {"backend/app/warm_tables.py": "TABLE = 'chunks'\n"})
+    problems = guard_problems(changed, reviewed={}, generic_updaters={})
+    assert any("warm_import_writer.py::put writes the chunks table" in p for p in problems), problems
+    assert not guard_problems(tree, reviewed={}, generic_updaters={})
+
+
+def test_warm_recognition_traverses_helper_callers_in_each_overlay():
+    tree = {
+        "backend/app/warm_helper.py": (
+            "def put(db, table):\n    db.execute(f'INSERT INTO {table} (id) VALUES (1)')\n"
+        ),
+        "backend/app/warm_caller.py": (
+            "from app.warm_helper import put\n"
+            "def run(db):\n    put(db, 'notes')\n"
+        ),
+    }
+    assert not guard_problems(tree, reviewed={}, generic_updaters={})
+    changed = overlay(tree, {
+        "backend/app/warm_caller.py": tree["backend/app/warm_caller.py"].replace("'notes'", "'chunks'")
+    })
+    problems = guard_problems(changed, reviewed={}, generic_updaters={})
+    assert any("warm_caller.py::run writes the chunks table" in p for p in problems), problems
+    assert not guard_problems(tree, reviewed={}, generic_updaters={})
+
+
+def test_repeated_analysis_keeps_mutable_results_independent():
+    tree = {
+        "backend/app/warm_results.py": (
+            "def put(db):\n"
+            "    db.execute('INSERT INTO chunks (id) VALUES (1)')\n"
+            "    db.execute('UPDATE chunks SET source_id=2')\n"
+        )
+    }
+    first, expected = guard_report(tree, reviewed={}, generic_updaters={})
+    assert len(first.sites) == 1
+    assert len(first.sites[0].writes) == 2
+    assert first.violations
+    first.sites[0].writes.clear()
+    first.sites[0].refused = True
+    first.sites.clear()
+    first.violations.clear()
+    first.helpers.append(("chunks", "injected", "helper", "table"))
+    second, actual = guard_report(tree, reviewed={}, generic_updaters={})
+    assert actual == expected
+    assert len(second.sites) == 1
+    assert len(second.sites[0].writes) == 2
+    assert not second.sites[0].refused
+    assert second.violations
+    assert not second.helpers
+
+
+def test_identical_source_keeps_each_module_path_and_expression_owner():
+    source = (
+        "TABLE = 'chunks'\n"
+        "def put(db):\n    db.execute(f'INSERT INTO {TABLE} (id) VALUES (1)')\n"
+    )
+    left, right = "backend/app/warm_left.py", "backend/app/warm_right.py"
+    guard_report({left: source}, reviewed={}, generic_updaters={})
+    report, problems = guard_report({left: source, right: source}, reviewed={}, generic_updaters={})
+    assert {site.key for site in report.sites} == {(left, "put"), (right, "put")}
+    assert len(problems) == 2
+    assert all("writes the chunks table" in problem for problem in problems)
 
 
 _DYNAMIC_CASES = {
