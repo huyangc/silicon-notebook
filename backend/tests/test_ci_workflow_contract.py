@@ -5,6 +5,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -109,11 +110,12 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
         "POSTGRES_USER": "postgres",
         "POSTGRES_PASSWORD": "ci-only-admin-password",
         "POSTGRES_DB": "postgres",
+        "POSTGRES_INITDB_ARGS": "--set=shared_buffers=512MB --set=max_wal_size=2GB",
     }
     assert service["ports"] == ["5432:5432"]
     assert "pg_isready -U postgres -d postgres" in service["options"]
     assert (
-        "--mount type=tmpfs,destination=/var/lib/postgresql/data,tmpfs-size=4294967296"
+        "--mount type=tmpfs,destination=/var/lib/postgresql/data,tmpfs-size=6442450944"
         in service["options"]
     )
 
@@ -194,28 +196,103 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
     ]
 
 
-def _ci_logging_configurator():
+def _ci_provisioning_functions():
     job = _load_workflow()["jobs"]["postgres-integration"]
     command = _named_step(job, "Provision least-privilege PostgreSQL test targets")["run"]
     source = command.removeprefix("python - <<'PY'\n").removesuffix("PY\n")
     module = ast.parse(source)
     functions = [node for node in module.body if isinstance(node, ast.FunctionDef)]
-    assert [function.name for function in functions] == ["configure_ci_logging"]
+    assert {function.name for function in functions} == {
+        "configure_ci_logging", "verify_ci_resources",
+    }
     connection_blocks = [
         node for node in module.body if isinstance(node, ast.With)
         and any(isinstance(item.optional_vars, ast.Name)
                 and item.optional_vars.id == "connection" for item in node.items)
     ]
     assert len(connection_blocks) == 1
-    # The executed provisioning path applies and verifies the policy before it
-    # checks durability or creates test roles/databases, not merely defining it.
-    invocation = connection_blocks[0].body[0]
-    assert isinstance(invocation, ast.Expr) and isinstance(invocation.value, ast.Call)
-    assert isinstance(invocation.value.func, ast.Name)
-    assert invocation.value.func.id == "configure_ci_logging"
+    # Both guards run before any CREATE ROLE/database side effect, rather than
+    # merely being defined somewhere in the provisioning program.
+    for invocation, name in zip(
+        connection_blocks[0].body, ("configure_ci_logging", "verify_ci_resources"),
+    ):
+        assert isinstance(invocation, ast.Expr) and isinstance(invocation.value, ast.Call)
+        assert isinstance(invocation.value.func, ast.Name)
+        assert invocation.value.func.id == name
     namespace = {"time": SimpleNamespace(sleep=lambda _: None)}
     exec(compile(ast.Module(body=functions, type_ignores=[]), str(WORKFLOW_PATH), "exec"), namespace)
-    return namespace["configure_ci_logging"]
+    return namespace
+
+
+def _ci_logging_configurator():
+    return _ci_provisioning_functions()["configure_ci_logging"]
+
+
+def test_postgres_ci_initdb_budgets_and_diagnostics_are_bounded() -> None:
+    job = _load_workflow()["jobs"]["postgres-integration"]
+    service = job["services"]["postgres"]
+    # The official entrypoint expands this string as initdb arguments. Reject
+    # additional server options that could weaken real migrations or isolation.
+    assert shlex.split(service["env"]["POSTGRES_INITDB_ARGS"]) == [
+        "--set=shared_buffers=512MB", "--set=max_wal_size=2GB",
+    ]
+    options = shlex.split(service["options"])
+    assert options[options.index("--mount") + 1] == (
+        "type=tmpfs,destination=/var/lib/postgresql/data,tmpfs-size=6442450944"
+    )
+    assert not {"--memory", "--memory-swap"}.intersection(options)
+    storage = _named_step(job, "Record PostgreSQL storage usage")
+    assert storage["if"] == "always()"
+    for diagnostic in (
+        "df -h", "/sys/fs/cgroup/memory.peak", "/sys/fs/cgroup/cpu.stat",
+        "checkpoints_req", "buffers_backend", "shared_buffers_bytes",
+        "max_wal_size_bytes", "pg_stat_wal", "wal_bytes", "wal_buffers_full",
+    ):
+        assert diagnostic in storage["run"]
+
+
+@pytest.mark.parametrize(
+    ("override", "accepted"),
+    [
+        ({}, True),
+        ({"shared_buffers": 128 * 1024**2}, False),
+        ({"max_wal_size": 1024**3}, False),
+        ({"fsync": "off"}, False),
+        ({"synchronous_commit": "off"}, False),
+        ({"full_page_writes": "off"}, False),
+    ],
+)
+def test_postgres_ci_rejects_unapplied_budgets_and_weakened_durability(
+    override, accepted,
+) -> None:
+    settings = {
+        "shared_buffers": 512 * 1024**2,
+        "max_wal_size": 2 * 1024**3,
+        "fsync": "on", "synchronous_commit": "on", "full_page_writes": "on",
+        **override,
+    }
+    checked = []
+
+    def execute(statement, params):
+        setting, = params
+        assert statement == (
+            "SELECT pg_size_bytes(current_setting(%s))"
+            if setting in {"shared_buffers", "max_wal_size"}
+            else "SELECT current_setting(%s)"
+        )
+        checked.append(setting)
+        return SimpleNamespace(fetchone=lambda: (settings[setting],))
+
+    verify = _ci_provisioning_functions()["verify_ci_resources"]
+    connection = SimpleNamespace(execute=execute)
+    if accepted:
+        verify(connection)
+        assert set(checked) == set(settings)
+    else:
+        bad_setting, = override
+        with pytest.raises(RuntimeError, match=bad_setting):
+            verify(connection)
+        assert checked[-1] == bad_setting
 
 
 class _CiLoggingServer:

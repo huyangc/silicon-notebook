@@ -706,6 +706,14 @@ backend 与 contracts wrapper 单独执行时仍隔离部署环境，打印慢 p
 修改不会复用旧树。Agent Profile job base/overlay 测试与 store 测试使用当前 schema 的
 独立副本，store 的「已部署 v52 升级」用例仍执行真实迁移梯并保留旧 schema 断言。
 
+测试 Settings source 仅对应用精确 Settings 类中注解恰为内置 `str`/`int`/`float`/`bool`
+的字段直接返回「非复杂类型」。`tests/speedups/settings_sources.py` 固定已核验的
+Pydantic 与 pydantic-settings 版本，并检查当前 source、FieldInfo、注解、元数据和分类器
+身份；未知或改动的输入走原分类器。环境变量与 dotenv 读取、别名、验证和实例值均不缓存。
+设置 `SILICON_NOTEBOOK_TEST_SETTINGS_SCALARS=0` 或使用该模块可嵌套的 `disabled()`
+上下文，可对照真实分类路径。差分测试验证所有当前字段等价，并覆盖新输入、可变输出
+隔离和各回退边界。
+
 已提交的 OpenAPI 契约是字节语义冻结契约，因此
 `backend/requirements.in` 精确固定 FastAPI `0.135.3` 与 Pydantic
 `2.12.4`。只能在有意重生 OpenAPI 契约并在干净环境跑 G2 扩展门时，
@@ -729,10 +737,15 @@ run 用 11:59（4 个 worker；job 总时长 8:41 与 13:03），单个 job 没�
 PostgreSQL 覆盖与离线门禁明确分离。`level-3-postgres-integration` job 启动 PostgreSQL 16，
 通过 `bash scripts/check_postgres.sh` 选择 `postgres_integration or postgres_lane_contract`；
 后者将环境自足的适配器/迁移契约与 launcher/目标安全检查纳入它所归属的泳道。
-仅 CI service 将 PGDATA 放在上限 4 GiB 的 tmpfs，减少短命 schema 的宿主磁盘开销。
-WAL、`fsync`、`synchronous_commit`、`full_page_writes` 保持默认值，建库时检查后三项；
+仅 CI service 将 PGDATA 放在上限 6 GiB 的 tmpfs，减少短命 schema 的宿主磁盘开销。
+初始化集群使用 `shared_buffers=512MB`、`max_wal_size=2GB`，减少真实 schema 创建中的
+buffer 淘汰与频繁请求 checkpoint。`max_wal_size` 是软 checkpoint 目标，不是存储上限；
+tmpfs 预留空间和另占的 shared buffers 必须纳入 runner 总内存预算。WAL 仍启用，
+`fsync`、`synchronous_commit`、`full_page_writes` 保持默认值。创建测试角色和目标之前，
+先校验实际 buffer/WAL 字节值及三项持久性设置，不匹配就立即失败。
 job 记录存储用量、容器内存峰值与 CPU 计数，以及 PostgreSQL 16 `pg_stat_bgwriter`
-中的 checkpoint 次数、写入/同步耗时和 buffer 写入计数，区分 checkpoint 压力与测试 CPU
+中的 checkpoint 次数、写入/同步耗时和 buffer 写入计数，以及实际 buffer/WAL 配置和
+`pg_stat_wal` 计数，区分 checkpoint 压力与测试 CPU
 开销。此泳道验证运行中的数据库行为，不验证容器丢失或宿主
 断电后的介质持久性；生产与本地 PostgreSQL 存储不变。
 仅 CI 为可丢弃服务设置 `log_min_error_statement=panic`，reload 后通过新连接确认生效，

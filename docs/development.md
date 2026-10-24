@@ -939,6 +939,17 @@ job base/overlay tests and the store tests use independent copies of the current
 schema, while the store's deployed-v52 upgrade test keeps the real ladder and its
 old-schema assertions.
 
+Test Settings sources shortcut only the non-complex classification of exact
+builtin `str`/`int`/`float`/`bool` fields on the application's exact Settings
+class. The shim in `tests/speedups/settings_sources.py` is pinned to the verified
+Pydantic and pydantic-settings versions and checks the current source, FieldInfo,
+annotation, metadata and classifier identities. Unknown or modified inputs use
+the original classifier. Environment and dotenv reads, aliases, validation and
+instance values are never cached. `SILICON_NOTEBOOK_TEST_SETTINGS_SCALARS=0` or
+the module's nested `disabled()` context runs the real classification for
+comparison. Differential tests keep every current field equivalent and exercise
+fresh input, mutable-output isolation and fallback boundaries.
+
 The committed OpenAPI contract is byte-semantically frozen, so
 `backend/requirements.in` pins FastAPI `0.135.3` and Pydantic `2.12.4`
 exactly. Upgrade either framework only together with an intentional OpenAPI
@@ -969,12 +980,19 @@ PostgreSQL coverage is deliberately separate from the offline gates. The
 `bash scripts/check_postgres.sh`, selecting `postgres_integration or postgres_lane_contract`.
 The latter includes hermetic adapter/migration contracts and launcher/target safety
 checks in the lane that owns them.
-Only the CI service stores PGDATA on a bounded 4 GiB tmpfs to avoid hosted-disk
-overhead from disposable schemas. WAL, `fsync`, `synchronous_commit`, and
-`full_page_writes` retain their defaults; provisioning checks the three settings.
+Only the CI service stores PGDATA on a bounded 6 GiB tmpfs to avoid hosted-disk
+overhead from disposable schemas. Its initial cluster uses `shared_buffers=512MB`
+and `max_wal_size=2GB` to reduce buffer eviction and frequent requested
+checkpoints during real schema creation. `max_wal_size` is a soft checkpoint
+target, not a storage limit; the tmpfs headroom and separate shared buffers must
+fit the runner's total memory budget. WAL remains enabled, and `fsync`,
+`synchronous_commit`, and `full_page_writes` retain their defaults. Provisioning
+checks actual buffer/WAL byte values and all three durability settings before
+creating test roles or targets; a mismatch fails closed.
 The job records storage usage, container peak memory and CPU counters, plus
 PostgreSQL 16 checkpoint counts, write/sync time, and buffer-write counters from
-`pg_stat_bgwriter`, so checkpoint pressure can be distinguished from test CPU.
+`pg_stat_bgwriter`, plus actual buffer/WAL settings and `pg_stat_wal` counters,
+so checkpoint pressure can be distinguished from test CPU.
 This lane tests live
 database behavior, not persistence across container loss or host power failure;
 production and local PostgreSQL storage are unchanged.

@@ -132,10 +132,13 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: ci-only-admin-password
           POSTGRES_DB: postgres
+          # CI-only cache/WAL budgets: preserve durable real migrations while
+          # avoiding small-default buffer churn and requested checkpoints.
+          POSTGRES_INITDB_ARGS: --set=shared_buffers=512MB --set=max_wal_size=2GB
         ports:
           - 5432:5432
         options: >-
-          --mount type=tmpfs,destination=/var/lib/postgresql/data,tmpfs-size=4294967296
+          --mount type=tmpfs,destination=/var/lib/postgresql/data,tmpfs-size=6442450944
           --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s
           --health-timeout 5s
@@ -196,6 +199,24 @@ jobs:
                   time.sleep(0.1)
               raise RuntimeError("PostgreSQL CI logging policy did not become effective")
 
+          def verify_ci_resources(connection):
+              for setting, expected_bytes in (
+                  ("shared_buffers", 512 * 1024**2),
+                  ("max_wal_size", 2 * 1024**3),
+              ):
+                  actual_bytes = connection.execute(
+                      "SELECT pg_size_bytes(current_setting(%s))", (setting,)
+                  ).fetchone()[0]
+                  if actual_bytes != expected_bytes:
+                      raise RuntimeError(f"unexpected PostgreSQL CI {setting} budget")
+              # tmpfs is bounded at 6 GiB; max_wal_size is a soft checkpoint
+              # target, not a WAL or total-memory cap. Keep durability intact.
+              for setting in ("fsync", "synchronous_commit", "full_page_writes"):
+                  if connection.execute(
+                      "SELECT current_setting(%s)", (setting,)
+                  ).fetchone()[0] != "on":
+                      raise RuntimeError(f"unexpected {setting} policy")
+
           role = "silicon_notebook_app"
           decoy_owner_role = "silicon_notebook_ci_owner_decoy"
           password = os.environ["POSTGRES_APP_PASSWORD"]
@@ -210,12 +231,7 @@ jobs:
           )
           with psycopg.connect(**admin_connection) as connection:
               configure_ci_logging(connection, lambda: psycopg.connect(**admin_connection))
-              # Disposable in-memory storage avoids hosted-disk DDL overhead;
-              # keep PostgreSQL's real commit/WAL machinery enabled.
-              for setting in ("fsync", "synchronous_commit", "full_page_writes"):
-                  assert connection.execute(
-                      "SELECT current_setting(%s)", (setting,)
-                  ).fetchone()[0] == "on", f"unexpected {setting} policy"
+              verify_ci_resources(connection)
               connection.execute(
                   sql.SQL("CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION").format(
                       sql.Identifier(role), sql.Literal(password)
@@ -285,6 +301,11 @@ jobs:
                    checkpoint_sync_time, buffers_checkpoint, buffers_backend,
                    buffers_backend_fsync
             FROM pg_stat_bgwriter;
+            SELECT pg_size_bytes(current_setting($$shared_buffers$$)) AS shared_buffers_bytes,
+                   pg_size_bytes(current_setting($$max_wal_size$$)) AS max_wal_size_bytes;
+            SELECT wal_records, wal_fpi, wal_bytes, wal_buffers_full,
+                   wal_write, wal_sync, wal_write_time, wal_sync_time
+            FROM pg_stat_wal;
           ' 2>/dev/null || printf 'PostgreSQL checkpoint counters unavailable\n'
 
       - name: Upload PostgreSQL test timings

@@ -13,7 +13,7 @@ from __future__ import annotations
 from importlib import import_module
 
 # Dotted module names under ``tests.speedups``; each exposes ``install()``.
-_SPEEDUPS: tuple[str, ...] = ("app_routes",)
+_SPEEDUPS: tuple[str, ...] = ("app_routes", "settings_sources")
 
 
 def register(config) -> None:  # noqa: ARG001 - pytest hook signature
