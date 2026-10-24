@@ -45,7 +45,8 @@ def test_units_match_effective_loadgroup_keys(marks, native, expected):
 
 def test_lpt_accounts_for_the_second_runners_later_work_and_is_order_independent():
     units = {("module", name): [name] for name in "abcd"}
-    costs = dict(a=1000, b=800, c=600, d=400)
+    overhead = shard.CONTRACTS_FRONTEND_TEST_SECONDS
+    costs = dict(a=overhead * 1.25, b=overhead, c=overhead * 0.75, d=overhead * 0.5)
     expected = shard._owners(units, costs)
     assert expected == {
         ("module", "a"): 0, ("module", "b"): 1,
@@ -116,8 +117,11 @@ def _suite(root):
         encoding="utf-8",
     )
     (root / "hints.json").write_text(json.dumps({
-        "default_seconds_per_test": 1000,
-        "seconds_per_test": {"test_stale.py": 20000, "test_a.py": 1200},
+        "default_seconds_per_test": 2 * shard.CONTRACTS_FRONTEND_TEST_SECONDS,
+        "seconds_per_test": {
+            "test_stale.py": 20 * shard.CONTRACTS_FRONTEND_TEST_SECONDS,
+            "test_a.py": 3 * shard.CONTRACTS_FRONTEND_TEST_SECONDS,
+        },
     }), encoding="utf-8")
     (root / "conftest.py").write_text(
         "import json, os\nfrom pathlib import Path\nimport pytest\n"

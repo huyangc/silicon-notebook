@@ -15,8 +15,8 @@ import pytest
 _BACKEND = Path(__file__).resolve().parents[2]
 _TIMINGS = Path(__file__).resolve().parents[1] / "fixtures/g1_module_timings.json"
 # The second runner subsequently executes contracts/frontend, measured around
-# four wall minutes on four workers. Express that load in cumulative test seconds.
-CONTRACTS_FRONTEND_TEST_SECONDS = 4 * 60 * 4
+# five wall minutes on four workers. Express that load in cumulative test seconds.
+CONTRACTS_FRONTEND_TEST_SECONDS = 5 * 60 * 4
 
 
 def pytest_addoption(parser):

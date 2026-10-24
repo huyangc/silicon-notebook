@@ -916,7 +916,7 @@ CI partitions the normally selected G1 items into exactly two nonempty parts,
 keeping each ungrouped module and each effective xdist loadgroup together.
 Measured per-module test costs only balance ownership: new modules use a default
 cost and stale or missing timing hints cannot omit a test. The second runner's
-four-minute contracts/frontend estimate is a balancing hint expressed as 960
+five-minute contracts/frontend estimate is a balancing hint expressed as 1200
 cumulative test seconds, not a timeout or test limit. The plugin is loaded only
 by the wrapper's explicit paired shard arguments; neither plugin nor shard
 selection is exported to nested pytest processes. The G1 collection guard checks
