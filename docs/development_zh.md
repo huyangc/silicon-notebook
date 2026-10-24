@@ -673,17 +673,29 @@ hooks 规则都解析为 error，且没有规则停在 warn；`react-hooks/rules
 job：job 名本身说明它把关什么，每个 job 都必须通过，workflow 只有在全部 job 通过时才算通过。
 
 `.github/workflows/ci.yml` 在目标为 `master` 的 PR、`master` push 与手动触发时运行。G1 是
-其中两个 job：`CI / level-1-backend` 在一台 runner 上执行 `scripts/check_backend.sh`（完整
-后端泳道，不分片，4 个 pytest worker）；`CI / level-1-contracts-frontend` 执行
-`bash scripts/check.sh --lane contracts --lane frontend`，其余两条泳道按本地 `check.sh`
-的方式并行运行。第三个 job 是 G3 `CI / level-3-postgres-integration`。不带参数的
-`check.sh` 仍是完整的本地 G1；`--lane <name>`（可重复）只跑指定泳道，存在的目的就是让
-CI 把后端泳道放到单独一台 runner 上。
+其中两个现有 runner 分担 G1，每台各用 4 个 backend pytest worker：
+`CI / level-1-backend-primary` 执行
+`bash scripts/check_backend.sh --shard-index 0 --shard-count 2`；
+`CI / level-1-backend-rest-contracts-frontend` 先执行同命令的 index 1，再执行
+`bash scripts/check.sh --lane contracts --lane frontend`。第二台 runner 不重叠执行
+backend 和前端；contracts 与前端仍彼此并行。backend 步骤失败后，后两条泳道仍可达，
+任一步骤失败仍使 job 失败。第三个 job 仍是独立的 G3
+`CI / level-3-postgres-integration`。不带参数的 `check_backend.sh` 仍跑完整 backend，
+不带参数的 `check.sh` 仍是完整本地 G1；`--lane <name>`（可重复）只跑指定泳道。
+
+CI 将正常选出的 G1 用例恰好分成两份非空集合，未分组模块和 xdist 实际生效的
+loadgroup 均不拆分。实测模块成本只用于平衡归属：新增模块使用默认成本，缺失或过期
+计时提示不能漏掉用例。第二台 runner 的 contracts/frontend 四分钟估计按 960 个累计
+测试秒计入平衡提示，不是超时或测试上限。插件只由 wrapper 显式、成对的分片参数加载，
+不向子 pytest 进程导出插件或分片选择。G1 收集守卫将实际完整选择与两份实际分片收集
+逐项对比，检查身份及重复次数完全相等、没有交集、没有拆开 loadgroup。
+G1/G2 的 marker 表达式与互补覆盖证明均保持不变。
 
 `.github/workflows/daily-extended.yml`（`Daily Extended Gate`，每日一个 cron 加手动触发）
-用三个 job 跑 G2。`level-2-backend` 与 `level-2-contracts-frontend` 逐条命令对齐
+用三个 job 跑 G2。`level-2-backend-primary` 与
+`level-2-backend-rest-contracts-frontend` 逐条命令对齐
 `ci.yml` 跑 G1，唯一差别是依赖安装仍按下文关闭 pip wheel cache。
-`level-2-contracts-frontend` 随后再以 `FRONTEND_LANE_PARALLEL=1` 运行
+`level-2-backend-rest-contracts-frontend` 随后再以 `FRONTEND_LANE_PARALLEL=1` 运行
 `scripts/check_frontend.sh`，G1 那一步失败也照跑：CI runner 不足 8 个 CPU，这是 frontend
 lane 并行路径唯一的 CI 覆盖，PR CI 从不强制走它。`level-2-complement` 执行
 `check_extended.sh --complement-only`：扩展后端 marker 集合、样板插件 UI lane 与 facade
@@ -695,8 +707,8 @@ G2，不带参数的 `check_extended.sh` 仍是完整的本地 G2（先 G1，再
 
 两个 workflow 都固定使用 `ubuntu-24.04`、Python 3.13 和唯一的 Node.js 大版本，从声明的
 依赖文件安装，并把测试选择委托给 wrapper 脚本。`test_ci_workflow_contract.py` 钉住
-job 集合与名字、最多三个 job 的规则、G1 的 job 合起来恰好把 `check.sh` 的 `LANES` 每条
-跑一次、每日 G1 半边与 `ci.yml` 对齐，并带与不带参数实际执行 `check.sh` 与
+job 集合与名字、最多三个 job 的规则、backend 两份分片索引及每份 4 worker、第二份之后
+其余 G1 泳道各跑一次、两份分片报告均上传、每日 G1 半边与 `ci.yml` 对齐，并带与不带参数实际执行 `check.sh` 与
 `check_extended.sh`。
 
 仓库只支持一个 Node.js 大版本 26，钉在 `.nvmrc`。每个 `actions/setup-node` 都读
@@ -740,11 +752,12 @@ OS/架构/Python/锁文件/策略 key，不回退到其他缓存；G2 继续禁�
 `-march=native` 编译，把这种本机 wheel 缓存后恢复到 CPU 特性不同的托管
 runner，可能以 `SIGILL` 崩溃。CI 使用可移植构建，以少量 ANN 性能换取确定性；
 生产 wheelhouse 仍可按已声明的部署 CPU 定向构建。job 的 timeout 都包含依赖安装，
-与 Apple Silicon 本地 warm gate 的 100 秒内目标刻意分开。两个后端 job（`level-1-backend`、
-`level-2-backend`）给 30 分钟：2026-10-14 实测不分片的后端泳道在 PR CI 用 8:05、每日
-run 用 11:59（4 个 worker；job 总时长 8:41 与 13:03），单个 job 没有别的 runner 可以分摊，
-这个上限为增长和慢 runner 留出两倍以上余量。其余离线 job 保持 20 分钟（实测 contracts
-与前端在 PR CI 5:00、每日含并行路径 7:30；补集 3:50）；G3 保持 35 分钟。这些 check 都不是
+与 Apple Silicon 本地 warm gate 的 100 秒内目标刻意分开。较大 backend 份所在的
+`level-1-backend-primary` 与 `level-2-backend-primary` 保持 30 分钟；较小 backend
+份之后运行 contracts/frontend 的 job 也给 30 分钟，每日补集保持 20 分钟。
+重新分配前，完整 backend 测试步骤在 run 40140238921 用 14:00，在 run 40083452330
+用 14:51；计时提示用于平衡现有 runner，这些上限为安装、增长和慢主机留出余量。
+G3 保持 35 分钟。这些 check 都不是
 `master` 的 required status check；要设为 required，须由用户明确批准分支保护变更。
 
 PostgreSQL 覆盖与离线门禁明确分离。`level-3-postgres-integration` job 启动 PostgreSQL 16，

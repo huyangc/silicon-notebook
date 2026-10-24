@@ -899,20 +899,36 @@ a pull request. No job only summarizes the others: each job's name says what it
 gates, every job must pass, and a workflow passes only when all of its jobs do.
 
 `.github/workflows/ci.yml` runs on pull requests targeting `master`, pushes to
-`master`, and manual dispatches. G1 is two of its jobs: `CI / level-1-backend`
-runs `scripts/check_backend.sh` (the whole backend lane, unsharded, four pytest
-workers) on one runner, and `CI / level-1-contracts-frontend` runs
-`bash scripts/check.sh --lane contracts --lane frontend`, the other two lanes run
-concurrently exactly as `check.sh` runs them locally. G3 is the third job,
-`CI / level-3-postgres-integration`. `check.sh` with no arguments remains the
-complete local G1; `--lane <name>` (repeatable) runs only the named lanes and
-exists so CI can give the backend lane a runner of its own.
+`master`, and manual dispatches. G1 uses two existing runners, each with four
+backend pytest workers: `CI / level-1-backend-primary` runs
+`bash scripts/check_backend.sh --shard-index 0 --shard-count 2`;
+`CI / level-1-backend-rest-contracts-frontend` first runs the same command with
+index 1, then `bash scripts/check.sh --lane contracts --lane frontend`.
+Backend and frontend work do not overlap on the second runner; contracts and
+frontend still run concurrently with each other. Their step remains reachable
+after a failed backend step, and a failure in either still fails the job. G3
+remains the independent third job, `CI / level-3-postgres-integration`.
+`check_backend.sh` without arguments still runs the entire backend lane;
+`check.sh` without arguments remains the complete local G1, and `--lane <name>`
+(repeatable) runs only the named lanes.
+
+CI partitions the normally selected G1 items into exactly two nonempty parts,
+keeping each ungrouped module and each effective xdist loadgroup together.
+Measured per-module test costs only balance ownership: new modules use a default
+cost and stale or missing timing hints cannot omit a test. The second runner's
+four-minute contracts/frontend estimate is a balancing hint expressed as 960
+cumulative test seconds, not a timeout or test limit. The plugin is loaded only
+by the wrapper's explicit paired shard arguments; neither plugin nor shard
+selection is exported to nested pytest processes. The G1 collection guard checks
+the actual full selection against both actual shard collections, with exact
+identity multiplicities, no overlap and no split loadgroup. The G1/G2 marker
+expressions and their complementary coverage proof remain unchanged.
 
 `.github/workflows/daily-extended.yml` (`Daily Extended Gate`, one daily cron plus
-manual dispatch) is G2 in three jobs. `level-2-backend` and
-`level-2-contracts-frontend` run G1 command for command as `ci.yml` does; only the
+manual dispatch) is G2 in three jobs. `level-2-backend-primary` and
+`level-2-backend-rest-contracts-frontend` run G1 command for command as `ci.yml` does; only the
 dependency install differs, keeping pip's wheel cache off as described below.
-`level-2-contracts-frontend` then also runs `scripts/check_frontend.sh` with
+`level-2-backend-rest-contracts-frontend` then also runs `scripts/check_frontend.sh` with
 `FRONTEND_LANE_PARALLEL=1`, even when the G1 step failed: CI runners have fewer
 than eight CPUs, so this is the only CI run of the frontend lane's parallel path,
 and PR CI never forces it. `level-2-complement` runs
@@ -928,8 +944,9 @@ every run from 2026-10-07 was cancelled at the timeout without any G2 result.
 Both workflows use `ubuntu-24.04`, Python 3.13 and one Node.js major, install from
 the declared lock/requirements files, and delegate selection to the wrapper
 scripts. `test_ci_workflow_contract.py` pins the job sets and names, the at-most-
-three rule, that the G1 jobs together run every lane in `check.sh`'s `LANES`
-exactly once, that the daily G1 half mirrors `ci.yml`, and it executes
+three rule, the exact pair of backend shard indices with four workers each,
+that the remaining G1 lanes run once after the second shard, that both shard
+reports are uploaded and the daily G1 half mirrors `ci.yml`, and it executes
 `check.sh` and `check_extended.sh` with and without their arguments.
 
 The repository supports exactly one Node.js major, 26, pinned in `.nvmrc`. Every
@@ -984,13 +1001,13 @@ wheel can crash with `SIGILL` when restored on a hosted runner with different
 CPU features. The portable build trades a small ANN speedup for deterministic
 CI; production wheelhouses may still target their declared deployment CPU.
 Job timeouts include dependency installation and are intentionally separate from
-the under-100-second local Apple Silicon warm-gate target. The two backend jobs
-(`level-1-backend`, `level-2-backend`) get 30 minutes: on 2026-10-14 the unsharded
-backend lane took 8:05 in PR CI and 11:59 in the daily run on four workers (jobs
-8:41 and 13:03), and a single job has no other runner to spread over, so the limit
-leaves more than twice the measured time for growth and slow runners. Every other
-offline job keeps 20 minutes (measured: contracts and frontend 5:00 in PR CI and
-7:30 daily including the parallel path; the complement 3:50); G3 keeps 35. None of
+the under-100-second local Apple Silicon warm-gate target. The primary backend
+jobs (`level-1-backend-primary`, `level-2-backend-primary`) retain 30 minutes;
+the jobs that now run the smaller backend part followed by contracts/frontend
+also get 30 minutes, while the daily complement keeps 20. Before repartitioning, the full backend
+test step took 14:00 in run 40140238921 and 14:51 in run 40083452330; timing hints
+rebalance the existing runners, while these limits leave room for installation,
+growth and slower hosts. G3 retains 35 minutes. None of
 these checks is a required `master` status check; making one required needs the
 user's explicit approval of the branch-protection change.
 

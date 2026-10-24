@@ -384,17 +384,24 @@ def test_ci_builds_hnswlib_portably_without_reusing_native_wheels(job_name) -> N
 
 
 PR_JOBS = {
-    "standard-backend": "level-1-backend",
-    "standard-contracts-frontend": "level-1-contracts-frontend",
+    "standard-backend": "level-1-backend-primary",
+    "standard-contracts-frontend": "level-1-backend-rest-contracts-frontend",
     "postgres-integration": "level-3-postgres-integration",
 }
 DAILY_JOBS = {
-    "extended-backend": "level-2-backend",
-    "extended-contracts-frontend": "level-2-contracts-frontend",
+    "extended-backend": "level-2-backend-primary",
+    "extended-contracts-frontend": "level-2-backend-rest-contracts-frontend",
     "extended-complement": "level-2-complement",
 }
 MAX_JOBS_PER_WORKFLOW = 3
 G1_REMAINING_LANES_COMMAND = "bash scripts/check.sh --lane contracts --lane frontend"
+BACKEND_SHARD_COMMANDS = [
+    f"bash scripts/check_backend.sh --shard-index {index} --shard-count 2"
+    for index in range(2)
+]
+BACKEND_SHARD_STEPS = [
+    "Run standard backend primary shard", "Run standard backend remaining shard",
+]
 NODE_MAJOR = "26"
 SETUP_NODE = "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e"
 
@@ -419,6 +426,8 @@ def _lanes_run_by(command: str) -> set[str]:
     """Which G1 lanes one workflow command runs."""
     if command == "bash scripts/check.sh":
         return set(_standard_gate_lanes())
+    if command in BACKEND_SHARD_COMMANDS:
+        return {"backend"}
     if command.startswith("bash scripts/check.sh "):
         words = command.split()[2:]
         assert words[0::2] == ["--lane"] * (len(words) // 2), command
@@ -466,47 +475,71 @@ def test_pr_ci_runs_every_g1_lane_in_two_jobs() -> None:
     assert backend["timeout-minutes"] == "30"
     assert _run_commands(backend) == [
         LOCKED_INSTALL,
-        "bash scripts/check_backend.sh",
+        BACKEND_SHARD_COMMANDS[0],
     ]
-    assert _named_step(backend, "Run standard backend lane")["env"] == {
+    assert _named_step(backend, BACKEND_SHARD_STEPS[0])["env"] == {
         "PYTHON_BIN": "python", "BACKEND_PYTEST_WORKERS": "4",
     }
 
     rest = jobs["standard-contracts-frontend"]
-    assert rest["timeout-minutes"] == "20"
+    assert rest["timeout-minutes"] == "30"
     assert _run_commands(rest) == [
         LOCKED_INSTALL,
         "npm ci --prefix frontend",
+        BACKEND_SHARD_COMMANDS[1],
         G1_REMAINING_LANES_COMMAND,
     ]
     assert _named_step(rest, "Run standard contracts and frontend lanes")["env"] == {
         "PYTHON_BIN": "python",
     }
 
-    for job in (backend, rest):
-        assert all("if" not in step for step in job["steps"] if "run" in step)
+    assert all("if" not in step for step in backend["steps"] if "run" in step)
+    for step in rest["steps"]:
+        if "run" not in step:
+            continue
+        if step["name"] in (BACKEND_SHARD_STEPS[1], "Run standard contracts and frontend lanes"):
+            # These used to run on different jobs. Keep both reachable when
+            # the other shard, npm install, or a prior test command fails;
+            # failure still fails the job because continue-on-error is banned.
+            assert step["if"] == "${{ !cancelled() }}"
+        else:
+            assert "if" not in step
+    shard_commands = []
+    for index, job in enumerate((backend, rest)):
+        shard = _named_step(job, BACKEND_SHARD_STEPS[index])
+        assert shard["env"] == {"PYTHON_BIN": "python", "BACKEND_PYTEST_WORKERS": "4"}
+        words = shlex.split(shard["run"])
+        assert words[:2] == ["bash", "scripts/check_backend.sh"]
+        assert words[2::2] == ["--shard-index", "--shard-count"]
+        assert words[5] == "2"
+        shard_commands.append(int(words[3]))
+    assert sorted(shard_commands) == [0, 1]
     covered = [
         lane
         for job in (backend, rest)
         for command in _run_commands(job)
         for lane in sorted(_lanes_run_by(command))
     ]
-    # Every lane check.sh runs, each exactly once.
-    assert sorted(covered) == sorted(_standard_gate_lanes())
+    # Backend is partitioned into exactly two complementary collections; the
+    # real collection proof lives in test_test_architecture_policy.py. Every
+    # other lane is still executed once and only once, after shard 1 finishes.
+    assert sorted(covered) == sorted([*_standard_gate_lanes(), "backend"])
 
-    for job_name, junit, artifact in (
-        ("standard-backend", "backend-junit.xml", "backend-test-timings"),
-        ("standard-contracts-frontend", "contracts-junit.xml", "contracts-test-timings"),
+    for job_name, step_name, junit, metrics, artifact in (
+        ("standard-backend", "Upload backend test timings", "backend-shard0-junit.xml",
+         "backend-shard0-metrics.json", "backend-test-timings-shard-0"),
+        ("standard-contracts-frontend", "Upload remaining backend test timings",
+         "backend-shard1-junit.xml", "backend-shard1-metrics.json", "backend-test-timings-shard-1"),
+        ("standard-contracts-frontend", "Upload contract test timings", "contracts-junit.xml",
+         None, "contracts-test-timings"),
     ):
-        upload = _uses_step(
-            jobs[job_name],
-            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
-        )
+        upload = _named_step(jobs[job_name], step_name)
+        assert upload["uses"] == "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
         assert upload["if"] == "always()"
         assert upload["with"]["name"] == artifact
         expected_paths = {f"backend/.local/{junit}"}
-        if job_name == "standard-backend":
-            expected_paths.add("backend/.local/backend-metrics.json")
+        if metrics:
+            expected_paths.add(f"backend/.local/{metrics}")
         assert set(upload["with"]["path"].splitlines()) == expected_paths
         assert upload["with"]["retention-days"] == "7"
 
@@ -678,12 +711,12 @@ def test_daily_extended_gate_runs_every_g1_lane_exactly_as_pr_ci_does() -> None:
     assert _run_commands(daily["extended-backend"]) == same_install(
         _run_commands(ci["standard-backend"])
     )
-    assert _named_step(daily["extended-backend"], "Run standard backend lane")["env"] == (
-        _named_step(ci["standard-backend"], "Run standard backend lane")["env"]
+    assert _named_step(daily["extended-backend"], BACKEND_SHARD_STEPS[0])["env"] == (
+        _named_step(ci["standard-backend"], BACKEND_SHARD_STEPS[0])["env"]
     )
 
     rest = daily["extended-contracts-frontend"]
-    assert rest["timeout-minutes"] == "20"
+    assert rest["timeout-minutes"] == "30"
     assert _run_commands(rest) == [
         *same_install(_run_commands(ci["standard-contracts-frontend"])),
         "bash scripts/check_frontend.sh",
@@ -692,7 +725,25 @@ def test_daily_extended_gate_runs_every_g1_lane_exactly_as_pr_ci_does() -> None:
     assert lanes["env"] == _named_step(
         ci["standard-contracts-frontend"], "Run standard contracts and frontend lanes",
     )["env"]
-    assert "if" not in lanes
+    assert lanes["if"] == "${{ !cancelled() }}"
+    assert _named_step(rest, BACKEND_SHARD_STEPS[1])["env"] == (
+        _named_step(ci["standard-contracts-frontend"], BACKEND_SHARD_STEPS[1])["env"]
+    )
+    assert _named_step(rest, BACKEND_SHARD_STEPS[1])["if"] == "${{ !cancelled() }}"
+    for daily_name, ci_name in (
+        ("extended-backend", "standard-backend"),
+        ("extended-contracts-frontend", "standard-contracts-frontend"),
+    ):
+        # Every timing artifact mirrors PR CI, with a separate daily namespace.
+        for step in ci[ci_name]["steps"]:
+            if "upload-artifact@" not in step.get("uses", ""):
+                continue
+            counterpart = _named_step(daily[daily_name], step["name"])
+            assert counterpart["uses"] == step["uses"]
+            assert counterpart["if"] == step["if"] == "always()"
+            assert counterpart["with"] == {
+                **step["with"], "name": "daily-" + step["with"]["name"],
+            }
     parallel = _named_step(rest, "Run frontend lane on its parallel path")
     assert parallel["env"] == {"FRONTEND_LANE_PARALLEL": "1"}
     # Runs after a failed G1 step too, so one daily run reports both paths.

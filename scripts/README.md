@@ -158,9 +158,21 @@ PYTHON_BIN=/path/to/python bash scripts/check.sh
 ```
 contracts + 后端测试/离线 smoke + 前端测试/tsc/build 三条 lane 并行执行。脚本会强制 `MODEL_SERVICES_CONFIG=""`，不读取开发者真实密钥，也不会访问付费/网络模型服务；EXIT=0 即过。
 
-GitHub G1 用两个 job 跑这三条泳道：后端单独一个 job（`scripts/check_backend.sh`），
-contracts 与前端合在一个 job（`bash scripts/check.sh --lane contracts --lane frontend`，
-两条 lane 仍并行）。`scripts/check_backend.sh`、`scripts/check_contracts.sh` 也可单独执行，
+GitHub G1 仍用两个 job：第一台执行较大的 backend 份，第二台先执行较小份，再执行
+`bash scripts/check.sh --lane contracts --lane frontend`（这两条 lane 仍彼此并行）。
+backend 与前端在第二台上不重叠，每台 runner 各用 4 个 backend worker。
+CI 专用的两份命令是：
+
+```bash
+BACKEND_PYTEST_WORKERS=4 bash scripts/check_backend.sh --shard-index 0 --shard-count 2
+BACKEND_PYTEST_WORKERS=4 bash scripts/check_backend.sh --shard-index 1 --shard-count 2
+```
+
+分片参数必须成对，只接受 index 0/1 和 count 2；正常 G1 选择后的全部用例按模块与
+实际 xdist 分组分配，真实收集守卫证明两份没有重漏。耗时提示仅平衡负载，新增模块自动
+使用默认成本。CI 两份分别生成 `backend-shard0-junit.xml` / `backend-shard0-metrics.json`
+和 index 1 的对应文件，不会相互覆盖，也不向子 pytest 传递分片。
+`scripts/check_backend.sh` 不带参数仍执行完整后端，`scripts/check_contracts.sh` 也可单独执行，
 仍隔离部署环境并在 `backend/.local` 生成 JUnit 耗时文件，CI 上传保留七天。完整验收仍执行
 不带参数的 `check.sh`，job 划分见
 [`docs/development_zh.md`](../docs/development_zh.md#github-actions-ci)。

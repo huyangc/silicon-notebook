@@ -258,11 +258,11 @@ def test_verification_lanes_do_not_hide_committed_tests():
 
 
 # conftest collects this test first (`_DISPATCHED_FIRST`) so xdist dispatches
-# it in the first wave rather than at the end of the run, where its ~6 s
-# collect-only subprocess would become the gate's tail. It changes no lane
+# it in the first wave rather than at the end of the run, where its complete
+# collect-only proof would become the gate's tail. It changes no lane
 # selection; `test_the_lane_partition_guard_is_collected_first` pins it.
 def test_verification_lane_markers_partition_every_architecture_contract_test():
-    """Empirically prove the G1/G2 backend marker split has no gap or overlap.
+    """Prove the marker split and actual G1 shards have no gap or overlap.
 
     The pinned literal strings above catch textual drift between the two `-m`
     expressions, but they cannot catch a *consistent* mistake: someone edits
@@ -277,8 +277,8 @@ def test_verification_lane_markers_partition_every_architecture_contract_test():
     module sets, plus a source-text scan for the marker decorators) rather
     than hardcoded, so this stays valid as tests gain or lose these markers.
 
-    This test itself costs ≈2–4s (dominated by one `--collect-only`
-    subprocess) and is a deliberate exception to the G1/G2 split it proves:
+    This test uses collect-only subprocesses and is a deliberate exception
+    to the G1/G2 split it proves:
     it stays in G1 on every PR because it *is* the guard that makes the
     56/8 `architecture_contract`/`architecture_contract_heavy` split
     trustworthy, not one of the things being split by it. Re-timing that
@@ -289,23 +289,22 @@ def test_verification_lane_markers_partition_every_architecture_contract_test():
     child process: a G2-only copy of this guard would stop running the moment
     a broken expression deselected it, so the guard stays in G1.
 
-    Collection now runs once, not once per `-m` expression: a single
-    `--collect-only` subprocess loads `tests.architecture.lane_partition_plugin`,
-    which dumps every collected item's nodeid and own marker names as JSON
-    (unfiltered — no `-m` passed to the subprocess). The two real `-m`
-    expressions are then evaluated in-process, per item, against that
-    marker set using pytest's own `_pytest.mark.expression` compiler — the
-    same engine `-m` itself uses (see `_pytest.mark.deselect_by_mark`) — so
-    this stays an empirical collection proof rather than a hand-rolled
-    re-implementation of marker matching.
+    One unfiltered collection dumps the entire non-PostgreSQL universe.
+    Pytest's own marker-expression compiler proves the original candidate
+    G1/G2 partition and identifies the complete G1 universe. Two additional
+    collections exercise the real sharding plugin and real G1 expression;
+    their native-id multisets must partition that universe exactly. Xdist's
+    actual scheduling-key function separately proves group co-location.
     """
     import ast
     import json
     import re
     import subprocess
     import sys
+    from collections import Counter
 
     from _pytest.mark.expression import Expression
+    from xdist.scheduler.loadgroup import LoadGroupScheduling
 
     from tests.architecture.lane_partition_plugin import END_SENTINEL, START_SENTINEL
 
@@ -392,40 +391,52 @@ def test_verification_lane_markers_partition_every_architecture_contract_test():
         sys.executable,
         "-m",
         "pytest",
-        *candidate_paths,
+        "backend/tests",
+        "--ignore=backend/tests/postgres",
         "--collect-only",
+        "-n0",
         "-q",
         "-p",
         "no:cacheprovider",
         "-p",
         "tests.architecture.lane_partition_plugin",
     ]
-    result = subprocess.run(
-        args,
-        cwd=ROOT,
-        env={**os.environ, "PYTHONPATH": str(ROOT / "backend")},
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=120,
-    )
-    assert result.returncode == 0, (
-        f"collect-only subprocess failed (exit {result.returncode}):\n"
-        f"stdout (tail):\n{result.stdout[-4000:]}\n"
-        f"stderr (tail):\n{result.stderr[-4000:]}"
-    )
-    assert START_SENTINEL in result.stdout and END_SENTINEL in result.stdout, (
-        "lane_partition_plugin dump not found in collect-only output:\n"
-        + result.stdout
-    )
-    dump = result.stdout.split(START_SENTINEL, 1)[1].split(END_SENTINEL, 1)[0]
-    items = json.loads(dump)
+
+    def collect(extra_args: list[str]) -> list[dict]:
+        result = subprocess.run(
+            [*args, *extra_args],
+            cwd=ROOT,
+            env={**os.environ, "PYTHONPATH": str(ROOT / "backend")},
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        assert result.returncode == 0, (
+            f"collect-only subprocess failed (exit {result.returncode}):\n"
+            f"stdout (tail):\n{result.stdout[-4000:]}\n"
+            f"stderr (tail):\n{result.stderr[-4000:]}"
+        )
+        assert START_SENTINEL in result.stdout and END_SENTINEL in result.stdout, (
+            "lane_partition_plugin dump not found in collect-only output:\n"
+            + result.stdout
+        )
+        dump = result.stdout.split(START_SENTINEL, 1)[1].split(END_SENTINEL, 1)[0]
+        return json.loads(dump)
+
+    items = collect([])
 
     universe = {item["nodeid"] for item in items}
     assert universe, "candidate discovery found files but collected zero tests"
+    candidate_items = [
+        item for item in items
+        if item["path"] in candidate_relpaths
+    ]
+    candidate_ids = {item["nodeid"] for item in candidate_items}
+    assert candidate_ids, "candidate discovery collected zero candidate tests"
 
     all_markers: set[str] = set()
-    for item in items:
+    for item in candidate_items:
         all_markers.update(item["markers"])
     for marker_name in G2_LANE_MARKERS:
         assert marker_name in all_markers, (
@@ -449,6 +460,42 @@ def test_verification_lane_markers_partition_every_architecture_contract_test():
 
     assert g1_ids | g2_ids == universe
     assert g1_ids & g2_ids == set()
+    # Retain the original marker-bearing candidate proof as well as the
+    # stronger complete-tree partition above.
+    assert (g1_ids & candidate_ids) | (g2_ids & candidate_ids) == candidate_ids
+    assert not (g1_ids & candidate_ids) & (g2_ids & candidate_ids)
+
+    g1_counter = Counter(item["nodeid"] for item in items if item["nodeid"] in g1_ids)
+    assert all(count == 1 for count in g1_counter.values())
+    selected = [
+        collect([
+            "-m", marker_expr(0), "-p", "tests.architecture.g1_sharding",
+            "--g1-shard-index", str(index), "--g1-shard-count", "2",
+        ])
+        for index in range(2)
+    ]
+    shard_counters = [Counter(item["nodeid"] for item in shard) for shard in selected]
+    assert all(shard_counters), "a real G1 shard selected no tests"
+    assert shard_counters[0] + shard_counters[1] == g1_counter
+    assert not (shard_counters[0] & shard_counters[1])
+    owners = {
+        nodeid: index
+        for index, counter in enumerate(shard_counters)
+        for nodeid in counter
+    }
+    group_owners: dict[str, set[int]] = {}
+    for item in items:
+        nodeid = item["nodeid"]
+        if nodeid not in g1_ids:
+            continue
+        names = item["xdist_groups"]
+        scheduled_id = f"{nodeid}@{'_'.join(names)}" if names else nodeid
+        # This is xdist's installed scheduler, independent of our selection
+        # implementation. In particular it handles '@' and ']' in parameters
+        # and group names, combined-name collisions, and default groups.
+        key = LoadGroupScheduling._split_scope(None, scheduled_id)
+        group_owners.setdefault(key, set()).add(owners[nodeid])
+    assert all(len(indices) == 1 for indices in group_owners.values())
 
 
 def test_the_process_scan_finds_every_way_a_g1_test_starts_a_process():

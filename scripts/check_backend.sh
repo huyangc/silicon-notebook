@@ -16,9 +16,33 @@ record_timing() {
 }
 trap record_timing EXIT
 
-if (( $# )); then
-  printf 'check_backend.sh takes no arguments (got: %s)\n' "$*" >&2
+SHARD_INDEX=""
+SHARD_COUNT=""
+usage_error() {
+  printf 'check_backend.sh: %s; use no arguments or --shard-index 0|1 --shard-count 2\n' "$1" >&2
   exit 2
+}
+while (( $# )); do
+  case "$1" in
+    --shard-index)
+      [[ -z "$SHARD_INDEX" && $# -ge 2 && "$2" =~ ^[01]$ ]] || usage_error 'invalid or repeated shard index'
+      SHARD_INDEX="$2"
+      shift 2
+      ;;
+    --shard-count)
+      [[ -z "$SHARD_COUNT" && $# -ge 2 && "$2" == 2 ]] || usage_error 'invalid or repeated shard count'
+      SHARD_COUNT="$2"
+      shift 2
+      ;;
+    *) usage_error 'unknown argument' ;;
+  esac
+done
+PYTEST_PLUGIN_ARGS=(-p no:cacheprovider -p tests.ci_metrics)
+REPORT_STEM=backend
+if [[ -n "$SHARD_INDEX" || -n "$SHARD_COUNT" ]]; then
+  [[ -n "$SHARD_INDEX" && -n "$SHARD_COUNT" ]] || usage_error 'shard options must be paired'
+  PYTEST_PLUGIN_ARGS+=(-p tests.architecture.g1_sharding --g1-shard-index "$SHARD_INDEX" --g1-shard-count "$SHARD_COUNT")
+  REPORT_STEM="backend-shard${SHARD_INDEX}"
 fi
 
 # Match check.sh when CI runs this lane on its own runner.
@@ -41,9 +65,9 @@ unset PYTHONDONTWRITEBYTECODE
 # 2026-10-14 ruling that set the local warm-gate target to 80 s: those
 # contracts are reported by the daily gate, not on every PR.
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
-  -m pytest -p no:cacheprovider -p tests.ci_metrics -n "$BACKEND_PYTEST_WORKERS" \
+  -m pytest "${PYTEST_PLUGIN_ARGS[@]}" -n "$BACKEND_PYTEST_WORKERS" \
   -m "not slow and not architecture_contract_heavy and not graph_index_contract and not process_contract and not legacy_upgrade_contract" \
   --ignore="$ROOT_DIR/backend/tests/postgres" \
-  --durations=30 --junitxml="$ROOT_DIR/backend/.local/backend-junit.xml" \
-  --ci-metrics="$ROOT_DIR/backend/.local/backend-metrics.json" \
+  --durations=30 --junitxml="$ROOT_DIR/backend/.local/${REPORT_STEM}-junit.xml" \
+  --ci-metrics="$ROOT_DIR/backend/.local/${REPORT_STEM}-metrics.json" \
   "$ROOT_DIR/backend/tests"
