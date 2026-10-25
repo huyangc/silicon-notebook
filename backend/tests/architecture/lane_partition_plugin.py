@@ -1,10 +1,11 @@
-"""Collect-only pytest plugin used by the G1/G2 lane partition self-guard.
+"""Collect-only pytest plugin used by the G1/G2/PG partition self-guard.
 
 The guard collects the full non-PostgreSQL test universe and the two actual
 G1 shard selections. Native ids and marker names prove complete partitioning;
 group names additionally let the guard check xdist's own effective scheduling
 keys without depending on the sharding implementation's assignment function.
-All three collections use ``-n0`` so xdist never appends a group suffix to
+The PG launcher's full and two sharded commands receive the same proof.
+All collections use ``-n0`` so xdist never appends a group suffix to
 the ids (a parametrized id may itself contain ``@``).
 
 The dump is wrapped in sentinel lines so the caller can find it inside

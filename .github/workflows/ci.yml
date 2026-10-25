@@ -15,16 +15,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # At most three jobs per workflow: G1 is these two jobs, G3 the third. No
-  # summary job: each job's name says what it gates, and every one must pass.
+  # At most three jobs: two runners share G1, then the primary runner helps
+  # the third complete G3. Each job gates real tests and every one must pass.
   standard-backend:
-    name: level-1-backend-primary
+    name: level-1-backend-primary-postgres-rest
     runs-on: ubuntu-24.04
-    # The primary backend shard uses four workers. The other existing G1
-    # runner executes its smaller shard before contracts/frontend.
-    timeout-minutes: 30
+    # Reuse the runner for the smaller PG shard after backend finishes.
+    # Provisioning and migrations never overlap the offline backend step.
+    timeout-minutes: 35
     env:
       PIP_CACHE_DIR: ${{ github.workspace }}/.local/pip-portable-v1
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-only-admin-password
+          POSTGRES_DB: postgres
+          # CI-only cache/WAL budgets: preserve durable real migrations while
+          # avoiding small-default buffer churn and requested checkpoints.
+          POSTGRES_INITDB_ARGS: --set=shared_buffers=512MB --set=max_wal_size=2GB
+        ports:
+          - 5432:5432
+        options: >-
+          --mount type=tmpfs,destination=/var/lib/postgresql/data,tmpfs-size=6442450944
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -61,6 +79,43 @@ jobs:
           path: |
             backend/.local/backend-shard0-junit.xml
             backend/.local/backend-shard0-metrics.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Provision least-privilege PostgreSQL test targets
+        if: ${{ !cancelled() }}
+        id: postgres-targets
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: postgres
+          PGPASSWORD: ci-only-admin-password
+          POSTGRES_APP_PASSWORD: ci-only-app-password
+        run: python backend/tests/postgres/ci_provision.py
+
+      - name: Run PostgreSQL adapter integration gate
+        if: ${{ !cancelled() }}
+        env:
+          PYTHON_BIN: python
+          POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED: "1"
+          TEST_POSTGRES_DECOY_OWNER_ROLE: silicon_notebook_ci_owner_decoy
+          TEST_POSTGRES_TARGETS_JSON: ${{ steps.postgres-targets.outputs.targets }}
+        run: bash scripts/check_postgres.sh --shard-index 1 --shard-count 2
+
+      - name: Record PostgreSQL storage usage
+        if: always()
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: bash backend/tests/postgres/ci_resources.sh
+
+      - name: Upload PostgreSQL test timings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: postgres-test-timings-shard-1
+          path: |
+            backend/.local/postgres-shard1-junit.xml
+            backend/.local/postgres-shard1-metrics.json
           if-no-files-found: warn
           retention-days: 7
 
@@ -191,104 +246,7 @@ jobs:
           PGUSER: postgres
           PGPASSWORD: ci-only-admin-password
           POSTGRES_APP_PASSWORD: ci-only-app-password
-        run: |
-          python - <<'PY'
-          import json
-          import os
-          import time
-          from urllib.parse import quote
-
-          import psycopg
-          from psycopg import sql
-
-          def configure_ci_logging(connection, connect):
-              # RAISE LOG includes its entire migration DO statement by default.
-              # Keep messages and their diagnostics, but omit repeated SQL bodies
-              # on this disposable CI server (including SQL from real errors).
-              connection.execute("ALTER SYSTEM SET log_min_error_statement = 'panic'")
-              if not connection.execute("SELECT pg_reload_conf()").fetchone()[0]:
-                  raise RuntimeError("could not reload PostgreSQL CI logging policy")
-              for _ in range(50):
-                  # Reload is asynchronous. A new session must observe the policy
-                  # before any test role, database or migration is provisioned.
-                  with connect() as probe:
-                      if probe.execute("SHOW log_min_error_statement").fetchone()[0] == "panic":
-                          return
-                  time.sleep(0.1)
-              raise RuntimeError("PostgreSQL CI logging policy did not become effective")
-
-          def verify_ci_resources(connection):
-              for setting, expected_bytes in (
-                  ("shared_buffers", 512 * 1024**2),
-                  ("max_wal_size", 2 * 1024**3),
-              ):
-                  actual_bytes = connection.execute(
-                      "SELECT pg_size_bytes(current_setting(%s))", (setting,)
-                  ).fetchone()[0]
-                  if actual_bytes != expected_bytes:
-                      raise RuntimeError(f"unexpected PostgreSQL CI {setting} budget")
-              # tmpfs is bounded at 6 GiB; max_wal_size is a soft checkpoint
-              # target, not a WAL or total-memory cap. Keep durability intact.
-              for setting in ("fsync", "synchronous_commit", "full_page_writes"):
-                  if connection.execute(
-                      "SELECT current_setting(%s)", (setting,)
-                  ).fetchone()[0] != "on":
-                      raise RuntimeError(f"unexpected {setting} policy")
-
-          role = "silicon_notebook_app"
-          decoy_owner_role = "silicon_notebook_ci_owner_decoy"
-          password = os.environ["POSTGRES_APP_PASSWORD"]
-          targets = []
-          admin_connection = dict(
-              host=os.environ["PGHOST"],
-              port=os.environ["PGPORT"],
-              user=os.environ["PGUSER"],
-              password=os.environ["PGPASSWORD"],
-              dbname="postgres",
-              autocommit=True,
-          )
-          with psycopg.connect(**admin_connection) as connection:
-              configure_ci_logging(connection, lambda: psycopg.connect(**admin_connection))
-              verify_ci_resources(connection)
-              connection.execute(
-                  sql.SQL("CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION").format(
-                      sql.Identifier(role), sql.Literal(password)
-                  )
-              )
-              connection.execute(
-                  sql.SQL(
-                      "CREATE ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB "
-                      "NOCREATEROLE NOREPLICATION"
-                  ).format(sql.Identifier(decoy_owner_role))
-              )
-              connection.execute(
-                  sql.SQL("GRANT {} TO {}").format(
-                      sql.Identifier(decoy_owner_role), sql.Identifier(role)
-                  )
-              )
-              # Migrations use a database-wide advisory lock. Each worker
-              # needs its own database, not merely its own schema.
-              for worker in range(4):
-                  group = {}
-                  for key, kind, options in (
-                      ("primary", "ci", "ENCODING 'UTF8'"),
-                      ("non_c", "non_c", "ENCODING 'UTF8' LOCALE_PROVIDER icu ICU_LOCALE 'en-US'"),
-                      ("non_utf", "non_utf", "ENCODING 'SQL_ASCII' LC_COLLATE 'C' LC_CTYPE 'C'"),
-                  ):
-                      database = f"silicon_notebook_{kind}_w{worker}_test"
-                      connection.execute(
-                          sql.SQL("CREATE DATABASE {} WITH OWNER {} {} TEMPLATE template0").format(
-                              sql.Identifier(database), sql.Identifier(role), sql.SQL(options)
-                          )
-                      )
-                      group[key] = (
-                          f"postgresql://{quote(role, safe='')}:{quote(password, safe='')}"
-                          f"@{os.environ['PGHOST']}:{os.environ['PGPORT']}/{database}"
-                      )
-                  targets.append(group)
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"targets={json.dumps(targets)}\n")
-          PY
+        run: python backend/tests/postgres/ci_provision.py
 
       - name: Run PostgreSQL adapter integration gate
         env:
@@ -296,43 +254,21 @@ jobs:
           POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED: "1"
           TEST_POSTGRES_DECOY_OWNER_ROLE: silicon_notebook_ci_owner_decoy
           TEST_POSTGRES_TARGETS_JSON: ${{ steps.postgres-targets.outputs.targets }}
-        run: bash scripts/check_postgres.sh
+        run: bash scripts/check_postgres.sh --shard-index 0 --shard-count 2
 
       - name: Record PostgreSQL storage usage
         if: always()
         env:
           POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
-        run: |
-          docker exec "$POSTGRES_CONTAINER" sh -c '
-            df -h "$PGDATA"
-            if [ -r /sys/fs/cgroup/memory.peak ]; then
-              printf "PostgreSQL container peak memory (bytes): "
-              cat /sys/fs/cgroup/memory.peak
-            fi
-            if [ -r /sys/fs/cgroup/cpu.stat ]; then
-              printf "PostgreSQL container CPU counters:\n"
-              cat /sys/fs/cgroup/cpu.stat
-            fi
-          '
-          docker exec "$POSTGRES_CONTAINER" psql --no-password -U postgres -d postgres -P pager=off -c '
-            SELECT checkpoints_timed, checkpoints_req, checkpoint_write_time,
-                   checkpoint_sync_time, buffers_checkpoint, buffers_backend,
-                   buffers_backend_fsync
-            FROM pg_stat_bgwriter;
-            SELECT pg_size_bytes(current_setting($$shared_buffers$$)) AS shared_buffers_bytes,
-                   pg_size_bytes(current_setting($$max_wal_size$$)) AS max_wal_size_bytes;
-            SELECT wal_records, wal_fpi, wal_bytes, wal_buffers_full,
-                   wal_write, wal_sync, wal_write_time, wal_sync_time
-            FROM pg_stat_wal;
-          ' 2>/dev/null || printf 'PostgreSQL checkpoint counters unavailable\n'
+        run: bash backend/tests/postgres/ci_resources.sh
 
       - name: Upload PostgreSQL test timings
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: postgres-test-timings
+          name: postgres-test-timings-shard-0
           path: |
-            backend/.local/postgres-junit.xml
-            backend/.local/postgres-metrics.json
+            backend/.local/postgres-shard0-junit.xml
+            backend/.local/postgres-shard0-metrics.json
           if-no-files-found: warn
           retention-days: 7

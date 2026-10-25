@@ -31,6 +31,11 @@ DAILY_LOCKED_INSTALL = LOCKED_INSTALL.replace(
     "pip install --require-hashes", "pip install --no-cache-dir --require-hashes"
 )
 LOCK_FILES_HASH = "hashFiles('backend/requirements.txt', 'backend/requirements-dev.txt')"
+POSTGRES_CI_JOBS = {"postgres-integration": 0, "standard-backend": 1}
+POSTGRES_PROVISION_SCRIPT = ROOT / "backend/tests/postgres/ci_provision.py"
+POSTGRES_RESOURCES_SCRIPT = ROOT / "backend/tests/postgres/ci_resources.sh"
+POSTGRES_PROVISION_COMMAND = "python backend/tests/postgres/ci_provision.py"
+POSTGRES_RESOURCES_COMMAND = "bash backend/tests/postgres/ci_resources.sh"
 
 
 def _load_workflow() -> dict[str, object]:
@@ -93,11 +98,13 @@ def test_ci_events_permissions_and_concurrency_are_bounded() -> None:
 
 
 
-def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() -> None:
+@pytest.mark.parametrize("job_name", POSTGRES_CI_JOBS)
+def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate(job_name) -> None:
     workflow = _load_workflow()
-    job = workflow["jobs"]["postgres-integration"]
+    job = workflow["jobs"][job_name]
+    shard = POSTGRES_CI_JOBS[job_name]
     assert isinstance(job, dict)
-    assert job["name"] == "level-3-postgres-integration"
+    assert job["name"] == PR_JOBS[job_name]
     assert job["runs-on"] == "ubuntu-24.04"
     assert job["timeout-minutes"] == "35"
 
@@ -131,7 +138,8 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
     assert python["with"] == {"python-version": "3.13"}
 
     provision = _named_step(job, "Provision least-privilege PostgreSQL test targets")
-    command = provision["run"]
+    assert provision["run"] == POSTGRES_PROVISION_COMMAND
+    command = POSTGRES_PROVISION_SCRIPT.read_text(encoding="utf-8")
     for phrase in (
         "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION",
         "silicon_notebook_ci_owner_decoy",
@@ -149,7 +157,9 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
     assert "print(" not in command
 
     gate = _named_step(job, "Run PostgreSQL adapter integration gate")
-    assert gate["run"] == "bash scripts/check_postgres.sh"
+    assert gate["run"] == (
+        f"bash scripts/check_postgres.sh --shard-index {shard} --shard-count 2"
+    )
     env = gate["env"]
     assert env["PYTHON_BIN"] == "python"
     assert env["POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED"] == "1"
@@ -182,8 +192,11 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
 
     timings = _named_step(job, "Upload PostgreSQL test timings")
     assert timings["if"] == "always()"
+    assert timings["with"]["name"] == f"postgres-test-timings-shard-{shard}"
+    assert timings["with"]["retention-days"] == "7"
     assert set(timings["with"]["path"].splitlines()) == {
-        "backend/.local/postgres-junit.xml", "backend/.local/postgres-metrics.json",
+        f"backend/.local/postgres-shard{shard}-junit.xml",
+        f"backend/.local/postgres-shard{shard}-metrics.json",
     }
 
     run_commands = [
@@ -192,14 +205,18 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
         if isinstance(step, dict) and isinstance(step.get("run"), str)
     ]
     assert [command for command in run_commands if "scripts/check" in command] == [
-        "bash scripts/check_postgres.sh"
+        *([BACKEND_SHARD_COMMANDS[0]] if job_name == "standard-backend" else []),
+        f"bash scripts/check_postgres.sh --shard-index {shard} --shard-count 2",
     ]
 
 
 def _ci_provisioning_functions():
-    job = _load_workflow()["jobs"]["postgres-integration"]
-    command = _named_step(job, "Provision least-privilege PostgreSQL test targets")["run"]
-    source = command.removeprefix("python - <<'PY'\n").removesuffix("PY\n")
+    for job_name in POSTGRES_CI_JOBS:
+        job = _load_workflow()["jobs"][job_name]
+        assert _named_step(job, "Provision least-privilege PostgreSQL test targets")["run"] == (
+            POSTGRES_PROVISION_COMMAND
+        )
+    source = POSTGRES_PROVISION_SCRIPT.read_text(encoding="utf-8")
     module = ast.parse(source)
     functions = [node for node in module.body if isinstance(node, ast.FunctionDef)]
     assert {function.name for function in functions} == {
@@ -220,7 +237,7 @@ def _ci_provisioning_functions():
         assert isinstance(invocation.value.func, ast.Name)
         assert invocation.value.func.id == name
     namespace = {"time": SimpleNamespace(sleep=lambda _: None)}
-    exec(compile(ast.Module(body=functions, type_ignores=[]), str(WORKFLOW_PATH), "exec"), namespace)
+    exec(compile(ast.Module(body=functions, type_ignores=[]), str(POSTGRES_PROVISION_SCRIPT), "exec"), namespace)
     return namespace
 
 
@@ -228,8 +245,9 @@ def _ci_logging_configurator():
     return _ci_provisioning_functions()["configure_ci_logging"]
 
 
-def test_postgres_ci_initdb_budgets_and_diagnostics_are_bounded() -> None:
-    job = _load_workflow()["jobs"]["postgres-integration"]
+@pytest.mark.parametrize("job_name", POSTGRES_CI_JOBS)
+def test_postgres_ci_initdb_budgets_and_diagnostics_are_bounded(job_name) -> None:
+    job = _load_workflow()["jobs"][job_name]
     service = job["services"]["postgres"]
     # The official entrypoint expands this string as initdb arguments. Reject
     # additional server options that could weaken real migrations or isolation.
@@ -237,18 +255,25 @@ def test_postgres_ci_initdb_budgets_and_diagnostics_are_bounded() -> None:
         "--set=shared_buffers=512MB", "--set=max_wal_size=2GB",
     ]
     options = shlex.split(service["options"])
+    assert options == [
+        "--mount", "type=tmpfs,destination=/var/lib/postgresql/data,tmpfs-size=6442450944",
+        "--health-cmd", "pg_isready -U postgres -d postgres",
+        "--health-interval", "5s", "--health-timeout", "5s", "--health-retries", "12",
+    ]
     assert options[options.index("--mount") + 1] == (
         "type=tmpfs,destination=/var/lib/postgresql/data,tmpfs-size=6442450944"
     )
     assert not {"--memory", "--memory-swap"}.intersection(options)
     storage = _named_step(job, "Record PostgreSQL storage usage")
     assert storage["if"] == "always()"
+    assert storage["run"] == POSTGRES_RESOURCES_COMMAND
+    assert storage["env"] == {"POSTGRES_CONTAINER": "${{ job.services.postgres.id }}"}
     for diagnostic in (
         "df -h", "/sys/fs/cgroup/memory.peak", "/sys/fs/cgroup/cpu.stat",
         "checkpoints_req", "buffers_backend", "shared_buffers_bytes",
         "max_wal_size_bytes", "pg_stat_wal", "wal_bytes", "wal_buffers_full",
     ):
-        assert diagnostic in storage["run"]
+        assert diagnostic in POSTGRES_RESOURCES_SCRIPT.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -384,7 +409,7 @@ def test_ci_builds_hnswlib_portably_without_reusing_native_wheels(job_name) -> N
 
 
 PR_JOBS = {
-    "standard-backend": "level-1-backend-primary",
+    "standard-backend": "level-1-backend-primary-postgres-rest",
     "standard-contracts-frontend": "level-1-backend-rest-contracts-frontend",
     "postgres-integration": "level-3-postgres-integration",
 }
@@ -472,10 +497,13 @@ def test_pr_ci_runs_every_g1_lane_in_two_jobs() -> None:
     jobs = _load_workflow()["jobs"]
 
     backend = jobs["standard-backend"]
-    assert backend["timeout-minutes"] == "30"
+    assert backend["timeout-minutes"] == "35"
     assert _run_commands(backend) == [
         LOCKED_INSTALL,
         BACKEND_SHARD_COMMANDS[0],
+        POSTGRES_PROVISION_COMMAND,
+        "bash scripts/check_postgres.sh --shard-index 1 --shard-count 2",
+        POSTGRES_RESOURCES_COMMAND,
     ]
     assert _named_step(backend, BACKEND_SHARD_STEPS[0])["env"] == {
         "PYTHON_BIN": "python", "BACKEND_PYTEST_WORKERS": "4",
@@ -493,7 +521,18 @@ def test_pr_ci_runs_every_g1_lane_in_two_jobs() -> None:
         "PYTHON_BIN": "python",
     }
 
-    assert all("if" not in step for step in backend["steps"] if "run" in step)
+    for step in backend["steps"]:
+        if "run" not in step:
+            continue
+        if step["name"] in (
+            "Provision least-privilege PostgreSQL test targets",
+            "Run PostgreSQL adapter integration gate",
+        ):
+            assert step["if"] == "${{ !cancelled() }}"
+        elif step["name"] == "Record PostgreSQL storage usage":
+            assert step["if"] == "always()"
+        else:
+            assert "if" not in step
     for step in rest["steps"]:
         if "run" not in step:
             continue
@@ -695,8 +734,8 @@ def test_daily_extended_gate_runs_once_per_day_and_is_manually_dispatchable() ->
 
 def test_daily_extended_gate_runs_every_g1_lane_exactly_as_pr_ci_does() -> None:
     """G2 is G1 plus a complement; the daily G1 half must be PR CI's G1, not a
-    copy that drifts. Only the pip install differs (G2 keeps the wheel cache
-    off); the contracts-and-frontend job then also forces the frontend lane's
+    copy that drifts. Daily keeps the PG-independent G1 commands and pip's
+    wheel cache off; its contracts/frontend job additionally forces the frontend
     parallel path, which PR CI never takes."""
     daily = _load_workflow_path(DAILY_EXTENDED_WORKFLOW_PATH)["jobs"]
     ci = _load_workflow()["jobs"]
@@ -709,7 +748,7 @@ def test_daily_extended_gate_runs_every_g1_lane_exactly_as_pr_ci_does() -> None:
 
     assert daily["extended-backend"]["timeout-minutes"] == "30"
     assert _run_commands(daily["extended-backend"]) == same_install(
-        _run_commands(ci["standard-backend"])
+        [LOCKED_INSTALL, BACKEND_SHARD_COMMANDS[0]]
     )
     assert _named_step(daily["extended-backend"], BACKEND_SHARD_STEPS[0])["env"] == (
         _named_step(ci["standard-backend"], BACKEND_SHARD_STEPS[0])["env"]
@@ -738,6 +777,8 @@ def test_daily_extended_gate_runs_every_g1_lane_exactly_as_pr_ci_does() -> None:
         for step in ci[ci_name]["steps"]:
             if "upload-artifact@" not in step.get("uses", ""):
                 continue
+            if step["name"] == "Upload PostgreSQL test timings":
+                continue
             counterpart = _named_step(daily[daily_name], step["name"])
             assert counterpart["uses"] == step["uses"]
             assert counterpart["if"] == step["if"] == "always()"
@@ -753,6 +794,44 @@ def test_daily_extended_gate_runs_every_g1_lane_exactly_as_pr_ci_does() -> None:
     for name, ci_job in ci.items():
         for step in ci_job.get("steps", []):
             assert "FRONTEND_LANE_PARALLEL" not in (step.get("env") or {}), name
+
+    for job in daily.values():
+        assert "services" not in job
+        assert not any("check_postgres.sh" in command for command in _run_commands(job))
+
+
+def test_ci_pg_tail_reuses_primary_only_after_backend_and_preserves_both_gates() -> None:
+    jobs = _load_workflow()["jobs"]
+    primary = jobs["standard-backend"]
+    dedicated = jobs["postgres-integration"]
+    # One service policy and the same provisioning/resource programs on both
+    # runners prevent tuning, logging or durability drifting between shards.
+    assert primary["services"] == dedicated["services"]
+    provision_name = "Provision least-privilege PostgreSQL test targets"
+    gate_name = "Run PostgreSQL adapter integration gate"
+    for name in (provision_name, gate_name, "Record PostgreSQL storage usage"):
+        left, right = _named_step(primary, name), _named_step(dedicated, name)
+        assert left.get("env") == right.get("env")
+        if name != gate_name:
+            assert left["run"] == right["run"]
+    names = [step["name"] for step in primary["steps"]]
+    assert names.index(BACKEND_SHARD_STEPS[0]) < names.index(provision_name) < names.index(gate_name)
+    assert names.index(BACKEND_SHARD_STEPS[0]) < names.index("Upload backend test timings")
+    assert names.index("Upload backend test timings") < names.index(provision_name)
+    assert names.index(gate_name) < names.index("Record PostgreSQL storage usage")
+    for name in (provision_name, gate_name):
+        assert _named_step(primary, name)["if"] == "${{ !cancelled() }}"
+    indices = []
+    for job_name, job in jobs.items():
+        commands = [command for command in _run_commands(job) if "check_postgres.sh" in command]
+        assert len(commands) == (1 if job_name in POSTGRES_CI_JOBS else 0)
+        for command in commands:
+            words = shlex.split(command)
+            assert words[:2] == ["bash", "scripts/check_postgres.sh"]
+            assert words[2::2] == ["--shard-index", "--shard-count"]
+            assert words[5] == "2"
+            indices.append(int(words[3]))
+    assert sorted(indices) == [0, 1]
 
 
 def test_daily_extended_complement_job_runs_only_the_complement_wrapper() -> None:

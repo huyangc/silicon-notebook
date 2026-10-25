@@ -33,11 +33,10 @@ from tests.postgres.conftest import (
 )
 from tests.postgres.targets import (
     PARALLEL_WORKERS,
-    TARGETS_ENV,
     TARGET_SPECS,
+    TARGETS_ENV,
     configured_target_groups,
 )
-
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BACKEND_ROOT = REPO_ROOT / "backend"
@@ -531,7 +530,14 @@ def _preflight_command() -> list[str]:
     return [sys.executable, "-m", "tests.postgres.lane", "--preflight"]
 
 
-def _pytest_command(workers: int = 0) -> list[str]:
+def _pytest_command(
+    workers: int = 0, *, shard: tuple[int, int] | None = None,
+) -> list[str]:
+    stem = "postgres" if shard is None else f"postgres-shard{shard[0]}"
+    shard_args = [] if shard is None else [
+        "-p", "tests.postgres.ci_sharding", "--pg-shard-index", str(shard[0]),
+        "--pg-shard-count", str(shard[1]),
+    ]
     return [
         sys.executable,
         "-m",
@@ -540,13 +546,14 @@ def _pytest_command(workers: int = 0) -> list[str]:
         "no:cacheprovider",
         "-p",
         "tests.ci_metrics",
+        *shard_args,
         "-n",
         str(workers),
         "--dist=loadgroup",
         "--max-worker-restart=0",
         "--durations=30",
-        f"--junitxml={BACKEND_ROOT / '.local' / 'postgres-junit.xml'}",
-        f"--ci-metrics={BACKEND_ROOT / '.local' / 'postgres-metrics.json'}",
+        f"--junitxml={BACKEND_ROOT / '.local' / (stem + '-junit.xml')}",
+        f"--ci-metrics={BACKEND_ROOT / '.local' / (stem + '-metrics.json')}",
         "--tb=short",
         "--maxfail=1",
         "-m",
@@ -658,11 +665,13 @@ def _run_pytest_in_environment(
     child_env: dict[str, str],
     *,
     owner: _LauncherResources | None = None,
+    shard: tuple[int, int] | None = None,
 ) -> int:
+    shard_options = {} if shard is None else {"shard": shard}
     command = (
-        _pytest_command(PARALLEL_WORKERS)
+        _pytest_command(PARALLEL_WORKERS, **shard_options)
         if configured_target_groups(child_env) is not None
-        else _pytest_command()
+        else _pytest_command(**shard_options)
     )
     completed = _run_child(command, child_env, owner=owner)
     return completed.returncode
@@ -711,7 +720,9 @@ def _run_pytest(targets: list[_Target]) -> int:
     return owner.exit_status(status)
 
 
-def _run_isolated_gate(targets: list[_Target]) -> int:
+def _run_isolated_gate(
+    targets: list[_Target], *, shard: tuple[int, int] | None = None,
+) -> int:
     """Run preflight and pytest inside one exact environment/pgpass lifetime."""
     owner = _LauncherResources()
     status = 2
@@ -724,7 +735,8 @@ def _run_isolated_gate(targets: list[_Target]) -> int:
                 if preflight.returncode != 0:
                     status = preflight.returncode
                 else:
-                    status = _run_pytest_in_environment(child_env, owner=owner)
+                    shard_options = {} if shard is None else {"shard": shard}
+                    status = _run_pytest_in_environment(child_env, owner=owner, **shard_options)
                     owner.checkpoint()
         except _LauncherSignal:
             pass
@@ -775,13 +787,38 @@ def _preflight_mode_main() -> int:
     return 0
 
 
-def main() -> int:
+def _shard_arguments(argv: list[str]) -> tuple[int, int] | None:
+    """Accept only the explicit pair; no arbitrary pytest argument transport."""
+    if not argv:
+        return None
+    options: dict[str, str] = {}
+    for offset in range(0, len(argv), 2):
+        option = argv[offset]
+        if (
+            option not in {"--shard-index", "--shard-count"}
+            or option in options or offset + 1 >= len(argv)
+        ):
+            raise ValueError("invalid shard arguments")
+        options[option] = argv[offset + 1]
+    if options.get("--shard-index") not in {"0", "1"} or options.get("--shard-count") != "2":
+        raise ValueError("invalid shard arguments")
+    return int(options["--shard-index"]), 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    # Direct main() calls preserve their historical behavior regardless of the
+    # caller's sys.argv; the module entry point supplies its own arguments.
+    try:
+        shard = _shard_arguments([] if argv is None else argv)
+    except ValueError:
+        print("PostgreSQL integration gate failed: invalid invocation", file=sys.stderr)
+        return 2
     targets = _configured_targets()
     if targets is None:
         return 2
 
     try:
-        return _run_isolated_gate(targets)
+        return _run_isolated_gate(targets) if shard is None else _run_isolated_gate(targets, shard=shard)
     except _LauncherSignal as interruption:
         return 128 + interruption.signum
     except KeyboardInterrupt:
@@ -798,7 +835,4 @@ def main() -> int:
 if __name__ == "__main__":
     if sys.argv[1:] == ["--preflight"]:
         raise SystemExit(_preflight_mode_main())
-    if sys.argv[1:]:
-        print("PostgreSQL integration gate failed: invalid invocation", file=sys.stderr)
-        raise SystemExit(2)
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

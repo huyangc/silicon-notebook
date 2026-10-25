@@ -900,14 +900,19 @@ gates, every job must pass, and a workflow passes only when all of its jobs do.
 
 `.github/workflows/ci.yml` runs on pull requests targeting `master`, pushes to
 `master`, and manual dispatches. G1 uses two existing runners, each with four
-backend pytest workers: `CI / level-1-backend-primary` runs
+backend pytest workers: `CI / level-1-backend-primary-postgres-rest` runs
 `bash scripts/check_backend.sh --shard-index 0 --shard-count 2`;
 `CI / level-1-backend-rest-contracts-frontend` first runs the same command with
 index 1, then `bash scripts/check.sh --lane contracts --lane frontend`.
 Backend and frontend work do not overlap on the second runner; contracts and
 frontend still run concurrently with each other. Their step remains reachable
-after a failed backend step, and a failure in either still fails the job. G3
-remains the independent third job, `CI / level-3-postgres-integration`.
+after a failed backend step, and a failure in either still fails the job.
+The primary runner then provisions its own PostgreSQL targets and executes
+`bash scripts/check_postgres.sh --shard-index 1 --shard-count 2`; the third job,
+`CI / level-3-postgres-integration`, executes index 0 on its own server. The
+primary service stays idle during backend tests: PG provisioning and tests
+start only after backend exits, including after a backend failure. Both PG
+parts must pass; the primary job's status gates both its backend and PG work.
 `check_backend.sh` without arguments still runs the entire backend lane;
 `check.sh` without arguments remains the complete local G1, and `--lane <name>`
 (repeatable) runs only the named lanes.
@@ -924,10 +929,22 @@ the actual full selection against both actual shard collections, with exact
 identity multiplicities, no overlap and no split loadgroup. The G1/G2 marker
 expressions and their complementary coverage proof remain unchanged.
 
+The PG split uses the same allocation algorithm, independently measured module
+costs, and the unchanged `postgres_integration or postgres_lane_contract`
+selection. Its second runner's preceding backend work is a nine-minute/2160
+cumulative-test-second hint, not a timeout or test limit. Native identities and
+effective loadgroups remain intact. The always-reachable G1 guard additionally
+collects the PG launcher's actual unsharded and two sharded commands and proves
+their exact multiset union, no overlap and group co-location without a database.
+Shard/plugin arguments never enter child environments. New tests receive a
+default cost; stale hints cannot remove them. Each PG part retains four workers
+and its own twelve targets, with distinct server endpoints on distinct runners.
+
 `.github/workflows/daily-extended.yml` (`Daily Extended Gate`, one daily cron plus
 manual dispatch) is G2 in three jobs. `level-2-backend-primary` and
-`level-2-backend-rest-contracts-frontend` run G1 command for command as `ci.yml` does; only the
-dependency install differs, keeping pip's wheel cache off as described below.
+`level-2-backend-rest-contracts-frontend` run the G1 commands exactly as `ci.yml`
+does, keeping pip's wheel cache off as described below. Daily does not add PG
+services or PG steps; its independent third job remains the G2 complement.
 `level-2-backend-rest-contracts-frontend` then also runs `scripts/check_frontend.sh` with
 `FRONTEND_LANE_PARALLEL=1`, even when the G1 step failed: CI runners have fewer
 than eight CPUs, so this is the only CI run of the frontend lane's parallel path,
@@ -946,7 +963,10 @@ the declared lock/requirements files, and delegate selection to the wrapper
 scripts. `test_ci_workflow_contract.py` pins the job sets and names, the at-most-
 three rule, the exact pair of backend shard indices with four workers each,
 that the remaining G1 lanes run once after the second shard, that both shard
-reports are uploaded and the daily G1 half mirrors `ci.yml`, and it executes
+reports are uploaded and the daily G1 half mirrors `ci.yml`. It also pins the
+PG pair, identical service budgets and shared provisioning/resource scripts,
+sequential primary-runner execution, failure continuation and separate PG
+artifacts, and it executes
 `check.sh` and `check_extended.sh` with and without their arguments.
 
 The repository supports exactly one Node.js major, 26, pinned in `.nvmrc`. Every
@@ -1001,8 +1021,9 @@ wheel can crash with `SIGILL` when restored on a hosted runner with different
 CPU features. The portable build trades a small ANN speedup for deterministic
 CI; production wheelhouses may still target their declared deployment CPU.
 Job timeouts include dependency installation and are intentionally separate from
-the under-100-second local Apple Silicon warm-gate target. The primary backend
-jobs (`level-1-backend-primary`, `level-2-backend-primary`) retain 30 minutes;
+the under-100-second local Apple Silicon warm-gate target. The daily primary
+backend job (`level-2-backend-primary`) retains 30 minutes; the PR primary
+(`level-1-backend-primary-postgres-rest`) gets 35 for sequential backend and PG;
 the jobs that now run the smaller backend part followed by contracts/frontend
 also get 30 minutes, while the daily complement keeps 20. Before repartitioning, the full backend
 test step took 14:00 in run 40140238921 and 14:51 in run 40083452330; timing hints
@@ -1012,11 +1033,11 @@ these checks is a required `master` status check; making one required needs the
 user's explicit approval of the branch-protection change.
 
 PostgreSQL coverage is deliberately separate from the offline gates. The
-`level-3-postgres-integration` job starts PostgreSQL 16 and runs
+two CI jobs each start PostgreSQL 16 and run explicit parts of
 `bash scripts/check_postgres.sh`, selecting `postgres_integration or postgres_lane_contract`.
 The latter includes hermetic adapter/migration contracts and launcher/target safety
 checks in the lane that owns them.
-Only the CI service stores PGDATA on a bounded 6 GiB tmpfs to avoid hosted-disk
+Only the CI services store PGDATA on bounded 6 GiB tmpfs mounts to avoid hosted-disk
 overhead from disposable schemas. Its initial cluster uses `shared_buffers=512MB`
 and `max_wal_size=2GB` to reduce buffer eviction and frequent requested
 checkpoints during real schema creation. `max_wal_size` is a soft checkpoint
@@ -1024,7 +1045,9 @@ target, not a storage limit; the tmpfs headroom and separate shared buffers must
 fit the runner's total memory budget. WAL remains enabled, and `fsync`,
 `synchronous_commit`, and `full_page_writes` retain their defaults. Provisioning
 checks actual buffer/WAL byte values and all three durability settings before
-creating test roles or targets; a mismatch fails closed.
+creating test roles or targets; a mismatch fails closed. Both jobs invoke the
+same `tests/postgres/ci_provision.py` and `ci_resources.sh` programs, so logging,
+role/target safety and resource observations have one implementation.
 The job records storage usage, container peak memory and CPU counters, plus
 PostgreSQL 16 checkpoint counts, write/sync time, and buffer-write counters from
 `pg_stat_bgwriter`, plus actual buffer/WAL settings and `pg_stat_wal` counters,
@@ -1096,7 +1119,10 @@ Local verification can still use an installed PostgreSQL 16 service and an expli
 `TEST_POSTGRES_URL` for the serial lane; do not also set the parallel JSON variable.
 Auxiliary targets remain mandatory in authoritative CI. `scripts/check.sh` must never
 start or contact PostgreSQL. The PG launcher always reports slow setup/call/teardown
-durations and writes `backend/.local/postgres-junit.xml`, uploaded by CI even on failure.
+durations. Without arguments it writes `backend/.local/postgres-junit.xml` and
+`postgres-metrics.json`; explicit parts write `postgres-shard0-*` and
+`postgres-shard1-*`, uploaded as distinct artifacts even on failure. Local
+no-argument verification still runs the entire PG lane.
 It does not forward arbitrary `PYTEST_ADDOPTS` into its isolated child environment.
 The backend, extended-backend, and PostgreSQL wrappers also load the optional
 `tests.ci_metrics` plugin and write the matching `*-metrics.json` beside their
