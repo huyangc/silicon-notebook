@@ -152,19 +152,21 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg16_authoritativ
         "postgres-integration:",
         "postgres:16",
         "--health-cmd",
-        "NOSUPERUSER",
-        "NOCREATEDB",
-        "NOCREATEROLE",
-        "LOCALE_PROVIDER icu",
-        "SQL_ASCII",
         "POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED: \"1\"",
         "TEST_POSTGRES_TARGETS_JSON",
         "bash scripts/check_postgres.sh",
     ):
         assert phrase in workflow
-    assert "scripts/check_postgres.sh" not in _between(
-        ".github/workflows/ci.yml", "\njobs:\n", "  postgres-integration:"
-    )
+    provision_path = "backend/tests/postgres/ci_provision.py"
+    assert workflow.count(f"run: python {provision_path}") == 2
+    provision = _read(provision_path)
+    for phrase in (
+        "NOSUPERUSER", "NOCREATEDB", "NOCREATEROLE", "LOCALE_PROVIDER icu", "SQL_ASCII",
+    ):
+        assert phrase in provision
+    # PG remains an explicit workflow step. Neither offline wrapper starts
+    # it, even though a runner may execute the two lanes sequentially.
+    assert "scripts/check_postgres.sh" not in _read("scripts/check_backend.sh")
 
 
 def _module_imports(path: Path) -> set[str]:
