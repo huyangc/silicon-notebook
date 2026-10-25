@@ -83,13 +83,21 @@ def test_committed_pg_hints_are_positive_numeric_and_only_balance_ownership():
 
 @pytest.mark.parametrize("index,preflight_status", [(0, 0), (1, 0), (1, 7)])
 def test_sharded_gate_keeps_preflight_credentials_and_fixed_parallel_topology(
-    monkeypatch, index, preflight_status,
+    monkeypatch, tmp_path, index, preflight_status,
 ):
     for _, variable, _ in TARGET_SPECS:
         monkeypatch.delenv(variable, raising=False)
     groups = [{kind: f"postgresql://lane_user:sentinel-password@db.example/silicon_notebook_test_w{worker}_{kind}"
                for kind in ("primary", "non_c", "non_utf")} for worker in range(4)]
     monkeypatch.setenv(TARGETS_ENV, json.dumps(groups))
+    # A live PG lane already owns an outer pgpass. Use this test's own
+    # inherited file and prove both merge precedence and cleanup ownership.
+    inherited = tmp_path / "inherited.pgpass"
+    inherited_text = "db.example:5432:other_database:other_user:outer-password\n"
+    inherited.write_text(inherited_text, encoding="utf-8")
+    inherited.chmod(0o600)
+    monkeypatch.setenv("PGPASSFILE", str(inherited))
+    monkeypatch.delenv("PGPASSWORD", raising=False)
     monkeypatch.setenv("PYTEST_ADDOPTS", "--collect-only --pg-shard-index 0")
     monkeypatch.setenv("PYTEST_PLUGINS", PLUGIN)
     calls = []
@@ -100,7 +108,9 @@ def test_sharded_gate_keeps_preflight_credentials_and_fixed_parallel_topology(
         path = Path(environment["PGPASSFILE"])
         pgpass.append(path)
         assert path.exists() and path.stat().st_mode & 0o777 == 0o600
-        assert len(path.read_text(encoding="utf-8").splitlines()) == 12
+        entries = path.read_text(encoding="utf-8").splitlines()
+        assert len(entries) == 13 and entries[-1] == inherited_text.rstrip("\n")
+        assert all(entry.endswith(":sentinel-password") for entry in entries[:12])
         assert "sentinel-password" not in repr(command) + repr(environment)
         assert "PYTEST_ADDOPTS" not in environment and "PYTEST_PLUGINS" not in environment
         assert not any("SHARD" in key for key in environment)
@@ -119,6 +129,7 @@ def test_sharded_gate_keeps_preflight_credentials_and_fixed_parallel_topology(
     if not preflight_status:
         assert calls[0][1] is calls[1][1]
     assert all(not path.exists() for path in pgpass)
+    assert inherited.read_text(encoding="utf-8") == inherited_text
 
 
 def _environment():
