@@ -261,7 +261,7 @@ def test_verification_lanes_do_not_hide_committed_tests():
 # it in the first wave rather than at the end of the run, where its complete
 # collect-only proof would become the gate's tail. It changes no lane
 # selection; `test_the_lane_partition_guard_is_collected_first` pins it.
-def test_verification_lane_markers_partition_every_architecture_contract_test():
+def test_verification_lane_markers_partition_every_architecture_contract_test(tmp_path):
     """Prove the marker split and actual G1/PG shards have no gap or overlap.
 
     The pinned literal strings above catch textual drift between the two `-m`
@@ -414,6 +414,15 @@ def test_verification_lane_markers_partition_every_architecture_contract_test():
                 "TEST_POSTGRES_NON_C_URL", "TEST_POSTGRES_NON_UTF_URL",
             ):
                 child_env.pop(key, None)
+            # Keep the launcher's actual selection/plugin arguments, but do
+            # not let collection overwrite reports from a real PG execution.
+            command = [
+                f"--junitxml={tmp_path / 'pg-collection-junit.xml'}"
+                if arg.startswith("--junitxml=") else
+                f"--ci-metrics={tmp_path / 'pg-collection-metrics.json'}"
+                if arg.startswith("--ci-metrics=") else arg
+                for arg in command
+            ]
         result = subprocess.run(
             [*(args if command is None else command), *extra_args],
             cwd=cwd,
