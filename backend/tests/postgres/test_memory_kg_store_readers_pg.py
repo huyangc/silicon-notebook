@@ -6,12 +6,12 @@ in ``test_memory_kg_readers_explain_pins.py``.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.repositories.postgres import knowledge_counts_cache
-
 from tests import memory_kg_reader_cases as cases
-
 
 pytestmark = [
     pytest.mark.postgres_integration,
@@ -31,47 +31,47 @@ def world(postgres_settings):
         repository.close()
 
 
-def test_list_page_rows_and_total_follow_the_viewer_pg(world):
+def _check_list_page_rows_and_total_follow_the_viewer_pg(world):
     cases.check_list_page_and_total(world)
 
 
-def test_counts_are_shared_plus_own_memory_pg(world):
+def _check_counts_are_shared_plus_own_memory_pg(world):
     cases.check_counts(world)
 
 
-def test_kg_ready_is_shared_or_own_memory_pg(world):
+def _check_kg_ready_is_shared_or_own_memory_pg(world):
     cases.check_has_kg(world)
 
 
-def test_no_viewer_counts_are_one_cached_statement_and_zero_live_reads_pg(world):
+def _check_no_viewer_counts_are_one_cached_statement_and_zero_live_reads_pg(world):
     cases.check_none_counts_zero_live_reads(world)
 
 
-def test_fts_filters_before_the_limit_pg(world):
+def _check_fts_filters_before_the_limit_pg(world):
     cases.check_fts_filters_before_the_limit(world)
 
 
-def test_fts_ceiling_and_viewer_combine_pg(world):
+def _check_fts_ceiling_and_viewer_combine_pg(world):
     cases.check_fts_ceiling_and_viewer(world)
 
 
-def test_object_meta_rows_viewer_form_is_notebook_bound_pg(world):
+def _check_object_meta_rows_viewer_form_is_notebook_bound_pg(world):
     cases.check_object_meta_rows_binding(world)
 
 
-def test_edge_centrality_rows_hold_no_memory_pg(world):
+def _check_edge_centrality_rows_hold_no_memory_pg(world):
     cases.check_edge_centrality_is_shared(world)
 
 
-def test_object_evidence_rows_can_skip_the_evidence_pg(world):
+def _check_object_evidence_rows_can_skip_the_evidence_pg(world):
     cases.check_object_evidence_rows(world)
 
 
-def test_enrich_evidence_can_resolve_sources_only_pg(world):
+def _check_enrich_evidence_can_resolve_sources_only_pg(world):
     cases.check_enrich_evidence_sources_only(world)
 
 
-def test_enrich_evidence_sources_only_narrows_the_owner_form_pg(world):
+def _check_enrich_evidence_sources_only_narrows_the_owner_form_pg(world):
     cases.check_enrich_evidence_sources_only_with_owner(world)
 
 
@@ -102,27 +102,27 @@ def test_a_viewer_read_never_takes_the_knn_shape_pg(world):
         reset_knn_index_cache()
 
 
-def test_the_counts_memo_carries_no_viewer_pg(world):
+def _check_the_counts_memo_carries_no_viewer_pg(world):
     cases.check_counts_cache_holds_no_viewer(world)
 
 
-def test_graph_readers_follow_the_viewer_pg(world):
+def _check_graph_readers_follow_the_viewer_pg(world):
     cases.check_graph_readers(world)
 
 
-def test_own_memory_overlay_reads_only_the_viewers_memory_pg(world):
+def _check_own_memory_overlay_reads_only_the_viewers_memory_pg(world):
     cases.check_own_memory_overlay(world)
 
 
-def test_search_legs_follow_the_viewer_pg(world):
+def _check_search_legs_follow_the_viewer_pg(world):
     cases.check_search_legs(world)
 
 
-def test_neighbour_relations_follow_the_viewer_pg(world):
+def _check_neighbour_relations_follow_the_viewer_pg(world):
     cases.check_neighbour_relations(world)
 
 
-def test_shared_tooling_leaves_every_memory_row_out_pg(world):
+def _check_shared_tooling_leaves_every_memory_row_out_pg(world):
     cases.check_shared_tooling(world)
 
 
@@ -131,7 +131,7 @@ def _no_memory_predicate(statements):
         "memory_items" in s or "FROM sources" in s for s in statements)
 
 
-def test_no_viewer_issues_the_pre_isolation_statements_pg(world):
+def _check_no_viewer_issues_the_pre_isolation_statements_pg(world):
     cases.check_none_statements_unchanged(world, {
         "graph_node_rows": [
             "SELECT id, object_type, status, payload FROM knowledge_objects "
@@ -159,3 +159,44 @@ def test_no_viewer_issues_the_pre_isolation_statements_pg(world):
             "SELECT EXISTS(SELECT 1 FROM knowledge_objects "
             "WHERE notebook_id=%s) AS exists"],
     })
+
+
+def test_readonly_memory_kg_store_reader_matrix_pg(world, postgres_settings):
+    """Keep every reader check on one immutable, real-migrated corpus.
+
+    Each scenario owns a fresh runtime and pool, and starts with no count
+    memo. The GiST-creating control above keeps its independent schema.
+    """
+    from app.services.postgres_repository import PostgresRepository
+
+    for check in (
+        _check_list_page_rows_and_total_follow_the_viewer_pg,
+        _check_counts_are_shared_plus_own_memory_pg,
+        _check_kg_ready_is_shared_or_own_memory_pg,
+        _check_no_viewer_counts_are_one_cached_statement_and_zero_live_reads_pg,
+        _check_fts_filters_before_the_limit_pg,
+        _check_fts_ceiling_and_viewer_combine_pg,
+        _check_object_meta_rows_viewer_form_is_notebook_bound_pg,
+        _check_edge_centrality_rows_hold_no_memory_pg,
+        _check_object_evidence_rows_can_skip_the_evidence_pg,
+        _check_enrich_evidence_can_resolve_sources_only_pg,
+        _check_enrich_evidence_sources_only_narrows_the_owner_form_pg,
+        _check_the_counts_memo_carries_no_viewer_pg,
+        _check_graph_readers_follow_the_viewer_pg,
+        _check_own_memory_overlay_reads_only_the_viewers_memory_pg,
+        _check_search_legs_follow_the_viewer_pg,
+        _check_neighbour_relations_follow_the_viewer_pg,
+        _check_shared_tooling_leaves_every_memory_row_out_pg,
+        _check_no_viewer_issues_the_pre_isolation_statements_pg,
+    ):
+        knowledge_counts_cache.invalidate()
+        repository = PostgresRepository(postgres_settings, migrate=False, seed=False)
+        try:
+            scenario = SimpleNamespace(**(vars(world) | {"repo": repository}))
+            check(scenario)
+        except Exception as exc:
+            exc.add_note(f"read-only Memory KG reader scenario: {check.__name__}")
+            raise
+        finally:
+            repository.close()
+            knowledge_counts_cache.invalidate()

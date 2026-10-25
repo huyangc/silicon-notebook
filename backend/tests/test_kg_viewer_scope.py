@@ -22,18 +22,115 @@ from app.core.config import Settings
 from app.core.request_context import reset_request_user, set_request_user
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository
-
-
 from tests.pre_isolation_graph import build_pre_isolation
+from tests.world_templates import world_env, world_template
+
+_SCENARIO_ENV = {"EVENT_LOG_ENABLED": "false", "LLM_LOG_ENABLED": "false"}
+_SCENARIO_PATH_SETTINGS = {
+    "database_url", "storage_dir", "event_log_dir", "llm_log_path", "diagnostics_dir",
+}
+
+
+def _scenario_settings():
+    return Settings(event_log_enabled=False, llm_log_enabled=False).model_dump(
+        mode="json", exclude=_SCENARIO_PATH_SETTINGS,
+    )
+
+
+# Capture collection-time defaults, as world_templates does for its build
+# environment. A test changing any non-path setting keeps the original builder.
+_SCENARIO_DEFAULTS = _scenario_settings()
 
 
 @pytest.fixture
-def repo(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
-    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
-    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
-    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+def repo(tmp_path, monkeypatch, request):
+    # Only explicit scenario consumers receive a seeded copy. Assembly and
+    # empty-notebook tests keep the original empty repository. Resolve the seed
+    # before constructing the runtime, including when another fixture requests
+    # repo before pytest gets to the scenario fixture itself.
+    seed = (request.getfixturevalue("scenario_seed")
+            if "scenario_seed" in request.fixturenames else None)
+    if seed is not None and seed[1] is not None:
+        environment = world_env(seed[0])
+    else:
+        environment = {
+            "DATABASE_URL": f"sqlite:///{tmp_path / 't.db'}",
+            "SILICON_NOTEBOOK_STORAGE_DIR": str(tmp_path / "s"),
+        }
+    for name, value in {**environment, **_SCENARIO_ENV}.items():
+        monkeypatch.setenv(name, value)
     return SQLiteRepository(Settings())
+
+
+def _seed_scenario_at(root, *, b_memory):
+    seeded = SQLiteRepository(Settings())
+    try:
+        scenario = build_scenario(seeded, b_memory=b_memory)
+        payload = {
+            "nb": scenario.nb, "a": scenario.a.id, "b": scenario.b.id,
+            "ids": vars(scenario.ids),
+        }
+        # Re-read every returned object from the persisted world. This catches
+        # a future builder returning transient fields that copies would lose.
+        assert _scenario_from_ids(seeded, payload) == scenario
+        return payload
+    finally:
+        seeded.close()
+
+
+def _seed_scenario_without_b(root):
+    return _seed_scenario_at(root, b_memory=False)
+
+
+def _seed_scenario_with_b(root):
+    return _seed_scenario_at(root, b_memory=True)
+
+
+def _reopen_scenario_at(root):
+    return SQLiteRepository(Settings())
+
+
+def _scenario_from_ids(repo, payload):
+    users = {}
+    identity = repo._runtime.identity
+    with repo._connect() as db:
+        for name in ("a", "b"):
+            user = db.execute("SELECT * FROM users WHERE id=?", (payload[name],)).fetchone()
+            profile = db.execute(
+                "SELECT * FROM user_profiles WHERE user_id=?", (payload[name],),
+            ).fetchone()
+            users[name] = identity._user_profile(user, profile)
+    return SimpleNamespace(
+        nb=payload["nb"], **users, ids=SimpleNamespace(**payload["ids"]),
+    )
+
+
+@pytest.fixture
+def scenario_seed(tmp_path, tmp_path_factory, request):
+    parameters = getattr(getattr(request.node, "callspec", None), "params", {})
+    b_memory = ("scenario_with_b_memory" in request.fixturenames
+                or parameters.get("b_memory", False))
+    if _scenario_settings() != _SCENARIO_DEFAULTS:
+        return b_memory, None
+    builder = _seed_scenario_with_b if b_memory else _seed_scenario_without_b
+    template = world_template(
+        tmp_path_factory, f"kg-viewer-scope-b-memory-{b_memory}",
+        builder, _reopen_scenario_at, env=_SCENARIO_ENV,
+    )
+    return template.materialize(tmp_path)
+
+
+@pytest.fixture
+def scenario(repo, scenario_seed):
+    root_or_b_memory, payload = scenario_seed
+    if payload is None:
+        return build_scenario(repo, b_memory=root_or_b_memory)
+    return _scenario_from_ids(repo, payload)
+
+
+@pytest.fixture
+def scenario_with_b_memory(scenario):
+    return scenario
 
 
 def _now(offset: int = 0) -> str:
@@ -174,8 +271,8 @@ def _texts(ctx):
 
 
 # ---------------------------------------------------------------- context
-def test_member_sees_no_text_from_another_members_memory(repo):
-    s = build_scenario(repo, b_memory=False)
+def test_member_sees_no_text_from_another_members_memory(scenario, repo):
+    s = scenario
     ctx = as_user(s.b, repo.node_context, s.nb, s.ids.engram_s)
     # The fused description mixes A's Memory → strict predicate drops it; the
     # first defines evidence is A's → falls through to the visible definer.
@@ -193,8 +290,8 @@ def test_member_sees_no_text_from_another_members_memory(repo):
     assert "A-PRIVATE" not in blob and "FUSED" not in blob
 
 
-def test_object_evidenced_only_by_another_members_memory_is_404(repo):
-    s = build_scenario(repo, b_memory=False)
+def test_object_evidenced_only_by_another_members_memory_is_404(scenario, repo):
+    s = scenario
     for oid in (s.ids.engram_ma, s.ids.secret, s.ids.definer_ma):
         with pytest.raises(KeyError):
             as_user(s.b, repo.node_context, s.nb, oid)
@@ -204,8 +301,10 @@ def test_object_evidenced_only_by_another_members_memory_is_404(repo):
     assert _texts(own) == ["A-PRIVATE secret project"]
 
 
-def test_owner_keeps_own_memory_text_when_the_notebook_also_holds_foreign_memory(repo):
-    s = build_scenario(repo, b_memory=True)
+def test_owner_keeps_own_memory_text_when_the_notebook_also_holds_foreign_memory(
+    scenario_with_b_memory, repo,
+):
+    s = scenario_with_b_memory
     ctx = as_user(s.a, repo.node_context, s.nb, s.ids.engram_ma)
     assert _texts(ctx) == ["A-PRIVATE occurrence of Engram"]
     # Every cluster member's source is readable to A → the fused description.
@@ -221,8 +320,8 @@ def test_owner_keeps_own_memory_text_when_the_notebook_also_holds_foreign_memory
         as_user(s.b, repo.node_context, s.nb, s.ids.engram_ma)
 
 
-def test_short_circuit_passes_no_ceiling_and_returns_todays_bytes(repo, monkeypatch):
-    s = build_scenario(repo, b_memory=False)
+def test_short_circuit_passes_no_ceiling_and_returns_todays_bytes(scenario, repo, monkeypatch):
+    s = scenario
     runtime = repo._runtime
     expected = runtime.knowledge.node_context(s.nb, s.ids.engram_s, check_access=False)
     seen = []
@@ -240,8 +339,8 @@ def test_short_circuit_passes_no_ceiling_and_returns_todays_bytes(repo, monkeypa
     assert got["definition"] == "FUSED description"
 
 
-def test_filtered_path_hands_the_store_the_viewers_readable_set(repo, monkeypatch):
-    s = build_scenario(repo, b_memory=False)
+def test_filtered_path_hands_the_store_the_viewers_readable_set(scenario, repo, monkeypatch):
+    s = scenario
     runtime = repo._runtime
     seen = []
     original = runtime.knowledge.node_context
@@ -256,8 +355,8 @@ def test_filtered_path_hands_the_store_the_viewers_readable_set(repo, monkeypatc
 
 
 # ---------------------------------------------------------- concept detail
-def test_concept_detail_omits_hidden_members_and_their_text(repo):
-    s = build_scenario(repo, b_memory=False)
+def test_concept_detail_omits_hidden_members_and_their_text(scenario, repo):
+    s = scenario
     detail = as_user(s.b, repo.concept_detail, s.nb, s.ids.engram_canonical)
     assert [m["id"] for m in detail["members"]] == [s.ids.engram_s]
     assert detail["member_total"] == 1
@@ -275,8 +374,8 @@ def test_concept_detail_omits_hidden_members_and_their_text(repo):
     assert own["member_total"] == 2
 
 
-def test_concept_detail_keyset_pages_stay_full_around_hidden_members(repo):
-    s = build_scenario(repo, b_memory=False)
+def test_concept_detail_keyset_pages_stay_full_around_hidden_members(scenario, repo):
+    s = scenario
     # Pad the Engram cluster with visible members so paging has work to do.
     with repo._write() as db:
         for index in range(5):
@@ -302,8 +401,8 @@ def test_concept_detail_keyset_pages_stay_full_around_hidden_members(repo):
     assert len(seen) == len(set(seen)) == 6 == total
 
 
-def test_cluster_label_never_comes_from_a_hidden_member(repo):
-    s = build_scenario(repo, b_memory=False)
+def test_cluster_label_never_comes_from_a_hidden_member(scenario, repo):
+    s = scenario
     with repo._write() as db:
         db.execute(
             "UPDATE concept_clusters SET canonical_name='A-PRIVATE Engram' "
@@ -320,10 +419,10 @@ def reader_of(repo):
     return repo._runtime.knowledge_query.viewer_scope.__self__
 
 
-def test_neighbourhood_filter_relabels_partly_hidden_clusters(repo):
+def test_neighbourhood_filter_relabels_partly_hidden_clusters(scenario, repo):
     """Both hydration paths take a cluster label from one member's payload;
     a label baked from the hidden member must come back as a visible one."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     scope = as_user(s.b, reader_of(repo).for_notebook, s.nb)
     nodes = [
         {"id": s.ids.engram_canonical, "object_type": "concept",
@@ -362,8 +461,8 @@ def neighbour_path(request, repo, monkeypatch):
     return request.param
 
 
-def test_neighbour_hydration_omits_hidden_nodes(repo, neighbour_path):
-    s = build_scenario(repo, b_memory=False)
+def test_neighbour_hydration_omits_hidden_nodes(scenario, repo, neighbour_path):
+    s = scenario
     owner_view = as_user(s.a, repo.kg_neighbors, s.nb, s.ids.engram_s)
     assert s.ids.secret_canonical in {n["id"] for n in owner_view["nodes"]}
     member_view = as_user(s.b, repo.kg_neighbors, s.nb, s.ids.engram_s)

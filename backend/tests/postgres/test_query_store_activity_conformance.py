@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import pytest
 
 from app.repositories.postgres._store_utils import jsonb
+from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.query_store import QueryStore as PostgresQueryStore
 
@@ -1241,16 +1242,12 @@ def _seed_parity_rows(connection) -> None:
         _insert_ask(connection, ask_id, "n1", "u1", datetime.fromisoformat(created_at))
 
 
-@pytest.mark.parametrize("since,until,expected", BOUND_PARITY_CASES)
-def test_bound_spellings_select_the_same_rows(postgres_database, store, since, until, expected):
+def _check_bound_spellings_select_the_same_rows(store, since, until, expected):
     """与 SQLite 侧的同名测试跑**同一张** BOUND_PARITY_CASES。
 
     这条分叉曾经躲过两份测试:SQLite 的用例只喂裸 naive、PostgreSQL 的只喂
     `+00:00`,而浏览器实际发的是 `...Z`。同一张表才拦得住。
     """
-    with postgres_database.write() as connection:
-        _seed_parity_rows(connection)
-
     result = store.list_user_activity("u1", since=since, until=until, limit=50)
     assert {item["id"] for item in result["items"]} == expected
 
@@ -1397,21 +1394,54 @@ def test_browser_local_day_window_selects_that_local_day(postgres_database, stor
     assert {item["id"] for item in result["items"]} == LOCAL_DAY_EXPECTED
 
 
-@pytest.mark.parametrize("bad", MALFORMED_BOUNDS)
-@pytest.mark.parametrize("field", ["since", "until"])
-def test_malformed_range_bound_raises_value_error(postgres_database, store, bad, field):
-    with postgres_database.write() as connection:
-        _seed_parity_rows(connection)
+def _check_malformed_range_bound_raises_value_error(store, bad, field):
     with pytest.raises(ValueError):
         store.list_user_activity("u1", **{field: bad}, limit=50)
 
 
-@pytest.mark.parametrize("bad", MALFORMED_BOUNDS)
-def test_malformed_cursor_raises_value_error(postgres_database, store, bad):
-    with postgres_database.write() as connection:
-        _seed_parity_rows(connection)
+def _check_malformed_cursor_raises_value_error(store, bad):
     with pytest.raises(ValueError):
         store.list_user_activity("u1", before_ts=bad, before_id="ask-a", limit=2)
+
+
+def test_readonly_activity_time_input_matrix(postgres_database, postgres_settings):
+    """Keep every shared parity row while migrating and seeding just once.
+
+    The five stored instants are unchanged by all thirty read-only input cases.
+    Each case gets a fresh store and pool; neither prepared statements nor an
+    invalid-input transaction can leak into the following case. Other activity
+    tests still own their independent function-scoped, really migrated schemas.
+    """
+    assert PostgresMigrator(postgres_database).migrate() == 83
+    with postgres_database.write() as connection:
+        _seed_parity_rows(connection)
+    checks = [
+        *(
+            (_check_bound_spellings_select_the_same_rows, (since, until, expected))
+            for since, until, expected in BOUND_PARITY_CASES
+        ),
+        *(
+            (_check_malformed_range_bound_raises_value_error, (bad, field))
+            for field in ("since", "until")
+            for bad in MALFORMED_BOUNDS
+        ),
+        *(
+            (_check_malformed_cursor_raises_value_error, (bad,))
+            for bad in MALFORMED_BOUNDS
+        ),
+    ]
+    for check, arguments in checks:
+        scenario_database = PostgresDatabase(
+            postgres_database.settings, postgres_database.root_dir
+        )
+        try:
+            scenario_store = PostgresQueryStore(scenario_database, postgres_settings)
+            check(scenario_store, *arguments)
+        except Exception as error:
+            error.add_note(f"Activity time scenario: {check.__name__}{arguments!r}")
+            raise
+        finally:
+            scenario_database.close()
 
 
 # ------------------------------------------------------------ 披露面 / 取数序

@@ -535,9 +535,14 @@ def _knowhow_table(rig: Rig) -> None:
 
 def workbook_world(rig: Rig) -> None:
     """The library plus one uploaded spreadsheet (the workbook lane)."""
+    library_world(rig)
+    _workbook(rig)
+
+
+def _workbook(rig: Rig) -> None:
+    """Upload the workbook after the ordinary library has been prepared."""
     from openpyxl import Workbook
 
-    library_world(rig)
     path = rig.tmp_path / "timing.xlsx"
     workbook = Workbook()
     sheet = workbook.active

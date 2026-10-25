@@ -14,6 +14,7 @@ import pytest
 
 from app.domain.knowledge_contracts import USABLE_STATUSES
 from app.repositories.postgres import memory_sql, query_store as postgres_query_store
+from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.query_store import QueryStore
 from tests import memory_sql_cases as cases
@@ -180,49 +181,46 @@ def test_outer_alias_that_would_capture_an_inner_table_or_is_not_a_bare_identifi
 
 
 # --------------------------------------------------------------------- 行为矩阵
-@pytest.mark.parametrize("viewer", list(cases.READABLE_SOURCES))
-def test_source_readability_matrix(world, viewer):
+def _check_source_readability_matrix(world, viewer):
     assert _sources(world, viewer) == cases.READABLE_SOURCES[viewer]
 
 
-def test_own_memory_is_readable_and_anothers_is_not(world):
+def _check_own_memory_is_readable_and_anothers_is_not(world):
     assert "src-mem-alice" in _sources(world, "u-alice")
     assert "src-mem-bob" not in _sources(world, "u-alice"), "another user's Memory not readable"
     assert "src-mem-alice" not in _sources(world, "u-bob")
 
 
-def test_orphan_and_memoryless_memory_sources_are_readable_by_nobody(world):
+def _check_orphan_and_memoryless_memory_sources_are_readable_by_nobody(world):
     for viewer in cases.READABLE_SOURCES:
         readable = _sources(world, viewer)
         assert "src-mem-orphan" not in readable, viewer
         assert "src-mem-null" not in readable, viewer
 
 
-def test_knowhow_and_ordinary_sources_are_readable_by_everyone(world):
+def _check_knowhow_and_ordinary_sources_are_readable_by_everyone(world):
     for viewer in cases.READABLE_SOURCES:
         readable = _sources(world, viewer)
         assert {"src-knowhow", "src-upload"} <= readable, "ordinary source readable"
 
 
-@pytest.mark.parametrize("viewer", ["", None])
-def test_empty_or_null_viewer_reads_no_memory_source(world, viewer):
+def _check_empty_or_null_viewer_reads_no_memory_source(world, viewer):
     memory_ids = {s[0] for s in cases.SOURCES if s[1] == "memory"}
     assert _sources(world, viewer) & memory_ids == set()
 
 
-@pytest.mark.parametrize("viewer", list(cases.FOREIGN_EXCLUDED_KEEPS_OBJECTS))
-def test_foreign_memory_exclusion_matrix(world, viewer):
+def _check_foreign_memory_exclusion_matrix(world, viewer):
     assert _objects_kept(world, viewer) == cases.FOREIGN_EXCLUDED_KEEPS_OBJECTS[viewer]
     assert _relations_kept(world, viewer) == cases.FOREIGN_EXCLUDED_KEEPS_RELATIONS[viewer]
 
 
-def test_rows_without_an_owning_source_are_never_excluded(world):
+def _check_rows_without_an_owning_source_are_never_excluded(world):
     for viewer in cases.FOREIGN_EXCLUDED_KEEPS_OBJECTS:
         assert "ko-unowned" in _objects_kept(world, viewer)
         assert "kr-no-source" in _relations_kept(world, viewer)
 
 
-def test_memory_derived_classifier_ignores_the_viewer_and_covers_orphans(world):
+def _check_memory_derived_classifier_ignores_the_viewer_and_covers_orphans(world):
     derived_objects = _ids(
         world,
         f"SELECT o.id FROM knowledge_objects o WHERE {memory_sql.memory_derived_object('o')}",
@@ -243,11 +241,11 @@ _CLUSTER_KEPT_SQL = (
 )
 
 
-def test_no_memory_member_cluster_excludes_the_whole_cluster(world):
+def _check_no_memory_member_cluster_excludes_the_whole_cluster(world):
     assert _ids(world, _CLUSTER_KEPT_SQL) == cases.NO_MEMORY_MEMBER_CLUSTERS
 
 
-def test_no_memory_member_cluster_is_scoped_to_its_own_notebook(world):
+def _check_no_memory_member_cluster_is_scoped_to_its_own_notebook(world):
     kept = _ids(world, _CLUSTER_KEPT_SQL)
     assert f"{cases.NOTEBOOK}/can-mixed/0" not in kept
     assert f"{cases.NOTEBOOK2}/can-mixed/0" in kept, (
@@ -255,7 +253,7 @@ def test_no_memory_member_cluster_is_scoped_to_its_own_notebook(world):
     )
 
 
-def test_no_memory_member_cluster_is_scoped_to_its_own_generation(world):
+def _check_no_memory_member_cluster_is_scoped_to_its_own_generation(world):
     kept = _ids(world, _CLUSTER_KEPT_SQL)
     assert f"{cases.NOTEBOOK}/can-gen/1" not in kept
     assert f"{cases.NOTEBOOK}/can-gen/0" in kept, (
@@ -271,7 +269,7 @@ def _cluster_keys(database, predicate: str) -> set[str]:
     )
 
 
-def test_memory_cluster_is_the_one_definition_of_a_cluster_of_a_memory(world):
+def _check_memory_cluster_is_the_one_definition_of_a_cluster_of_a_memory(world):
     memory = _cluster_keys(world, memory_sql.memory_cluster("c"))
     clean = _cluster_keys(world, memory_sql.no_memory_cluster("c"))
     assert memory == cases.MEMORY_CLUSTERS
@@ -279,7 +277,7 @@ def test_memory_cluster_is_the_one_definition_of_a_cluster_of_a_memory(world):
     assert cases.ALL_CLUSTERS - cases.NO_MEMORY_MEMBER_CLUSTERS <= memory
 
 
-def test_cluster_seed_object_id_reads_the_object_id_a_canonical_id_was_minted_from(world):
+def _check_cluster_seed_object_id_reads_the_object_id_a_canonical_id_was_minted_from(world):
     for canonical, expected in cases.CLUSTER_SEED_OBJECT_IDS.items():
         with world.connect() as db:
             got = db.execute(
@@ -290,7 +288,7 @@ def test_cluster_seed_object_id_reads_the_object_id_a_canonical_id_was_minted_fr
         assert got == expected, canonical
 
 
-def test_memory_derived_in_notebook_agrees_on_same_notebook_rows_and_stops_at_the_notebook(world):
+def _check_memory_derived_in_notebook_agrees_on_same_notebook_rows_and_stops_at_the_notebook(world):
     """合法数据(行与来源同笔记本)上与 `memory_derived_object` 逐行同义;来源在别的笔记本
     时不算(那条只用来把外层的笔记本条件传进内层)。"""
     got = _ids(
@@ -309,7 +307,7 @@ def test_memory_derived_in_notebook_agrees_on_same_notebook_rows_and_stops_at_th
     assert (bool(row["here"]), bool(row["anywhere"])) == (False, True)
 
 
-def test_memory_member_cluster_keys_is_the_member_arm_as_a_set(world):
+def _check_memory_member_cluster_keys_is_the_member_arm_as_a_set(world):
     """同一判据的集合形态:每个笔记本读出的 (canonical_id, generation) 恰是成员臂排除的那些簇,
     一个参数(笔记本 id)。"""
     member_clusters = cases.ALL_CLUSTERS - cases.NO_MEMORY_MEMBER_CLUSTERS
@@ -321,7 +319,7 @@ def test_memory_member_cluster_keys_is_the_member_arm_as_a_set(world):
     assert memory_sql.memory_member_cluster_keys().count("%s") == 1
 
 
-def test_memory_cluster_docstring_holds_seed_arm_only_minted_real_names_left_to_the_dirty_rule(
+def _check_memory_cluster_docstring_holds_seed_arm_only_minted_real_names_left_to_the_dirty_rule(
     world,
 ):
     """`memory_cluster` docstring 的两句话:canonical 臂只认按对象 id 铸的种子(``K-~ko-…``、
@@ -348,7 +346,7 @@ def test_memory_cluster_docstring_holds_seed_arm_only_minted_real_names_left_to_
 
 
 # --------------------------------------------------------------- 嵌进更大的查询
-def test_fragment_embedded_in_a_larger_query_agrees_with_the_standalone_result(world):
+def _check_fragment_embedded_in_a_larger_query_agrees_with_the_standalone_result(world):
     for viewer, expected in cases.READABLE_SOURCES.items():
         got = _ids(
             world,
@@ -388,7 +386,7 @@ def test_query_store_constants_reference_the_shared_fragments():
     )
 
 
-def test_derived_classifier_agrees_with_the_pre_e0_hand_written_predicate(world):
+def _check_derived_classifier_agrees_with_the_pre_e0_hand_written_predicate(world):
     old_kept = _ids(
         world,
         f"SELECT o.id FROM knowledge_objects o WHERE {cases.PRE_E0_NOT_MEMORY_OWNED}",
@@ -401,7 +399,7 @@ def test_derived_classifier_agrees_with_the_pre_e0_hand_written_predicate(world)
     assert new_kept == old_kept == cases.ALL_OBJECT_IDS - cases.MEMORY_DERIVED_OBJECTS
 
 
-def test_query_store_aggregates_give_the_golden_results(world):
+def _check_query_store_aggregates_give_the_golden_results(world):
     queries = QueryStore(world)
     with world.connect() as db:
         counts = {
@@ -413,3 +411,51 @@ def test_query_store_aggregates_give_the_golden_results(world):
         names = queries.top_concept_names(db, cases.NOTEBOOK, USABLE_STATUSES, 24)
     assert counts == cases.QUERY_STORE_TYPE_COUNTS
     assert names == cases.QUERY_STORE_TOP_CONCEPTS
+
+
+def test_readonly_memory_sql_contract_matrix(world):
+    """Run every original SQL assertion over one unchanged, really migrated world.
+
+    Each original case has a new pool so its reads cannot warm another case's
+    prepared statements. The fixture remains function-scoped; no schema or seed
+    is reused by another test.
+    """
+    checks = [
+        *(
+            (_check_source_readability_matrix, (viewer,))
+            for viewer in cases.READABLE_SOURCES
+        ),
+        (_check_own_memory_is_readable_and_anothers_is_not, ()),
+        (_check_orphan_and_memoryless_memory_sources_are_readable_by_nobody, ()),
+        (_check_knowhow_and_ordinary_sources_are_readable_by_everyone, ()),
+        *(
+            (_check_empty_or_null_viewer_reads_no_memory_source, (viewer,))
+            for viewer in ("", None)
+        ),
+        *(
+            (_check_foreign_memory_exclusion_matrix, (viewer,))
+            for viewer in cases.FOREIGN_EXCLUDED_KEEPS_OBJECTS
+        ),
+        (_check_rows_without_an_owning_source_are_never_excluded, ()),
+        (_check_memory_derived_classifier_ignores_the_viewer_and_covers_orphans, ()),
+        (_check_no_memory_member_cluster_excludes_the_whole_cluster, ()),
+        (_check_no_memory_member_cluster_is_scoped_to_its_own_notebook, ()),
+        (_check_no_memory_member_cluster_is_scoped_to_its_own_generation, ()),
+        (_check_memory_cluster_is_the_one_definition_of_a_cluster_of_a_memory, ()),
+        (_check_cluster_seed_object_id_reads_the_object_id_a_canonical_id_was_minted_from, ()),
+        (_check_memory_derived_in_notebook_agrees_on_same_notebook_rows_and_stops_at_the_notebook, ()),
+        (_check_memory_member_cluster_keys_is_the_member_arm_as_a_set, ()),
+        (_check_memory_cluster_docstring_holds_seed_arm_only_minted_real_names_left_to_the_dirty_rule, ()),
+        (_check_fragment_embedded_in_a_larger_query_agrees_with_the_standalone_result, ()),
+        (_check_derived_classifier_agrees_with_the_pre_e0_hand_written_predicate, ()),
+        (_check_query_store_aggregates_give_the_golden_results, ()),
+    ]
+    for check, arguments in checks:
+        scenario_database = PostgresDatabase(world.settings, world.root_dir)
+        try:
+            check(scenario_database, *arguments)
+        except Exception as error:
+            error.add_note(f"Memory SQL scenario: {check.__name__}{arguments!r}")
+            raise
+        finally:
+            scenario_database.close()

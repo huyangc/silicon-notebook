@@ -678,7 +678,7 @@ def test_the_lane_partition_guard_is_collected_first(request):
 
 def test_backend_parallelism_is_bounded_and_explicit():
     config = (ROOT / "backend" / "pytest.ini").read_text(encoding="utf-8")
-    assert "addopts = -n 12 --dist loadgroup" in config
+    assert "addopts = -n 4 --dist loadgroup" in config
     assert "architecture_contract:" in config
     assert "architecture_contract_heavy:" in config
     for marker_name in (*G2_LANE_MARKERS, "real_sqlite_migration"):
@@ -686,7 +686,7 @@ def test_backend_parallelism_is_bounded_and_explicit():
     assert "-n auto" not in config
     assert "worksteal" not in config
     backend_lane = (ROOT / "scripts" / "check_backend.sh").read_text(encoding="utf-8")
-    assert 'BACKEND_PYTEST_WORKERS="${BACKEND_PYTEST_WORKERS:-16}"' in backend_lane
+    assert 'BACKEND_PYTEST_WORKERS="${BACKEND_PYTEST_WORKERS:-4}"' in backend_lane
 
 
 def test_the_collected_heap_is_frozen_out_of_the_cyclic_collector():
