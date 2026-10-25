@@ -1,7 +1,8 @@
-"""Only the ordinary SQLite reasoning library seed is reusable.
+"""Reuse only the ordinary SQLite reasoning library prefix.
 
 Uploaded sources keep absolute paths, so PINNED materialization replaces the
-live world for every test. No repository, model, recorder or hook is reused.
+live world for every test. Specialized tails still execute per test. No
+repository, model, recorder or hook is reused.
 """
 from __future__ import annotations
 
@@ -36,7 +37,8 @@ BACKEND = cases.Backend(
 
 def eligible(scenario: cases.Scenario) -> bool:
     """No custom world, environment, extension or model script is templated."""
-    return (scenario.world is cases.library_world and not scenario.env
+    return (scenario.world in (cases.library_world, cases.knowhow_world, cases.workbook_world)
+            and not scenario.env
             and scenario.gap_plugin is False
             and type(scenario.script) is cases.Script and scenario.script == cases.Script())
 
@@ -137,8 +139,14 @@ def materialize(scenario, tmp_path_factory, tmp_path):
     return template.materialize(tmp_path)
 
 
-def restore_rig(rig: cases.Rig, payload: dict) -> None:
+def restore_rig(rig: cases.Rig, payload: dict, scenario: cases.Scenario | None = None) -> None:
     assert _model_state(rig) == payload["model_state"]
     rig.notebook_id = payload["notebook_id"]
     rig.user_id = payload["user_id"]
     rig.sources = dict(payload["sources"])
+    if scenario is not None:
+        assert eligible(scenario)
+        if scenario.world is cases.knowhow_world:
+            cases._knowhow_table(rig)
+        elif scenario.world is cases.workbook_world:
+            cases._workbook(rig)

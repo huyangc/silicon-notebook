@@ -371,7 +371,7 @@ bash scripts/check.sh
 | G2 扩展门 | `scripts/check_extended.sh`：G1 加真实索引/性能测试、冷图/索引契约、全仓语义扫描（重活子集）、真实子进程合同与老版本升级矩阵 | 每天 `17 18 * * *` UTC（北京时间次日 02:17）一次，也可手动触发 |
 | G3 PostgreSQL | `scripts/check_postgres.sh`：直接 PostgreSQL adapter 集成 | 独立的 PR/push/手动 CI job |
 
-G1 并行运行三个有界 lane：`check_backend.sh` 以默认 16 个 worker 执行稳定 backend pytest（CI 固定 4 个）；`check_contracts.sh` 执行语法/依赖预检、hermetic smoke、契约检查、后端 lint 门（见[后端 lint 门](#后端-lint-门)）与确定性抽取评分 harness；`check_frontend.sh` 执行递归发现的全部 `*.test.mjs`、全部 `*.component.test.tsx`、ESLint（`npm run lint`，见[前端 ESLint 门](#前端-eslint-门)）、production build 与包内类型检查。在不少于 8 个 CPU 的主机上，同步一次插件投影之后，node 测试、组件测试、ESLint 与「build 之后类型检查」四组并发运行，各自写独立日志，全部结束后按固定顺序打印并逐步给出退出码；更小的主机（CI runner）保持串行顺序、在第一个失败处停止，`FRONTEND_LANE_PARALLEL=1`/`0` 可覆盖 CPU 判断。Node 原生 test runner 和 Vitest 各限制为 4 workers，为 backend 临界路径保留 CPU；Next build 不得启用 `ignoreBuildErrors`、仍是生产代码类型检查的权威，但 Next 的构建期类型检查会静默丢弃 `*.test.*`/`*.spec.*` 文件与 `__tests__`/`__mocks__` 目录里的全部诊断（`next/dist/lib/typescript/runTypeCheck.js` 的 `ignoreRegex`，Next 15.5 实测），只存在于 `frontend/tests/**` 的类型错误对 build 完全不可见；因此前端 lane 在 build **之后**补跑 `npm run typecheck`（`tsc --noEmit`）——排在 build 后是让它检查刚重新生成的 `.next/types` 而不是脏树上的陈旧生成物——这是唯一看得见测试文件的检查；`incremental` 使 warm 重查不到 1 秒（冷 ~5 秒），当初「同一程序重复解析两遍」要省的成本已不再成立。G1 backend 排除 `slow` 真实索引/性能用例、`graph_index_contract` 冷图/索引契约、`architecture_contract_heavy`（`_ARCHITECTURE_CONTRACT_HEAVY_TESTS` 中的八条全仓语义扫描）、`process_contract`（启动真实子进程——subprocess、multiprocessing spawn 或 fork——检查进程级合同的用例：服务启停与 launcher 信号交接、release manifest 的 git 历史与打包、batch ingest 进程池、真进程拒启、脚本与 CLI 入口）、`legacy_upgrade_contract`（升级已部署老版本库的用例：快照 verifier 的「已部署 vNN」用例、老版本迁移矩阵，以及这类升级排上的记忆隔离重建；同一模块里的当前 schema、新库与源码一致性检查仍留在 G1）和 PostgreSQL 树，其余轻量 `architecture_contract` 测试随 G1 每次 PR/push 跑。按 2026-10-14 把本机目标定为 80 秒的裁决，这些进程级与老版本合同由每日 G2 报告，不再每个 PR 即时覆盖。`process_contract` 与 `legacy_upgrade_contract` 逐测试标注，同一个文件可以与 G1 用例混排。下文的 lane 划分守卫虽然启动子进程，仍不加标记、留在 G1：只放在 G2 的话，表达式一旦写坏把它排除掉，它就再也不会运行。G2 先执行 G1，再执行精确互补的 backend marker 集——`backend/tests/test_test_architecture_policy.py::test_verification_lane_markers_partition_every_architecture_contract_test` 用 `--collect-only` 实测验证这个划分，不只是钉两条 `-m` 字符串。每个 lane 都有独立进程组，因此中断或终止 controller 时，也会终止并回收 pytest、npm 和 Next.js 的后代进程。官方 client MCP smoke 精确锁定已公开的二十一个工具：发现与概况两个、搜索与点查两个、问答两个、问答记录与报告四个、提交两个、来源四个、构建一个与四个 knowhow 工具。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
+G1 并行运行三个有界 lane：`check_backend.sh` 以默认 4 个 worker 执行稳定 backend pytest（CI 固定 4 个）；`check_contracts.sh` 执行语法/依赖预检、hermetic smoke、契约检查、后端 lint 门（见[后端 lint 门](#后端-lint-门)）与确定性抽取评分 harness；`check_frontend.sh` 执行递归发现的全部 `*.test.mjs`、全部 `*.component.test.tsx`、ESLint（`npm run lint`，见[前端 ESLint 门](#前端-eslint-门)）、production build 与包内类型检查。在不少于 8 个 CPU 的主机上，同步一次插件投影之后，node 测试、组件测试、ESLint 与「build 之后类型检查」四组并发运行，各自写独立日志，全部结束后按固定顺序打印并逐步给出退出码；更小的主机（CI runner）保持串行顺序、在第一个失败处停止，`FRONTEND_LANE_PARALLEL=1`/`0` 可覆盖 CPU 判断。Node 原生 test runner 和 Vitest 各限制为 4 workers，为 backend 临界路径保留 CPU；Next build 不得启用 `ignoreBuildErrors`、仍是生产代码类型检查的权威，但 Next 的构建期类型检查会静默丢弃 `*.test.*`/`*.spec.*` 文件与 `__tests__`/`__mocks__` 目录里的全部诊断（`next/dist/lib/typescript/runTypeCheck.js` 的 `ignoreRegex`，Next 15.5 实测），只存在于 `frontend/tests/**` 的类型错误对 build 完全不可见；因此前端 lane 在 build **之后**补跑 `npm run typecheck`（`tsc --noEmit`）——排在 build 后是让它检查刚重新生成的 `.next/types` 而不是脏树上的陈旧生成物——这是唯一看得见测试文件的检查；`incremental` 使 warm 重查不到 1 秒（冷 ~5 秒），当初「同一程序重复解析两遍」要省的成本已不再成立。G1 backend 排除 `slow` 真实索引/性能用例、`graph_index_contract` 冷图/索引契约、`architecture_contract_heavy`（`_ARCHITECTURE_CONTRACT_HEAVY_TESTS` 中的八条全仓语义扫描）、`process_contract`（启动真实子进程——subprocess、multiprocessing spawn 或 fork——检查进程级合同的用例：服务启停与 launcher 信号交接、release manifest 的 git 历史与打包、batch ingest 进程池、真进程拒启、脚本与 CLI 入口）、`legacy_upgrade_contract`（升级已部署老版本库的用例：快照 verifier 的「已部署 vNN」用例、老版本迁移矩阵，以及这类升级排上的记忆隔离重建；同一模块里的当前 schema、新库与源码一致性检查仍留在 G1）和 PostgreSQL 树，其余轻量 `architecture_contract` 测试随 G1 每次 PR/push 跑。按 2026-10-14 把本机目标定为 80 秒的裁决，这些进程级与老版本合同由每日 G2 报告，不再每个 PR 即时覆盖。`process_contract` 与 `legacy_upgrade_contract` 逐测试标注，同一个文件可以与 G1 用例混排。下文的 lane 划分守卫虽然启动子进程，仍不加标记、留在 G1：只放在 G2 的话，表达式一旦写坏把它排除掉，它就再也不会运行。G2 先执行 G1，再执行精确互补的 backend marker 集——`backend/tests/test_test_architecture_policy.py::test_verification_lane_markers_partition_every_architecture_contract_test` 用 `--collect-only` 实测验证这个划分，不只是钉两条 `-m` 字符串。每个 lane 都有独立进程组，因此中断或终止 controller 时，也会终止并回收 pytest、npm 和 Next.js 的后代进程。官方 client MCP smoke 精确锁定已公开的二十一个工具：发现与概况两个、搜索与点查两个、问答两个、问答记录与报告四个、提交两个、来源四个、构建一个与四个 knowhow 工具。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
 
 验收时使用项目一直采用的 Homebrew/Miniconda Python：
 
@@ -379,7 +379,7 @@ G1 并行运行三个有界 lane：`check_backend.sh` 以默认 16 个 worker �
 PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
 ```
 
-G1 标准门并发运行 backend、contracts、frontend 三个 lane。`check_backend.sh` 默认使用 16 个 backend pytest worker，可用 `BACKEND_PYTEST_WORKERS` 覆盖。Apple Silicon warm gate 硬目标是不超过 100 秒（2026-10-19 裁决由 80 秒放宽，2026-10-14 挪到 G2 的合同测试仍留在 G2；60 秒仍是长期目标）；G2 每日扩展门不受该本机时限约束，各 CI lane 时长仅作观察，因此这不是对每一台 CI 机器的可移植超时断言。`check.sh` 结束时打印整门墙钟、各 lane 秒数，以及本次 JUnit 报告里最慢的 10 个 backend 测试文件与 10 条测试（`scripts/check_timing_summary.py`），墙钟超过 100 秒时打印醒目警告；这份汇总只是本地警告，从不改变门禁的退出码。门禁脚本把 Python 字节码（含 pytest 改写后的测试模块）写到 gitignored 的 `.local/pycache`（`PYTHONPYCACHEPREFIX`），并 unset 调用方 shell 导出的 `PYTHONDONTWRITEBYTECODE`：新 worktree 或 agent 会话也复用字节码缓存，不再在每个 worker 里重新编译全部模块。backend 测试里用手工构造的环境启动子进程时，一律展开 `BYTECODE_ENV`（`backend/tests/child_env_testkit.py`，由策略测试强制），所以 G1 运行不会往源码树写任何字节码。由于前缀按绝对路径镜像，测试写在临时目录下的模块也会被缓存进去；backend conftest 在每次 pytest 会话开始时删掉镜像临时目录的那一棵子树，缓存因此有界，仓库自身与解释器的模块缓存保持热。
+G1 标准门并发运行 backend、contracts、frontend 三个 lane。`check_backend.sh` 默认使用 4 个 backend pytest worker，与 CI 一致；聚焦诊断可用 `BACKEND_PYTEST_WORKERS` 覆盖，性能对比固定 4 个。Apple Silicon warm gate 硬目标是不超过 100 秒（2026-10-19 裁决由 80 秒放宽，2026-10-14 挪到 G2 的合同测试仍留在 G2；60 秒仍是长期目标）；G2 每日扩展门不受该本机时限约束，各 CI lane 时长仅作观察，因此这不是对每一台 CI 机器的可移植超时断言。`check.sh` 结束时打印整门墙钟、各 lane 秒数，以及本次 JUnit 报告里最慢的 10 个 backend 测试文件与 10 条测试（`scripts/check_timing_summary.py`），墙钟超过 100 秒时打印醒目警告；这份汇总只是本地警告，从不改变门禁的退出码。门禁脚本把 Python 字节码（含 pytest 改写后的测试模块）写到 gitignored 的 `.local/pycache`（`PYTHONPYCACHEPREFIX`），并 unset 调用方 shell 导出的 `PYTHONDONTWRITEBYTECODE`：新 worktree 或 agent 会话也复用字节码缓存，不再在每个 worker 里重新编译全部模块。backend 测试里用手工构造的环境启动子进程时，一律展开 `BYTECODE_ENV`（`backend/tests/child_env_testkit.py`，由策略测试强制），所以 G1 运行不会往源码树写任何字节码。由于前缀按绝对路径镜像，测试写在临时目录下的模块也会被缓存进去；backend conftest 在每次 pytest 会话开始时删掉镜像临时目录的那一棵子树，缓存因此有界，仓库自身与解释器的模块缓存保持热。
 
 测试加速必须保持结果语义：G1 标准门与 G2 扩展门的 marker 表达式精确互补，PostgreSQL 独立负责，任何已提交用例都不能变成不可达；全仓 AST/协议扫描在同一测试进程（pytest worker 或隔离的 Node guard 进程）内只解析每个生产文件一次，冻结 fixture 用例若只关心成员集合，就应使用只投影名称的入口，不生成详细站点、签名与 ownership；可执行的全仓守卫只在其归属的 contracts lane 对真实源码树运行一次，参数解析、失败模式与 extra-root 的单元测试把默认根重定向到最小 fixture，不再重复扫描全仓；同一份不可变行为矩阵上的断言只遍历一次，并给每一格保留明确失败标签，不能为每一格或不同断言族重复搭建完全相同的数据库世界；frontend lane 只同步一次不可变的本地插件投影，随后仅抑制 npm 重复的 `pretest`/`prebuild`/`pretypecheck` 钩子，开发者单独执行每条命令时这些钩子仍是必跑项；缓存容器策略直接验证容器，不搭建无关数据库与 ANN 索引；autouse 隔离路径从 worker 已有的 pytest base temp 派生，不为每条纯测试额外创建 `tmp_path`；普通 SQLite 仓储测试按 worker 只构建一次当前空 schema（这次构建本身就是每个 worker 里一次真实的从零完整迁移梯），再复制成每条测试各自独立的可变数据库文件。是否从零跑真实迁移梯按测试决定，不按模块：迁移梯本身是检查对象的测试标 `@pytest.mark.real_sqlite_migration`（或由所在模块的 `pytestmark` 统一标）。`test_test_architecture_policy.py` 要求：在拥有迁移器的模块里，凡是测试函数自身（直接或经模块内 helper）驱动 `SqliteMigrator` 的，以及启动迁移接线用例，都必须带这个标记；迁移与仓储快照模块里的升级用例逐条标注，新加进这些模块的用例默认用模板、留在 G1。只建当前 schema 空库的 fixture 使用模板副本；测试改了迁移梯（`SCHEMA_VERSION` 或某个 `_migration_N` 步骤，沿迁移器的类继承链查找）却没有标记时，autouse fixture 让这次复制直接失败；步骤调用的 helper 被打补丁时检测不到，这类用例要自己带标记。已经存在的库文件（老版本 fixture、回滚出来的副本）始终按真实迁移梯升级；仓储密集测试只可在 pytest autouse fixture 中降低默认密码派生成本，认证 helper 保留生产默认，比较凭据字段的快照模块必须登记 `_REAL_PASSWORD_HASH_MODULES`；普通 UT 与 G1 测试必须环境自足，不绑定宿主端口、不依赖环境服务；只有合同本身属于进程级行为时才保留自包含的子进程/信号覆盖，启动真实子进程的用例标 `process_contract`，在 G2 运行。`test_test_architecture_policy.py` 扫描测试模块：G1 用例自身代码（或它用到的模块内 helper、fixture）经 `subprocess`、`multiprocessing`、`ProcessPoolExecutor`、`os.fork`/`os.spawn*` 或 `asyncio.create_subprocess_*` 启动进程就判失败；lane 划分守卫是唯一经审查的例外，进程在应用代码内部启动时这项扫描看不到。并发顺序与公平性使用 event/barrier，而非固定 sleep 或线程唤醒顺序；分波次排队时由控制线程运行被测同步编排，在观测到目标容量后用 event 放行，不能让后一波单独落进 cyclic barrier；进程级延迟任务须在共享 teardown 中取消待执行项并等待活跃项收敛，不能只清理由某个局部 repository 对象可见的任务。测试若把 `app.*` 模块从 `sys.modules` 摘掉，必须经 `monkeypatch`（`delitem`，并钉住父包属性）还原，不能裸 `pop`：父包属性仍绑着旧模块对象，下一次 import 会让属性查找与 `sys.modules` 查找分叉，对着一条路径打的补丁另一条路径看不见；backend conftest 在每条测试结束后核对这一不变量，让污染者报错而不是后跑的受害者。收集结束时 backend conftest 先做一次完整回收，再对存活对象（已导入的 app、测试模块与已收集的用例）执行 `gc.freeze()`，循环回收器不再在每次完整回收时重新遍历这块常驻堆；测试之后分配的对象照常回收。
 
@@ -398,6 +398,12 @@ MCP 协议 fixture 按 worker 为用户、笔记本、档案、成员关系和 t
 或 app 状态变更不得影响另一个副本。构建时逐一核对原创建返回值与重读对象的具体类型
 和完整字段（包括签发的 token 原文），防止正确落库掩盖错误的接口返回值。
 
+KG viewer-scope 测试显式选择「第二位成员有／无 Memory」两种种子世界。每条测试
+复制完整数据库与存储，并在安装 runtime spy 前构造全新 repository。payload 只含 ID，
+用户与场景对象从该测试的副本重读。空库用例与任何非路径 Settings 变更仍走真实
+builder。差分回归核对两种 Memory 场景的全部持久表与存储文件、读取结果，以及
+副本之间的数据修改和缓存隔离。
+
 Schema guest、第三方导入与笔记本生命周期源码守卫也经共享的按内容 AST 入口读取。
 Schema guest 扫描缓存每棵树的不可变语义投影，并把三条真实树检查放在同一小分组；
 笔记本生命周期扫描把所属函数信息放在独立投影中，不向共享 AST 节点写入 parent 属性。
@@ -412,6 +418,9 @@ SQLite 推理表征测试只有在使用完全默认的模型脚本、没有场�
 插件时，才可从 `pinned` 种子复制普通 `library_world`。种子在表征集清理后的环境中
 执行真实上传、解析和知识图谱流程；创建返回值须与等价重读一致，反思状态须与全新
 默认模型相同。每条用例的数据库与存储内容、仓库、rig、记录器、hooks 和模型均独立。
+默认脚本的 Knowhow 与 workbook 场景复用同一 library 前缀，再在各自副本中真实执行
+Knowhow 插入或表格上传，不缓存这些差异操作。回归核对完整前缀摘要、每次新建的
+差异实体身份，以及独立副本中的可读产物。
 场景安装前恢复种子预热的计数缓存，Ask 前原有的完整缓存清理仍保留。每次 Ask、
 协作者观测、整库前后差分和断言仍全部执行。特殊 SQLite 场景与全部 PostgreSQL
 场景继续走原路径，独立构建自己的世界。
@@ -816,6 +825,14 @@ KG findings、store-evidence、id-binding 和已认证 KG 枚举的计划检查�
 仍使用独立 schema。这不引入共享可变的模块级 fixture 或 PostgreSQL 迁移模板。
 id-binding 的重复执行缓存测试也保留独立 schema：它会切换反向索引认证标记，不能改变
 行序检查所用的已认证世界。
+
+Memory SQL 谓词与活动时间输入对齐检查也采用带标签的只读矩阵：29 个谓词场景和
+30 个时间输入场景全部可达，每个场景新建连接池。两份矩阵减少 57 次重复迁移与
+seed；变更数据、DDL 与撤权用例仍各用独立 schema。
+18 项 Memory KG store-reader 检查，以及两种删除状态各自的 8 项生命周期可见性
+检查，也保留全部断言并组成三个只读矩阵执行项，再减少 31 次重复世界构造。
+每个场景使用全新 repository、runtime、连接池和空计数缓存；GiST DDL 与全部
+Memory 变更用例仍保留原有独立世界。
 
 Retrieval-leg 的结果与计划检查也在各自已认证或回退只读矩阵中共用一份不变语料。
 标记在矩阵开始前设置，每个场景单独打开并关闭连接池，保留预编译语句对照与事务内

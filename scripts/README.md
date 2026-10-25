@@ -158,6 +158,8 @@ PYTHON_BIN=/path/to/python bash scripts/check.sh
 ```
 contracts + 后端测试/离线 smoke + 前端测试/tsc/build 三条 lane 并行执行。脚本会强制 `MODEL_SERVICES_CONFIG=""`，不读取开发者真实密钥，也不会访问付费/网络模型服务；EXIT=0 即过。
 
+本地 backend 与直接运行 backend pytest 均默认 4 个 worker，与 CI 一致；耗时对比固定使用 4 个 worker。
+
 GitHub G1 仍用两个 job：第一台执行较大的 backend 份，第二台先执行较小份，再执行
 `bash scripts/check.sh --lane contracts --lane frontend`（这两条 lane 仍彼此并行）。
 backend 与前端在第二台上不重叠，每台 runner 各用 4 个 backend worker。

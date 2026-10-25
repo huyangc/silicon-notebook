@@ -17,6 +17,7 @@ import pytest
 
 from app.models.schemas import NotebookCreate
 from app.services import kg_viewer_scope
+from tests import test_kg_viewer_scope as _scenario_fixtures
 from tests.kg_no_memory_baseline import (
     FIXTURE,
     READS,
@@ -33,6 +34,10 @@ from tests.test_kg_viewer_scope import (  # noqa: F401  (``repo`` is a fixture)
     build_scenario,
     repo,
 )
+
+scenario = _scenario_fixtures.scenario
+scenario_seed = _scenario_fixtures.scenario_seed
+scenario_with_b_memory = _scenario_fixtures.scenario_with_b_memory
 
 _MISSING = object()
 
@@ -87,8 +92,8 @@ def _read_all(repo, user, nb):
     as_user(user, repo.kg_search, nb, "Engram")
 
 
-def test_viewer_id_reaches_the_store_only_when_the_scope_filters(repo, keyword_log):
-    s = build_scenario(repo, b_memory=False)
+def test_viewer_id_reaches_the_store_only_when_the_scope_filters(scenario, repo, keyword_log):
+    s = scenario
     # B: A's Memory is foreign -> every read carries B.
     _read_all(repo, s.b, s.nb)
     assert keyword_log == [("list_knowledge_page", s.b.id), ("type_counts", s.b.id),
@@ -104,11 +109,11 @@ def test_viewer_id_reaches_the_store_only_when_the_scope_filters(repo, keyword_l
     assert {value for _name, value in keyword_log} == {_MISSING}
 
 
-def test_a_closed_memory_channel_reads_as_the_empty_identity(repo, keyword_log, monkeypatch):
+def test_a_closed_memory_channel_reads_as_the_empty_identity(scenario, repo, keyword_log, monkeypatch):
     """Plan correction 1: a token without ``memory:read`` sees no
     Memory-derived row, its own included -- the scope exists whenever the
     notebook holds any Memory, and the store is handed ''."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     monkeypatch.setattr(kg_viewer_scope, "memory_channel_allowed", lambda: False)
     _read_all(repo, s.a, s.nb)
     assert keyword_log == [("list_knowledge_page", ""), ("type_counts", ""),
@@ -117,8 +122,8 @@ def test_a_closed_memory_channel_reads_as_the_empty_identity(repo, keyword_log, 
     assert scope.foreign == {"src-ma"} and scope.own_memory == frozenset()
 
 
-def test_the_seam_off_passes_nothing(repo, monkeypatch):
-    s = build_scenario(repo, b_memory=False)
+def test_the_seam_off_passes_nothing(scenario, repo, monkeypatch):
+    s = scenario
     monkeypatch.setattr(kg_viewer_scope, "STORE_READERS_TAKE_VIEWER_ID", False)
     seen: list = []
     for name in ("list_knowledge_page", "type_counts", "fts_search"):
@@ -128,8 +133,8 @@ def test_the_seam_off_passes_nothing(repo, monkeypatch):
 
 
 # ------------------------------------------------ what the reads return
-def test_list_drops_foreign_evidence_items_and_search_drops_hidden_hits(repo):
-    s = build_scenario(repo, b_memory=False)
+def test_list_drops_foreign_evidence_items_and_search_drops_hidden_hits(scenario, repo):
+    s = scenario
     repo.store_kg(s.nb, "src-s", [{
         "local_id": "m", "object_type": "concept",
         "payload": {"name": "Mixture", "section_path": "1"},
@@ -152,11 +157,11 @@ def test_list_drops_foreign_evidence_items_and_search_drops_hidden_hits(repo):
         assert name in repr(a_hits), (query, a_hits)
 
 
-def test_list_judges_an_item_by_the_source_its_element_lives_in(repo, monkeypatch):
+def test_list_judges_an_item_by_the_source_its_element_lives_in(scenario, repo, monkeypatch):
     """P2-4: a legacy-shape item names the readable ``src-s`` but quotes an
     element of A's Memory: B's list page leaves it out (the rule concept
     detail applies), A's keeps it -- with ONE element read for the page."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     repo.store_kg(s.nb, "src-s", [{
         "local_id": "l", "object_type": "concept",
         "payload": {"name": "Legacyshape", "section_path": "1"},
@@ -179,10 +184,10 @@ def test_list_judges_an_item_by_the_source_its_element_lives_in(repo, monkeypatc
     assert "A-PRIVATE secret project" in repr(owner)
 
 
-def test_list_judges_an_item_without_an_element_by_the_source_it_names(repo):
+def test_list_judges_an_item_without_an_element_by_the_source_it_names(scenario, repo):
     """P3-C: an item that names A's Memory and carries no element id never
     reaches the element read; the source it names hides it from B."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     repo.store_kg(s.nb, "src-s", [{
         "local_id": "n", "object_type": "concept",
         "payload": {"name": "Namedonly", "section_path": "1"},
@@ -196,12 +201,12 @@ def test_list_judges_an_item_without_an_element_by_the_source_it_names(repo):
         as_user(s.a, repo.list_knowledge, s.nb, "concept"))
 
 
-def test_list_resolves_each_distinct_element_once_and_sources_only(repo, monkeypatch):
+def test_list_resolves_each_distinct_element_once_and_sources_only(scenario, repo, monkeypatch):
     """P3-B: the list page's element read takes every DISTINCT element id
     once, in batches of 900 distinct ids, and -- with the E4-4 stores
     assembled -- asks for sources only (``sources_only=True``; the double
     below stands in for E4-4's keyword)."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     shared = [{**_ev("src-s", "el-ma-secret"), "quoted_span": f"copy {i}"}
               for i in range(3)]
     repo.store_kg(s.nb, "src-s", [
@@ -279,13 +284,13 @@ def _seed_named_cluster(repo, s, seed_id, ph="?"):
 
 @pytest.mark.parametrize("pending", [True, False])
 def test_a_pending_notebook_never_answers_a_search_hit_by_a_seeded_cluster_id(
-    repo, monkeypatch, pending,
+    scenario, repo, monkeypatch, pending,
 ):
     """E4-4 §7.1: before the isolated rebuild a mixed cluster's canonical id
     can carry a hidden member's text.  While the marker says pending, B's
     folded hit is answered by its first visible member's object id -- same
     name, no seeded id, openable; once isolated, the canonical id again."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     seed = "K-a private seedname"
     _seed_named_cluster(repo, s, seed)
     monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "_isolation_pending",
@@ -302,11 +307,11 @@ def test_a_pending_notebook_never_answers_a_search_hit_by_a_seeded_cluster_id(
         assert engram[0]["object_id"] == seed, hits
 
 
-def test_a_cluster_hit_with_no_visible_member_is_dropped(repo, monkeypatch):
+def test_a_cluster_hit_with_no_visible_member_is_dropped(scenario, repo, monkeypatch):
     """P2-2: a hit that reaches the folded stage as a CANONICAL id (an ANN
     leg answering with a cluster) whose every member is hidden is dropped,
     and never answers under the stored (hidden) name."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     query = repo._runtime.knowledge_query
     hit = {"object_id": s.ids.secret_canonical, "name": "SecretProject",
            "object_type": "concept", "score": 0.9, "match": "semantic"}
@@ -319,8 +324,8 @@ def test_a_cluster_hit_with_no_visible_member_is_dropped(repo, monkeypatch):
     assert [h["object_id"] for h in a_hits] == [s.ids.secret_canonical]
 
 
-def test_legacy_graph_leaves_out_foreign_objects_and_relations(repo, monkeypatch):
-    s = build_scenario(repo, b_memory=False)
+def test_legacy_graph_leaves_out_foreign_objects_and_relations(scenario, repo, monkeypatch):
+    s = scenario
     folds: list = []
     unified_kg = repo._runtime.unified_kg
     fold = unified_kg.cluster_fold_rows
@@ -347,8 +352,8 @@ def _private(s):
 
 
 @pytest.mark.parametrize("path", ["full", "artifact"])
-def test_graph_view_is_the_shared_graph_plus_the_viewers_own_memory(repo, path):
-    s = build_scenario(repo, b_memory=False)
+def test_graph_view_is_the_shared_graph_plus_the_viewers_own_memory(scenario, repo, path):
+    s = scenario
     kwargs = {"level": "object"}
     if path == "artifact":
         assert repo._runtime.scale_artifacts.build_viz(s.nb) is not None
@@ -367,12 +372,12 @@ def test_graph_view_is_the_shared_graph_plus_the_viewers_own_memory(repo, path):
 
 
 @pytest.mark.parametrize("level", ["object", "concept"])
-def test_the_shared_graph_cache_is_the_same_for_every_viewer(repo, level):
+def test_the_shared_graph_cache_is_the_same_for_every_viewer(scenario, repo, level):
     """P1-1 / F3: the shared graph is cached once per notebook and level and
     handed to every member, so it holds NOBODY's Memory -- the requester's
     own included.  The owner reads first (and fills the cache); the member
     then reads the same entry."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     owner = as_user(s.a, repo.unified_graph, s.nb, level=level)
     member = as_user(s.b, repo.unified_graph, s.nb, level=level)
     for view in (owner, member):
@@ -383,11 +388,11 @@ def test_the_shared_graph_cache_is_the_same_for_every_viewer(repo, level):
     assert s.ids.secret in _node_ids(owner)
 
 
-def test_an_unfiltered_cache_entry_never_serves_a_member(repo):
+def test_an_unfiltered_cache_entry_never_serves_a_member(scenario, repo):
     """P1-1: an unfiltered read of the whole graph (the scale build's
     ``_unified_graph_full``) caches under its own key; a member's read does
     not pick it up."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     everything = repo._runtime.knowledge_lifecycle._unified_graph_full(s.nb, "object")
     assert "SecretProject" in repr(everything)
     member = as_user(s.b, repo.unified_graph, s.nb, level="object")
@@ -435,16 +440,16 @@ def assert_a_foreign_memory_relation_between_own_objects_stays_out(repo, s, q) -
     assert "bforeignedge" not in repr(for_b)
 
 
-def test_a_foreign_memory_relation_between_own_objects_stays_out(repo):
-    s = build_scenario(repo, b_memory=True)
+def test_a_foreign_memory_relation_between_own_objects_stays_out(scenario_with_b_memory, repo):
+    s = scenario_with_b_memory
     assert_a_foreign_memory_relation_between_own_objects_stays_out(repo, s, lambda x: x)
 
 
-def test_a_memory_relation_between_shared_objects_is_in_no_shared_graph(repo):
+def test_a_memory_relation_between_shared_objects_is_in_no_shared_graph(scenario, repo):
     """P3-5 (M12): a relation extracted from A's Memory that joins two
     SHARED objects is judged on its own source: it is in neither the shared
     graph (whoever reads it) nor B's legacy graph."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     _memory_relation(repo, s, "rel-mem-shared", s.ids.flow, s.ids.engram_s,
                      "privateedge")
     for user in (s.b, s.a):
@@ -455,10 +460,10 @@ def test_a_memory_relation_between_shared_objects_is_in_no_shared_graph(repo):
 
 
 @pytest.mark.parametrize("path", ["full", "artifact"])
-def test_overlay_edges_join_two_overlay_nodes(repo, path):
+def test_overlay_edges_join_two_overlay_nodes(scenario, repo, path):
     """P3-5 (M4): with the overlay cut by ``limit``, a relation of A's Memory
     whose other end fell outside the cut is not returned."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     _memory_relation(repo, s, "rel-mem-own", s.ids.engram_ma, s.ids.definer_ma,
                      "ownedge")
     kwargs = {"level": "object", "limit": 1}
@@ -474,11 +479,11 @@ def test_overlay_edges_join_two_overlay_nodes(repo, path):
 
 
 @pytest.mark.parametrize("path", ["full", "artifact"])
-def test_graph_totals_do_not_depend_on_the_limit(repo, path):
+def test_graph_totals_do_not_depend_on_the_limit(scenario, repo, path):
     """codex #824 r2: the totals describe the whole graph the viewer may see,
     so ``limit`` (which cuts the own-Memory overlay too) never changes them
     -- the own-Memory edges whose other end fell outside the cut included."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     _memory_relation(repo, s, "rel-mem-own", s.ids.engram_ma, s.ids.definer_ma,
                      "ownedge")
     if path == "artifact":
@@ -491,16 +496,16 @@ def test_graph_totals_do_not_depend_on_the_limit(repo, path):
     assert narrow["truncated"] is True
 
 
-def test_a_closed_channel_hides_the_owners_own_memory_from_the_graph(repo, monkeypatch):
-    s = build_scenario(repo, b_memory=False)
+def test_a_closed_channel_hides_the_owners_own_memory_from_the_graph(scenario, repo, monkeypatch):
+    s = scenario
     monkeypatch.setattr(kg_viewer_scope, "memory_channel_allowed", lambda: False)
     view = as_user(s.a, repo.unified_graph, s.nb, level="object")
     assert not (_node_ids(view) & {s.ids.secret, s.ids.engram_ma, s.ids.definer_ma})
     assert "SecretProject" not in repr(view)
 
 
-def test_neighbours_of_an_own_memory_object_come_from_the_live_tables(repo):
-    s = build_scenario(repo, b_memory=False)
+def test_neighbours_of_an_own_memory_object_come_from_the_live_tables(scenario, repo):
+    s = scenario
     assert repo._runtime.scale_artifacts.build_viz(s.nb) is not None
     view = as_user(s.a, repo.kg_neighbors, s.nb, s.ids.secret)
     assert view["focus_id"] == s.ids.secret
@@ -513,11 +518,11 @@ def test_neighbours_of_an_own_memory_object_come_from_the_live_tables(repo):
     assert hidden["nodes"] == [] and hidden["edges"] == []
 
 
-def test_own_memory_neighbours_are_own_memory_objects_only(repo):
+def test_own_memory_neighbours_are_own_memory_objects_only(scenario, repo):
     """P3-5 (M5): A's own ``private definer`` is linked by a relation of the
     visible source to the shared Engram; its own-Memory neighbourhood holds
     A's Memory objects only."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     view = as_user(s.a, repo.kg_neighbors, s.nb, s.ids.definer_ma)
     assert view["focus_id"] == s.ids.definer_ma
     assert _node_ids(view) == {s.ids.definer_ma}, view
@@ -525,12 +530,12 @@ def test_own_memory_neighbours_are_own_memory_objects_only(repo):
 
 
 @pytest.mark.parametrize("assembled", [False, True])
-def test_the_neighbour_filter_reads_owners_without_evidence(repo, monkeypatch, assembled):
+def test_the_neighbour_filter_reads_owners_without_evidence(scenario, repo, monkeypatch, assembled):
     """E4-4 review P2-2: the neighbour filter's owner read uses only ``id``
     and ``source_id``; with the E4-4 stores assembled it asks for no
     evidence (``with_evidence=False``; the doubles stand in for E4-4's
     keywords)."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     monkeypatch.setattr(kg_viewer_scope, "STORE_READERS_TAKE_VIEWER_ID", assembled)
     knowledge = repo._runtime.knowledge
     original = knowledge.object_evidence_rows
@@ -551,11 +556,11 @@ def test_the_neighbour_filter_reads_owners_without_evidence(repo, monkeypatch, a
     assert all(kwargs == expected for kwargs in calls), calls
 
 
-def test_the_neighbour_route_reads_the_focus_row_not_every_own_object(repo, monkeypatch):
+def test_the_neighbour_route_reads_the_focus_row_not_every_own_object(scenario, repo, monkeypatch):
     """P3-2: routing a click to the live own-Memory path costs one
     primary-key read of the focus row; a shared focus never reads the
     viewer's own Memory object ids."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     knowledge = repo._runtime.knowledge
     relink = knowledge.relink_object_rows_for_source
     get_row = knowledge.get_object_row
@@ -575,13 +580,13 @@ def test_the_neighbour_route_reads_the_focus_row_not_every_own_object(repo, monk
 # ------------------- neighbours: a focus the viz artifact does not hold
 @pytest.mark.parametrize("large", [False, True])
 def test_a_focus_missing_from_the_artifact_falls_back_to_the_live_path(
-    repo, monkeypatch, large,
+    scenario, repo, monkeypatch, large,
 ):
     """Assembly decision (1): the viz artifact answers only for a focus it
     holds.  Here the served artifact is another notebook's (built by the
     same code): a small notebook answers the focus from the live DB path, a
     large one reports ``locating_unavailable`` instead of an empty view."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     scale = repo._runtime.scale_artifacts
     other = as_user(s.a, repo.create_notebook, NotebookCreate(name="other")).id
     with repo._write() as db:
@@ -623,9 +628,9 @@ def test_a_focus_missing_from_the_artifact_falls_back_to_the_live_path(
 # ------------------------------------------- the M1 transition marker (E4-5)
 @pytest.mark.parametrize("large", [False, True])
 def test_a_notebook_pending_its_isolated_rebuild_serves_no_artifact(
-    repo, monkeypatch, large,
+    scenario, repo, monkeypatch, large,
 ):
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     lifecycle = repo._runtime.knowledge_lifecycle
     scale = repo._runtime.scale_artifacts
     assert scale.build_viz(s.nb) is not None
@@ -726,10 +731,10 @@ def test_a_notebook_without_memory_answers_the_pre_e4_7_bytes(repo, monkeypatch)
 
 
 # ------------------------------------------------ summary counts (item 3)
-def test_a_closed_channel_shows_no_memory_count(repo, monkeypatch):
+def test_a_closed_channel_shows_no_memory_count(scenario, repo, monkeypatch):
     """Coordinator decision (e4-7-close): with the Memory channel closed the
     viewer's own Memory count is 0 in the notebook detail and in the list."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     assert as_user(s.a, repo.get_notebook, s.nb).counts["memories"] == 1
     monkeypatch.setattr(kg_viewer_scope, "memory_channel_allowed", lambda: False)
     assert as_user(s.a, repo.get_notebook, s.nb).counts["memories"] == 0
@@ -737,13 +742,13 @@ def test_a_closed_channel_shows_no_memory_count(repo, monkeypatch):
     assert listed[s.nb].counts["memories"] == 0
 
 
-def test_summary_counts_and_kg_ready_carry_the_viewer(repo, monkeypatch):
+def test_summary_counts_and_kg_ready_carry_the_viewer(scenario, repo, monkeypatch):
     """F1 (D2's three values, E4-4): on a notebook holding Memory the counts
     and ``kg_ready`` are read for the viewer -- the member's id, the owner's
     id, '' with the channel closed or without a user; a notebook without
     Memory keeps today's statement.  ``kg_ready`` follows the keyword (the
     store double answers True only for A's own-Memory view)."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     monkeypatch.setattr(kg_viewer_scope, "STORE_READERS_TAKE_VIEWER_ID", True)
     queries = repo._runtime.queries
     seen: list = []
@@ -778,11 +783,11 @@ def test_summary_counts_and_kg_ready_carry_the_viewer(repo, monkeypatch):
         assert summaries.viewer_count_kwargs(db, s.nb, s.b.id) == {}
 
 
-def test_analytics_and_the_search_box_carry_the_viewer(repo, monkeypatch):
+def test_analytics_and_the_search_box_carry_the_viewer(scenario, repo, monkeypatch):
     """E4-4 handover: ``notebook_analytics``' knowledge counts and the search
     box's knowledge leg (HTTP ``/search``, MCP ``search_notebook_context``)
     take the viewer on the summary counts' rule."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     queries = repo._runtime.queries
     seen: list = []
     for name in ("notebook_analytics", "search_notebook"):
@@ -813,12 +818,12 @@ def test_analytics_and_the_search_box_carry_the_viewer(repo, monkeypatch):
     assert seen == [("notebook_analytics", _MISSING), ("search_notebook", _MISSING)]
 
 
-def test_the_notebook_list_probes_memory_once_for_all_its_notebooks(repo, monkeypatch):
+def test_the_notebook_list_probes_memory_once_for_all_its_notebooks(scenario, repo, monkeypatch):
     """P2-A: with the E4-4 seam on, the notebook list learns which of its
     notebooks hold Memory in ONE statement -- the page costs exactly one
     statement more than with the seam off, however many notebooks it lists
     -- and only the notebook holding Memory is counted for the viewer."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     plains = [as_user(s.a, repo.create_notebook, NotebookCreate(name=f"p{i}")).id
               for i in range(5)]
     queries = repo._runtime.queries
@@ -848,11 +853,11 @@ def test_the_notebook_list_probes_memory_once_for_all_its_notebooks(repo, monkey
     assert len(carried) == 2 * (len(plains) + 1), seen
 
 
-def test_memory_holders_is_one_indexed_statement(repo):
+def test_memory_holders_is_one_indexed_statement(scenario, repo):
     """The batched presence read (``memory_source_ids(holders_among=...)``):
     exact answer, one statement, a seek of ``idx_sources_nb_hidden_type`` per
     notebook (EXPLAIN pin) and no scan of ``sources``."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     plain = as_user(s.a, repo.create_notebook, NotebookCreate(name="plain")).id
     with repo._write() as db:              # a source, but no Memory
         _source(db, plain, "src-plain-only", elements=[("el-po", "PLAIN")])

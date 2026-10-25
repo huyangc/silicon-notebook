@@ -439,13 +439,13 @@ def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract
         "`frontend/app/api-client.ts` is the shared transport",
     ))
     _assert_contract("docs/development.md", (
-        "default 16 backend pytest workers",
+        "default four backend pytest workers",
         "`BACKEND_PYTEST_WORKERS`",
         "CI lane timings are observational only",
         "warm gate hard target is at most 100 seconds",
     ))
     _assert_contract("docs/development_zh.md", (
-        "默认使用 16 个 backend pytest worker",
+        "默认使用 4 个 backend pytest worker",
         "`BACKEND_PYTEST_WORKERS`",
         "CI lane 时长仅作观察",
         "warm gate 硬目标是不超过 100 秒",

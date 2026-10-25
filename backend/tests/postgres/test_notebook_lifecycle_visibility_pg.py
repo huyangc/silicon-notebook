@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import pytest
 
-
 pytestmark = [
     pytest.mark.postgres_integration,
     pytest.mark.xdist_group(name="postgres_notebook_lifecycle_visibility"),
@@ -160,7 +159,7 @@ def lifecycle(postgres_repository, request):
     }
 
 
-def test_owned_notebook_rows(postgres_repository, lifecycle):
+def _check_owned_notebook_rows(postgres_repository, lifecycle):
     queries = postgres_repository._runtime.queries
     with postgres_repository._connect() as db:
         ids = {
@@ -170,7 +169,7 @@ def test_owned_notebook_rows(postgres_repository, lifecycle):
     assert ids == {lifecycle["active_id"], lifecycle["viewer_id"]}
 
 
-def test_granted_notebook_rows(postgres_repository, lifecycle):
+def _check_granted_notebook_rows(postgres_repository, lifecycle):
     queries = postgres_repository._runtime.queries
     with postgres_repository._connect() as db:
         ids = {
@@ -180,14 +179,14 @@ def test_granted_notebook_rows(postgres_repository, lifecycle):
     assert ids == {lifecycle["active_id"]}
 
 
-def test_notebook_exists_for_owner(postgres_repository, lifecycle):
+def _check_notebook_exists_for_owner(postgres_repository, lifecycle):
     repo = postgres_repository
     assert repo._runtime.queries.notebook_exists_for_owner(lifecycle["active_id"], lifecycle["owner_id"]) is True
     assert repo._runtime.queries.notebook_exists_for_owner(lifecycle["copying_id"], lifecycle["owner_id"]) is False
     assert repo._runtime.queries.notebook_exists_for_owner(lifecycle["deleting_id"], lifecycle["owner_id"]) is False
 
 
-def test_notebook_analytics(postgres_repository, lifecycle):
+def _check_notebook_analytics(postgres_repository, lifecycle):
     repo = postgres_repository
     repo.notebook_analytics(lifecycle["active_id"])
     with pytest.raises(KeyError):
@@ -196,7 +195,7 @@ def test_notebook_analytics(postgres_repository, lifecycle):
         repo.notebook_analytics(lifecycle["deleting_id"])
 
 
-def test_list_user_activity_scoped(postgres_repository, lifecycle):
+def _check_list_user_activity_scoped(postgres_repository, lifecycle):
     repo = postgres_repository
     active = repo._runtime.queries.list_user_activity(
         lifecycle["owner_id"], notebook_id=lifecycle["active_id"], activity_type="ask"
@@ -214,14 +213,14 @@ def test_list_user_activity_scoped(postgres_repository, lifecycle):
     assert deleting == {"items": [], "has_more": False, "next_cursor": None}
 
 
-def test_mount_gate_participant_resolution(postgres_repository, lifecycle):
+def _check_mount_gate_participant_resolution(postgres_repository, lifecycle):
     store = postgres_repository._runtime.notebook_store
     with postgres_repository._connect() as db:
         ids = set(store.participant_ids(db, lifecycle["viewer_id"], viewer_id=lifecycle["owner_id"]))
     assert ids == {lifecycle["viewer_id"], lifecycle["active_id"]}
 
 
-def test_direct_resource_authorization(postgres_repository, lifecycle):
+def _check_direct_resource_authorization(postgres_repository, lifecycle):
     """直连资源端点授权(codex #653 R2,真规格缺口):`/sources/{id}`、`/elements`
     等端点不经 `get_notebook` 的目录寻址闸,直接走 `access_sql` 的
     NOTEBOOK_READ_SQL/NOTEBOOK_ADMIN_SQL/NOTEBOOK_WRITE_SQL 授权——deleting/copying
@@ -247,7 +246,7 @@ def test_direct_resource_authorization(postgres_repository, lifecycle):
         assert repo.user_can_read_notebook(hidden_id, member_id) is False
 
 
-def test_find_by_token(postgres_repository, lifecycle):
+def _check_find_by_token(postgres_repository, lifecycle):
     """codex #659 R11 P1：``sharing_store.find_by_token`` 的 PG 拼接抽查——
     裸列名 + ``AND NOTEBOOK_LIVE_SQL``，与 ``notebook_exists_for_owner``
     同一拼接形状（模块 docstring 的取舍：语义已在 SQLite 侧钉死，这里只验证
@@ -257,6 +256,33 @@ def test_find_by_token(postgres_repository, lifecycle):
     assert store.find_by_token(tokens[lifecycle["active_id"]]) == lifecycle["active_id"]
     assert store.find_by_token(tokens[lifecycle["copying_id"]]) is None
     assert store.find_by_token(tokens[lifecycle["deleting_id"]]) is None
+
+
+def test_readonly_notebook_lifecycle_visibility_matrix(postgres_settings, lifecycle):
+    """Exercise every read for both lifecycle states without rebuilding its seed."""
+    from app.repositories.postgres import knowledge_counts_cache
+    from app.services.postgres_repository import PostgresRepository
+
+    for check in (
+        _check_owned_notebook_rows,
+        _check_granted_notebook_rows,
+        _check_notebook_exists_for_owner,
+        _check_notebook_analytics,
+        _check_list_user_activity_scoped,
+        _check_mount_gate_participant_resolution,
+        _check_direct_resource_authorization,
+        _check_find_by_token,
+    ):
+        knowledge_counts_cache.invalidate()
+        repository = PostgresRepository(postgres_settings, migrate=False, seed=False)
+        try:
+            check(repository, lifecycle)
+        except Exception as exc:
+            exc.add_note(f"read-only notebook lifecycle scenario: {check.__name__}")
+            raise
+        finally:
+            repository.close()
+            knowledge_counts_cache.invalidate()
 
 
 # --------------------------------------------------------------------------

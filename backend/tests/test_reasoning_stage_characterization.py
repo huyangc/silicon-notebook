@@ -34,7 +34,7 @@ def test_run_reasoning_stage_characterization(scenario, tmp_path_factory, tmp_pa
     try:
         observation = cases.observe(
             repo, BACKEND, scenario, root, monkeypatch,
-            prepare_world=(lambda rig: world.restore_rig(rig, payload)) if seeded else None,
+            prepare_world=(lambda rig: world.restore_rig(rig, payload, scenario)) if seeded else None,
         )
     finally:
         repo.close()

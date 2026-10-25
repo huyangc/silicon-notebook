@@ -14,6 +14,7 @@ import json
 
 import pytest
 
+from tests import test_kg_viewer_scope as _scenario_fixtures
 from tests.test_kg_viewer_scope import (  # noqa: F401  (``repo`` is a fixture)
     _ev,
     _memory,
@@ -28,6 +29,9 @@ from tests.test_kg_viewer_scope import (  # noqa: F401  (``repo`` is a fixture)
 
 
 from tests.pre_isolation_graph import build_pre_isolation
+
+scenario = _scenario_fixtures.scenario
+scenario_seed = _scenario_fixtures.scenario_seed
 
 
 def _cluster_of(repo, nb, object_id):
@@ -58,8 +62,8 @@ def _add_owned_objects(repo, s):
     return merged, bare
 
 
-def test_owner_column_hides_objects_whatever_their_evidence(repo):
-    s = build_scenario(repo, b_memory=False)
+def test_owner_column_hides_objects_whatever_their_evidence(scenario, repo):
+    s = scenario
     merged, bare = _add_owned_objects(repo, s)
     canonical = _cluster_of(repo, s.nb, s.ids.engram_s)
     assert _cluster_of(repo, s.nb, merged) == canonical
@@ -80,8 +84,8 @@ def test_owner_column_hides_objects_whatever_their_evidence(repo):
 
 
 # ------------------------------------------------ mixed member evidence (4a)
-def test_visible_member_never_returns_its_foreign_evidence_items(repo):
-    s = build_scenario(repo, b_memory=False)
+def test_visible_member_never_returns_its_foreign_evidence_items(scenario, repo):
+    s = scenario
     repo.store_kg(s.nb, "src-s", [{
         "local_id": "c", "object_type": "concept",
         "payload": {"name": "Engram", "section_path": "1"},
@@ -106,8 +110,8 @@ def test_visible_member_never_returns_its_foreign_evidence_items(repo):
 
 # ---------------------------------------------------------- fail closed (4c)
 @pytest.mark.parametrize("endpoint", ["context", "concept", "neighbors"])
-def test_a_scope_that_cannot_be_built_fails_the_request(repo, monkeypatch, endpoint):
-    s = build_scenario(repo, b_memory=False)
+def test_a_scope_that_cannot_be_built_fails_the_request(scenario, repo, monkeypatch, endpoint):
+    s = scenario
     reader = reader_of(repo)
 
     def boom(*_a, **_k):
@@ -149,14 +153,14 @@ def _add_dangling(repo, s):
 
 @pytest.mark.parametrize("certified", [False, True])
 def test_an_object_of_a_readable_source_is_never_hidden_by_its_evidence(
-    repo, certified,
+    scenario, repo, certified,
 ):
     """E4-7 (D2 twin of ``foreign_memory_object_excluded``): the objects stay
     visible to B -- their names are the visible source's -- and every
     evidence item attributed to A's Memory (or to nothing readable) is
     dropped from what B receives.  The reverse index is no longer consulted,
     so certifying it changes nothing."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     dangling, claim = _add_dangling(repo, s)
     with repo._write() as db:
         db.execute(
@@ -215,8 +219,8 @@ def _fixed_hub(repo, s, pattern):
     ("HDVVHDVV", 200),
     ("HHHH", 2),          # nothing visible: a 404 on the first page
 ])
-def test_concept_pages_are_exact_around_hidden_members(repo, pattern, limit):
-    s = build_scenario(repo, b_memory=False)
+def test_concept_pages_are_exact_around_hidden_members(scenario, repo, pattern, limit):
+    s = scenario
     canonical = _fixed_hub(repo, s, pattern)
     expected = [f"ko-hub-{i:02d}" for i, kind in enumerate(pattern) if kind in "VD"]
     if not expected:
@@ -246,8 +250,8 @@ def test_concept_pages_are_exact_around_hidden_members(repo, pattern, limit):
 
 # ------------------------------------------------- cap counts visible (5b)
 @pytest.mark.parametrize("path", ["viz", "db"])
-def test_neighbour_cap_counts_visible_neighbours(repo, monkeypatch, path):
-    s = build_scenario(repo, b_memory=False)
+def test_neighbour_cap_counts_visible_neighbours(scenario, repo, monkeypatch, path):
+    s = scenario
     hidden = [{"local_id": f"h{i}", "object_type": "claim",
                "payload": {"name": f"A-PRIVATE claim {i}", "section_path": "1"},
                "evidence": [_ev("src-ma", "el-ma-occ")]} for i in range(6)]
@@ -337,7 +341,7 @@ def _endpoint_counts(repo, monkeypatch, s):
 
 
 def test_statement_count_is_constant_in_the_number_of_unreadable_sources(
-    repo, monkeypatch,
+    scenario, repo, monkeypatch,
 ):
     """Each endpoint issues the same number of statements with 31 and with 301
     unreadable Memory sources: the owned-object set is ONE statement
@@ -346,7 +350,7 @@ def test_statement_count_is_constant_in_the_number_of_unreadable_sources(
     need a check are read in ONE batched statement, and nothing issues a
     per-source read or a per-cluster COUNT. (The owned objects here stay
     under one 900-id fold batch.)"""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     _foreign_memories(repo, s, 30)
     few = _endpoint_counts(repo, monkeypatch, s)
     _foreign_memories(repo, s, 270, offset=30)
@@ -355,11 +359,11 @@ def test_statement_count_is_constant_in_the_number_of_unreadable_sources(
     assert few["context"] <= 30 and few["concept"] <= 30 and few["neighbors"] <= 40, few
 
 
-def test_owned_object_read_seeks_the_source_index(repo):
+def test_owned_object_read_seeks_the_source_index(scenario, repo):
     """The set-valued owner read is driven by the id list: SQLite seeks the
     source index once per listed id instead of scanning the notebook. The
     statement pinned is the one the store actually issues."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     statements = []
     with repo._runtime.database.connect() as db:
         db.set_trace_callback(statements.append)
@@ -376,10 +380,10 @@ def test_owned_object_read_seeks_the_source_index(repo):
     assert "idx_knowledge_objects_nb_updated" not in plan, plan
 
 
-def test_set_valued_store_reads(repo):
+def test_set_valued_store_reads(scenario, repo):
     """``source_ids=`` / ``canonical_ids=``: owned live objects only, an empty
     list issues no statement, and each cluster is cut to ``limit`` rows."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     knowledge = repo._runtime.knowledge
     with repo._write() as db:
         db.execute("UPDATE knowledge_objects SET status='deprecated' WHERE id=?",
@@ -427,11 +431,11 @@ def _mixed_neighbour_clusters(repo, s, names):
     build_pre_isolation(repo, s.nb)
 
 
-def test_partly_hidden_clusters_are_read_in_one_batch(repo, monkeypatch):
+def test_partly_hidden_clusters_are_read_in_one_batch(scenario, repo, monkeypatch):
     """Neighbour hydration probes every partly hidden cluster of the
     response with ONE batched read: the statement count does not grow with
     the number of such clusters."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     _mixed_neighbour_clusters(repo, s, [f"Mixed{i}" for i in range(2)])
     few = _endpoint_counts(repo, monkeypatch, s)["neighbors"]
     _mixed_neighbour_clusters(repo, s, [f"Mixed{i}" for i in range(2, 8)])

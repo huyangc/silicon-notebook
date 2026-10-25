@@ -25,6 +25,7 @@ import json
 
 import pytest
 
+from tests import test_kg_viewer_scope as _scenario_fixtures
 from tests.test_kg_viewer_scope import (  # noqa: F401  (``repo`` is a fixture)
     _ev,
     _object_id,
@@ -36,6 +37,9 @@ from tests.test_kg_viewer_scope import (  # noqa: F401  (``repo`` is a fixture)
 
 
 from tests.pre_isolation_graph import build_pre_isolation
+
+scenario = _scenario_fixtures.scenario
+scenario_seed = _scenario_fixtures.scenario_seed
 
 
 @pytest.fixture(params=["viz", "db"])
@@ -106,11 +110,11 @@ def certify(repo, nb, certified):
 
 @pytest.mark.parametrize("certified", [True, False])
 def test_neighbours_keep_a_cluster_whose_member_only_cites_foreign_memory(
-    repo, neighbour_path, certified,
+    scenario, repo, neighbour_path, certified,
 ):
     """E4-7 (D2/D4): the phantom is the visible source's object; B sees it
     and its edge, and its evidence item from A's Memory never reaches B."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     phantom, phantom_c = add_phantom(repo, s)
     certify(repo, s.nb, certified)
     owner = as_user(s.a, repo.kg_neighbors, s.nb, s.ids.engram_s)
@@ -125,8 +129,8 @@ def test_neighbours_keep_a_cluster_whose_member_only_cites_foreign_memory(
 
 
 @pytest.mark.parametrize("certified", [True, False])
-def test_cluster_labels_never_come_from_a_hidden_member(repo, certified):
-    s = build_scenario(repo, b_memory=False)
+def test_cluster_labels_never_come_from_a_hidden_member(scenario, repo, certified):
+    s = scenario
     visible, hidden, canonical = add_gadget(repo, s)
     certify(repo, s.nb, certified)
     detail = as_user(s.b, repo.concept_detail, s.nb, canonical)
@@ -152,12 +156,12 @@ def test_cluster_labels_never_come_from_a_hidden_member(repo, certified):
     assert owner["canonical_name"] == "A-PRIVATE Gadget"
 
 
-def test_unrelated_clusters_keep_their_stored_label(repo):
+def test_unrelated_clusters_keep_their_stored_label(scenario, repo):
     """Clusters no member of which touches an unreadable source are not
     relabelled: the fix reaches only the clusters it has to. (Without a
     certified reverse index every cluster is examined and labelled by its
     first visible member — fail closed.)"""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     visible, _hidden, canonical = add_gadget(repo, s)
     repo.store_kg(s.nb, "src-s", [
         {"local_id": "w", "object_type": "concept",
@@ -182,7 +186,7 @@ def _kinds(rows):
     return out
 
 
-def test_owned_and_citing_sets_come_from_one_indexed_statement(repo):
+def test_owned_and_citing_sets_come_from_one_indexed_statement(scenario, repo):
     """``relink_object_rows_for_source(source_ids=..., with_citing=True)``:
     the owned objects, the objects CITING the listed sources (reverse index)
     and the index's certificate in ONE statement; the owned leg seeks
@@ -190,7 +194,7 @@ def test_owned_and_citing_sets_come_from_one_indexed_statement(repo):
     ``idx_kos_source_object`` per listed id, never a notebook index; an empty
     list issues nothing; an uncertified index yields no citing rows and no
     certificate marker (unknown, never "none")."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     phantom, _phantom_c = add_phantom(repo, s)
     knowledge = repo._runtime.knowledge
     statements = []
@@ -222,11 +226,11 @@ def test_owned_and_citing_sets_come_from_one_indexed_statement(repo):
 
 
 # ------------------------------------------ same gap, found by the sweep
-def test_fused_description_counts_a_member_owned_by_foreign_memory(repo):
+def test_fused_description_counts_a_member_owned_by_foreign_memory(scenario, repo):
     """Q1 on the member's OWN source: a member owned by A's Memory whose
     evidence is all visible (merged) still makes the fused description
     unattributable to B."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     repo.store_kg(s.nb, "src-s", [
         {"local_id": "z", "object_type": "concept",
          "payload": {"name": "Gizmo", "section_path": "Z"},
@@ -252,13 +256,13 @@ def test_fused_description_counts_a_member_owned_by_foreign_memory(repo):
         "A-PRIVATE fused Gizmo")
 
 
-def test_evidence_items_are_judged_on_named_and_actual_source(repo):
+def test_evidence_items_are_judged_on_named_and_actual_source(scenario, repo):
     """Occurrences (object context) and every evidence list of concept detail
     — the page's, each member's and each attached object's — drop an item
     whose element lives in an unreadable source although it names a readable
     one, and an item naming an unreadable source although its element is
     readable (its ``source_title`` is that source's)."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     repo.store_kg(s.nb, "src-s", [
         {"local_id": "g", "object_type": "concept",
          "payload": {"name": "Gadget", "section_path": "G"},
@@ -303,11 +307,11 @@ def deprecate_with_visible_evidence(repo, s, object_id):
     assert object_id not in repo.cluster_map(s.nb)
 
 
-def test_a_raw_object_is_judged_on_its_own_source_whatever_its_status(repo, monkeypatch):
+def test_a_raw_object_is_judged_on_its_own_source_whatever_its_status(scenario, repo, monkeypatch):
     """The owner half is judged on the row's own ``source_id``, not only
     through the live owned set: a deprecated object of A's Memory that
     cites a readable source never reaches B as a neighbour."""
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     deprecate_with_visible_evidence(repo, s, s.ids.secret)
     monkeypatch.setattr(repo._runtime.scale_artifacts, "viz_index", lambda *_a, **_k: None)
     owner = as_user(s.a, repo.kg_neighbors, s.nb, s.ids.engram_s)
@@ -343,8 +347,8 @@ def _legacy(repo, nb, name, section, source_id, evidence):
 
 
 @pytest.mark.parametrize("section", ["L", ""])
-def test_legacy_sibling_owned_by_foreign_memory_is_not_a_step(repo, section):
-    s = build_scenario(repo, b_memory=False)
+def test_legacy_sibling_owned_by_foreign_memory_is_not_a_step(scenario, repo, section):
+    s = scenario
     target = _legacy(repo, s.nb, "visible step", section, "src-s",
                      [_ev("src-s", "el-s-step")])
     # Owned by A's Memory; the visible evidence item came in by a merge.
@@ -359,8 +363,8 @@ def test_legacy_sibling_owned_by_foreign_memory_is_not_a_step(repo, section):
 
 
 @pytest.mark.parametrize("section", ["L", ""])
-def test_legacy_step_text_comes_from_the_elements_actual_source(repo, section):
-    s = build_scenario(repo, b_memory=False)
+def test_legacy_step_text_comes_from_the_elements_actual_source(scenario, repo, section):
+    s = scenario
     target = _legacy(repo, s.nb, "visible step", section, "src-s",
                      [_ev("src-s", "el-s-step")])
     # Names the visible source, points at an element of A's Memory.
@@ -469,10 +473,10 @@ def count_hydrated_member_rows(knowledge, monkeypatch):
     return hydrated
 
 
-def test_a_suspect_hub_no_longer_sizes_every_clusters_member_window(repo, monkeypatch):
+def test_a_suspect_hub_no_longer_sizes_every_clusters_member_window(scenario, repo, monkeypatch):
     from app.services.kg_viewer_scope import _FIRST_MEMBER_WINDOW as window
 
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     seed_member_clusters(repo, s.nb, MEMBER_SPECS)
     certify(repo, s.nb, True)
     reader = reader_of(repo)
@@ -494,9 +498,9 @@ def test_a_suspect_hub_no_longer_sizes_every_clusters_member_window(repo, monkey
 
 @pytest.mark.parametrize("certified", [True, False])
 def test_a_cluster_is_labelled_by_a_visible_member_beyond_the_first_window(
-    repo, monkeypatch, certified,
+    scenario, repo, monkeypatch, certified,
 ):
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     names = seed_member_clusters(repo, s.nb, MEMBER_SPECS)
     certify(repo, s.nb, certified)
     scope = as_user(s.b, reader_of(repo).for_notebook, s.nb)
@@ -510,8 +514,8 @@ def test_a_cluster_is_labelled_by_a_visible_member_beyond_the_first_window(
 
 
 @pytest.mark.parametrize("certified", [True, False])
-def test_a_cluster_with_no_visible_member_anywhere_is_hidden(repo, certified):
-    s = build_scenario(repo, b_memory=False)
+def test_a_cluster_with_no_visible_member_anywhere_is_hidden(scenario, repo, certified):
+    s = scenario
     seed_member_clusters(repo, s.nb, MEMBER_SPECS)
     certify(repo, s.nb, certified)
     scope = as_user(s.b, reader_of(repo).for_notebook, s.nb)
@@ -534,10 +538,10 @@ def _member_ids(names, canonical):
     return sorted(oid for oid, name in names.items() if f"{canonical} " in name)
 
 
-def test_a_concept_page_reads_the_page_size_not_the_hubs_suspect_count(repo, monkeypatch):
+def test_a_concept_page_reads_the_page_size_not_the_hubs_suspect_count(scenario, repo, monkeypatch):
     from app.services.kg_viewer_scope import _FIRST_MEMBER_WINDOW as window
 
-    s = build_scenario(repo, b_memory=False)
+    s = scenario
     seed_member_clusters(repo, s.nb, MEMBER_SPECS)
     certify(repo, s.nb, True)
     knowledge = reader_of(repo).knowledge
@@ -558,8 +562,8 @@ def test_a_concept_page_reads_the_page_size_not_the_hubs_suspect_count(repo, mon
 
 
 @pytest.mark.parametrize("certified", [True, False])
-def test_a_concept_page_widens_past_hidden_members(repo, certified):
-    s = build_scenario(repo, b_memory=False)
+def test_a_concept_page_widens_past_hidden_members(scenario, repo, certified):
+    s = scenario
     seed_member_clusters(repo, s.nb, MEMBER_SPECS)
     certify(repo, s.nb, certified)
     page = as_user(s.b, repo.concept_detail, s.nb, DEEP, limit=3)
@@ -573,8 +577,8 @@ def test_a_concept_page_widens_past_hidden_members(repo, certified):
 
 
 @pytest.mark.parametrize("certified", [True, False])
-def test_a_cluster_with_no_visible_member_is_absent_on_every_page(repo, certified):
-    s = build_scenario(repo, b_memory=False)
+def test_a_cluster_with_no_visible_member_is_absent_on_every_page(scenario, repo, certified):
+    s = scenario
     names = seed_member_clusters(repo, s.nb, MEMBER_SPECS)
     certify(repo, s.nb, certified)
     members = _member_ids(names, DARK)

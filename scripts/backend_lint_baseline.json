@@ -1363,9 +1363,6 @@
   "backend/tests/postgres/test_memory_chunk_write_refusals_pg.py": {
     "I001": 1
   },
-  "backend/tests/postgres/test_memory_kg_store_readers_pg.py": {
-    "I001": 1
-  },
   "backend/tests/postgres/test_memory_purge_pg.py": {
     "I001": 1
   },
@@ -1388,9 +1385,6 @@
     "I001": 1
   },
   "backend/tests/postgres/test_notebook_delete_rows_and_files_pg.py": {
-    "I001": 1
-  },
-  "backend/tests/postgres/test_notebook_lifecycle_visibility_pg.py": {
     "I001": 1
   },
   "backend/tests/postgres/test_notebook_list_prefetch_pg.py": {
@@ -2167,9 +2161,6 @@
     "I001": 2
   },
   "backend/tests/test_kg_source_status.py": {
-    "I001": 1
-  },
-  "backend/tests/test_kg_viewer_scope.py": {
     "I001": 1
   },
   "backend/tests/test_kg_viewer_scope_assembly.py": {

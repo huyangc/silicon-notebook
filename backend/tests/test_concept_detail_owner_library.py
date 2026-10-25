@@ -36,9 +36,15 @@ from tests.test_kg_viewer_scope import (  # noqa: F401  (``repo`` is a fixture)
     repo,
 )
 
+scenario = kg_viewer_scope.scenario
+scenario_seed = kg_viewer_scope.scenario_seed
+scenario_with_b_memory = kg_viewer_scope.scenario_with_b_memory
 
-def test_viewer_scoped_concept_detail_never_reads_another_librarys_element(repo):
-    s = build_scenario(repo, b_memory=True)
+
+def test_viewer_scoped_concept_detail_never_reads_another_librarys_element(
+    scenario_with_b_memory, repo,
+):
+    s = scenario_with_b_memory
     private = as_user(s.a, repo.create_notebook, NotebookCreate(name="private")).id
     with repo._write() as db:
         _source(db, private, "src-priv", elements=[("el-priv", "PRIVATE CURRENT TEXT")])
@@ -63,7 +69,7 @@ def test_viewer_scoped_concept_detail_never_reads_another_librarys_element(repo)
 
 
 def check_mixed_pointer_never_reaches_the_raw_lists(
-    repo, helpers, b_memory, *, update_evidence_sql,
+    repo, helpers, b_memory, *, update_evidence_sql, scenario=None,
 ):
     """A MIXED pointer -- an item naming this library's source but an element
     of ANOTHER library (``el-priv``, in A's private notebook) -- on a cluster
@@ -73,7 +79,7 @@ def check_mixed_pointer_never_reaches_the_raw_lists(
     the other library's element id (codex #823 r2 P2).  ``b_memory`` selects
     the branch: with B's Memory in the library A's view runs under the viewer
     rule, without it the detail is read unfiltered."""
-    s = helpers.build_scenario(repo, b_memory=b_memory)
+    s = scenario if scenario is not None else helpers.build_scenario(repo, b_memory=b_memory)
     private = helpers.as_user(s.a, repo.create_notebook, NotebookCreate(name="private")).id
     mixed = {**helpers._ev("src-s", "el-priv"), "quoted_span": "mixed stored"}
     with repo._write() as db:
@@ -110,7 +116,8 @@ _SQLITE_EVIDENCE_SQL = (
 
 
 @pytest.mark.parametrize("b_memory", [True, False])
-def test_mixed_pointer_never_reaches_the_raw_lists(repo, b_memory):
+def test_mixed_pointer_never_reaches_the_raw_lists(repo, b_memory, scenario):
     check_mixed_pointer_never_reaches_the_raw_lists(
         repo, kg_viewer_scope, b_memory, update_evidence_sql=_SQLITE_EVIDENCE_SQL,
+        scenario=scenario,
     )
