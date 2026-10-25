@@ -213,6 +213,12 @@ python scripts/check_backend_lint.py --rename OLD NEW   # 改名/挪动有基线
 同时生成 `backend/.local/postgres-metrics.json`，汇总墙钟、各 worker 阶段累计耗时、
 CPU 与单进程峰值内存；指标故障不影响测试结果，CI 将其与 JUnit 一起保留七天。
 
+CI 使用显式 `--shard-index 0|1 --shard-count 2` 将同一选择集合分为两份：index 0
+在专用 PG runner 执行，index 1 在另一台 runner 的 backend 完成后执行。两台各用
+独立 PG16 服务和十二个目标，每份仍为 4 worker、每条用例独立 schema／真实迁移。
+报告分别使用 `postgres-shard0-*`／`postgres-shard1-*`，参数不传给嵌套 pytest；非法或
+不成对参数立即失败。不带参数的本地命令保持完整 PG 泳道，不会自动启用分片。
+
 ### `migrate_sqlite_to_postgres.py` —— SQLite 存量迁移到 PostgreSQL
 
 默认只预检；目标必须是空的 PostgreSQL 16 UTF-8 数据库，URL 从环境变量读取而不出现在 CLI 参数：

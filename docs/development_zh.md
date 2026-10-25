@@ -674,13 +674,17 @@ job：job 名本身说明它把关什么，每个 job 都必须通过，workflow
 
 `.github/workflows/ci.yml` 在目标为 `master` 的 PR、`master` push 与手动触发时运行。G1 是
 其中两个现有 runner 分担 G1，每台各用 4 个 backend pytest worker：
-`CI / level-1-backend-primary` 执行
+`CI / level-1-backend-primary-postgres-rest` 执行
 `bash scripts/check_backend.sh --shard-index 0 --shard-count 2`；
 `CI / level-1-backend-rest-contracts-frontend` 先执行同命令的 index 1，再执行
 `bash scripts/check.sh --lane contracts --lane frontend`。第二台 runner 不重叠执行
 backend 和前端；contracts 与前端仍彼此并行。backend 步骤失败后，后两条泳道仍可达，
-任一步骤失败仍使 job 失败。第三个 job 仍是独立的 G3
-`CI / level-3-postgres-integration`。不带参数的 `check_backend.sh` 仍跑完整 backend，
+任一步骤失败仍使 job 失败。第一台 runner 在 backend 退出后预建自己的 PostgreSQL
+目标，并执行 `bash scripts/check_postgres.sh --shard-index 1 --shard-count 2`；
+第三个 job `CI / level-3-postgres-integration` 在自己的服务上执行 index 0。
+第一台的 PG service 在 backend 测试期间保持空闲，预建和 PG 测试只在 backend
+结束后开始，backend 失败也继续；两份 PG 都须通过，第一台 job 状态同时把关
+backend 和 PG。不带参数的 `check_backend.sh` 仍跑完整 backend，
 不带参数的 `check.sh` 仍是完整本地 G1；`--lane <name>`（可重复）只跑指定泳道。
 
 CI 将正常选出的 G1 用例恰好分成两份非空集合，未分组模块和 xdist 实际生效的
@@ -691,10 +695,19 @@ loadgroup 均不拆分。实测模块成本只用于平衡归属：新增模块�
 逐项对比，检查身份及重复次数完全相等、没有交集、没有拆开 loadgroup。
 G1/G2 的 marker 表达式与互补覆盖证明均保持不变。
 
+PG 分片复用同一分配算法、独立实测的模块成本，以及不变的
+`postgres_integration or postgres_lane_contract` 选择。第二台 PG runner 之前的
+backend 工作按九分钟／2160 累计测试秒作为平衡提示，不是超时或测试上限。
+原始身份与实际 loadgroup 均保持完整。始终在 G1 可达的守卫还会实际收集 PG launcher
+的完整命令和两份分片命令，在不连接数据库的情况下证明多重集合完整并集、无交集和
+分组不拆分。分片／插件参数不进入子进程环境；新测试使用默认成本，旧提示不会漏掉
+用例。每份 PG 保持 4 worker、各自 12 个目标，两个 runner 的服务端点彼此独立。
+
 `.github/workflows/daily-extended.yml`（`Daily Extended Gate`，每日一个 cron 加手动触发）
 用三个 job 跑 G2。`level-2-backend-primary` 与
 `level-2-backend-rest-contracts-frontend` 逐条命令对齐
-`ci.yml` 跑 G1，唯一差别是依赖安装仍按下文关闭 pip wheel cache。
+`ci.yml` 跑 G1，依赖安装仍按下文关闭 pip wheel cache。Daily 不增加 PG service
+或 PG 步骤，独立第三个 job 仍是 G2 补集。
 `level-2-backend-rest-contracts-frontend` 随后再以 `FRONTEND_LANE_PARALLEL=1` 运行
 `scripts/check_frontend.sh`，G1 那一步失败也照跑：CI runner 不足 8 个 CPU，这是 frontend
 lane 并行路径唯一的 CI 覆盖，PR CI 从不强制走它。`level-2-complement` 执行
@@ -708,7 +721,9 @@ G2，不带参数的 `check_extended.sh` 仍是完整的本地 G2（先 G1，再
 两个 workflow 都固定使用 `ubuntu-24.04`、Python 3.13 和唯一的 Node.js 大版本，从声明的
 依赖文件安装，并把测试选择委托给 wrapper 脚本。`test_ci_workflow_contract.py` 钉住
 job 集合与名字、最多三个 job 的规则、backend 两份分片索引及每份 4 worker、第二份之后
-其余 G1 泳道各跑一次、两份分片报告均上传、每日 G1 半边与 `ci.yml` 对齐，并带与不带参数实际执行 `check.sh` 与
+其余 G1 泳道各跑一次、两份分片报告均上传、每日 G1 半边与 `ci.yml` 对齐；还钉住
+PG 两份索引、相同 service 预算、共用预建／资源脚本、第一台串行顺序、失败继续和
+独立 PG 产物，并带与不带参数实际执行 `check.sh` 与
 `check_extended.sh`。
 
 仓库只支持一个 Node.js 大版本 26，钉在 `.nvmrc`。每个 `actions/setup-node` 都读
@@ -753,22 +768,25 @@ OS/架构/Python/锁文件/策略 key，不回退到其他缓存；G2 继续禁�
 runner，可能以 `SIGILL` 崩溃。CI 使用可移植构建，以少量 ANN 性能换取确定性；
 生产 wheelhouse 仍可按已声明的部署 CPU 定向构建。job 的 timeout 都包含依赖安装，
 与 Apple Silicon 本地 warm gate 的 100 秒内目标刻意分开。较大 backend 份所在的
-`level-1-backend-primary` 与 `level-2-backend-primary` 保持 30 分钟；较小 backend
+Daily 的 `level-2-backend-primary` 保持 30 分钟；PR 的
+`level-1-backend-primary-postgres-rest` 为串行 backend 和 PG 给 35 分钟；较小 backend
 份之后运行 contracts/frontend 的 job 也给 30 分钟，每日补集保持 20 分钟。
 重新分配前，完整 backend 测试步骤在 run 40140238921 用 14:00，在 run 40083452330
 用 14:51；计时提示用于平衡现有 runner，这些上限为安装、增长和慢主机留出余量。
 G3 保持 35 分钟。这些 check 都不是
 `master` 的 required status check；要设为 required，须由用户明确批准分支保护变更。
 
-PostgreSQL 覆盖与离线门禁明确分离。`level-3-postgres-integration` job 启动 PostgreSQL 16，
-通过 `bash scripts/check_postgres.sh` 选择 `postgres_integration or postgres_lane_contract`；
+PostgreSQL 覆盖与离线门禁明确分离。两个 CI job 各启动 PostgreSQL 16，通过显式分片的
+`bash scripts/check_postgres.sh` 选择 `postgres_integration or postgres_lane_contract`；
 后者将环境自足的适配器/迁移契约与 launcher/目标安全检查纳入它所归属的泳道。
-仅 CI service 将 PGDATA 放在上限 6 GiB 的 tmpfs，减少短命 schema 的宿主磁盘开销。
+仅 CI service 各将 PGDATA 放在上限 6 GiB 的 tmpfs，减少短命 schema 的宿主磁盘开销。
 初始化集群使用 `shared_buffers=512MB`、`max_wal_size=2GB`，减少真实 schema 创建中的
 buffer 淘汰与频繁请求 checkpoint。`max_wal_size` 是软 checkpoint 目标，不是存储上限；
 tmpfs 预留空间和另占的 shared buffers 必须纳入 runner 总内存预算。WAL 仍启用，
 `fsync`、`synchronous_commit`、`full_page_writes` 保持默认值。创建测试角色和目标之前，
-先校验实际 buffer/WAL 字节值及三项持久性设置，不匹配就立即失败。
+先校验实际 buffer/WAL 字节值及三项持久性设置，不匹配就立即失败。两个 job 共用
+`tests/postgres/ci_provision.py` 和 `ci_resources.sh`，让日志、角色／目标安全检查和
+资源观测保持单一实现。
 job 记录存储用量、容器内存峰值与 CPU 计数，以及 PostgreSQL 16 `pg_stat_bgwriter`
 中的 checkpoint 次数、写入/同步耗时和 buffer 写入计数，以及实际 buffer/WAL 配置和
 `pg_stat_wal` 计数，区分 checkpoint 压力与测试 CPU
@@ -817,7 +835,9 @@ Memory KG 写侧种子按依赖顺序批量发送，包括成本矩阵中的 Mem
 本地仍可使用已安装的 PostgreSQL 16 和显式 `TEST_POSTGRES_URL` 运行串行泳道，此时
 不得同时设置并行 JSON 变量；权威 CI 仍要求辅助目标齐全。`scripts/check.sh` 不得启动
 或连接 PostgreSQL。PG launcher 固定报告慢 setup/call/teardown，并输出
-`backend/.local/postgres-junit.xml`，CI 即使失败也上传；不会把任意 `PYTEST_ADDOPTS`
+不带参数时写入 `backend/.local/postgres-junit.xml` 与 `postgres-metrics.json`，显式
+分片分别使用 `postgres-shard0-*`／`postgres-shard1-*`，CI 即使失败也作为独立产物上传。
+本地无参验证仍运行完整 PG 泳道；不会把任意 `PYTEST_ADDOPTS`
 转发给隔离的子进程。backend、extended-backend 与 PostgreSQL wrapper 另加载可选
 `tests.ci_metrics` 插件，在 JUnit 旁写入对应的 `*-metrics.json`；CI 在原有保留七天的
 artifact 中一起上传。指标包括墙钟、setup/call/teardown 的累计耗时与报告数、可用 CPU

@@ -262,7 +262,7 @@ def test_verification_lanes_do_not_hide_committed_tests():
 # collect-only proof would become the gate's tail. It changes no lane
 # selection; `test_the_lane_partition_guard_is_collected_first` pins it.
 def test_verification_lane_markers_partition_every_architecture_contract_test():
-    """Prove the marker split and actual G1 shards have no gap or overlap.
+    """Prove the marker split and actual G1/PG shards have no gap or overlap.
 
     The pinned literal strings above catch textual drift between the two `-m`
     expressions, but they cannot catch a *consistent* mistake: someone edits
@@ -295,6 +295,8 @@ def test_verification_lane_markers_partition_every_architecture_contract_test():
     collections exercise the real sharding plugin and real G1 expression;
     their native-id multisets must partition that universe exactly. Xdist's
     actual scheduling-key function separately proves group co-location.
+    The same independent proof exercises the PostgreSQL launcher's actual
+    full and sharded commands, without starting fixtures or contacting a DB.
     """
     import ast
     import json
@@ -402,11 +404,20 @@ def test_verification_lane_markers_partition_every_architecture_contract_test():
         "tests.architecture.lane_partition_plugin",
     ]
 
-    def collect(extra_args: list[str]) -> list[dict]:
+    def collect(extra_args: list[str], *, command=None, cwd=ROOT) -> list[dict]:
+        child_env = {**os.environ, "PYTHONPATH": str(ROOT / "backend")}
+        if command is not None:
+            # These are collect-only commands with -n0, not a live target
+            # launch. Ambient four-worker target maps must not enable PG.
+            for key in (
+                "TEST_POSTGRES_TARGETS_JSON", "TEST_POSTGRES_URL",
+                "TEST_POSTGRES_NON_C_URL", "TEST_POSTGRES_NON_UTF_URL",
+            ):
+                child_env.pop(key, None)
         result = subprocess.run(
-            [*args, *extra_args],
-            cwd=ROOT,
-            env={**os.environ, "PYTHONPATH": str(ROOT / "backend")},
+            [*(args if command is None else command), *extra_args],
+            cwd=cwd,
+            env=child_env,
             capture_output=True,
             text=True,
             check=False,
@@ -465,8 +476,6 @@ def test_verification_lane_markers_partition_every_architecture_contract_test():
     assert (g1_ids & candidate_ids) | (g2_ids & candidate_ids) == candidate_ids
     assert not (g1_ids & candidate_ids) & (g2_ids & candidate_ids)
 
-    g1_counter = Counter(item["nodeid"] for item in items if item["nodeid"] in g1_ids)
-    assert all(count == 1 for count in g1_counter.values())
     selected = [
         collect([
             "-m", marker_expr(0), "-p", "tests.architecture.g1_sharding",
@@ -474,28 +483,41 @@ def test_verification_lane_markers_partition_every_architecture_contract_test():
         ])
         for index in range(2)
     ]
-    shard_counters = [Counter(item["nodeid"] for item in shard) for shard in selected]
-    assert all(shard_counters), "a real G1 shard selected no tests"
-    assert shard_counters[0] + shard_counters[1] == g1_counter
-    assert not (shard_counters[0] & shard_counters[1])
-    owners = {
-        nodeid: index
-        for index, counter in enumerate(shard_counters)
-        for nodeid in counter
-    }
-    group_owners: dict[str, set[int]] = {}
-    for item in items:
-        nodeid = item["nodeid"]
-        if nodeid not in g1_ids:
-            continue
-        names = item["xdist_groups"]
-        scheduled_id = f"{nodeid}@{'_'.join(names)}" if names else nodeid
-        # This is xdist's installed scheduler, independent of our selection
-        # implementation. In particular it handles '@' and ']' in parameters
-        # and group names, combined-name collisions, and default groups.
-        key = LoadGroupScheduling._split_scope(None, scheduled_id)
-        group_owners.setdefault(key, set()).add(owners[nodeid])
-    assert all(len(indices) == 1 for indices in group_owners.values())
+    def assert_partition(full, parts, lane):
+        complete = Counter(item["nodeid"] for item in full)
+        assert complete and all(count == 1 for count in complete.values())
+        shard_counters = [Counter(item["nodeid"] for item in part) for part in parts]
+        assert all(shard_counters), f"a real {lane} shard selected no tests"
+        assert shard_counters[0] + shard_counters[1] == complete
+        assert not (shard_counters[0] & shard_counters[1])
+        owners = {
+            nodeid: index
+            for index, counter in enumerate(shard_counters)
+            for nodeid in counter
+        }
+        group_owners: dict[str, set[int]] = {}
+        for item in full:
+            nodeid, names = item["nodeid"], item["xdist_groups"]
+            scheduled_id = f"{nodeid}@{'_'.join(names)}" if names else nodeid
+            # Installed xdist, independent of the allocator, handles native
+            # @ parameters, default groups and combined-name collisions.
+            key = LoadGroupScheduling._split_scope(None, scheduled_id)
+            group_owners.setdefault(key, set()).add(owners[nodeid])
+        assert all(len(indices) == 1 for indices in group_owners.values())
+
+    assert_partition([item for item in items if item["nodeid"] in g1_ids], selected, "G1")
+
+    from tests.postgres.lane import BACKEND_ROOT, _pytest_command
+
+    collect_args = ["--collect-only", "-q", "-p", "tests.architecture.lane_partition_plugin"]
+    pg_full = collect(collect_args, command=_pytest_command(), cwd=BACKEND_ROOT)
+    pg_parts = [
+        collect(
+            collect_args, command=_pytest_command(shard=(index, 2)), cwd=BACKEND_ROOT,
+        )
+        for index in range(2)
+    ]
+    assert_partition(pg_full, pg_parts, "PostgreSQL")
 
 
 def test_the_process_scan_finds_every_way_a_g1_test_starts_a_process():

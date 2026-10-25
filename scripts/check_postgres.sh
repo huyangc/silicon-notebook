@@ -4,6 +4,33 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
+LAUNCHER_ARGS=(-m tests.postgres.lane)
+SHARD_INDEX=""
+SHARD_COUNT=""
+usage_error() {
+  printf 'check_postgres.sh: %s; use no arguments or --shard-index 0|1 --shard-count 2\n' "$1" >&2
+  exit 2
+}
+while (( $# )); do
+  case "$1" in
+    --shard-index)
+      [[ -z "$SHARD_INDEX" && $# -ge 2 && "$2" =~ ^[01]$ ]] || usage_error 'invalid or repeated shard index'
+      SHARD_INDEX="$2"
+      shift 2
+      ;;
+    --shard-count)
+      [[ -z "$SHARD_COUNT" && $# -ge 2 && "$2" == 2 ]] || usage_error 'invalid or repeated shard count'
+      SHARD_COUNT="$2"
+      shift 2
+      ;;
+    *) usage_error 'unknown argument' ;;
+  esac
+done
+if [[ -n "$SHARD_INDEX" || -n "$SHARD_COUNT" ]]; then
+  [[ -n "$SHARD_INDEX" && -n "$SHARD_COUNT" ]] || usage_error 'shard options must be paired'
+  LAUNCHER_ARGS+=(--shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT")
+fi
+
 # Preserve repo-relative interpreter paths after the script changes into backend/.
 if [[ "$PYTHON_BIN" != /* && -x "$ROOT_DIR/$PYTHON_BIN" ]]; then
   PYTHON_BIN="$ROOT_DIR/$PYTHON_BIN"
@@ -32,4 +59,4 @@ export MINERU_MODE="off" MINERU_API_TOKEN=""
 # diagnostics, password-free pytest URLs, and selection of integration and
 # hermetic lane contracts. Keeping conninfo parsing out of shell prevents echoing.
 cd "$ROOT_DIR/backend"
-PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -m tests.postgres.lane
+PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "${LAUNCHER_ARGS[@]}"
