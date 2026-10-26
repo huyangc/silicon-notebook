@@ -4657,6 +4657,8 @@ Deep reports first deduplicate material and remove repeated metadata, then fit w
 
 This applies to intent/outline/sufficiency, retrieval reasoning, section drafting, synthesis and final editing. Each derived layer is budgeted again; downstream aggregation cannot concatenate unbounded intermediate results. Small requests keep the ordinary path. Retrieval depth still selects retrieval effort rather than silently shrinking to match model capacity. Budget exhaustion stops extra calls: usable partial material is disclosed, missing mandatory directions remain explicit gaps, failed synthesis/editor stages keep completed sections, and a report with no usable sections fails.
 
+Renderer-owned graph relations, inference paths, validity scopes and inference citation rules remain with their complete citation dependencies during projection. Omitting a dependency omits the associated inference and records the material gap. Compression depth follows normalized claims' supporting and contrary evidence across sections. Shared definitions carry their dependencies to every receiving chapter; a globally forwarded central answer conservatively inherits the highest admitted input depth because it has no explicit evidence bindings.
+
 | Context-processing rail | Default / rule |
 | --- | --- |
 | `MODEL_CONTEXT_SAFETY_RATIO` | Default 0.05, range 0 ≤ ratio < 1; reserve `ceil(context window × ratio)` tokens |

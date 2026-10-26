@@ -1,6 +1,8 @@
 """Report capacity integration: real prompts, admitted sends and durable receipts."""
 import json
 from copy import deepcopy
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,7 +11,7 @@ from app.core.model_context import ContextBudget, ModelContextExceeded, admit_re
 from app.models.schemas import NotebookCreate
 from app.services.context_spans import entry_lines
 from app.services.reasoning_retrieval import ReasoningResult
-from app.services.report_context import EvidenceUnit, ReportContextOverflow
+from app.services.report_context import ContextProjection, EvidenceUnit, ReportContextOverflow
 from app.services.report_context_runtime import (
     ReportIntentClient,
     context_disclosure,
@@ -18,8 +20,10 @@ from app.services.report_context_runtime import (
     report_blueprint_call,
     report_context_runtime,
     report_editor_call,
+    section_context_receipt,
 )
 from app.services.report_engine import ReportEngine
+from app.services.report_synthesis import blueprint_for_section
 from tests.test_report_engine_ports import _deps, _Evidence, _Models
 
 
@@ -152,6 +156,72 @@ def test_blueprint_allowed_ids_exclude_evidence_not_received_by_model():
     assert '"evidence_id": "e2"' not in prompt
     assert "all fixed" in prompt
     assert receipt_for(eng)["stages"]["synthesis"]["omitted_items"] == 1
+
+
+@pytest.mark.parametrize("dependency", ["claim", "counterevidence", "shared_definition", "central_answer"])
+def test_blueprint_derivations_inherit_actual_evidence_depth_before_editor_compression(monkeypatch, dependency):
+    quote = "Measured 1.2 V at 25 C."
+    raw = {"central_answer": "Global derived answer" if dependency == "central_answer" else "",
+           "shared_definitions": [], "claims": [],
+           "sections": [{"section_id": f"section-{index}", "thesis": f"Section {index}"}
+                        for index in range(1, 4)]}
+    if dependency in {"claim", "counterevidence"}:
+        raw["claims"] = [{"id": "cross-section", "statement": quote, "type": "fact",
+                          "owner_section_id": "section-2",
+                          "evidence_keys": ["e1" if dependency == "claim" else "e2"],
+                          "counterevidence_keys": ["e1"] if dependency == "counterevidence" else []}]
+    if dependency == "shared_definition":
+        raw["shared_definitions"] = [{"term": "Measurement", "definition": quote,
+                                      "evidence_keys": ["e1"]}]
+    seen = []
+
+    def compress(messages):
+        payload = json.loads(messages[-1]["content"])
+        seen.extend(item["handle"] for item in payload)
+        return {"cards": [finding(item["handle"], quote) for item in payload]}
+
+    target = Transport(raw)
+    eng = engine(target, Transport(compress))
+    runtime = report_context_runtime(eng)
+    original_project = runtime.project
+
+    def projected(client, schema, render, units, stage):
+        projection = original_project(client, schema, render, units, stage)
+        if stage == "synthesis":
+            # Model the completed projection boundary: only source section 1's
+            # material has reached the configured maximum compression depth.
+            projected_units = tuple(replace(unit, level=eng.settings.report_context_compression_max_levels,
+                                            quotes=((unit.handle, quote),))
+                                    if unit.group == "section-1" else unit for unit in projection.units)
+            return replace(projection, units=projected_units)
+        return projection
+
+    monkeypatch.setattr(runtime, "project", projected)
+    outline = [{"title": f"Section {index}", "scope": "Measurements"} for index in range(1, 4)]
+    results = [ReasoningResult(chunks=[SimpleNamespace(chunk_id=f"e{index}", text=quote)])
+               for index in range(1, 4)]
+    blueprint, status, error = eng._synthesize_report_blueprint(outline, results, "Question", None)
+    assert status == "available", error
+    empty_draft = SimpleNamespace(projection=ContextProjection((), ()))
+    receipts = [section_context_receipt(empty_draft, blueprint_for_section(blueprint, index))
+                for index in range(3)]
+    maximum = eng.settings.report_context_compression_max_levels
+    expected = [maximum, maximum, 0] if dependency in {"claim", "counterevidence"} else [maximum] * 3
+    assert [receipt["max_level"] for receipt in receipts] == expected
+
+    target.context_budget = ContextBudget(1000000, 100, 9000)
+    chapters = [{"title": f"Section {index}", "markdown": quote + (" detail. " * 2000 if index else ""),
+                 "claims": [], "citation_audit": {}, "context_processing": receipt}
+                for index, receipt in enumerate(receipts)]
+    report_editor_call(eng, "Question", chapters, None, None, "Fixed assumptions")
+    # Source 1's max-depth material was moved into section 2 by the blueprint;
+    # the editor must never send that derived chapter through another layer.
+    assert "editor-section-1" not in seen
+    if dependency in {"claim", "counterevidence"}:
+        assert "editor-section-2" in seen
+    else:
+        # Both globally forwarded contracts make every chapter a derivation.
+        assert not seen
 
 
 def test_editor_compresses_all_chapters_without_mutating_bodies_and_reports_gaps():

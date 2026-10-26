@@ -63,7 +63,8 @@ from app.domain.share_disclosure import (
 )
 from app.services.report_memory_use import RetrievalSourceLog
 from app.services.report_context_runtime import (
-    CONTEXT_RECEIPT_KEY, context_disclosure, intent_context_limited, prepare_section_call,
+    CONTEXT_RECEIPT_KEY, context_disclosure, inherit_blueprint_context_levels,
+    intent_context_limited, prepare_section_call,
     planning_context_call, preserve_context_error, projected_section_map,
     receipt_for, record_report_context, record_section_baseline,
     ReportIntentClient,
@@ -2732,10 +2733,7 @@ class ReportEngine:
                 return None, "failed_validation", ValueError(
                     "report synthesis blueprint failed validation"
                 )
-            levels = getattr(report_context_runtime(self), "blueprint_section_levels", {})
-            for section in blueprint.get("sections", []):
-                if levels.get(section["section_id"], 0):
-                    section["_context_level"] = levels[section["section_id"]]
+            inherit_blueprint_context_levels(self, blueprint)
             return blueprint, "available", None
         except AskCancelled:
             raise
