@@ -58,9 +58,9 @@ test("模型格式问题按需显示完整提问和原始回答", async () => {
     support_id: "mdl-safe",
     parent_id: "ask-1",
     created_at: "2026-08-31T01:00:00+00:00",
-    updated_at: "2026-08-31T01:00:00+00:00",
+    updated_at: new Date(2026, 7, 31, 9, 15).toISOString(),
     resolved_at: "",
-    expires_at: "2026-09-30T01:00:00+00:00",
+    expires_at: new Date(2026, 8, 30, 9, 15).toISOString(),
     artifact_available: true,
     source_deleted: false,
     notebook_deleted: false,
@@ -91,6 +91,9 @@ test("模型格式问题按需显示完整提问和原始回答", async () => {
 
   render(<AnalysisIssuesSheet users={users} />);
   await userEvent.click(await screen.findByRole("button", { name: "查看提问与回答" }));
+
+  expect(screen.getByRole("cell", { name: "2026-08-31 09:15" })).toBeInTheDocument();
+  expect(screen.getByRole("cell", { name: "2026-09-30 09:15" })).toBeInTheDocument();
 
   expect(await screen.findByText("原始问题")).toBeInTheDocument();
   expect(screen.getByText('{"answer":[]}')).toBeInTheDocument();

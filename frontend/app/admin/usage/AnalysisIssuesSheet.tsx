@@ -216,7 +216,7 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
                   ? (item.notebook_name || item.notebook_id || "未关联笔记本")
                   : (item.source_deleted ? "来源已删除（已脱敏）" : (item.source_title || item.file_name || "未命名来源"))}</td>
                 <td>{formatLastActive(item.updated_at)}</td>
-                <td>{item.expires_at.replace("T", " ").slice(0, 16)}</td>
+                <td>{formatLastActive(item.expires_at)}</td>
                 <td>
                   {item.category === "model_output" && item.artifact_available
                     ? <button
