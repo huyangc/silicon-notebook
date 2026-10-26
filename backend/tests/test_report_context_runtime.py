@@ -439,6 +439,51 @@ def test_unrelated_planning_depth_does_not_prevent_chapter_compression_with_lite
     assert receipt["stages"]["final_editor"]["partial_items"] == 1
 
 
+@pytest.mark.parametrize("claim_type", ["inference", "general"])
+def test_editor_compression_inherits_claim_qualifiers_even_when_compressor_drops_them(claim_type):
+    quote = "Measured 1.2 V at 25 C."
+    card = finding("editor-section-0", quote)
+    card.update(conditions=[], counterevidence=[], inference=False, general=False)
+    target = Transport({"summary": "Summary"}, maximum=9000)
+    eng = engine(target, Transport({"cards": [card]}))
+    sections = [{"title": "Qualified chapter", "markdown": quote + " detail. " * 2000,
+                 "claims": [{"statement": quote, "type": claim_type,
+                             "conditions": ["Only under the stated baseline"],
+                             "counterevidence": ["Contrary result at 80 C"]}], "citation_audit": {}}]
+    report_editor_call(eng, "Question", sections, None, None, "Fixed assumptions")
+    prompt = target.calls[0][-1]["content"]
+    assert f'"{claim_type}": true' in prompt
+    assert "Only under the stated baseline" in prompt
+    assert "Contrary result at 80 C" in prompt
+    assert receipt_for(eng)["stages"]["final_editor"]["compressed"]
+
+
+@pytest.mark.parametrize("compress", [False, True])
+def test_editor_projection_marks_only_affected_mandatory_topics_uncertain(compress):
+    topics = [{"id": "required-large", "title": "完整测量"},
+              {"id": "required-small", "title": "短章结论"}]
+    quote = "Measured 1.2 V at 25 C."
+    target = Transport({"summary": "Summary", "coverage": [
+        {"intent_id": topic["id"], "covered": True} for topic in topics]}, maximum=9000)
+    eng = engine(target, Transport({"cards": [finding("editor-section-0", quote)]}))
+    if not compress:
+        eng.settings.report_context_extra_calls_max = 0
+    outline = [{"title": "Measurements", "intent_contract": {"mandatory_topics": topics}}]
+    sections = [{"title": title, "scope": "Scope", "intent_ids": [topic["id"]],
+                 "markdown": body, "grounded": True, "id_map": {}, "claims": [], "citation_audit": {}}
+                for title, topic, body in [
+                    ("Large", topics[0], quote + " detail. " * 2000),
+                    ("Small", topics[1], "Short independent chapter.")]]
+    content, gaps, _ = eng._assemble("nb", "rid", "Question", outline, sections)
+    expected = "必答主题「完整测量」因材料容量限制，完整性尚未确认"
+    assert expected in gaps
+    assert expected in content
+    assert not any("短章结论" in gap for gap in gaps)
+    stage = receipt_for(eng)["stages"]["final_editor"]
+    assert stage["partial_items"] == int(compress)
+    assert stage["omitted_items"] == int(not compress)
+
+
 @pytest.mark.parametrize("compress", [False, True])
 def test_capacity_projection_keeps_named_mandatory_gap_even_when_editor_claims_covered(stored_report, monkeypatch, compress):
     reports, nb, rid = stored_report
