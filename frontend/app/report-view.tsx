@@ -39,6 +39,7 @@ import { Pagination } from "./Pagination";
 import { quotedPhraseHint } from "./query-syntax";
 import { ReportScopeHint, type ReportScopeHintProps } from "./report-scope-hint";
 import { ReportShareConfirm } from "./report-share-confirm";
+import { ReportDocument } from "./report-document";
 import { useClientPagination } from "./use-client-pagination.ts";
 import {
   CITATION_IMAGE_SLOT_ATTRIBUTE,
@@ -1808,13 +1809,14 @@ export function ReportsPanel({
           // 只是换了个对象),selectedRefKey 是 ReportMarkdown 内部 state,不会跟着
           // 自动清零——不加这个 key,报告 A 里点开的引用详情卡会带着 A 的 selectedRefKey
           // 在切到报告 B 后继续渲染,连带发出一次用户没点过的附图请求。
-          <ReportMarkdown
-            key={active.id}
-            markdown={active.content_md}
-            references={active.references}
-            notebookId={notebookId}
-            onPreviewImage={onPreviewImage}
-          />
+          <ReportDocument key={active.id} markdown={active.content_md}>
+            <ReportMarkdown
+              markdown={active.content_md}
+              references={active.references}
+              notebookId={notebookId}
+              onPreviewImage={onPreviewImage}
+            />
+          </ReportDocument>
         ) : (
           !isReportActive(active.status)
           && !["failed", "intent_ready", "outline_ready"].includes(active.status) && (
