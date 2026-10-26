@@ -798,6 +798,41 @@ export function ReportCredibilitySummary({ report }: { report: ReportDetailT }) 
   );
 }
 
+const CONTEXT_STAGE_LABELS = {
+  planning_intent: "问题理解", planning_outline: "大纲规划", planning_sufficiency: "资料充分性检查",
+  retrieve: "资料检索", draft: "章节撰写", synthesis: "全篇综合", final_editor: "摘要与审校",
+} as const;
+
+/** Counts describe processing passes, never unique source coverage. */
+export function ReportContextProcessing({ report }: { report: ReportDetailT }) {
+  const receipt = report.understanding?.context_processing;
+  if (!receipt) return null;
+  const count = (value: number | undefined) => Number.isSafeInteger(value) && (value ?? 0) >= 0 ? value! : 0;
+  const stages = Object.entries(CONTEXT_STAGE_LABELS).map(([key, title]) => ({
+    key, title, receipt: receipt.stages?.[key as keyof typeof CONTEXT_STAGE_LABELS],
+  })).filter((stage) => stage.receipt && (stage.receipt.compressed || stage.receipt.failed
+    || count(stage.receipt.omitted_items) || count(stage.receipt.partial_items) || count(stage.receipt.invalid_items)));
+  if (!receipt.compressed && !count(receipt.extra_calls) && stages.length === 0) return null;
+  return (
+    <section className="report-credibility-summary" aria-label="报告材料处理回执">
+      <p><strong>材料处理：</strong>{receipt.compressed || stages.some((stage) => stage.receipt?.compressed)
+        ? "已分批整理材料，引用仍指向原始资料。" : "已按模型容量整理材料。"}</p>
+      <p>额外调用 {count(receipt.extra_calls)} / {count(receipt.extra_calls_max)} 次
+        {" · "}压缩层数 {count(receipt.max_level)} / {count(receipt.compression_max_levels)}
+        {receipt.estimated_counting && " · 容量使用保守估算"}</p>
+      {stages.map(({ key, title, receipt: stage }) => (
+        <p key={key}>{title}：{stage?.failed ? "未完成" : stage?.compressed ? "已压缩" : "已整理"}
+          {count(stage?.omitted_items) > 0 && `；未纳入 ${count(stage?.omitted_items)} 项材料`}
+          {count(stage?.partial_items) > 0 && `；部分采用 ${count(stage?.partial_items)} 项材料`}
+          {count(stage?.invalid_items) > 0 && `；来源校验未通过 ${count(stage?.invalid_items)} 项`}
+        </p>
+      ))}
+      {stages.some(({ receipt: stage }) => count(stage?.omitted_items) || count(stage?.partial_items) || count(stage?.invalid_items))
+        && <p>以上按各处理阶段计数，同一材料可能重复计入，不能据此认定已完整覆盖资料。</p>}
+    </section>
+  );
+}
+
 /** 失败章节的原文。正文(也是分享页)里失败章节只写一句中性说明;作者本人在
  * 自己的报告里仍能展开看到原文——报告详情只对创建者开放,分享页不读 sections。 */
 export function ReportSectionFailures({ report }: { report: ReportDetailT }) {
@@ -1786,6 +1821,7 @@ export function ReportsPanel({
         {isReportActive(active.status) && <WaitingWishCarousel />}
         <ReportCorpusBasis report={active} />
         <ReportCredibilitySummary report={active} />
+        <ReportContextProcessing report={active} />
         {active.content_md && <ReportCitationDistribution report={active} />}
         {active.content_md && active.sections.some((section) => citationAuditLabel(section.citation_audit)) && (
           <div className="report-section-audits" aria-label="章节引证覆盖率">

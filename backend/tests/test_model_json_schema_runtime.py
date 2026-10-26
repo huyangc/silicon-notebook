@@ -9,6 +9,7 @@ import pytest
 
 from app.core.config import Settings
 from app.core import llm
+from app.core.model_context import request_admission
 from app.services.model_provider import ModelInvocationError, RuntimeModelProvider
 from app.services.model_registry import ModelServiceDefinition, SystemModelServiceRegistry
 
@@ -97,6 +98,7 @@ def service():
         base_url="https://models.invalid/v1", api_key="private-test-credential",
         api_key_env="CHAT_KEY", model="test-model", max_concurrency=2,
         fingerprint="generation-1",
+        context_window_tokens=1048576, max_output_tokens=131072,
     )
 
 
@@ -149,6 +151,29 @@ def test_read_only_runtime_access_never_probes_upstream(tmp_path, monkeypatch):
         assert provider.scheduler_snapshot("shared").active == 0
         assert sdk.calls == []
         assert capability_events(log) == []
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize("allowed", [0, 1])
+def test_admission_bounds_schema_probe_and_business_send(tmp_path, monkeypatch, allowed):
+    sdk = FakeSDK()
+    provider, log = make_provider(tmp_path, monkeypatch, sdk)
+    admitted = 0
+    refusal = RuntimeError("extra report requests exhausted")
+    def admit():
+        nonlocal admitted
+        if admitted >= allowed:
+            raise refusal
+        admitted += 1
+    try:
+        with request_admission(admit), pytest.raises(ModelInvocationError) as caught:
+            ask(provider)
+        assert caught.value.code == "report_context_budget_exhausted"
+        assert len(sdk.calls) == admitted == allowed
+        assert all(is_probe(call) for call in sdk.calls)
+        assert provider.scheduler_snapshot("shared").breaker_state == "closed"
+        assert caught.value.__cause__.__cause__ is refusal
     finally:
         provider.close()
 

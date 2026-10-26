@@ -1014,6 +1014,7 @@ def _stress_service(
         api_key="fake-secret",
         max_concurrency=maximum,
         fingerprint=f"fp-{service_id}",
+        context_window_tokens=1048576, max_output_tokens=131072,
     )
 
 

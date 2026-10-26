@@ -177,11 +177,13 @@ class ReportStore:
         understanding_sql = (
             _keep_planning_memory(
                 "understanding_json",
-                "json_set(json_remove(?, '$.credibility'),"
+                "json_set(json_remove(?, '$.credibility',"
+                "CASE WHEN status='failed' THEN '$.context_processing' ELSE '$.credibility' END),"
                 "'$._generation_started_at',?)",
             )
             if understanding is not None
-            else "json_set(json_remove(understanding_json, '$.credibility'),"
+            else "json_set(json_remove(understanding_json, '$.credibility',"
+            "CASE WHEN status='failed' THEN '$.context_processing' ELSE '$.credibility' END),"
             "'$._generation_started_at',?)"
         )
         understanding_args = (

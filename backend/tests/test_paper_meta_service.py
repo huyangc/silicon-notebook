@@ -104,6 +104,7 @@ def scheduled_paper_client(repo, service):
         base_url="https://paper.example/v1", model="paper-test",
         api_key_env="PAPER_TEST_KEY", api_key="test", max_concurrency=1,
         fingerprint="paper-test",
+        context_window_tokens=1048576, max_output_tokens=131072,
     )
     provider = RuntimeModelProvider(
         repo.settings, service.event_log,

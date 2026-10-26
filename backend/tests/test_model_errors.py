@@ -84,6 +84,7 @@ def test_scheduled_ask_failure_has_safe_support_metadata_and_no_fake_answer(
         protocol="openai_chat", base_url="https://model.invalid/v1",
         model="safe-model", api_key_env="MODEL_KEY", api_key="secret",
         max_concurrency=2, fingerprint="fp",
+        context_window_tokens=1048576, max_output_tokens=131072,
     )
     workload = WorkloadSpec(
         id="ask_answer", kind="chat", default_priority="interactive",

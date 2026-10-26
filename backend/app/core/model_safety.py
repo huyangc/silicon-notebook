@@ -18,6 +18,8 @@ _MODEL_ERROR_CODES = frozenset({
     "provider_unavailable",
     "provider_error",
     "malformed_response",
+    "model_context_exceeded",
+    "report_context_budget_exhausted",
     "model_not_configured",
     # Deployment-shaped rejections the provider already classifies
     # (``model_provider._stable_error_code``). They used to fall through

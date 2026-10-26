@@ -32,6 +32,8 @@ from app.services.startup_warmup import _unbound_workload_warnings
 _SERVICES = """[services.chat]
 display_name = "chat"
 kind = "chat"
+context_window_tokens = 1048576
+max_output_tokens = 131072
 protocol = "openai"
 base_url = "https://llm.example/v1"
 model = "chat-model"
@@ -274,7 +276,7 @@ def test_stale_ids_are_listed_with_the_log_lines_sanitiser(tmp_path):
 
 
 def test_gaps_are_opt_in_per_call(tmp_path):
-    """非管理员那一路(默认不带)拿到的三个字段恒为空,每服务行不变。"""
+    """非管理员的缺口和容量诊断为空，其余每服务状态不变。"""
     settings = _settings(_write_config(
         tmp_path / "m.toml", omit={"kg_glean"}, extra_bindings='ask_anwser = "chat"\n'
     ))
@@ -287,7 +289,11 @@ def test_gaps_are_opt_in_per_call(tmp_path):
 
     assert _gaps(plain) == {"unbound": [], "stale": [], "hidden": 0}
     assert _gaps(full)["unbound"] == [("kg_glean", False)]
-    assert plain.services == full.services
+    capacity_fields = {"context_window_tokens", "max_output_tokens", "max_input_tokens"}
+    assert all(row.context_window_tokens is None for row in plain.services)
+    assert [row.model_dump(exclude=capacity_fields) for row in plain.services] == [
+        row.model_dump(exclude=capacity_fields) for row in full.services
+    ]
 
 
 def test_test_all_keeps_the_gaps_in_the_replacement_snapshot(tmp_path):

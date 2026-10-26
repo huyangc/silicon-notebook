@@ -135,6 +135,8 @@ class ServiceSpec:
     api_key: str
     max_concurrency: int
     roles: tuple[str, ...]
+    context_window_tokens: int | None = None
+    max_output_tokens: int | None = None
 
     @property
     def physical_key(self) -> tuple[str, str, str, str, str]:
@@ -181,25 +183,25 @@ def _positive_int(
     return parsed
 
 
-def parse_capacity_overrides(items: Sequence[str]) -> dict[str, int]:
+def parse_capacity_overrides(items: Sequence[str], option: str = "--max-concurrency") -> dict[str, int]:
     result: dict[str, int] = {}
     for item in items:
         role, separator, raw_value = item.partition("=")
         role = role.strip().lower()
         if not separator or role not in ROLE_ORDER:
             raise MigrationError(
-                "--max-concurrency must use ROLE=N; ROLE is one of "
+                f"{option} must use ROLE=N; ROLE is one of "
                 + ", ".join(ROLE_ORDER)
             )
         try:
             value = int(raw_value.strip())
         except ValueError as exc:
             raise MigrationError(
-                f"--max-concurrency {role} must be a positive integer"
+                f"{option} {role} must be a positive integer"
             ) from exc
         if value <= 0:
             raise MigrationError(
-                f"--max-concurrency {role} must be a positive integer"
+                f"{option} {role} must be a positive integer"
             )
         result[role] = value
     return result
@@ -232,6 +234,9 @@ def _candidate(
 def build_migration_plan(
     values: Mapping[str, object],
     capacity_overrides: Mapping[str, int] | None = None,
+    *,
+    context_windows: Mapping[str, int] | None = None,
+    output_limits: Mapping[str, int] | None = None,
 ) -> MigrationPlan:
     overrides = dict(capacity_overrides or {})
     warnings: list[str] = []
@@ -456,6 +461,18 @@ def build_migration_plan(
             "start until you add them (or set MODEL_BINDINGS_STRICT=false): "
             + ", ".join(unbound)
         )
+    declared_services = []
+    for service in services:
+        if service.kind == "chat":
+            windows = {(context_windows or {}).get(role) for role in service.roles}
+            outputs = {(output_limits or {}).get(role) for role in service.roles}
+            if None in windows or None in outputs:
+                raise MigrationError("chat capacity is required: pass --context-window ROLE=N and --max-output-tokens ROLE=N for every configured chat role")
+            # Several legacy roles may share one physical endpoint. Respect
+            # the most restrictive explicitly declared capacity.
+            service = replace(service, context_window_tokens=min(windows), max_output_tokens=min(outputs))
+        declared_services.append(service)
+    services = declared_services
     toml_text = render_toml(tuple(services), bindings)
     plan = MigrationPlan(tuple(services), bindings, tuple(warnings), toml_text)
     validate_plan(plan)
@@ -484,8 +501,13 @@ def render_toml(
             f"model = {_toml_string(service.model)}",
             f"api_key_env = {_toml_string(service.api_key_env)}",
             f"max_concurrency = {service.max_concurrency}",
-            "",
         ])
+        if service.kind == "chat":
+            lines.extend([
+                f"context_window_tokens = {service.context_window_tokens}",
+                f"max_output_tokens = {service.max_output_tokens}",
+            ])
+        lines.append("")
     lines.append("[bindings]")
     lines.extend(
         f"{workload_id} = {_toml_string(service_id)}"
@@ -671,6 +693,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="override inferred capacity for general/reasoning/rewrite/kg/embedding/rerank",
     )
     parser.add_argument("--apply", action="store_true", help="write files")
+    parser.add_argument("--context-window", action="append", default=[], metavar="ROLE=N",
+                        help="actual total context capacity for each configured chat role (required)")
+    parser.add_argument("--max-output-tokens", action="append", default=[], metavar="ROLE=N",
+                        help="actual output ceiling for each configured chat role (required)")
     parser.add_argument(
         "--force", action="store_true", help="replace an existing output TOML"
     )
@@ -686,7 +712,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise MigrationError(f"legacy .env does not exist: {env_path}")
         values = dotenv_values(env_path)
         overrides = parse_capacity_overrides(args.max_concurrency)
-        plan = build_migration_plan(values, overrides)
+        plan = build_migration_plan(values, overrides,
+            context_windows=parse_capacity_overrides(args.context_window, "--context-window"),
+            output_limits=parse_capacity_overrides(args.max_output_tokens, "--max-output-tokens"))
         print(
             f"migration plan: {len(plan.services)} services, "
             f"{len(plan.bindings)} workload bindings"

@@ -4,6 +4,10 @@
 [services.general]
 display_name = "通用模型"
 kind = "chat"
+# Required: replace these illustrative capacities with actual endpoint limits.
+context_window_tokens = 1048576
+max_output_tokens = 32768
+# Optional independent input ceiling: max_input_tokens = 1000000
 protocol = "openai"
 base_url = "https://llm.example.com/v1"
 model = "general-model"
@@ -13,6 +17,8 @@ max_concurrency = 20
 [services.reasoning]
 display_name = "推理模型"
 kind = "chat"
+context_window_tokens = 1048576
+max_output_tokens = 32768
 protocol = "openai"
 base_url = "https://reasoning.example.com/v1"
 model = "reasoning-model"
@@ -70,6 +76,7 @@ reasoning_agent = "reasoning"
 report_outline = "reasoning"
 report_section = "general"
 report_summary = "general"
+report_context_compress = "general"
 retrieval_query_embedding = "embedding"
 source_element_embedding = "embedding"
 chunk_embedding = "embedding"
@@ -95,6 +102,7 @@ report_outline = "enabled"
 report_sufficiency = "enabled"
 report_section = "disabled"
 report_summary = "disabled"
+report_context_compress = "disabled"
 source_summary = "disabled"
 notebook_metadata = "disabled"
 paper_metadata = "disabled"

@@ -1248,6 +1248,8 @@ def _offline_settings(
             '''[services.fixture_chat]
 display_name = "FixtureChat"
 kind = "chat"
+context_window_tokens = 1048576
+max_output_tokens = 131072
 protocol = "openai"
 base_url = "https://fixture.invalid/v1"
 model = "fixture-chat"

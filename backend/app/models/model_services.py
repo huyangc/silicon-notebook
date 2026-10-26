@@ -13,6 +13,11 @@ class ModelServiceStatusItem(BaseModel):
     display_name: str
     kind: Literal["chat", "embedding", "rerank"]
     model: str = ""
+    # Deployment capacity is an administrator diagnostic; ordinary snapshots
+    # leave it unset. Non-chat services have no chat context declaration.
+    context_window_tokens: int | None = None
+    max_output_tokens: int | None = None
+    max_input_tokens: int | None = None
     workloads: List[ModelWorkloadView] = Field(default_factory=list)
     status: Literal[
         "untested", "ok", "busy", "error", "circuit_open", "half_open"

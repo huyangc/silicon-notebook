@@ -5790,6 +5790,7 @@ def _provider_backed_retriever(rrepo, reflect_result):
         base_url="https://chat.example/v1", model="safe-chat",
         api_key_env="CHAT_KEY", api_key="sk-private", max_concurrency=2,
         fingerprint="fp-chat",
+        context_window_tokens=1048576, max_output_tokens=131072,
     )
     provider = provider_mod.RuntimeModelProvider(
         Settings(_env_file=None, event_log_enabled=False, llm_log_enabled=False),
@@ -6289,6 +6290,7 @@ def test_finish_reason_is_read_along_the_cause_chain_not_just_one_level():
         protocol="openai_chat", base_url="https://model.invalid/v1",
         model="safe-model", api_key_env="MODEL_KEY", api_key="secret",
         max_concurrency=2, fingerprint="fp",
+        context_window_tokens=1048576, max_output_tokens=131072,
     )
     workload = WorkloadSpec(
         id="ask_reflect", kind="chat", default_priority="interactive",

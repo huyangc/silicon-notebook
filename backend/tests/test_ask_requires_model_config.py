@@ -56,6 +56,8 @@ def _missing_ask_answer_config(tmp_path, monkeypatch) -> str:
         """[services.background_chat]
 display_name = "BackgroundChat"
 kind = "chat"
+context_window_tokens = 1048576
+max_output_tokens = 131072
 protocol = "openai"
 base_url = "https://fixture.invalid/v1"
 model = "fixture-chat"

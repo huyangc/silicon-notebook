@@ -117,9 +117,18 @@ scripts/backend.sh restart
 旧部署仍使用逐角色模型变量时，先运行迁移助手：
 
 ```bash
-python scripts/migrate_legacy_model_env.py --env .env          # 只预览
-python scripts/migrate_legacy_model_env.py --env .env --apply  # 备份后写入
+python scripts/migrate_legacy_model_env.py --env .env --context-window general=131072 --max-output-tokens general=32768          # 只预览
+python scripts/migrate_legacy_model_env.py --env .env --context-window general=131072 --max-output-tokens general=32768 --apply  # 备份后写入
 ```
+
+已配置 chat 角色还必须显式提供实际服务容量（角色名沿用旧配置，例如 `general`、`reasoning`、`kg`）：
+
+```bash
+python scripts/migrate_legacy_model_env.py --env .env \
+  --context-window general=131072 --max-output-tokens general=32768
+```
+
+两个选项均可重复，对每个已配置 chat 角色各填一次；不根据模型名称猜测，缺失则拒绝生成。合用同一物理端点的角色取所填容量的较小值。`--apply` 前先检查预览；已有 TOML 的 chat 服务也须在升级前补齐 `context_window_tokens` 和 `max_output_tokens`（可选独立 `max_input_tokens`），否则服务拒绝启动。
 
 脚本从旧值生成 `.local/model-services.toml`，把密钥迁移到新的 `.env` 槽位，并移除已废弃的模型/并发字段；不会在 TOML 或终端中泄露密钥，当前 `.env` 与含密钥备份都会收紧为 `0600`。推算出的 `max_concurrency` 只是初始值，应按真实服务容量复核；可用可重复的 `--max-concurrency ROLE=N` 覆盖。安装流程生成且未改动的示例 TOML 可直接替换；其他已有配置只有显式 `--force` 才会替换，且都会先备份。
 

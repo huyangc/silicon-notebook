@@ -330,6 +330,7 @@ def _reasoning_provider(content: str, events: _EventLog):
         api_key="sk-private",
         max_concurrency=2,
         fingerprint="fp-chat",
+        context_window_tokens=1048576, max_output_tokens=131072,
     )
     registry = SystemModelServiceRegistry(
         {"chat": service}, {"reasoning_agent": "chat"}, None

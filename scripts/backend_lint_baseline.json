@@ -974,7 +974,7 @@
     "I001": 1
   },
   "backend/app/services/report_engine.py": {
-    "I001": 8
+    "I001": 6
   },
   "backend/app/services/report_execution.py": {
     "I001": 1
@@ -2381,9 +2381,6 @@
   },
   "backend/tests/test_model_scheduler.py": {
     "I001": 1
-  },
-  "backend/tests/test_model_status_service.py": {
-    "F401": 1
   },
   "backend/tests/test_mount_sql_contract.py": {
     "I001": 1

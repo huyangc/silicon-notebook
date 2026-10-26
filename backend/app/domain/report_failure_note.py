@@ -24,6 +24,7 @@ SECTION_FAILURE_COPY = MappingProxyType({
     "malformed": "模型返回的本节内容无法解析,已重试",
     "error": "本节模型调用失败,已重试",
     "internal": "本节处理过程出错",
+    "context": "本节材料超过当前模型可处理范围，请调整模型容量或缩小研究范围后重新生成",
 })
 NOTE_PREFIX = "（本节生成失败:"
 NOTE_SUFFIX = "）"

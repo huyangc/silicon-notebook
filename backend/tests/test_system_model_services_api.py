@@ -225,6 +225,7 @@ def _real_status_service(raw, *, maximum: int = 1):
         api_key="private-secret",
         max_concurrency=maximum,
         fingerprint="fp-general",
+        context_window_tokens=1048576, max_output_tokens=131072,
     )
     registry = SystemModelServiceRegistry(
         {definition.id: definition}, {"ask_answer": definition.id}
@@ -484,6 +485,7 @@ def test_admin_test_all_continues_after_one_provider_failure(api):
             api_key="private-secret",
             max_concurrency=1,
             fingerprint=f"fp-{service_id}",
+            context_window_tokens=1048576, max_output_tokens=131072,
         )
         for service_id in ("broken", "healthy")
     }
@@ -557,6 +559,7 @@ def test_binding_gaps_reach_administrators_only(api, tmp_path, monkeypatch):
         f"""[services.{service_id}]
 display_name = "{service_id}"
 kind = "{kind}"
+{chr(10).join(("context_window_tokens = 1048576", "max_output_tokens = 131072")) if kind == "chat" else ""}
 protocol = "{protocol}"
 base_url = "https://private-provider.invalid/v1"
 model = "safe-model"
@@ -607,5 +610,15 @@ max_concurrency = 1
     assert user_body["unbound_workloads"] == []
     assert user_body["stale_binding_ids"] == []
     assert user_body["stale_binding_hidden_count"] == 0
-    assert user_body["services"] == admin_body["services"]
+    capacity_fields = {"context_window_tokens", "max_output_tokens", "max_input_tokens"}
+    assert all(row[field] is None for row in user_body["services"] for field in capacity_fields)
+    assert admin_body["services"][0]["context_window_tokens"] == 1048576
+    assert admin_body["services"][0]["max_output_tokens"] == 131072
+    assert [
+        {key: value for key, value in row.items() if key not in capacity_fields}
+        for row in user_body["services"]
+    ] == [
+        {key: value for key, value in row.items() if key not in capacity_fields}
+        for row in admin_body["services"]
+    ]
     _assert_sanitized(admin_body)

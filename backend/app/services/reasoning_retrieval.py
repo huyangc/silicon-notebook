@@ -4082,12 +4082,14 @@ class ReasoningRetriever:
         reflect_action_host=None,
         plugin_egress_question: str = "",
         report_outline: str = "",
+        reflection_context=None,
     ):
         self.retrieval = retrieval
         self.model_clients = model_clients
         self.communities = communities
         self.settings = settings
         self.cancel_event = cancel_event
+        self.reflection_context = reflection_context
         # 类型化集合的「地图层」与「清单层」。两者都缺省为 None:没接线的调用方
         # (深度报告逐节深挖等)行为与接入前逐字相同——不注入地图、不提供动作。
         self.collection_catalog = collection_catalog
@@ -5210,7 +5212,8 @@ class ReasoningRetriever:
                     "role": "system",
                     "content": self.untrusted_evidence_instruction,
                 })
-            raw = client.chat_json(
+            reflection_call = self.reflection_context or client.chat_json
+            raw = reflection_call(
                 messages,
                 reflect_schema_hint(
                     element_kinds, object_types, outline, consult_memory,
@@ -5226,6 +5229,8 @@ class ReasoningRetriever:
                     section_read=section_read,
                 ),
                 timeout=self.settings.reasoning_timeout_seconds,
+                **({"candidates_summary": candidates_summary, "client": client}
+                   if self.reflection_context is not None else {}),
                 max_retries=self.settings.reasoning_max_retries,
                 cancel_event=self.cancel_event,
                 # 与规划阶段共用部署配置的输出预算。

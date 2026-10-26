@@ -27,6 +27,8 @@ def _definition(
         api_key="secret",
         max_concurrency=3,
         fingerprint=fingerprint or f"fp-{service_id}",
+        context_window_tokens=1048576 if kind == "chat" else None,
+        max_output_tokens=131072 if kind == "chat" else None,
     )
 
 
@@ -109,6 +111,25 @@ def _service(rows=None):
 
 def _item(snapshot, service_id="chat_primary"):
     return next(item for item in snapshot.services if item.service_id == service_id)
+
+
+def test_chat_context_capacity_is_admin_only_and_never_on_non_chat():
+    chat = replace(_definition("chat_primary"), context_window_tokens=131072,
+                   max_output_tokens=32768, max_input_tokens=98304)
+    embedding = _definition("embed_primary", kind="embedding")
+    registry = SystemModelServiceRegistry(
+        {chat.id: chat, embedding.id: embedding}, {"ask_answer": chat.id}
+    )
+    service = ModelStatusService(registry, _Provider(), _Store())
+    regular = _item(service.snapshot())
+    assert regular.context_window_tokens is None
+    assert regular.max_output_tokens is None
+    assert regular.max_input_tokens is None
+    admin = service.snapshot(include_binding_gaps=True)
+    assert _item(admin).context_window_tokens == 131072
+    assert _item(admin).max_output_tokens == 32768
+    assert _item(admin).max_input_tokens == 98304
+    assert _item(admin, "embed_primary").context_window_tokens is None
 
 
 def test_snapshot_reads_once_never_probes_and_stale_fingerprint_is_untested():

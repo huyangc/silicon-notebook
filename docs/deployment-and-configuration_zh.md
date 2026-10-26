@@ -121,10 +121,10 @@ observer，不借用 Ask 预算。其语义同样是协作式：已开始 callba
 
 ```bash
 # 默认只预览：读取 .env，不写任何文件。
-python scripts/migrate_legacy_model_env.py --env .env
+python scripts/migrate_legacy_model_env.py --env .env --context-window general=131072 --max-output-tokens general=32768
 
 # 检查服务列表和推算容量后，生成 TOML，并只改写 .env 中由脚本管理的模型字段。
-python scripts/migrate_legacy_model_env.py --env .env --apply
+python scripts/migrate_legacy_model_env.py --env .env --context-window general=131072 --max-output-tokens general=32768 --apply
 ```
 
 应用迁移前会备份 `.env`，并把当前文件及所有含密钥的备份权限收紧为 `0600`；密钥会
@@ -563,7 +563,15 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 刻意独立于 `agent_profile_consolidate` 的 workload，好让部署能单独换模型或单独关闭它，
 不必连带关掉笔记本理解巡固）映射到物理服务。多个 workload
 可以共用一个服务，它们也会共用该服务唯一的调度器和并发预算。`max_concurrency`
-是唯一的模型容量参数；来源作业数、窗口大小、batch 大小与本地 ANN 线程都不会再创建模型 gate。
+是唯一的模型并发容量参数；来源作业数、窗口大小、batch 大小与本地 ANN 线程都不会再创建模型 gate。
+
+每个 chat 服务还必须填写正整数 `context_window_tokens`、`max_output_tokens`，输出上限必须小于总窗口；可选正整数 `max_input_tokens` 不得超过窗口。这些值填写实际服务端允许的 token 容量，不按模型名称猜测，旧配置升级前也必须补齐。非 chat 服务拒绝这些容量字段。容量缺失/无效时拒绝启动，不受 `MODEL_BINDINGS_STRICT` 放行影响；无效热更新保留上一份有效 registry。声明容量仅管理员在「模型服务」面板可见。
+
+统一聊天入口对最终完整请求采用保守 UTF-8 字节估算并保留安全余量，请求输出受服务容量约束；不猜测或下载 tokenizer。服务可能添加隐藏模板，因此明确标为估算。报告默认自动整理/压缩超量材料，额外成本由任务级 `REPORT_CONTEXT_EXTRA_CALLS_MAX`、`REPORT_CONTEXT_COMPRESSION_MAX_LEVELS`、`REPORT_CONTEXT_COMPRESS_MAX_TOKENS` 控制；这些高级质量/成本设置归本文，不扩展入门 `.env`。精确默认值、失败和回执合同归[产品/API 参考](./product-and-api_zh.md#模型上下文容量与报告压缩)。
+
+高级设置 `MODEL_CONTEXT_SAFETY_RATIO` 控制总窗口预留为安全余量的比例，校验范围为 `0 <= ratio < 1`，默认值归[产品/API 上下文护栏](./product-and-api_zh.md#模型上下文容量与报告压缩)。该项不进入入门 `.env`，仅在核对实际端点计数行为后覆盖；同一有效比例随固定的服务快照贯通 provider 准备与最终传输检查。
+
+还须绑定新增 chat workload `report_context_compress`（「报告材料整理」），默认关闭 thinking、使用报告队列优先级；可复用现有服务，不另设模型并发预算。
 
 **绑定表在启动时被硬校验：缺一个工作负载或多一个未知 id，后端直接拒绝启动。**
 只要 `MODEL_SERVICES_CONFIG` 非空，`[bindings]` 就必须覆盖全部工作负载（chat / embedding /
@@ -751,7 +759,7 @@ embedding 模型输出维度一致。KG 来源级并行仍由 `KG_JOB_CONCURRENC
 `kg_extract` 所绑定服务的容量；两者都不能覆盖服务 `max_concurrency`。
 
 `OPENAI_COMPAT_MAX_TOKENS` 是没有工作负载专用覆盖时的生成输出上限；设为零时，这些调用
-不传 `max_tokens`，由服务端决定。`ANSWER_MAX_TOKENS` 限制最终答案，
+取消全局覆盖，但仍受模型服务声明的输出上限约束。`ANSWER_MAX_TOKENS` 限制最终答案，
 `KG_EXTRACT_MAX_TOKENS` 限制抽取输出；两者设为非正数时，只是不传专用覆盖，仍沿用全局上限。
 `REASONING_MAX_TOKENS` 限制规划与反思；`REPORT_SECTION_MAX_TOKENS`、
 `REPORT_SYNTHESIS_MAX_TOKENS`、`REPORT_SUMMARY_MAX_TOKENS` 分别限制报告节起草、全篇证据蓝图

@@ -6,6 +6,31 @@ This runbook covers logs, live diagnostics, MinerU, offline ingestion, retrieval
 
 ## Unified command entry
 
+### Upgrading chat context capacity
+
+Before starting the upgraded service, add actual endpoint limits
+`context_window_tokens` and `max_output_tokens` to every chat service in the
+file selected by `MODEL_SERVICES_CONFIG`; optionally declare its separate
+`max_input_tokens`. There is no inferred compatibility default. Missing/invalid
+capacity refuses startup; an invalid live edit keeps the previous configuration.
+Embedding/rerank and offline operation need no chat capacity fields. See the
+[deployment reference](./deployment-and-configuration.md#system-model-services-scheduling-and-diagnostics).
+
+For legacy environment migration, supply `--context-window ROLE=N` and
+`--max-output-tokens ROLE=N` for each configured chat role; these options are
+repeatable. Inspect the generated preview before applying. Roles sharing one
+physical service use the most restrictive supplied capacity. The tool never
+rewrites an existing deployment configuration automatically.
+
+During large reports, check the material-processing receipt for extra calls,
+compression depth and per-stage omitted/partial/invalid material counts. These
+are processing counts, not unique source counts or proof of full coverage.
+Context overflow, exhausted processing budget and invalid compression have
+distinct stable errors and do not imply an unavailable service. Reducing research
+scope or correcting the declared endpoint capacity is preferable to repeating
+unchanged requests. Diagnostics contain counts and budgets only; do not log
+evidence or compression content while investigating.
+
 Use `bash scripts/cli.sh --help` or `npm run cli -- --help` to discover the grouped
 operator commands. The [command index](../scripts/README.md#统一-cli-入口) owns
 the group catalog and minimal examples; this section owns the operating boundaries.

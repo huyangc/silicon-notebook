@@ -72,6 +72,19 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+test("chat capacity appears only for administrators, including independent input limit", () => {
+  const capacityStatus = { services: [status("general", "通用服务", "ok", {
+    context_window_tokens: 131072, max_output_tokens: 32768, max_input_tokens: 98304,
+  })] };
+  const view = renderPanel({ isAdmin: true, status: capacityStatus });
+  expect(screen.getByLabelText("模型容量")).toHaveTextContent("上下文窗口 131,072 tokens");
+  expect(screen.getByLabelText("模型容量")).toHaveTextContent("最大输出 32,768 tokens");
+  expect(screen.getByLabelText("模型容量")).toHaveTextContent("最大输入 98,304 tokens");
+  view.unmount();
+  renderPanel({ isAdmin: false, status: capacityStatus });
+  expect(screen.queryByLabelText("模型容量")).not.toBeInTheDocument();
+});
+
 function servicesWithSupportId(supportId: string) {
   return {
     services: services.services.map((item) => item.service_id === "reasoner-next"

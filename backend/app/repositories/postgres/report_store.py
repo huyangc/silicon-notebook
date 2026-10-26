@@ -173,11 +173,13 @@ class ReportStore:
         # record (M4, ``REPORT_PLANNING_MEMORY_KEY``): the outline it planned is
         # kept.
         understanding_sql = (
-            "jsonb_set(%s::jsonb - 'credibility',"
+            "jsonb_set(%s::jsonb - 'credibility' - "
+            "CASE WHEN status='failed' THEN 'context_processing' ELSE 'credibility' END,"
             "'{_generation_started_at}',%s,true)"
             + _keep_planning_memory("understanding_json")
             if understanding is not None
-            else "jsonb_set(understanding_json - 'credibility',"
+            else "jsonb_set(understanding_json - 'credibility' - "
+            "CASE WHEN status='failed' THEN 'context_processing' ELSE 'credibility' END,"
             "'{_generation_started_at}',%s,true)"
         )
         understanding_args = (

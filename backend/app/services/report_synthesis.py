@@ -717,6 +717,7 @@ def exclusive_frame_conflicts(sections: Iterable[dict], frame: dict | None) -> l
 def fair_editor_context(
     sections: Sequence[dict], *, frame: dict | None = None,
     blueprint: dict | None = None, max_chars: int = EDITOR_CONTEXT_MAX_CHARS,
+    coverage: dict | None = None,
 ) -> str:
     """Allocate valid, bounded audit context without dropping later sections."""
     max_chars = max(0, int(max_chars))
@@ -781,6 +782,8 @@ def fair_editor_context(
     head_budget = max(0, max_chars // 3)
     serialized_overhead = json.dumps(overhead, ensure_ascii=False)
     if len(serialized_overhead) > head_budget:
+        if coverage is not None:
+            coverage["overhead_projected"] = True
         blueprint_value = blueprint or {}
         frame_value = frame or {}
         overhead = {
@@ -808,6 +811,15 @@ def fair_editor_context(
          list(section.get("claims") or [])[:CLAIM_LEDGER_MAX_CLAIMS]]
         for section in sections
     ]
+    if coverage is not None:
+        for section, bounded_claims in zip(sections, raw_claims_by_section):
+            originals = list(section.get("claims") or [])
+            if len(originals) != len(bounded_claims) or any(
+                isinstance(original, dict) and any(
+                    value != original.get(key, value) for key, value in bounded.items()
+                ) for original, bounded in zip(originals, bounded_claims)
+            ):
+                coverage["claims_projected"] = True
     base_values = []
     for section, raw_claims in zip(sections, raw_claims_by_section):
         base_values.append({
@@ -827,6 +839,8 @@ def fair_editor_context(
     base_serialized = [json.dumps(value, ensure_ascii=False) for value in base_values]
     minimum_sections = sum(len(value) + len(delimiter) for value in base_serialized)
     if len(head) + separators + minimum_sections > max_chars:
+        if coverage is not None:
+            coverage["sections_projected"] = True
         # This branch is only for callers supplying a smaller-than-production
         # budget.  It still returns complete JSON rather than slicing a payload.
         compact = {
@@ -859,8 +873,12 @@ def fair_editor_context(
                 break
             meta_value = candidate
         meta = json.dumps(meta_value, ensure_ascii=False)
+        if coverage is not None and meta_value["claims_truncated"]:
+            coverage["claims_projected"] = True
         meta_extra = len(meta) - len(base_meta)
         prose_room = max(0, extra_share - meta_extra)
+        if coverage is not None and len(markdown) > prose_room:
+            coverage["prose_projected"] = True
         if len(markdown) <= prose_room:
             excerpt = markdown
         elif prose_room <= 3:

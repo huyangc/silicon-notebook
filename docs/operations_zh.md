@@ -6,6 +6,14 @@
 
 ## 统一命令入口
 
+### 升级聊天模型上下文容量
+
+升级后启动前，在 `MODEL_SERVICES_CONFIG` 指向的文件中，为每个 chat 服务补齐实际端点允许的 `context_window_tokens`、`max_output_tokens`，有独立输入上限时再填 `max_input_tokens`。不提供猜测的兼容默认值；缺失/无效时拒绝启动，无效在线编辑保留上一份有效配置。embedding/rerank 和离线运行不需要聊天容量字段。详见[部署参考](./deployment-and-configuration_zh.md#系统模型服务调度与诊断)。
+
+从旧环境变量迁移时，为每个已配置 chat 角色传入可重复的 `--context-window ROLE=N`、`--max-output-tokens ROLE=N`，先检查预览再应用。多个角色合用物理服务时取声明的较小容量。工具不会自动改写现有部署配置。
+
+长报告的「材料处理」回执显示额外调用、压缩层数及各阶段未纳入/部分采用/校验失败材料数量；这些是处理次数口径，不能当成去重来源数或完整覆盖证明。上下文超限、处理预算耗尽和无效压缩是不同稳定错误，不代表服务不可用。应缩小研究范围或修正实际端点容量，不原样反复提交。排查只记录数量和预算，不记录证据或压缩正文。
+
 用 `bash scripts/cli.sh --help` 或 `npm run cli -- --help` 查看按用途分组的运维命令。
 [命令索引](../scripts/README.md#统一-cli-入口)集中维护分组目录与最小示例，本节维护操作边界。
 `batch` 接受原 `batch_ingest.py` 的全部阶段和参数，`batch-ingest` 是兼容别名。

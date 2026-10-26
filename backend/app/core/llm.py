@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 from datetime import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI, OpenAI
@@ -21,6 +21,10 @@ from app.core.model_schema import (
     StructuredModelResponseError,
     response_format_for_hint,
     validate_structured_response,
+)
+from app.core.model_context import (
+    ContextBudget, ModelContextExceeded, RequestAdmissionError, admit_request, is_context_error,
+    provider_messages,
 )
 from app.domain.cancellation import AskCancelled, CancelEvent, raise_if_cancelled, sleep_or_cancel
 
@@ -235,36 +239,6 @@ def cap_kwargs(client: Any, attr: str) -> Dict[str, Any]:
     return budget_kwargs(getattr(client, "settings", None), attr)
 
 
-#: The wrapper system message this client puts in front of every caller's
-#: messages. Spelled once, here, because two places must agree on it byte for
-#: byte: what actually goes on the wire, and what any measurement of the
-#: provider-facing message sequence reconstructs.
-_PROVIDER_WRAPPER_PREFIX = (
-    "You are the extraction and reasoning engine for "
-    "silicon-notebook. Return valid JSON only, no markdown fences. "
-    "Schema hint: "
-)
-
-
-def provider_messages(
-    messages: List[Dict[str, str]],
-    response_schema_hint: str,
-) -> List[Dict[str, str]]:
-    """Assemble the exact provider message list without changing caller data.
-
-    The fixed JSON wrapper and schema precede the caller's messages. Cache
-    keys, interaction logs and transport share this assembly; caller message
-    mappings pass through by reference and are never mutated here.
-    """
-    return [
-        {
-            "role": "system",
-            "content": f"{_PROVIDER_WRAPPER_PREFIX}{response_schema_hint}",
-        },
-        *messages,
-    ]
-
-
 #: Name of the optional OUT-parameter a caller may pass to ``chat_json`` to get
 #: this call's provider-side outcome back. The value is a caller-owned mutable
 #: mapping which ``chat_json`` fills in before returning or raising; see
@@ -391,8 +365,10 @@ class OpenAICompatibleClient:
                  enable_json_schema_probe: bool = False,
                  json_schema_observer: Optional[Callable[[str, str], None]] = None,
                  json_schema_capability: Optional[JsonSchemaCapability] = None,
+                 context_budget: Optional[ContextBudget] = None,
                  cache: Optional[CacheBackend] = None):
         self.settings = settings
+        self.context_budget = context_budget
         # Transport identity is always supplied by the system service registry.
         self.base_url = (base_url or "").strip()
         self.api_key = (api_key or "").strip()
@@ -492,9 +468,27 @@ class OpenAICompatibleClient:
         to be named ``requests`` cannot bind to it instead of travelling in
         ``call_kwargs``.
         """
+        self._guard_wire(call_kwargs)
         create = self.client().chat.completions.create
+        admit_request()
         requests.record()
-        return create(**call_kwargs)
+        try:
+            return create(**call_kwargs)
+        except Exception as exc:
+            if is_context_error(exc):
+                raise ModelContextExceeded() from exc
+            raise
+
+    def _guard_wire(self, kwargs: Dict[str, Any]) -> None:
+        if self.context_budget is None:
+            return
+        requested = kwargs.get("max_tokens")
+        output = self.context_budget.max_output_tokens
+        if isinstance(requested, int) and requested > 0:
+            output = min(output, requested)
+        kwargs["max_tokens"] = output
+        budget = replace(self.context_budget, max_output_tokens=output)
+        budget.check_wire(kwargs.get("messages", []), kwargs.get("response_format"))
 
     def _stream_chat_content(
         self,
@@ -613,8 +607,15 @@ class OpenAICompatibleClient:
 
                     async def create_stream():
                         raise_if_cancelled(cancel_event)
+                        self._guard_wire(call_kwargs)
+                        admit_request()
                         requests.record()
-                        return await client.chat.completions.create(**call_kwargs)
+                        try:
+                            return await client.chat.completions.create(**call_kwargs)
+                        except Exception as exc:
+                            if is_context_error(exc):
+                                raise ModelContextExceeded() from exc
+                            raise
 
                     try:
                         stream = await create_stream()
@@ -661,7 +662,7 @@ class OpenAICompatibleClient:
 
     def _structured_format(
         self, hint: str, *, requests: _RequestCount,
-        cancel_event: CancelEvent, timeout: Optional[float],
+        cancel_event: CancelEvent, timeout: Optional[float], max_tokens: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """Learn capability once inside the physical service's scheduler slot.
 
@@ -679,7 +680,7 @@ class OpenAICompatibleClient:
         try:
             raise_if_cancelled(cancel_event)
             if self._json_schema_capability is None:
-                self._probe_json_schema(requests, cancel_event, timeout)
+                self._probe_json_schema(requests, cancel_event, timeout, max_tokens)
             if self._json_schema_capability != "supported":
                 return None
             response_format = response_format_for_hint(hint)
@@ -694,7 +695,7 @@ class OpenAICompatibleClient:
 
     def _probe_json_schema(
         self, requests: _RequestCount, cancel_event: CancelEvent,
-        timeout: Optional[float],
+        timeout: Optional[float], max_tokens: Optional[int] = None,
     ) -> None:
         marker = secrets.token_hex(16)
         response_format = {
@@ -723,8 +724,9 @@ class OpenAICompatibleClient:
             )}],
             "response_format": response_format,
         }
-        if self.settings.openai_compat_max_tokens > 0:
-            kwargs["max_tokens"] = self.settings.openai_compat_max_tokens
+        probe_output = max_tokens if max_tokens is not None else self.settings.openai_compat_max_tokens
+        if probe_output > 0:
+            kwargs["max_tokens"] = probe_output
         status, reason = "unverified", "probe_error"
         usage = None
         try:
@@ -738,7 +740,7 @@ class OpenAICompatibleClient:
                 status, reason = "supported", "schema_enforced"
             else:
                 status, reason = "unsupported", "schema_ignored"
-        except AskCancelled:
+        except (AskCancelled, RequestAdmissionError):
             raise
         except Exception as exc:
             _raise_if_cancelled_with_usage(cancel_event, usage)
@@ -840,6 +842,13 @@ class OpenAICompatibleClient:
         # — the documented truncation remedy — correctly lands on a different key.
         _mt = max_tokens if max_tokens is not None else self.settings.openai_compat_max_tokens
         effective_max_tokens = _mt if isinstance(_mt, int) and _mt > 0 else None
+        if self.context_budget is not None:
+            effective_max_tokens = min(effective_max_tokens or self.context_budget.max_output_tokens,
+                                       self.context_budget.max_output_tokens)
+            budget = replace(self.context_budget, max_output_tokens=effective_max_tokens)
+            # Refuse the business request before a capability probe is sent.
+            if not budget.fits(messages, response_schema_hint):
+                raise ModelContextExceeded()
         # Started BEFORE the cache lookup, not after it, because the lookup is on
         # the clock too: the whole point of measuring a served-from-cache call is
         # to compare its cost against a real one, and a timer that starts after
@@ -852,7 +861,7 @@ class OpenAICompatibleClient:
         try:
             response_format = self._structured_format(
                 response_schema_hint, requests=requests,
-                cancel_event=cancel_event, timeout=timeout,
+                cancel_event=cancel_event, timeout=timeout, max_tokens=effective_max_tokens,
             )
         except AskCancelled:
             _record_call_stats(

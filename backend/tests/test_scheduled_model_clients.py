@@ -53,6 +53,8 @@ def _service(
         api_key="sk-private",
         max_concurrency=maximum,
         fingerprint=f"fp-{service_id}",
+        context_window_tokens=1048576 if kind == "chat" else None,
+        max_output_tokens=131072 if kind == "chat" else None,
     )
 
 
