@@ -210,6 +210,25 @@ async function withStatusBody(body, run) {
   }
 }
 
+test("capacity declarations accept positive integers and redact missing fields", async () => {
+  await withStatusBody({ services: [status("general", "ok", {
+    context_window_tokens: 131072, max_output_tokens: 32768, max_input_tokens: 98304,
+  })] }, async () => {
+    const item = (await fetchModelServiceStatus()).services[0];
+    assert.equal(item.context_window_tokens, 131072);
+    assert.equal(item.max_output_tokens, 32768);
+    assert.equal(item.max_input_tokens, 98304);
+  });
+  await withStatusBody({ services: [status("general", "ok")] }, async () => {
+    assert.equal((await fetchModelServiceStatus()).services[0].context_window_tokens, null);
+  });
+  for (const capacity of [0, -1, 1.5, "131072", Number.MAX_SAFE_INTEGER + 1]) {
+    await withStatusBody({ services: [status("general", "ok", {
+      context_window_tokens: capacity,
+    })] }, async () => assert.rejects(fetchModelServiceStatus(), /模型服务状态格式无效/));
+  }
+});
+
 
 test("binding gaps parse when present and default to empty for an older backend", async () => {
   const withGaps = await withStatusBody({

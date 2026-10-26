@@ -12,6 +12,9 @@ export type ModelServiceStatusItem = {
   display_name: string;
   kind: "chat" | "embedding" | "rerank";
   model: string;
+  context_window_tokens?: number | null;
+  max_output_tokens?: number | null;
+  max_input_tokens?: number | null;
   workloads: Array<{ id: string; label: string }>;
   status: "untested" | "ok" | "busy" | "error" | "circuit_open" | "half_open";
   active: number;
@@ -100,6 +103,12 @@ function nonnegativeInteger(value: unknown): number {
   return value;
 }
 
+function optionalCapacity(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  const capacity = nonnegativeInteger(value);
+  return capacity > 0 ? capacity : invalidStatus();
+}
+
 function safeDisplayName(value: unknown): string {
   if (typeof value !== "string") return "";
   const normalized = value.trim().replace(/\s+/g, " ");
@@ -158,6 +167,9 @@ export function parseModelServiceStatusItem(value: unknown): ModelServiceStatusI
     display_name: safeDisplayName(item.display_name),
     kind: kind as ModelServiceStatusItem["kind"],
     model: safeModel(item.model),
+    context_window_tokens: optionalCapacity(item.context_window_tokens),
+    max_output_tokens: optionalCapacity(item.max_output_tokens),
+    max_input_tokens: optionalCapacity(item.max_input_tokens),
     workloads: item.workloads.map(parseWorkload),
     status: status as ModelServiceStatusItem["status"],
     active: nonnegativeInteger(item.active),

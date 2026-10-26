@@ -416,6 +416,8 @@ def plan_query_intent(
     keywords: bool = False,
     corpus_langs: list[str] | None = None,
     linked_report: str = "",
+    preserve_history: bool = False,
+    fail_on_context_error: bool = False,
 ) -> dict:
     """Build one bounded intent contract without reading corpus content.
 
@@ -443,7 +445,7 @@ def plan_query_intent(
     )
 
     question = str(question or "").strip()
-    history = str(history or "")[:8000]
+    history = str(history or "") if preserve_history else str(history or "")[:8000]
     max_topics = max(1, min(int(max_topics), 16))
     data: dict = {}
     understanding_succeeded = False
@@ -472,7 +474,11 @@ def plan_query_intent(
             understanding_succeeded = _understanding_response_is_valid(data)
     except AskCancelled:
         raise
-    except Exception:
+    except Exception as exc:
+        if fail_on_context_error:
+            from app.core.model_context import is_context_error
+            if is_context_error(exc) or str(getattr(exc, "code", "")).startswith("report_context_"):
+                raise
         data = {}
     if status is not None:
         status["understanding_succeeded"] = understanding_succeeded

@@ -9282,6 +9282,17 @@
               "title": "Code",
               "type": "string"
             },
+            "context_window_tokens": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Context Window Tokens"
+            },
             "display_name": {
               "title": "Display Name",
               "type": "string"
@@ -9299,6 +9310,28 @@
               "default": 0,
               "title": "Latency Ms",
               "type": "integer"
+            },
+            "max_input_tokens": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Input Tokens"
+            },
+            "max_output_tokens": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Output Tokens"
             },
             "maximum": {
               "default": 0,

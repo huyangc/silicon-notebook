@@ -87,6 +87,13 @@ function ModelServiceCard({
       </div>
 
       <div className="model-service-workloads">
+        {isAdmin && item.kind === "chat" && item.context_window_tokens != null && (
+          <p aria-label="模型容量">
+            上下文窗口 {item.context_window_tokens.toLocaleString("zh-CN")} tokens
+            {item.max_output_tokens != null && <> · 最大输出 {item.max_output_tokens.toLocaleString("zh-CN")} tokens</>}
+            {item.max_input_tokens != null && <> · 最大输入 {item.max_input_tokens.toLocaleString("zh-CN")} tokens</>}
+          </p>
+        )}
         <small>使用位置</small>
         <div>
           {item.workloads.length > 0

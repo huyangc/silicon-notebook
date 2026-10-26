@@ -11,6 +11,27 @@ from app.services.model_registry import WORKLOADS, SystemModelServiceRegistry
 from scripts import migrate_legacy_model_env as migration
 
 
+# Every chat endpoint in these legacy-role fixtures declares its actual limits.
+_WINDOWS = {role: 1048576 for role in ("general", "reasoning", "rewrite", "kg")}
+_OUTPUTS = {role: 32768 for role in _WINDOWS}
+_CAPACITY_ARGS = [item for role in _WINDOWS for item in (
+    "--context-window", f"{role}=1048576", "--max-output-tokens", f"{role}=32768")]
+
+
+def _build_plan(*args, **kwargs):
+    return migration.build_migration_plan(*args, context_windows=_WINDOWS, output_limits=_OUTPUTS, **kwargs)
+
+
+def _main(args):
+    return migration.main([*_CAPACITY_ARGS, *args])
+
+
+def test_chat_migration_requires_capacity_without_guessing_model_name():
+    with pytest.raises(migration.MigrationError, match="chat capacity is required"):
+        migration.build_migration_plan({"OPENAI_COMPAT_BASE_URL": "https://example.invalid/v1",
+            "OPENAI_COMPAT_API_KEY": "secret", "OPENAI_COMPAT_MODEL": "large-1m-model"})
+
+
 def _legacy_env() -> str:
     return """# keep this deployment setting
 DATABASE_URL=sqlite:///custom.db
@@ -45,7 +66,7 @@ def test_build_plan_preserves_roles_bindings_protocols_and_inferred_capacity(tmp
     env_path = tmp_path / ".env"
     env_path.write_text(_legacy_env(), encoding="utf-8")
 
-    plan = migration.build_migration_plan(dotenv_values(env_path))
+    plan = _build_plan(dotenv_values(env_path))
     services = {service.id: service for service in plan.services}
 
     assert set(services) == {
@@ -88,14 +109,14 @@ def test_cli_is_dry_run_by_default_and_apply_backs_up_then_validates(tmp_path, c
     output_path = tmp_path / "model-services.toml"
     argv = ["--env", str(env_path), "--output", str(output_path)]
 
-    assert migration.main(argv) == 0
+    assert _main(argv) == 0
     dry_output = capsys.readouterr()
     assert not output_path.exists()
     assert env_path.read_text(encoding="utf-8") == original
     assert "dry-run" in dry_output.out
     assert "general secret#1" not in dry_output.out + dry_output.err
 
-    assert migration.main([*argv, "--apply"]) == 0
+    assert _main([*argv, "--apply"]) == 0
     applied_output = capsys.readouterr()
     backup = tmp_path / ".env.pre-system-models.bak"
     assert backup.read_text(encoding="utf-8") == original
@@ -133,7 +154,7 @@ def test_deduplicates_one_physical_service_and_keeps_legacy_fallbacks():
         "KG_LLM_BASE_URL": "https://partial.example/v1",
     }
 
-    plan = migration.build_migration_plan(values)
+    plan = _build_plan(values)
 
     assert [service.id for service in plan.services] == ["general"]
     assert plan.services[0].roles == ("general", "reasoning")
@@ -143,7 +164,7 @@ def test_deduplicates_one_physical_service_and_keeps_legacy_fallbacks():
 
 
 def test_dashscope_rerank_keeps_the_legacy_default_base_url():
-    plan = migration.build_migration_plan({
+    plan = _build_plan({
         "RERANK_API_KEY": "rerank-secret",
         "RERANK_MODEL": "qwen3-rerank",
     })
@@ -161,7 +182,7 @@ def test_a_partial_legacy_env_migrates_but_says_the_backend_will_refuse_to_start
     是合法输出;PR-4 之后这张表会让后端拒绝启动,因此警告要在迁移时就给出来,
     而不是让运维从一个起不来的服务里反推。
     """
-    plan = migration.build_migration_plan({
+    plan = _build_plan({
         "RERANK_API_KEY": "rerank-secret",
         "RERANK_MODEL": "qwen3-rerank",
     })
@@ -182,7 +203,7 @@ def test_a_partial_legacy_env_migrates_but_says_the_backend_will_refuse_to_start
 def test_rerank_preserves_legacy_default_base_and_style_normalization(
     style, protocol
 ):
-    plan = migration.build_migration_plan({
+    plan = _build_plan({
         "RERANK_API_KEY": "rerank-secret",
         "RERANK_MODEL": "qwen3-rerank",
         "RERANK_API_STYLE": style,
@@ -205,7 +226,7 @@ def test_same_physical_service_rejects_conflicting_explicit_capacity():
     }
 
     with pytest.raises(migration.MigrationError, match="same physical service"):
-        migration.build_migration_plan(
+        _build_plan(
             values, {"general": 4, "reasoning": 2}
         )
 
@@ -216,12 +237,12 @@ def test_force_replacement_backs_up_existing_toml(tmp_path):
     output_path = tmp_path / "model-services.toml"
     output_path.write_text("old-config\n", encoding="utf-8")
 
-    assert migration.main([
+    assert _main([
         "--env", str(env_path), "--output", str(output_path), "--apply"
     ]) == 2
     assert output_path.read_text(encoding="utf-8") == "old-config\n"
 
-    assert migration.main([
+    assert _main([
         "--env", str(env_path), "--output", str(output_path),
         "--apply", "--force",
     ]) == 0
@@ -237,7 +258,7 @@ def test_apply_replaces_an_unmodified_packaged_example_without_force(tmp_path):
     example = Path(migration.ROOT) / "model-services.example.toml"
     output_path.write_bytes(example.read_bytes())
 
-    assert migration.main([
+    assert _main([
         "--env", str(env_path), "--output", str(output_path), "--apply",
     ]) == 0
 
@@ -255,4 +276,4 @@ def test_capacity_override_parser_and_no_complete_service_errors():
     with pytest.raises(migration.MigrationError, match="ROLE=N"):
         migration.parse_capacity_overrides(["unknown=2"])
     with pytest.raises(migration.MigrationError, match="no complete"):
-        migration.build_migration_plan({"OPENAI_COMPAT_MODEL": "partial"})
+        _build_plan({"OPENAI_COMPAT_MODEL": "partial"})

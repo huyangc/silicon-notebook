@@ -16,6 +16,7 @@ from hashlib import sha256
 from typing import Any, Callable, Literal
 
 from app.core.config import Settings
+from app.core.model_context import ModelContextExceeded, is_context_error, service_context_budget
 from app.core.ask_context import _ASK_MODEL_ERRORS
 from app.core.llm import CALL_STATS_KWARG, JsonSchemaCapability, OpenAICompatibleClient
 from app.core.llm_logging import (
@@ -226,6 +227,10 @@ def _status_code(error: BaseException) -> int | None:
 
 
 def _stable_error_code(error: BaseException) -> str:
+    if is_context_error(error):
+        return "model_context_exceeded"
+    if getattr(error, "code", "") == "report_context_budget_exhausted":
+        return "report_context_budget_exhausted"
     if isinstance(error, ModelSchedulingError):
         return error.code
     if isinstance(error, MalformedModelResponse):
@@ -331,6 +336,7 @@ class _ScheduledAdapter:
         self._provider = provider
         self._workload = workload
         self._pinned_runtime = pinned_runtime
+        self._runtime_pinned = pinned_runtime is not None
         # Retain the most recently resolved generation for close/admission
         # compatibility.  Normal calls refresh it from the live registry; once
         # provider close begins, routing through this scheduler preserves the
@@ -338,7 +344,7 @@ class _ScheduledAdapter:
         self._runtime = pinned_runtime or initial_runtime
 
     def _current_runtime(self) -> _ServiceRuntime | None:
-        if self._pinned_runtime is not None:
+        if self._runtime_pinned:
             return self._pinned_runtime
         if (
             self._provider._closing or self._provider._closed
@@ -495,13 +501,34 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
             pinned_runtime=pinned_runtime,
         )
         self.settings = provider.settings
+        self.context_budget = None
+        self._context_max_tokens = None
+        self._pinned_thinking_mode = None
+
+    def pin_context(self, max_tokens=None):
+        with self._provider._lock:
+            runtime = self._current_runtime()
+            pinned = ScheduledJsonChatClient(self._provider, self._workload, pinned_runtime=runtime)
+            pinned._runtime_pinned = True
+            pinned._pinned_thinking_mode = (self._pinned_thinking_mode or
+                self._provider.registry.thinking_mode_for(self._workload.id))
+            requested = max_tokens if max_tokens is not None else self.settings.openai_compat_max_tokens
+            if runtime is not None:
+                pinned.context_budget = service_context_budget(
+                    runtime.service, requested, safety_ratio=self.settings.model_context_safety_ratio)
+                pinned._context_max_tokens = pinned.context_budget.max_output_tokens
+            return pinned
 
     @property
     def configured(self) -> bool:
+        if self._runtime_pinned:
+            return self._pinned_runtime is not None
         return self._provider.configured(self._workload.id)
 
     @property
     def model(self) -> str:
+        if self._runtime_pinned:
+            return self._pinned_runtime.service.model if self._pinned_runtime is not None else ""
         service = self._provider.registry.service_for(self._workload.id)
         return service.model if service is not None else ""
 
@@ -558,7 +585,7 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
         # that route even if the TOML changes while it waits for service capacity.
         with self._provider._lock:
             runtime = self._current_runtime()
-            configured_thinking_mode = (
+            configured_thinking_mode = self._pinned_thinking_mode or (
                 self._provider.registry.thinking_mode_for(
                     self._workload.id
                 )
@@ -567,6 +594,11 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
             return self._provider._offline_chat.chat_json(
                 messages, response_schema_hint
             )
+        requested = self._context_max_tokens if self._context_max_tokens is not None else (
+            max_tokens if max_tokens is not None else self.settings.openai_compat_max_tokens)
+        context_budget = service_context_budget(
+            runtime.service, requested, safety_ratio=self.settings.model_context_safety_ratio)
+        max_tokens = context_budget.max_output_tokens
 
         raw_response = ""
         rejection_reason = ""
@@ -607,6 +639,8 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
 
         def invoke() -> str:
             nonlocal raw_response, rejection_reason
+            if not context_budget.fits(messages, response_schema_hint):
+                raise ModelContextExceeded()
             content = raw_chat_json(
                 messages,
                 response_schema_hint,
@@ -1383,6 +1417,7 @@ class RuntimeModelProvider:
             enable_json_schema_probe=True,
             json_schema_observer=observe_json_schema,
             json_schema_capability=capability,
+            context_budget=service_context_budget(service, safety_ratio=self.settings.model_context_safety_ratio),
         )
 
     def _raw_embedding(self, service: ModelServiceDefinition):

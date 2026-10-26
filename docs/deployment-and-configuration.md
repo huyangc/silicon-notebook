@@ -150,11 +150,11 @@ Existing deployments can convert the retired `OPENAI_COMPAT_*`, `KG_LLM_*`,
 
 ```bash
 # Preview only; reads .env and writes nothing.
-python scripts/migrate_legacy_model_env.py --env .env
+python scripts/migrate_legacy_model_env.py --env .env --context-window general=131072 --max-output-tokens general=32768
 
 # After reviewing the service list and inferred capacities, create the TOML and
 # rewrite only the managed model assignments in .env.
-python scripts/migrate_legacy_model_env.py --env .env --apply
+python scripts/migrate_legacy_model_env.py --env .env --context-window general=131072 --max-output-tokens general=32768 --apply
 ```
 
 The apply step backs up `.env`, tightens the active file and every backup containing
@@ -688,9 +688,39 @@ see `RETRIEVAL_EXPERIENCE_ENABLED` below — deliberately its own workload rathe
 sharing `agent_profile_consolidate`'s, so a deployment can point it at a different model
 or disable it independently of notebook-understanding consolidation) to those services. Several workloads may share a service;
 all of them share that service's one scheduler and one concurrency budget.
-`max_concurrency` is the only model-capacity setting. Source-job counts,
+`max_concurrency` is the only model-concurrency setting. Source-job counts,
 window sizes, batch sizes, and local ANN threads do not create another model
 gate.
+
+Each chat service additionally requires positive integer `context_window_tokens`
+and `max_output_tokens`; output must be smaller than the total window. Optional
+`max_input_tokens` is positive and cannot exceed that window. These are the
+actual endpoint's token limits, not inferred model-name defaults; fill them in
+for existing files before upgrading. Non-chat services reject chat capacity
+fields. Missing/invalid capacity refuses startup independently of
+`MODEL_BINDINGS_STRICT`; invalid hot reload retains the last valid registry.
+Only administrators see these declarations in the **模型服务** panel.
+
+Advanced `MODEL_CONTEXT_SAFETY_RATIO` controls the fraction of the context window
+reserved as a safety margin, validated as `0 <= ratio < 1`. Its default is owned
+by the [product/API context rails](./product-and-api.md#model-context-capacity-and-report-compression).
+It does not belong in the starter `.env`; override only after checking the
+endpoint's actual counting behavior. One validated ratio follows the pinned
+service snapshot through provider preparation and the final transport check.
+
+The common chat boundary counts the complete final request using conservative
+UTF-8 byte estimation and reserves a safety margin; it caps requested output by
+service capacity. No tokenizer is guessed or downloaded. Token counting is
+explicitly an estimate because providers can add hidden templates. Reports
+automatically fit/compress over-capacity material using task-wide
+`REPORT_CONTEXT_EXTRA_CALLS_MAX`, `REPORT_CONTEXT_COMPRESSION_MAX_LEVELS` and
+`REPORT_CONTEXT_COMPRESS_MAX_TOKENS`; these advanced cost/quality settings belong
+here rather than the starter `.env`. Exact defaults and failure/receipt contracts
+are owned by [the product/API reference](./product-and-api.md#model-context-capacity-and-report-compression).
+
+Bind the new `report_context_compress` chat workload (「报告材料整理」) as well;
+its default thinking policy is disabled. It uses the report queue priority and
+may share an existing service, with no independent service concurrency budget.
 
 **The binding table is checked at startup: one missing workload or one unknown
 id and the backend refuses to start.** Whenever `MODEL_SERVICES_CONFIG` is
@@ -969,8 +999,8 @@ the `kg_extract` service capacity; neither setting overrides service
 `max_concurrency`.
 
 `OPENAI_COMPAT_MAX_TOKENS` supplies the default completion cap for generation calls
-without a workload override; zero omits `max_tokens` on those calls and lets the
-provider decide. `ANSWER_MAX_TOKENS` caps final answers and `KG_EXTRACT_MAX_TOKENS`
+without a workload override; zero removes this global override while the declared
+service output cap still applies. `ANSWER_MAX_TOKENS` caps final answers and `KG_EXTRACT_MAX_TOKENS`
 caps extraction output. A non-positive value for either omits that workload override
 and falls back to the global cap. `REASONING_MAX_TOKENS` caps planning and reflection;
 `REPORT_SECTION_MAX_TOKENS`, `REPORT_SYNTHESIS_MAX_TOKENS`, and

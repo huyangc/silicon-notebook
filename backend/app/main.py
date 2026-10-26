@@ -226,6 +226,7 @@ def _model_bindings_preflight(settings: Settings) -> None:
     """
     from app.services.model_registry import (
         ModelBindingGapError,
+        ModelCapacityConfigurationError,
         SystemModelServiceRegistry,
     )
 
@@ -233,6 +234,10 @@ def _model_bindings_preflight(settings: Settings) -> None:
         SystemModelServiceRegistry.load(settings)
     except ModelBindingGapError as exc:
         message = exc.loggable()
+        logger.error("%s", message)
+        raise SystemExit(message) from None
+    except ModelCapacityConfigurationError as exc:
+        message = str(exc)
         logger.error("%s", message)
         raise SystemExit(message) from None
     except ValueError:

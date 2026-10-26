@@ -6,6 +6,7 @@ import {
   OutlineEditor,
   ReportCitationDistribution,
   ReportCredibilitySummary,
+  ReportContextProcessing,
   ReportCorpusBasis,
   ReportsPanel,
   type ReportDetailT,
@@ -37,6 +38,35 @@ function detail(overrides: Partial<ReportDetailT> = {}): ReportDetailT {
   };
 }
 
+test("材料处理回执兼容旧报告，说明分批整理和阶段材料缺口", () => {
+  const { rerender } = render(<ReportContextProcessing report={detail()} />);
+  expect(screen.queryByLabelText("报告材料处理回执")).toBeNull();
+  rerender(<ReportContextProcessing report={detail({ understanding: { context_processing: {
+    extra_calls: 0, extra_calls_max: 24, max_level: 0, compression_max_levels: 2, stages: {},
+  } } })} />);
+  expect(screen.queryByLabelText("报告材料处理回执")).toBeNull();
+  rerender(<ReportContextProcessing report={detail({ understanding: { context_processing: {
+    extra_calls: 3, extra_calls_max: 24, max_level: 2, compression_max_levels: 2,
+    compressed: true, estimated_counting: true,
+    stages: { draft: { compressed: true, omitted_items: 2, partial_items: 1, invalid_items: 3 } },
+  } } })} />);
+  const receipt = screen.getByLabelText("报告材料处理回执");
+  expect(receipt).toHaveTextContent("已分批整理材料，引用仍指向原始资料");
+  expect(receipt).toHaveTextContent("额外调用 3 / 24 次");
+  expect(receipt).toHaveTextContent("压缩层数 2 / 2");
+  expect(receipt).toHaveTextContent("容量使用保守估算");
+  expect(receipt).toHaveTextContent("章节撰写：已压缩；未纳入 2 项材料；部分采用 1 项材料；来源校验未通过 3 项");
+  expect(receipt).toHaveTextContent("同一材料可能重复计入");
+});
+
+
+test("只有终审失败的材料回执也显示摘要与审校未完成", () => {
+  render(<ReportContextProcessing report={detail({ understanding: { context_processing: {
+    extra_calls: 0, extra_calls_max: 24, max_level: 0, compression_max_levels: 2,
+    stages: { final_editor: { failed: true } },
+  } } })} />);
+  expect(screen.getByLabelText("报告材料处理回执")).toHaveTextContent("摘要与审校：未完成");
+});
 
 test("资料基础披露完整性限制，并兼容缺失 profile 的旧报告", () => {
   const { rerender } = render(<ReportCorpusBasis report={detail()} />);
@@ -390,6 +420,10 @@ test("报告详情实际挂载可信度回执与引证分布，而非只测试�
     status: "done",
     content_md: "# 完整报告\n\n结论 [k1]。",
     understanding: {
+      context_processing: {
+        compressed: true, extra_calls: 1, extra_calls_max: 24,
+        max_level: 1, compression_max_levels: 2,
+      },
       credibility: {
         synthesis_status: "failed_validation",
         claim_ledgers_available: 1,
@@ -411,6 +445,7 @@ test("报告详情实际挂载可信度回执与引证分布，而非只测试�
   );
 
   expect(await screen.findByLabelText("报告可信度回执")).toHaveTextContent("返回结果未通过校验");
+  expect(screen.getByLabelText("报告材料处理回执")).toHaveTextContent("额外调用 1 / 24 次");
   expect(screen.getByTitle("报告引证的资料数量与个人/公共来源分布")).toHaveTextContent("可区分资料 1");
 });
 

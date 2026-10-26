@@ -13,6 +13,7 @@ from app.services.model_registry import (
     RETIRED_WORKLOADS,
     WORKLOADS,
     ModelBindingGapError,
+    ModelCapacityConfigurationError,
     SystemModelServiceRegistry,
     describe_binding_gap,
     ignorable_retired_hint,
@@ -32,6 +33,7 @@ _EXPECTED_WORKLOADS = {
     "report_sufficiency": ("chat", "report", "报告充分性判断"),
     "report_section": ("chat", "report", "报告章节生成"),
     "report_summary": ("chat", "report", "报告摘要"),
+    "report_context_compress": ("chat", "report", "报告材料整理"),
     "source_summary": ("chat", "background", "来源摘要"),
     "notebook_metadata": ("chat", "background", "笔记本信息提取"),
     "paper_metadata": ("chat", "background", "论文元数据提取"),
@@ -79,6 +81,7 @@ def _service(
     return f'''[services.{service_id}]
 display_name = "通用模型"
 kind = "{kind}"
+{chr(10).join(("context_window_tokens = 1048576", "max_output_tokens = 131072")) if kind == "chat" else ""}
 protocol = "{protocol}"
 base_url = "{base_url}"
 model = "{model}"
@@ -156,6 +159,7 @@ def test_chat_workloads_have_an_exhaustive_analysis_area():
             "report_sufficiency",
             "report_section",
             "report_summary",
+            "report_context_compress",
         },
         "source": {
             "source_summary",
@@ -386,6 +390,33 @@ def test_resolves_secret_from_supplied_environment_without_exposing_it(tmp_path)
 
     assert registry.service("general").api_key == "a-secret"
     assert "a-secret" not in repr(registry.service("general"))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("context_window_tokens", "0"), ("context_window_tokens", "true"),
+    ("max_output_tokens", "0"), ("max_output_tokens", "1048576"),
+    ("max_input_tokens", "1048577"),
+])
+def test_chat_capacity_validation_rejects_invalid_endpoint_limits(tmp_path, field, value):
+    body = _service()
+    if field == "max_input_tokens":
+        body += f"\n{field} = {value}\n"
+    else:
+        import re
+        body = re.sub(rf"{field} = [0-9]+", f"{field} = {value}", body)
+    path = _write_config(tmp_path / "models.toml", body)
+    with pytest.raises(ValueError, match=field):
+        SystemModelServiceRegistry.load(_settings(path), {"GENERAL_KEY": "secret"})
+
+
+def test_missing_capacity_is_explicit_and_nonchat_rejects_chat_capacity(tmp_path):
+    body = _service().replace("context_window_tokens = 1048576\n", "").replace("max_output_tokens = 131072\n", "")
+    path = _write_config(tmp_path / "models.toml", body)
+    with pytest.raises(ValueError, match="context_window_tokens.*max_output_tokens"):
+        SystemModelServiceRegistry.load(_settings(path), {"GENERAL_KEY": "secret"})
+    path = _write_config(path, _service(kind="embedding", protocol="dashscope", extra="context_window_tokens = 1024"))
+    with pytest.raises(ValueError, match="仅适用于聊天模型"):
+        SystemModelServiceRegistry.load(_settings(path), {"GENERAL_KEY": "secret"})
 
 
 def test_relative_config_path_is_anchored_to_repository_root(monkeypatch, tmp_path):
@@ -876,21 +907,31 @@ def test_the_ignorable_ledger_is_exactly_the_community_summary_id():
     assert "graph_chain_verify" not in IGNORABLE_RETIRED_WORKLOADS
 
 
-def test_the_pre_retirement_template_passes_the_strict_preflight_verbatim(caplog):
-    """基线 1e842854 的模板原样(两张表都绑着 kg_community_summary)喂给新版严格
-    预检必须通过:这就是每个部署升级时手里那份文件的形状。"""
+def test_the_pre_retirement_template_requires_explicit_capacity_upgrade(caplog):
+    """冻结的历史配置缺容量，必须明确拒绝，不能按模型名猜测或豁免。"""
     baseline = _BASELINE_TEMPLATE.read_text(encoding="utf-8")
-    current = (
-        Path(__file__).resolve().parents[2] / "model-services.example.toml"
-    ).read_text(encoding="utf-8")
-    # 夹具确实是「当前模板 + 恰好那两行」,不是另一份随手写的配置。
-    assert [
-        line for line in baseline.splitlines() if line not in current.splitlines()
-    ] == ['kg_community_summary = "general"', 'kg_community_summary = "disabled"']
+    assert "context_window_tokens" not in baseline
+    assert "max_output_tokens" not in baseline
+    assert "report_context_compress" not in baseline
+    with pytest.raises(ModelCapacityConfigurationError) as caught:
+        SystemModelServiceRegistry.load(_settings(_BASELINE_TEMPLATE, strict=True), _TEMPLATE_KEYS)
+    message = str(caught.value)
+    assert "context_window_tokens" in message and "max_output_tokens" in message
+    assert str(_BASELINE_TEMPLATE) not in message
+    assert all(secret not in message for secret in _TEMPLATE_KEYS.values())
+    assert [record for record in caplog.records if record.name == _REGISTRY_LOGGER] == []
+
+
+def test_operator_upgraded_historical_template_still_ignores_retired_workload(tmp_path, caplog):
+    """运维在临时副本补容量与新增绑定后，原有退役条目的忽略语义保持。"""
+    baseline = _BASELINE_TEMPLATE.read_text(encoding="utf-8")
+    upgraded = baseline.replace('kind = "chat"\n', 'kind = "chat"\ncontext_window_tokens = 1048576\nmax_output_tokens = 32768\n')
+    upgraded = upgraded.replace('report_summary = "general"\n', 'report_summary = "general"\nreport_context_compress = "general"\n')
+    path = _write_config(tmp_path / "operator-upgraded-models.toml", upgraded)
 
     with caplog.at_level(logging.WARNING, logger=_REGISTRY_LOGGER):
         registry = SystemModelServiceRegistry.load(
-            _settings(_BASELINE_TEMPLATE, strict=True), _TEMPLATE_KEYS
+            _settings(path, strict=True), _TEMPLATE_KEYS
         )
 
     assert all(registry.service_for(workload_id) for workload_id in WORKLOADS)

@@ -43,6 +43,7 @@ DEFAULT_CHUNK_KG_MAX_DEPTH = 1
 DEFAULT_CHUNK_KG_FAN_OUT = 8
 DEFAULT_REPORT_RETRIEVAL_FANOUT = 8
 DEFAULT_REPORT_PROBE_CHANNEL_CONCURRENCY = 2
+DEFAULT_MODEL_CONTEXT_SAFETY_RATIO = 0.05
 # ``ask.reflect_action`` budgets (design document §八).  ``0`` plugin actions is
 # the deployment-level kill switch; there is deliberately no separate boolean.
 DEFAULT_REASONING_MAX_PLUGIN_ACTIONS = 2
@@ -196,6 +197,9 @@ class Settings(BaseSettings):
     # 临时放行——它不是产品默认,也不改变「未绑定的工作负载静默不可用」这个事实。
     # 空 MODEL_SERVICES_CONFIG 是另一回事(受支持的离线模式),不受本开关影响。
     model_bindings_strict: bool = Field(True, validation_alias="MODEL_BINDINGS_STRICT")
+    model_context_safety_ratio: float = Field(
+        DEFAULT_MODEL_CONTEXT_SAFETY_RATIO, ge=0, lt=1,
+        validation_alias="MODEL_CONTEXT_SAFETY_RATIO")
 
     # Deployment-owned out-of-repo plugin manifest (TOML). Empty = no deployment
     # plugins; the frozen topology is then byte-identical to the built-in tuple. A
@@ -584,6 +588,12 @@ class Settings(BaseSettings):
         102400, ge=1, validation_alias="REPORT_SYNTHESIS_MAX_TOKENS")
     report_summary_max_tokens: int = Field(
         102400, ge=1, validation_alias="REPORT_SUMMARY_MAX_TOKENS")
+    report_context_extra_calls_max: int = Field(
+        24, ge=0, le=256, validation_alias="REPORT_CONTEXT_EXTRA_CALLS_MAX")
+    report_context_compression_max_levels: int = Field(
+        2, ge=0, le=8, validation_alias="REPORT_CONTEXT_COMPRESSION_MAX_LEVELS")
+    report_context_compress_max_tokens: int = Field(
+        8192, ge=1, validation_alias="REPORT_CONTEXT_COMPRESS_MAX_TOKENS")
     # 【通识】层:允许报告引入库外参数知识(行内标注,仅报告管线读取)。
     report_allow_parametric: bool = Field(
         True, validation_alias="REPORT_ALLOW_PARAMETRIC")

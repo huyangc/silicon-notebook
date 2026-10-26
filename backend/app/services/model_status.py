@@ -78,6 +78,7 @@ class ModelStatusService:
                     stored.get(service.id),
                     self.provider.scheduler_snapshot(service.id),
                     registry=registry,
+                    include_capacity=include_binding_gaps,
                 )
                 for service in registry.services()
             ],
@@ -129,6 +130,7 @@ class ModelStatusService:
             service,
             self.status_store.get_all().get(service.id),
             self.provider.scheduler_snapshot(service.id),
+            include_capacity=True,
         )
 
     def test_all(self, *, actor_id: str) -> ModelServicesStatus:
@@ -168,6 +170,7 @@ class ModelStatusService:
         live: SchedulerSnapshot,
         *,
         registry: SystemModelServiceRegistry | None = None,
+        include_capacity: bool = False,
     ) -> ModelServiceStatusItem:
         registry = registry if registry is not None else self.registry
         persisted = self._current_persisted(service, stored)
@@ -185,6 +188,9 @@ class ModelStatusService:
             display_name=safe_model_display_name(service.display_name),
             kind=service.kind,
             model=safe_model_label(service.model),
+            context_window_tokens=(service.context_window_tokens if include_capacity and service.kind == "chat" else None),
+            max_output_tokens=(service.max_output_tokens if include_capacity and service.kind == "chat" else None),
+            max_input_tokens=(service.max_input_tokens if include_capacity and service.kind == "chat" else None),
             workloads=[
                 ModelWorkloadView(id=workload.id, label=workload.display_label)
                 for workload in registry.workloads_for(service.id)

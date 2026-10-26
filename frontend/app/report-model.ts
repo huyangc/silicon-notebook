@@ -135,6 +135,26 @@ export type ReportCitationAuditT = {
   high_risk_assertions?: number;
 };
 
+export type ReportContextStageT = {
+  failed?: boolean;
+  compressed?: boolean;
+  input_items?: number;
+  output_items?: number;
+  omitted_items?: number;
+  partial_items?: number;
+  invalid_items?: number;
+};
+
+export type ReportContextProcessingT = {
+  extra_calls?: number;
+  extra_calls_max?: number;
+  max_level?: number;
+  compression_max_levels?: number;
+  compressed?: boolean;
+  estimated_counting?: boolean;
+  stages?: Partial<Record<"planning_intent" | "planning_outline" | "planning_sufficiency" | "retrieve" | "draft" | "synthesis" | "final_editor", ReportContextStageT>>;
+};
+
 export type ReportUnderstandingT = {
   objective?: string;
   resolved_question?: string;
@@ -161,6 +181,7 @@ export type ReportUnderstandingT = {
   corpus_profile?: ReportCorpusProfileT;
   report_frame?: ReportFrameT;
   credibility?: ReportCredibilityT;
+  context_processing?: ReportContextProcessingT;
   /** 报告创建时冻结的两维检索范围（服务端快照，`narrowed` 说明是否真的收窄过）。
    *  「就此追问」不直接读它，而是问 `GET …/followup` 要一份按现状过滤过的范围。 */
   source_scope?: SourceScopePayload & { narrowed?: boolean | null };
@@ -195,6 +216,10 @@ export type ReportDetailT = ReportSummaryT & {
     // 失败章节的原文,只有报告作者的详情里有;正文里失败章节只写中性说明。
     error?: string;
     citation_audit?: ReportCitationAuditT;
+    context_processing?: {
+      max_level?: number;
+      coverage_limited?: boolean;
+    };
   }[];
   section_status?: { title: string; phase: string; step: number }[];
   gaps: string[];

@@ -12,6 +12,8 @@ def _config(*, service_id: str, model: str, top_p: float) -> str:
     return f'''[services.{service_id}]
 display_name = "{service_id}"
 kind = "chat"
+context_window_tokens = 1048576
+max_output_tokens = 131072
 protocol = "openai"
 base_url = "https://llm.example/v1"
 model = "{model}"
@@ -248,6 +250,26 @@ def test_watcher_rejects_a_file_that_changes_while_it_is_loaded(monkeypatch, tmp
         )
         assert provider.reload_if_changed() is True
         assert provider.chat("ask_answer").model == "model-three"
+    finally:
+        provider.close()
+
+
+def test_capacity_edit_pins_generation_and_missing_capacity_reload_keeps_old(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOT_RELOAD_KEY", "secret")
+    path = tmp_path / "model-services.toml"
+    original = _config(service_id="chat", model="test-model", top_p=1.0)
+    path.write_text(original, encoding="utf-8")
+    provider = RuntimeModelProvider(_settings(path), _EventLog(), chat_factory=lambda service: _ChatDelegate(service, []))
+    try:
+        client = provider.chat("ask_answer")
+        pinned = client.pin_context(max_tokens=1000)
+        path.write_text(original.replace("context_window_tokens = 1048576", "context_window_tokens = 524288"), encoding="utf-8")
+        assert provider.reload_if_changed(force=True)
+        assert pinned.context_budget.context_window_tokens == 1048576
+        assert client.pin_context(max_tokens=1000).context_budget.context_window_tokens == 524288
+        path.write_text(original.replace("context_window_tokens = 1048576\n", ""), encoding="utf-8")
+        assert not provider.reload_if_changed(force=True)
+        assert client.pin_context(max_tokens=1000).context_budget.context_window_tokens == 524288
     finally:
         provider.close()
 

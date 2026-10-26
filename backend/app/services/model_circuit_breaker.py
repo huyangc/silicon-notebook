@@ -6,6 +6,7 @@ from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Callable, Literal
+from app.core.model_context import is_context_error
 
 from app.services.model_work import (
     MalformedModelResponse,
@@ -82,6 +83,8 @@ def _provider_code(error: BaseException) -> str:
 
 
 def classify_provider_failure(error: BaseException) -> FailureKind:
+    if is_context_error(error) or getattr(error, "code", "") == "report_context_budget_exhausted":
+        return FailureKind.IGNORED
     if isinstance(error, (ModelSchedulingError, CancelledError)):
         return FailureKind.IGNORED
     if isinstance(error, MalformedModelResponse):

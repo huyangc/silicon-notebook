@@ -45,7 +45,6 @@ from app.core.config import (
     DEFAULT_REPORT_PROBE_CHANNEL_CONCURRENCY,
     DEFAULT_REPORT_RETRIEVAL_FANOUT,
 )
-from app.core.llm import cap_kwargs
 from app.core.model_json import (
     ModelJsonRepairError,
     parse_model_json_object,
@@ -63,6 +62,15 @@ from app.domain.share_disclosure import (
     MemorySourceReader,
 )
 from app.services.report_memory_use import RetrievalSourceLog
+from app.services.report_context_runtime import (
+    CONTEXT_RECEIPT_KEY, context_disclosure, prepare_section_call,
+    planning_context_call, preserve_context_error, projected_section_map,
+    receipt_for, record_report_context, record_section_baseline,
+    ReportIntentClient,
+    report_context_failure,
+    report_blueprint_call, report_context_runtime, report_editor_call,
+    section_context_receipt,
+)
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 # Only the NAME, from the dependency-free domain layer: these modules are
 # not on the participant override's frozen reader whitelist, but their
@@ -88,7 +96,6 @@ from app.services.report_synthesis import (
     annotate_trend_evidence,
     blueprint_for_section,
     exclusive_frame_conflicts,
-    fair_editor_context,
     localize_blueprint_evidence,
     normalize_claim_ledger,
     normalize_report_frame,
@@ -1000,14 +1007,13 @@ class ReportEngine:
     # --- Stage A ---
     def _plan_outline(self, notebook_id: str, question: str, history: str) -> List[dict]:
         from app.services.prompts import report_outline_prompt, REPORT_OUTLINE_SCHEMA_HINT
-        client = self.dependencies.model_clients.chat("report_outline")
         try:
-            raw = client.chat_json(
-                [{"role": "user", "content": report_outline_prompt(
+            raw = planning_context_call(
+                self, "report_outline", REPORT_OUTLINE_SCHEMA_HINT,
+                lambda _blocks: report_outline_prompt(
                     question, max_sections=self.settings.report_max_sections,
                     max_subqueries=self.settings.report_max_subqueries_per_section,
-                    history_block=history)}],
-                REPORT_OUTLINE_SCHEMA_HINT, cancel_event=self.cancel_event)
+                    history_block=history), {}, stage="planning_outline")
             data = json.loads(raw)
             sections = []
             for s in _dict_items(data.get("sections"))[: self.settings.report_max_sections]:
@@ -1025,9 +1031,9 @@ class ReportEngine:
                 return sections
         except AskCancelled:
             raise
-        except Exception:
-            pass
-        # 回退骨架:expand_query 的子查询平铺为单节(保证总能出报告)。
+        except Exception as exc:
+            preserve_context_error(exc)
+        # 回退骨架:expand_query 的子查询平铺为单节。
         from app.services.query_rewrite import expand_query
         ex = expand_query(self.dependencies.model_clients.chat("query_rewrite"),
                           question, history)
@@ -1045,12 +1051,14 @@ class ReportEngine:
         from app.services.query_intent import finalize_query_intent, plan_query_intent
 
         contract = plan_query_intent(
-            self.dependencies.model_clients.chat("report_outline"),
+            ReportIntentClient(self),
             question,
             history,
             max_topics=self.settings.report_max_sections,
             purpose="deep report",
             cancel_event=self.cancel_event,
+            preserve_history=True,
+            fail_on_context_error=True,
         )
         if not confirmation_mode:
             return contract
@@ -1075,10 +1083,13 @@ class ReportEngine:
         """
         reports = self.dependencies.reports
         try:
+            report_context_runtime(self, notebook_id, rid)
             reports.update_report(
                 notebook_id, rid, status="planning", progress="理解研究问题中"
             )
             contract = self._plan_intent_contract(question, history)
+            if receipt_for(self):
+                contract[CONTEXT_RECEIPT_KEY] = receipt_for(self)
             # Some compatible model clients cannot interrupt an in-flight call.
             # Re-check after it returns so a durable cancellation cannot be
             # followed by publishing a fresh intent_ready state.
@@ -1659,6 +1670,7 @@ class ReportEngine:
                           intent_contract=None) -> list[dict] | None:
         reports = self.dependencies.reports
         try:
+            report_context_runtime(self, notebook_id, rid)
             reports.update_report(notebook_id, rid, status="planning", progress="按已确认问题规划中")
             # 探针检索 memo(本次规划 run 有效):覆盖探针把同一条确认问题放在
             # 每个主题的查询头部,跨主题/跨节的检索方向也高频重复——9.1M 库上
@@ -1841,20 +1853,22 @@ class ReportEngine:
             # memo 只属于这一次规划:不清掉会让整份探针命中(KG+元素对象)挂在
             # 引擎实例上活过整个 generate 阶段(质量评审 P3-6)。
             self._probe_retrieval_memo = None
+            if getattr(self, "_context_runtime", None) is not None:
+                self._context_runtime.flush()
 
     def _storm_outline(self, notebook_id, question, history, corpus_map, *,
                        intent_contract=None, intent_probe=None) -> List[dict]:
         from app.services.prompts import report_storm_outline_prompt, REPORT_STORM_SCHEMA_HINT
         try:
-            raw = self.dependencies.model_clients.chat("report_outline").chat_json(
-                [{"role": "user", "content": report_storm_outline_prompt(
-                    question, corpus_map, max_sections=self.settings.report_max_sections,
+            raw = planning_context_call(
+                self, "report_outline", REPORT_STORM_SCHEMA_HINT,
+                lambda blocks: report_storm_outline_prompt(
+                    question, blocks["corpus_map"], max_sections=self.settings.report_max_sections,
                     max_subqueries=self.settings.report_max_subqueries_per_section,
                     history_block=history,
                     intent_block=json.dumps(intent_contract or {}, ensure_ascii=False),
                     coverage_block=json.dumps(intent_probe or [], ensure_ascii=False),
-                )}],
-                REPORT_STORM_SCHEMA_HINT, cancel_event=self.cancel_event)
+                ), {"corpus_map": corpus_map}, stage="planning_outline")
             data = json.loads(raw)
             intent_type = str((intent_contract or {}).get("intent_type") or "")
             frame_shape = (
@@ -1885,8 +1899,8 @@ class ReportEngine:
                 return out
         except AskCancelled:
             raise
-        except Exception:
-            pass
+        except Exception as exc:
+            preserve_context_error(exc)
         return self._plan_outline(notebook_id, question, history)   # 回退现行骨架
 
     def _bind_outline_to_intent(self, sections: List[dict], intent_contract: dict,
@@ -2021,14 +2035,14 @@ class ReportEngine:
             return sections
         try:
             block = "\n".join(probe_lines)
-            raw = self.dependencies.model_clients.chat("report_sufficiency").chat_json(
-                [{"role": "user", "content": report_sufficiency_prompt(
+            raw = planning_context_call(
+                self, "report_sufficiency", REPORT_SUFFICIENCY_SCHEMA_HINT,
+                lambda blocks: report_sufficiency_prompt(
                     question,
-                    block,
+                    blocks["probe"],
                     result_scope=result_scope,
                     completeness_required=completeness_required,
-                )}],
-                REPORT_SUFFICIENCY_SCHEMA_HINT, cancel_event=self.cancel_event)
+                ), {"probe": block}, stage="planning_sufficiency")
             for v in _dict_items(json.loads(raw).get("verdicts")):
                 number = v.get("index")
                 if (
@@ -2050,8 +2064,8 @@ class ReportEngine:
                     s["gap_note"] = _prose(v.get("gap_note"))
         except AskCancelled:
             raise
-        except Exception:
-            pass
+        except Exception as exc:
+            preserve_context_error(exc)
         return sections
 
     # --- Stage B(单节):完整 reasoning 深挖 ---
@@ -2095,6 +2109,7 @@ class ReportEngine:
         result = ReasoningRetriever(
             retrieval=deps.retrieval,
             model_clients=deps.model_clients,
+            reflection_context=report_context_runtime(self).reflect_chat_json,
             communities=deps.communities,
             settings=self.settings,
             cancel_event=self.cancel_event,
@@ -2380,12 +2395,13 @@ class ReportEngine:
         return bound + reasoning_order_for(
             self.settings, unbound, notebook_id, held=bound).passages
 
+    @record_report_context
     def _draft_section(self, notebook_id: str, section: dict, question: str, result,
                        depth=None, *, report_frame: Optional[dict] = None,
                        synthesis: Optional[dict] = None,
                        synthesis_requested: bool = False,
                        report_id: str = "", section_index: int = -1) -> dict:
-        from app.services.prompts import report_section_prompt, REPORT_SECTION_SCHEMA_HINT
+        from app.services.prompts import REPORT_SECTION_SCHEMA_HINT
         deps = self.dependencies
         # 撰写上下文的预算同样随研究深度走(codex PR#418 R1 P2-2):档位贯通此前只
         # 到检索为止,而「概览」和「穷尽」此前拿到的是同一份 6000/20000 字符上下文
@@ -2474,6 +2490,7 @@ class ReportEngine:
             budget_chars=element_budget,
         )
         element_block = "" if element_block == "(none)" else element_block
+        evidence_blocks = [chunk_block, kg_block, element_block]
         context_block = (f"{chunk_block}\n\n[Knowledge graph]\n{kg_block}"
                          if chunk_block else kg_block) or "(no evidence retrieved)"
         if element_block:
@@ -2515,6 +2532,7 @@ class ReportEngine:
             admitted = _admit_block(chain_block, "")
             if admitted:
                 context_block = f"{context_block}{admitted}"
+                evidence_blocks.append(chain_block)
             elif limits is not None:
                 chain_map = {}
         memory_map = {}
@@ -2537,81 +2555,34 @@ class ReportEngine:
             admitted = _admit_block(memory_block, "Confirmed Memory")
             if admitted:
                 context_block = f"{context_block}{admitted}"
+                evidence_blocks.append(memory_block)
             elif limits is not None:
                 memory_map = {}
         except Exception:
             memory_map = {}
-        client = deps.model_clients.chat("report_section")
         id_map = {**chunk_map, **kg_map, **chain_map, **memory_map, **element_map}
-        from app.services.retrieval_baseline import build_retrieval_baseline_manifest
-        candidate_manifest = getattr(result, "baseline_manifest", None)
-        result.baseline_manifest = build_retrieval_baseline_manifest(
-            notebook_id=notebook_id,
-            query=f"{question}\n{section.get('title') or ''}",
-            mode="report",
-            settings=self.settings,
-            candidate_knowledge=(
-                candidate_manifest.candidate_knowledge
-                if candidate_manifest is not None else result.top_hits
-            ),
-            candidate_chunks=(
-                candidate_manifest.candidate_chunks
-                if candidate_manifest is not None else chunks
-            ),
-            candidate_elements=(
-                candidate_manifest.candidate_elements
-                if candidate_manifest is not None else elements
-            ),
-            selected_knowledge=result.top_hits,
-            selected_chunks=(
-                getattr(result, "baseline_chunks", None) or chunks
-            ),
-            selected_elements=elements,
-            final_context_block=context_block,
-            final_id_map=id_map,
-            final_ordered_handles=(
-                *tuple(chunk_map),
-                *tuple(kg_map),
-                *tuple(element_map),
-                *tuple(chain_map),
-                *tuple(memory_map),
-            ),
-            final_budget_chars=chunk_budget + kg_budget,
-            prior_manifest=candidate_manifest,
-            baseline_step_usage=len(getattr(result, "trace", None) or []),
-        )
-        localized_synthesis = localize_blueprint_evidence(synthesis, id_map)
-        synthesis_block = (
-            json.dumps(localized_synthesis, ensure_ascii=False)
-            if localized_synthesis else ""
-        )
         frame_block = (
             json.dumps(report_frame, ensure_ascii=False) if report_frame else ""
         )
-        # 子大纲 → 有界「发现的结构」块。它只作用于本节内部的 `###` 组织,绝不回写
-        # reports.outline_json 里用户确认过的大纲。两次重试共用同一份块:它与
-        # id_map 一样在这轮里是常量。
-        structure_block = outline_structure_block(sub_outline, id_map)
-        def ask_model() -> Any:
-            return client.chat_json(
-                [{"role": "user", "content": report_section_prompt(
-                    section["title"], section["scope"], question, context_block,
-                    allow_parametric=self.settings.report_allow_parametric,
-                    discovered_structure=structure_block,
-                    assumptions="；".join(
-                        str(item) for item in
-                        ((section.get("intent_contract") or {}).get("assumptions") or [])
-                        if str(item).strip()
-                    )[:1000],
-                    report_frame=frame_block,
-                    synthesis_commitment=synthesis_block,
-                )}],
-                REPORT_SECTION_SCHEMA_HINT, cancel_event=self.cancel_event,
-                **cap_kwargs(client, "report_section_max_tokens"))
+        prepared, aliases = prepare_section_call(
+            self, notebook_id=notebook_id, report_id=report_id,
+            section_index=section_index, section=section, question=question,
+            blocks=evidence_blocks, context_block=context_block, id_map=id_map,
+            frame_block=frame_block, synthesis=synthesis, sub_outline=sub_outline,
+            structure_builder=outline_structure_block,
+        )
         markdown, llm_grounded, raw_claims, failure = self._section_attempts(
-            ask_model, REPORT_SECTION_SCHEMA_HINT,
+            prepared.chat_json, REPORT_SECTION_SCHEMA_HINT,
             report_id=report_id, section_index=section_index,
         )
+        id_map = projected_section_map(prepared, aliases, id_map)
+        record_section_baseline(
+            self, result, notebook_id=notebook_id, section=section, question=question,
+            chunks=chunks, elements=elements, id_map=id_map,
+            context_block=getattr(prepared.render, "evidence_context", context_block),
+            budget_chars=chunk_budget + kg_budget,
+        )
+        localized_synthesis = localize_blueprint_evidence(synthesis, id_map)
         anchors = deps.evidence_context.parse_anchors(markdown, id_map) if markdown else []
         evidence_level, top_relevance, citation_audit = self._section_evidence_grade(
             markdown, id_map, anchors, llm_grounded)
@@ -2631,6 +2602,7 @@ class ReportEngine:
             ) | set(family_resolution.get("unresolved_source_ids") or []),
         )
         base = {"title": section["title"], "scope": section["scope"],
+                "context_processing": section_context_receipt(prepared, synthesis),
                 "markdown": markdown, "grounded": evidence_level == "grounded",
                 "evidence_level": evidence_level, "top_relevance": top_relevance,
                 "citation_audit": citation_audit,
@@ -2700,6 +2672,8 @@ class ReportEngine:
             if markdown:
                 break
             failure = (attempt_status, attempt_reason, failure_error)
+            if report_context_failure(failure_error):
+                break
         return markdown, llm_grounded, raw_claims, failure
 
     def _mark_section_failed(
@@ -2718,7 +2692,8 @@ class ReportEngine:
             # the model request has already degraded to an empty section.
             pass
         base["failed"] = True
-        base["error"] = SECTION_FAILURE_COPY.get(status, SECTION_FAILURE_COPY["error"])
+        base["error"] = (SECTION_FAILURE_COPY["context"] if report_context_failure(error)
+                         else SECTION_FAILURE_COPY.get(status, SECTION_FAILURE_COPY["error"]))
 
     def _synthesize_report_blueprint(self, outline: Sequence[dict], results: Sequence[Any],
                                      question: str, report_frame: Optional[dict]) -> tuple[
@@ -2729,11 +2704,6 @@ class ReportEngine:
         The status is deliberately separate from the optional blueprint so the
         UI can distinguish an evidence-free skip from model/validation failure.
         """
-        from app.services.prompts import (
-            REPORT_SYNTHESIS_SCHEMA_HINT,
-            report_synthesis_prompt,
-        )
-
         evidence_sections, legal_evidence_ids = synthesis_evidence_payload(
             outline, results
         )
@@ -2745,22 +2715,9 @@ class ReportEngine:
             {},
         )
         try:
-            client = self.dependencies.model_clients.chat("report_summary")
-            raw = client.chat_json(
-                [{"role": "user", "content": report_synthesis_prompt(
-                    question,
-                    json.dumps(intent_contract, ensure_ascii=False),
-                    json.dumps(report_frame or {}, ensure_ascii=False),
-                    json.dumps(evidence_sections, ensure_ascii=False),
-                    facet_ids=[
-                        row["id"] for row in (report_frame or {}).get("facets") or []
-                        if isinstance(row, dict) and row.get("id")
-                    ],
-                    )}],
-                    REPORT_SYNTHESIS_SCHEMA_HINT,
-                    cancel_event=self.cancel_event,
-                    **cap_kwargs(client, "report_synthesis_max_tokens"),
-                )
+            raw, legal_evidence_ids = report_blueprint_call(
+                self, question, intent_contract, report_frame, evidence_sections,
+            )
         except AskCancelled:
             raise
         except Exception as exc:
@@ -2775,6 +2732,10 @@ class ReportEngine:
                 return None, "failed_validation", ValueError(
                     "report synthesis blueprint failed validation"
                 )
+            levels = getattr(report_context_runtime(self), "blueprint_section_levels", {})
+            for section in blueprint.get("sections", []):
+                if levels.get(section["section_id"], 0):
+                    section["_context_level"] = levels[section["section_id"]]
             return blueprint, "available", None
         except AskCancelled:
             raise
@@ -2803,6 +2764,7 @@ class ReportEngine:
 
     # --- Stage B+C 并行编排 ---
     def _run_sections(self, notebook_id, rid, outline, question, depth):
+        report_context_runtime(self)
         status = [{"title": s["title"], "phase": "排队", "step": 0} for s in outline]
         # One report-wide decision, read by every site below.  Depth no longer
         # gates synthesis; it selects retrieval budgets only.
@@ -3318,6 +3280,7 @@ class ReportEngine:
         reports = self.dependencies.reports
         try:
             d = reports.get_report(notebook_id, rid)
+            report_context_runtime(self, notebook_id, rid, reset=True)
             outline = d.get("outline") or []
             understanding = d.get("understanding") or {}
             display_question = str(
@@ -3672,9 +3635,6 @@ class ReportEngine:
 
     def _assemble(self, notebook_id, rid, question, outline, sections, *,
                   display_question: str | None = None):
-        from app.services.prompts import (
-            report_summary_prompt, REPORT_SUMMARY_SCHEMA_HINT,
-        )
         intent_contract = next(
             (dict(section.get("intent_contract") or {}) for section in outline
              if section.get("intent_contract")),
@@ -3722,18 +3682,9 @@ class ReportEngine:
         try:
             if not has_successful_body:
                 raise ValueError("no successful report section to summarize")
-            sections_block = fair_editor_context(
-                sections, frame=report_frame, blueprint=synthesis_blueprint
+            raw = report_editor_call(
+                self, question, sections, report_frame, synthesis_blueprint, intent_block,
             )
-            summary_client = self.dependencies.model_clients.chat("report_summary")
-            raw = summary_client.chat_json(
-                [{"role": "user", "content": report_summary_prompt(
-                    question, sections_block, intent_block=intent_block
-                )}],
-                REPORT_SUMMARY_SCHEMA_HINT, cancel_event=self.cancel_event,
-                **cap_kwargs(
-                    summary_client, "report_summary_max_tokens",
-                ))
             data = json.loads(raw)
             summary = _prose(data.get("summary"))
             known_intents = {str(item.get("id") or "") for item in intent_catalog}
@@ -3752,6 +3703,7 @@ class ReportEngine:
             raise
         except Exception:
             final_editor_failed = True
+            report_context_runtime(self).session.note_failure("final_editor")
         finally:
             self._emit_stage_timing(
                 notebook_id,
@@ -3962,6 +3914,10 @@ class ReportEngine:
             review = editor_coverage.get(intent_id)
             if not structurally_covered:
                 intent_gaps.append(f"必答主题「{title}」未形成有效正文")
+            elif any(intent_id in (section.get("intent_ids") or [])
+                     and (section.get("context_processing") or {}).get("coverage_limited")
+                     for section in sections):
+                intent_gaps.append(f"必答主题「{title}」因材料容量限制，完整性尚未确认")
             elif review and not review["covered"]:
                 note = f":{review['note']}" if review["note"] else ""
                 intent_gaps.append(f"必答主题「{title}」回答不完整{note}")
@@ -4051,6 +4007,8 @@ class ReportEngine:
         if report_frame:
             persisted_understanding["report_frame"] = report_frame
         persisted_understanding["credibility"] = credibility
+        if receipt_for(self):
+            persisted_understanding[CONTEXT_RECEIPT_KEY] = receipt_for(self)
         try:
             self.dependencies.reports.update_report(
                 notebook_id, rid, understanding=persisted_understanding
@@ -4070,6 +4028,7 @@ class ReportEngine:
             # disclosure costs no query and reports what was actually cited.
             base_reference_sources=base_reference_source_count(references),
         )
+        parts += context_disclosure(self)
         for si, s in enumerate(sections):
             if s.get("failed"):
                 parts += [f"## {s['title']}", "", section_failure_paragraph(s.get("error")), ""]

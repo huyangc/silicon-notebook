@@ -55,6 +55,9 @@ class ModelServiceDefinition:
     # per-call value; a number forces every request sent to this physical chat
     # service to use the configured value.
     top_p: float | None = None
+    context_window_tokens: int | None = None
+    max_output_tokens: int | None = None
+    max_input_tokens: int | None = None
 
 
 _WORKLOAD_LABELS = MappingProxyType({
@@ -69,6 +72,7 @@ _WORKLOAD_LABELS = MappingProxyType({
     "report_sufficiency": "报告充分性判断",
     "report_section": "报告章节生成",
     "report_summary": "报告摘要",
+    "report_context_compress": "报告材料整理",
     "source_summary": "来源摘要",
     "notebook_metadata": "笔记本信息提取",
     "paper_metadata": "论文元数据提取",
@@ -108,6 +112,7 @@ _WORKLOAD_ANALYSIS_AREAS: Mapping[str, ModelAnalysisArea] = MappingProxyType({
     "report_sufficiency": "report",
     "report_section": "report",
     "report_summary": "report",
+    "report_context_compress": "report",
     "source_summary": "source",
     "notebook_metadata": "source",
     "paper_metadata": "source",
@@ -153,6 +158,7 @@ _CHAT_THINKING_DEFAULTS: Mapping[
     # both stages remain non-thinking; reasoning is spent in outline and
     # sufficiency planning instead.
     "report_summary": "disabled",
+    "report_context_compress": "disabled",
     "source_summary": "disabled",
     "notebook_metadata": "disabled",
     "paper_metadata": "disabled",
@@ -223,7 +229,7 @@ WORKLOADS = workload_map(
         "external_evidence_answer": "interactive",
         "report_outline": "report",
         "report_sufficiency": "report", "report_section": "report",
-        "report_summary": "report", "source_summary": "background",
+        "report_summary": "report", "report_context_compress": "report", "source_summary": "background",
         "notebook_metadata": "background", "paper_metadata": "background",
         "chunk_question_generation": "background",
         "kg_extract": "background", "kg_refine": "background",
@@ -315,7 +321,7 @@ _REQUIRED_SERVICE_KEYS = frozenset({
     "display_name", "kind", "protocol", "base_url", "model", "api_key_env",
     "max_concurrency",
 })
-_OPTIONAL_SERVICE_KEYS = frozenset({"top_p"})
+_OPTIONAL_SERVICE_KEYS = frozenset({"top_p", "context_window_tokens", "max_output_tokens", "max_input_tokens"})
 _SERVICE_KEYS = _REQUIRED_SERVICE_KEYS | _OPTIONAL_SERVICE_KEYS
 _TOP_LEVEL_KEYS = frozenset({"services", "bindings", "thinking"})
 _THINKING_MODES = frozenset({"enabled", "disabled", "provider_default"})
@@ -930,9 +936,11 @@ def _parse_service(
     if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) or max_concurrency <= 0:
         raise ValueError(f"model service {service_id} has an invalid max_concurrency")
     top_p = _optional_top_p(raw_definition.get("top_p"), kind, service_id)
+    capacity = _chat_capacity(raw_definition, kind)
     fingerprint = _fingerprint(
         service_id, kind, protocol, base_url, model, api_key,
         str(max_concurrency), "" if top_p is None else repr(top_p),
+        *(str(capacity[key]) for key in sorted(capacity)),
     )
     return ModelServiceDefinition(
         id=service_id,
@@ -946,7 +954,38 @@ def _parse_service(
         max_concurrency=max_concurrency,
         fingerprint=fingerprint,
         top_p=top_p,
+        **capacity,
     )
+
+
+class ModelCapacityConfigurationError(ValueError):
+    """Safe capacity diagnostic composed only from fixed field names."""
+
+
+def _chat_capacity(raw: Mapping[str, object], kind: str) -> dict[str, int | None]:
+    fields = ("context_window_tokens", "max_output_tokens", "max_input_tokens")
+    if kind != "chat":
+        if any(key in raw for key in fields):
+            raise ModelCapacityConfigurationError("context_window_tokens、max_output_tokens、max_input_tokens 仅适用于聊天模型。")
+        return dict.fromkeys(fields)
+    missing = [key for key in fields[:2] if key not in raw]
+    if missing:
+        raise ModelCapacityConfigurationError("聊天模型缺少容量配置，请在 MODEL_SERVICES_CONFIG 的聊天服务中填写：" + "、".join(missing) + "。请按实际服务限制填写，不要根据模型名称猜测。")
+    values: dict[str, int | None] = {}
+    for key in fields:
+        value = raw.get(key)
+        if value is None and key == "max_input_tokens":
+            values[key] = None
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ModelCapacityConfigurationError(f"聊天模型容量 {key} 必须是正整数，请修正模型配置。")
+        values[key] = value
+    window = values["context_window_tokens"]
+    output = values["max_output_tokens"]
+    assert window is not None and output is not None
+    if output >= window or (values["max_input_tokens"] or 0) > window:
+        raise ModelCapacityConfigurationError("聊天模型 max_output_tokens 必须小于 context_window_tokens，max_input_tokens 不得大于上下文窗口，请修正模型配置。")
+    return values
 
 
 def _optional_top_p(value: object, kind: str, service_id: str) -> float | None:

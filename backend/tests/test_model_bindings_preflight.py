@@ -31,6 +31,8 @@ from tests.child_env_testkit import BYTECODE_ENV
 _SERVICE = """[services.chat]
 display_name = "chat"
 kind = "chat"
+context_window_tokens = 1048576
+max_output_tokens = 131072
 protocol = "openai"
 base_url = "https://llm.example/v1"
 model = "chat-model"
@@ -90,6 +92,20 @@ def test_a_complete_binding_table_passes_the_preflight(monkeypatch, tmp_path):
 def test_empty_config_passes_because_offline_mode_is_a_supported_runtime():
     """`scripts/check.sh` 与本机开发都跑在这个形态下;它不是配错。"""
     assert _model_bindings_preflight(_settings()) is None
+
+
+def test_missing_capacity_startup_reports_safe_actionable_fields(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("PREFLIGHT_KEY", "private-secret")
+    config = Path(_config(tmp_path))
+    config.write_text(config.read_text().replace("context_window_tokens = 1048576\n", ""))
+    with pytest.raises(SystemExit) as raised:
+        _model_bindings_preflight(_settings(str(config)))
+    message = str(raised.value)
+    assert "context_window_tokens" in message
+    assert "MODEL_SERVICES_CONFIG" in message
+    assert "private-secret" not in message
+    assert str(config) not in message
+    assert raised.value.__suppress_context__
 
 
 def test_a_missing_binding_logs_the_message_and_stops_the_process(
