@@ -211,6 +211,72 @@ def test_real_section_does_not_repeat_rejected_adaptive_request():
     assert receipt_for(eng)["extra_calls"] == len(compressor.calls) + 1
 
 
+@pytest.mark.parametrize("limit", [1, 2])
+def test_section_retry_after_empty_recovery_remains_under_shared_admission(limit):
+    replies = iter([ModelContextExceeded(), {"markdown": ""}, {"markdown": "Recovered body"}])
+    target = Transport(lambda messages: next(replies), maximum=9000)
+    eng = engine(target)
+    eng.settings.report_context_extra_calls_max = 0
+    units = tuple(EvidenceUnit(f"e{i}", "evidence. " * 200, group=str(i), level=2) for i in range(4))
+    render = lambda selected: [{"role": "user", "content": "Fixed contract.\n" + "\n".join(x.text for x in selected)}]
+    prepared = report_context_runtime(eng).prepare("report_section", "{}", render, units, stage="draft")
+    eng.settings.report_context_extra_calls_max = limit
+    markdown, _, _, failure = eng._section_attempts(prepared.chat_json, "{}", report_id=None, section_index=0)
+    assert len(target.calls) == 1 + limit
+    assert receipt_for(eng)["extra_calls"] == limit
+    if limit == 1:
+        assert not markdown
+        assert failure[2].code == "report_context_budget_exhausted"
+    else:
+        assert markdown == "Recovered body"
+
+
+@pytest.mark.parametrize("all_hops_fit,compress", [(False, False), (True, False), (True, True)])
+def test_projected_section_keeps_graph_semantics_only_with_their_citation_dependencies(all_hops_fit, compress):
+    from app.domain.graph import ChainHop, InferredChain
+    from app.services.prompts import REPORT_SECTION_SCHEMA_HINT
+
+    hops = tuple(ChainHop(f"r{index}", "nb", "personal", source, dest, "derived_from", source, dest,
+                          evidence=[{"quote": f"Direct hop {index}.", "source_id": f"source-{index}"}])
+                 for index, (source, dest) in enumerate([("A", "B"), ("B", "C")], 1))
+    chain = InferredChain("A", "B", "C", "A", "B", "C", "derived_from", hops,
+                          validity_scope={"temperature": "25 C only"})
+
+    class GraphEvidence(Evidence):
+        def knowledge_context(self, *args, **kwargs):
+            if not all_hops_fit:
+                return "(none)", {}
+            return entry_lines(["k1001: Graph A.", "k1002: Graph B.",
+                                "relations: A --derived_from--> B"]), {
+                key: {"object_type": "concept", "object_id": key, "source_id": key}
+                for key in ("k1001", "k1002")}
+
+    section = {"title": "Graph", "scope": "Explain qualified inference", "sub_queries": []}
+    empty_target = Transport()
+    engine(empty_target, evidence_context=Evidence([]))._draft_section(
+        "nb", section, "Q", ReasoningResult(), section_index=0)
+    fixed = empty_target.context_budget.input_tokens(empty_target.calls[0], REPORT_SECTION_SCHEMA_HINT)
+    target = Transport()
+    target.context_budget = ContextBudget(1000000, 100, fixed + (5000 if all_hops_fit else 350))
+    compressor = Transport({"cards": [finding("section-0:k1", "Large source sentence.")]})
+    eng = engine(target, compressor, evidence_context=GraphEvidence([("k1", "Large source sentence. " * 2000)]))
+    if not compress:
+        eng.settings.report_context_extra_calls_max = 0
+    out = eng._draft_section("nb", section, "Q", ReasoningResult(chains=[chain]), section_index=0)
+    prompt = target.calls[-1][-1]["content"]
+    if all_hops_fit:
+        assert {"k1001", "k1002", "k2001", "k2002"} <= set(out["id_map"])
+        assert "relations: A --derived_from--> B" in prompt
+        assert "path 1: [k2001] + [k2002]" in prompt
+        assert "25 C only" in prompt
+        assert "attach NO [k] marker" in prompt
+    else:
+        assert not {"k2001", "k2002"} <= set(out["id_map"])
+        assert "inference 1: A" not in prompt
+    stage = receipt_for(eng)["stages"]["draft"]
+    assert stage["omitted_items"] >= 1 if not compress else stage["partial_items"] == 1
+
+
 @pytest.fixture
 def stored_report(tmp_path):
     from app.services.sqlite_repository import SQLiteRepository

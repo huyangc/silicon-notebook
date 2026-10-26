@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any, Callable
@@ -77,13 +78,20 @@ class PreparedReportCall:
         return self.render(self.projection.units)
 
     def chat_json(self, **kwargs):
+        from app.core.model_context import request_admission
+
         raise_if_cancelled(self.runtime.cancel_event)
         if self.max_tokens is not None:
             kwargs["max_tokens"] = self.max_tokens
         kwargs.setdefault("cancel_event", self.runtime.cancel_event)
         previous_messages = self.messages
         try:
-            return self.client.chat_json(previous_messages, self.schema, **kwargs)
+            # A section's bounded empty/JSON retry may call us again after
+            # recovery. Every subsequent send still belongs to that recovery.
+            admission = (request_admission(lambda: self.runtime.session.admit_attempt(self.stage))
+                         if self.recovered else nullcontext())
+            with admission:
+                return self.client.chat_json(previous_messages, self.schema, **kwargs)
         except Exception as exc:
             if (self.recovered or not _context_error(exc)
                     or getattr(self.client, "context_budget", None) is None):
@@ -95,7 +103,7 @@ class PreparedReportCall:
                 _ReducedClient(self.client), self.schema, self.render,
                 self.originals, self.stage,
             )
-            from app.core.model_context import ModelContextExceeded, request_admission
+            from app.core.model_context import ModelContextExceeded
             if (self.messages == previous_messages or
                     self.client.context_budget.input_tokens(self.messages, self.schema)
                     >= self.client.context_budget.input_tokens(previous_messages, self.schema)):
@@ -316,8 +324,22 @@ def prepare_section_call(engine, *, notebook_id, report_id, section_index,
     runtime = report_context_runtime(engine)
     aliases = {}
     units = []
-    for block in blocks:
-        for span in recorded_spans(block) or ():
+    semantic_blocks = []
+    for block_index, block in enumerate(blocks):
+        spans = recorded_spans(block) or ()
+        keys = {span.key for span in spans if span.key in id_map}
+        semantic = ("\n".join(block[span.start:span.end] for span in spans
+                               if not span.key and not span.glue) if spans else block).strip()
+        if semantic:
+            if keys:
+                # Renderer-owned graph edges and inference qualifications are
+                # meaningful context. Retain them verbatim with their entire
+                # dependency set; never attach inferred text to a source key.
+                semantic_blocks.append((keys, semantic))
+            else:
+                units.append(EvidenceUnit(f"section-{section_index}:context-{block_index}",
+                                          semantic, group=f"context-{block_index}", kind="context"))
+        for span in spans:
             if not span.key or span.key not in id_map:
                 continue
             handle = f"section-{section_index}:{span.key}"
@@ -341,9 +363,10 @@ def prepare_section_call(engine, *, notebook_id, report_id, section_index,
         }
         selected_map = {key: value for key, value in id_map.items() if key in selected_keys}
         localized = localize_blueprint_evidence(synthesis, selected_map)
-        evidence = context_block if unchanged else "\n".join(
-            _unit_text(unit, aliases) for unit in selected
-        ) or "(no evidence fits this model's context budget)"
+        evidence = context_block if unchanged else "\n".join([
+            *(_unit_text(unit, aliases) for unit in selected),
+            *(text for dependencies, text in semantic_blocks if dependencies <= selected_keys),
+        ]) or "(no evidence fits this model's context budget)"
         render.evidence_context = evidence
         directions = list(section.get("intent_questions") or [])
         fixed_question = question + ("\n本节必答方向：\n" + "\n".join(directions) if directions else "")
