@@ -402,6 +402,34 @@ def section_context_receipt(prepared, synthesis=None):
             "coverage_limited": bool(projection.omitted_handles or projection.partial_handles)}
 
 
+def inherit_blueprint_context_levels(engine, blueprint):
+    """Extend input lineage with the normalized output's cross-section dependencies."""
+    runtime = report_context_runtime(engine)
+    levels = getattr(runtime, "blueprint_evidence_levels", {})
+    section_levels = getattr(runtime, "blueprint_section_levels", {})
+    # Shared definitions retain their text even when localization removes their
+    # citation keys. The unbound central answer is also sent to every writer,
+    # so it conservatively inherits every admitted input's depth.
+    shared_level = max((levels.get(key, 0)
+                        for definition in blueprint.get("shared_definitions", [])
+                        for key in definition.get("evidence_keys", [])), default=0)
+    if blueprint.get("central_answer"):
+        shared_level = max(shared_level, max(levels.values(), default=0))
+    claims = {claim["id"]: claim for claim in blueprint.get("claims", [])}
+    for section in blueprint.get("sections", []):
+        dependencies = (
+            key for claim_id in section.get("claim_ids", [])
+            for field in ("evidence_keys", "counterevidence_keys")
+            for key in claims[claim_id].get(field, [])
+        )
+        # The section's thesis/handoff have no evidence bindings; preserve its
+        # input-section lineage as well as any explicitly transferred evidence.
+        level = max(shared_level, section_levels.get(section["section_id"], 0),
+                    max((levels.get(key, 0) for key in dependencies), default=0))
+        if level:
+            section["_context_level"] = level
+
+
 def record_section_baseline(engine, result, *, notebook_id, section, question,
                             chunks, elements, id_map, context_block, budget_chars):
     from app.services.retrieval_baseline import build_retrieval_baseline_manifest
@@ -464,11 +492,15 @@ def report_blueprint_call(engine, question, intent_contract, report_frame, evide
     raw = prepared.chat_json()
     legal = {by_handle[handle][1]["evidence_id"] for handle in prepared.projection.source_handles}
     levels = {}
+    section_levels = {}
     for unit in prepared.projection.units:
         for handle in unit.original_handles():
-            section_id = by_handle[handle][0]
-            levels[section_id] = max(levels.get(section_id, 0), unit.level)
-    prepared.runtime.blueprint_section_levels = levels
+            section_id, card = by_handle[handle]
+            evidence_id = card["evidence_id"]
+            levels[evidence_id] = max(levels.get(evidence_id, 0), unit.level)
+            section_levels[section_id] = max(section_levels.get(section_id, 0), unit.level)
+    prepared.runtime.blueprint_evidence_levels = levels
+    prepared.runtime.blueprint_section_levels = section_levels
     return raw, legal
 
 
