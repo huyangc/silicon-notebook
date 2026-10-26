@@ -110,6 +110,14 @@ test("failure rows say which model and what the reply did", () => {
     "返回内容不符合要求。",
   );
   assert.equal(modelFailurePhenomenon({ message: "future_code" }), "调用未成功。");
+  for (const code of ["model_context_exceeded", "report_context_exceeded"]) {
+    assert.equal(modelFailurePhenomenon({ message: code }),
+      "材料超过当前模型的容量，请缩小研究范围或联系管理员检查模型容量。");
+  }
+  assert.equal(modelFailurePhenomenon({ message: "report_context_budget_exhausted" }),
+    "分批整理次数已达上限，请缩小研究范围后重试。");
+  assert.equal(modelFailureText({ ...base, message: "report_context_budget_exhausted" }),
+    "推理服务 deepseek-reasoner（问答回答）调用失败：分批整理次数已达上限，请缩小研究范围后重试。");
   assert.equal(
     modelFailureText({ service_id: "", service_name: "推理服务", message: "missing_config" }),
     "推理服务尚未配置。",

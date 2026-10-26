@@ -165,8 +165,8 @@ export const MODEL_SERVICE_STATUS_ERROR: Record<string, string> = {
   malformed_response: "返回格式异常",
   model_not_configured: "系统未配置",
   model_context_exceeded: "材料超过当前模型的容量，请缩小研究范围或联系管理员检查模型容量",
-  model_context_budget_exhausted: "分批整理次数已达上限，请缩小研究范围后重试",
-  model_context_invalid_compression: "整理后的材料未通过来源校验，请重新生成",
+  report_context_exceeded: "材料超过当前模型的容量，请缩小研究范围或联系管理员检查模型容量",
+  report_context_budget_exhausted: "分批整理次数已达上限，请缩小研究范围后重试",
   // 部署形态的拒绝(后端 model_provider._stable_error_code 已分类,现在原样透传):
   // 模型名配错、端点协议不对、模型不支持所需能力,各自要改的地方不同,不能都叫
   // 「连接未通过」。

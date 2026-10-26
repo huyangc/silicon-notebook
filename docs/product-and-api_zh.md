@@ -3441,7 +3441,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 | `REPORT_CONTEXT_COMPRESS_MAX_TOKENS` | 每次压缩输出 8,192 tokens（正整数），另受模型容量约束 |
 | 服务端上下文超限补救 | 重组输入后最多 1 次，计入额外调用预算 |
 
-发送前原子扣减名额，失败尝试、重试及上下文处理导致的协议回退均计数。计数跨规划与生成持久化，换阶段、重试不重置任务预算或派生层数；用户明确发起新一轮报告生成才重置预算。`model_context_exceeded`、`model_context_budget_exhausted`、`model_context_invalid_compression` 为不同稳定错误；上下文超限不触发模型服务熔断，不原样重发相同输入。
+发送前原子扣减名额，失败尝试、重试及上下文处理导致的协议回退均计数。计数跨规划与生成持久化，换阶段、重试不重置任务预算或派生层数；用户明确发起新一轮报告生成才重置预算。`model_context_exceeded`、`report_context_exceeded`、`report_context_budget_exhausted` 分别表示模型请求超限、报告材料超限和额外调用预算耗尽；无效压缩卡片被剔除并计入回执。上下文超限不触发模型服务熔断，不原样重发相同输入。
 
 终审完整章节材料在旧字符预算投影会遗漏内容时进入容量感知处理，不静默只取章节开头和结尾代替完整材料。章节 `context_processing` 另记录 `max_level` 与 `coverage_limited`。材料未纳入或仅部分采用时，具体必答方向须标为覆盖不确定，不宣称已完整覆盖。上下文处理阶段失败记录 `failed: true`，界面显示「未完成」（包括摘要与审校），必要限制保留在正文中。
 
