@@ -6,13 +6,23 @@ export function canSeeAdminUsage(role: string | undefined): boolean {
 
 export function formatLastActive(iso: string | null | undefined): string {
   if (!iso) return "—";
-  return iso.replace("T", " ").slice(0, 16);
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return "—";
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${formatDate(iso)} ${hours}:${minutes}`;
 }
 
 // 只取日期部分(YYYY-MM-DD):主表「注册时间」列用它省出约 50px 列宽,完整时刻放进 title。
 export function formatDate(iso: string | null | undefined): string {
   if (!iso) return "—";
-  return iso.slice(0, 10);
+  // 带偏移的时间转换到浏览器时区；旧的无偏移时间沿用本地时间语义。
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return "—";
+  const year = String(date.getFullYear()).padStart(4, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 // 存储占用格式化:1024 进制,单位 B/KB/MB/GB/TB,保留一位小数;小于 1 KB 按整数字节

@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 
 import { toUserMessage } from "../../errors.ts";
 import { Pagination } from "../../Pagination";
+import { formatLastActive } from "./format.ts";
 import {
   fetchAnalysisIssues,
   fetchAnalysisIssueModelArtifact,
@@ -214,7 +215,7 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
                 <td>{item.category === "model_output"
                   ? (item.notebook_name || item.notebook_id || "未关联笔记本")
                   : (item.source_deleted ? "来源已删除（已脱敏）" : (item.source_title || item.file_name || "未命名来源"))}</td>
-                <td>{item.updated_at.replace("T", " ").slice(0, 16)}</td>
+                <td>{formatLastActive(item.updated_at)}</td>
                 <td>{item.expires_at.replace("T", " ").slice(0, 16)}</td>
                 <td>
                   {item.category === "model_output" && item.artifact_available

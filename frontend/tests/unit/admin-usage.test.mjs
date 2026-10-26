@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   canSeeAdminUsage,
   formatBytes,
+  formatDate,
   formatLastActive,
   logsDrillHref,
   parseUploadLimit,
@@ -21,6 +22,35 @@ test("formatLastActive 处理空值与格式", () => {
   assert.equal(formatLastActive(null), "—");
   assert.equal(formatLastActive(undefined), "—");
   assert.equal(formatLastActive("2026-07-06T12:34:56"), "2026-07-06 12:34");
+});
+
+test("用户分析时间随浏览器时区转换，日期跨天且兼容历史本地时间", () => {
+  const previous = process.env.TZ;
+  try {
+    for (const [zone, expected] of [
+      ["Asia/Shanghai", "2026-01-01 04:34"],
+      ["UTC", "2025-12-31 20:34"],
+      ["America/New_York", "2025-12-31 15:34"],
+      ["Asia/Kolkata", "2026-01-01 02:04"],
+    ]) {
+      process.env.TZ = zone;
+      for (const value of ["2025-12-31T20:34:56Z", "2026-01-01T04:34:56+08:00"]) {
+        assert.equal(formatLastActive(value), expected);
+        assert.equal(formatDate(value), expected.split(" ")[0]);
+      }
+      assert.equal(formatLastActive("2026-07-06T12:34:56"), "2026-07-06 12:34");
+      for (const value of [null, undefined, "", "invalid"]) {
+        assert.equal(formatLastActive(value), "—");
+        assert.equal(formatDate(value), "—");
+      }
+    }
+    process.env.TZ = "America/New_York";
+    assert.equal(formatLastActive("2026-03-08T06:30:00Z"), "2026-03-08 01:30");
+    assert.equal(formatLastActive("2026-03-08T07:30:00Z"), "2026-03-08 03:30");
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
 });
 
 // 规格 §3 B6:进位判断放在四舍五入之后(1048570/1048575 不出现「1024.0 KB」假进位);
