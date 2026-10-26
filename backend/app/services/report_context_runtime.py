@@ -198,6 +198,13 @@ def receipt_for(engine):
     return runtime.session.receipt() if runtime is not None else None
 
 
+def intent_context_limited(engine, sections, intent_id):
+    editor_limited = getattr(report_context_runtime(engine), "editor_limited_sections", set())
+    return any(intent_id in (section.get("intent_ids") or []) and (
+        index in editor_limited or (section.get("context_processing") or {}).get("coverage_limited")
+    ) for index, section in enumerate(sections))
+
+
 def preserve_context_error(error):
     """Optional model stages may degrade, but must not hide capacity errors."""
     if report_context_failure(error):
@@ -447,6 +454,7 @@ def report_editor_call(engine, question, sections, frame, blueprint, intent_bloc
     from app.services.report_synthesis import fair_editor_context
 
     runtime = report_context_runtime(engine)
+    runtime.editor_limited_sections = set()
     coverage = {}
     full = fair_editor_context(sections, frame=frame, blueprint=blueprint, coverage=coverage)
     units = tuple(EvidenceUnit(
@@ -455,6 +463,14 @@ def report_editor_call(engine, question, sections, frame, blueprint, intent_bloc
             "claims": section.get("claims"), "citation_audit": section.get("citation_audit"),
         }, ensure_ascii=False), group=f"section-{index}", kind="section",
         level=int((section.get("context_processing") or {}).get("max_level", 0)), raw_text=True,
+        # A chapter quote may select any claim. Inherit every known qualifier
+        # conservatively so compression cannot promote an inference to fact.
+        conditions=tuple(dict.fromkeys(condition for claim in section.get("claims") or []
+                                       for condition in claim.get("conditions") or [])),
+        counterevidence=tuple(dict.fromkeys(item for claim in section.get("claims") or []
+                                            for item in claim.get("counterevidence") or [])),
+        inference=any(claim.get("type") == "inference" for claim in section.get("claims") or []),
+        general=any(claim.get("type") == "general" for claim in section.get("claims") or []),
     ) for index, section in enumerate(sections))
 
     def render(selected):
@@ -469,9 +485,16 @@ def report_editor_call(engine, question, sections, frame, blueprint, intent_bloc
             question, block, intent_block=intent_block,
         )}]
 
-    return runtime.prepare("report_summary", REPORT_SUMMARY_SCHEMA_HINT, render,
-                           units, stage="final_editor",
-                           max_tokens=engine.settings.report_summary_max_tokens).chat_json()
+    prepared = runtime.prepare("report_summary", REPORT_SUMMARY_SCHEMA_HINT, render,
+                               units, stage="final_editor",
+                               max_tokens=engine.settings.report_summary_max_tokens)
+    try:
+        return prepared.chat_json()
+    finally:
+        limited = set(prepared.projection.omitted_handles) | set(prepared.projection.partial_handles)
+        runtime.editor_limited_sections = {
+            index for index, unit in enumerate(units) if unit.handle in limited
+        }
 
 
 def context_disclosure(engine):

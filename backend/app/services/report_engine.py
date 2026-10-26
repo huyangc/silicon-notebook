@@ -63,7 +63,7 @@ from app.domain.share_disclosure import (
 )
 from app.services.report_memory_use import RetrievalSourceLog
 from app.services.report_context_runtime import (
-    CONTEXT_RECEIPT_KEY, context_disclosure, prepare_section_call,
+    CONTEXT_RECEIPT_KEY, context_disclosure, intent_context_limited, prepare_section_call,
     planning_context_call, preserve_context_error, projected_section_map,
     receipt_for, record_report_context, record_section_baseline,
     ReportIntentClient,
@@ -3914,9 +3914,7 @@ class ReportEngine:
             review = editor_coverage.get(intent_id)
             if not structurally_covered:
                 intent_gaps.append(f"必答主题「{title}」未形成有效正文")
-            elif any(intent_id in (section.get("intent_ids") or [])
-                     and (section.get("context_processing") or {}).get("coverage_limited")
-                     for section in sections):
+            elif intent_context_limited(self, sections, intent_id):
                 intent_gaps.append(f"必答主题「{title}」因材料容量限制，完整性尚未确认")
             elif review and not review["covered"]:
                 note = f":{review['note']}" if review["note"] else ""
