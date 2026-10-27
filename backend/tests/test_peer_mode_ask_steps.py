@@ -502,9 +502,22 @@ class _FakeUnifiedKg:
     def resolve_focal(self, notebook_id, key):
         return f"focal::{notebook_id}"
 
-    def comention_peers(self, notebook_id, focal, min_bridge, top_k, **kwargs):
+    def comention_peers(self, notebook_id, focal, min_bridge, top_k, *,
+                        with_canonical_id=False, **kwargs):
         self.comention_queries.append(notebook_id)
-        return [(name, 3) for name in self._peers.get(notebook_id, ())]
+        names = self._peers.get(notebook_id, ())
+        if with_canonical_id:
+            return [(f"K-{name}", name, 3) for name in names]
+        return [(name, 3) for name in names]
+
+    def comparison_peer_members(self, notebook_id, canonical_ids, *, limit, after=""):
+        # R3 的成员读(``_peer_scope`` 装了逐库天花板,所以名字出口会来读):
+        # 每个兄弟簇恰一个天花板内成员,名字就是存储名——本文件不测改名。
+        return [
+            {"canonical_id": cid, "member_object_id": f"ko-{cid}",
+             "source_id": f"src-{notebook_id}", "member_name": cid[len("K-"):]}
+            for cid in sorted(canonical_ids)
+        ]
 
     def top_community_for(self, notebook_id, focal):
         # 共提为空的库照常回退社区路径;这个替身没有社区,回退当场空手——
