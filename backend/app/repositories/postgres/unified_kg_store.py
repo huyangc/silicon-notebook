@@ -2145,10 +2145,19 @@ class UnifiedKgStore:
 
         形状同 ``KnowledgeStore.concept_cluster_detail_rows(canonical_ids=...)``:
         每个簇 id 一次 LATERAL 有界 seek(``(notebook_id, canonical_id,
-        member_object_id)`` 索引),枢纽簇也只读 ``limit`` 行;排序与 keyset 比较
-        都带 ``COLLATE "C"``,与 SQLite 的字节序一致。簇 id 清单经 ``id_binding``
-        绑成一个参数、不走预备语句(``execute_ids``)。``after`` 只在单簇往后
-        翻页时传;空清单不发语句。
+        member_object_id)`` 索引走 Index Only Scan,对象按主键探查),``LIMIT``
+        限住的是**走过的**簇行,枢纽簇也只读 ``limit`` 行;keyset 比较与簇内排序
+        都带 ``COLLATE "C"``,与 SQLite 的字节序一致。R4 也用它按页走焦点簇
+        (只列一个簇)。
+
+        外层不写 ``ORDER BY``:那会在计划顶上多一个 Sort 节点(行数虽有界,但它
+        让「整页都由索引顺序给出」不再成立,EXPLAIN 钉
+        ``tests/postgres/test_comparison_peer_members_plan_pin_pg.py`` 不许它出现)。
+        返回顺序 ``(canonical_id, member_object_id)`` 在 Python 里排:行数至多
+        ``len(canonical_ids) × limit``,Python 的 ``str`` 按码点比较,与 UTF-8 下
+        ``COLLATE "C"`` 的字节序一致。簇 id 清单经 ``id_binding`` 绑成一个参数、
+        不走预备语句(``execute_ids``)。``after`` 只在单簇往后翻页时传;空清单
+        不发语句。
         """
         values = sorted({str(value) for value in canonical_ids if value})
         if not values or limit <= 0:
@@ -2160,7 +2169,7 @@ class UnifiedKgStore:
             if after else ("", ())
         )
         with self.database.connect() as db:
-            return execute_ids(
+            rows = execute_ids(
                 db,
                 "SELECT c.cid AS canonical_id, m.member_object_id, m.source_id, "
                 "m.member_name "
@@ -2172,10 +2181,11 @@ class UnifiedKgStore:
                 "WHERE cc.notebook_id=%s AND cc.canonical_id=c.cid "
                 "AND ko.status!='deprecated' "
                 f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN} {seek}"
-                'ORDER BY cc.member_object_id COLLATE "C" LIMIT %s) m '
-                'ORDER BY c.cid COLLATE "C", m.member_object_id COLLATE "C"',
+                'ORDER BY cc.member_object_id COLLATE "C" LIMIT %s) m',
                 (peers.param, notebook_id, notebook_id, *seek_params, int(limit)),
             ).fetchall()
+        return sorted(
+            rows, key=lambda row: (row["canonical_id"], row["member_object_id"]))
 
     def source_index_backfilled(self, notebook_id: str) -> bool:
         """SQLite 孪生同注记:给服务层的可观测入口,只在天花板真的在绑时被调。"""
