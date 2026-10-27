@@ -11,12 +11,12 @@ import pytest
 import app.services.kg.source_partition_index as partition_module
 import app.repositories.source_subgraph_projection as source_projection
 from app.core.config import Settings
-from app.repositories.filesystem.scale_artifact_store import MANIFEST_ABSENT
-from app.services.kg.source_partition_index import (
+from app.domain.kg.source_partition import (
     SourcePartitionUnavailable,
-    build_source_partition,
     source_partition_key,
 )
+from app.repositories.filesystem.scale_artifact_store import MANIFEST_ABSENT
+from app.services.kg.source_partition_index import build_source_partition
 from app.services.source_partitioned_ppr import SourcePartitionedPprService
 from app.services.source_subgraph_ppr import SourceSubgraphPprService
 from app.services.sqlite_repository import SQLiteRepository

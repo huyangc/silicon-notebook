@@ -734,6 +734,52 @@ def test_repository_service_reverse_import_ceiling_only_allows_reduction(tmp_pat
     ]
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import importlib\n"
+        "def codec():\n"
+        "    return importlib.import_module('app.services.kg.scale_index')\n",
+        "from importlib import import_module\n"
+        "CODEC = import_module('app.services.kg')\n",
+        "def codec():\n"
+        "    return __import__('app.services.kg.viz_index')\n",
+    ],
+)
+def test_repository_service_ceiling_counts_literal_dynamic_imports(tmp_path, source):
+    """Every ceiling is 0 now, so the remaining way to re-grow a reverse edge
+    without a reviewer noticing is spelling it at run time. A literal
+    ``import_module`` / ``__import__`` of ``app.services...`` counts exactly
+    like an import statement.
+
+    Mutation anchor: drop the dynamic-import branch from
+    ``repository_service_import_counts`` and every case goes green.
+    """
+    app = tmp_path / "app"
+    _write(app / "repositories/filesystem/artifact_store.py", source)
+
+    assert repository_service_import_violations(
+        app, {"sqlite": 0, "postgres": 0, "other": 0}
+    ) == ["repositories/other service imports grew: 1 > 0"]
+
+
+def test_repository_service_ceiling_ignores_unrelated_dynamic_imports(tmp_path):
+    """A driver probe (``read_budget``'s fail-soft psycopg import) or a
+    non-literal module name is not a services edge and must not count."""
+    app = tmp_path / "app"
+    _write(
+        app / "repositories/read_budget.py",
+        "from importlib import import_module\n"
+        "def probe(name):\n"
+        "    import_module('psycopg.errors')\n"
+        "    return import_module(name)\n",
+    )
+
+    assert repository_service_import_violations(
+        app, {"sqlite": 0, "postgres": 0, "other": 0}
+    ) == []
+
+
 def test_core_models_service_import_allowlist_only_allows_reduction(tmp_path):
     app = tmp_path / "app"
     _write(app / "core/x.py", "from app.services.y import thing\n")

@@ -67,7 +67,7 @@ BASELINE_CEILING = {
 #: injection, re-exports and side-effect imports. Only ever lowered, and
 #: always equal to the gate's ``SUPPRESSIONS``.
 SUPPRESSION_CEILING = {
-    "F401": {"count": 66, "files": 56},
+    "F401": {"count": 65, "files": 55},
     "F811": {"count": 99, "files": 13},
 }
 

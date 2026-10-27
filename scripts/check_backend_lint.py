@@ -71,7 +71,7 @@ NEVER_BASELINED = frozenset({"invalid-syntax", "E902", "F821", "F822", "F823"})
 # predate the gate: pytest fixtures imported for injection, re-exports and
 # side-effect imports. Only ever lowered; pinned again in CEILING_FILE.
 SUPPRESSIONS = {
-    "F401": {"count": 66, "files": 56},
+    "F401": {"count": 65, "files": 55},
     "F811": {"count": 99, "files": 13},
 }
 

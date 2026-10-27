@@ -28,6 +28,7 @@ from app.repositories.scale_build_lock import (
     ScaleBuildLockLost,
 )
 from app.services import scale_build_cli as cli
+from app.services.kg.scale_artifact_codec import KG_SCALE_ARTIFACT_CODEC
 from app.services.kg.source_partition_index import SOURCE_PARTITION_FORMAT_VERSION
 
 FIXTURES = (
@@ -130,7 +131,7 @@ def storage(tmp_path) -> _Settings:
 
 @pytest.fixture
 def store(storage) -> ScaleArtifactStore:
-    return ScaleArtifactStore(storage)
+    return ScaleArtifactStore(storage, codec=KG_SCALE_ARTIFACT_CODEC)
 
 
 @pytest.fixture

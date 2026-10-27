@@ -81,6 +81,7 @@ def _scale_rows(module, projections, db, storage_dir: str, notebook_ids) -> list
     from types import SimpleNamespace
 
     from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
+    from app.services.kg.scale_artifact_codec import KG_SCALE_ARTIFACT_CODEC
 
     max_bytes = _setting("NOTEBOOK_COPY_MAX_BYTES", "notebook_copy_max_bytes")
     max_rows = _setting("NOTEBOOK_COPY_MAX_ROWS", "notebook_copy_max_rows")
@@ -88,7 +89,9 @@ def _scale_rows(module, projections, db, storage_dir: str, notebook_ids) -> list
 
     # The artifact store's own inventories (published roots only; build
     # scratch / rollback directories excluded by the same rule the worker uses).
-    artifacts = ScaleArtifactStore(SimpleNamespace(storage_dir=storage_dir))
+    artifacts = ScaleArtifactStore(
+        SimpleNamespace(storage_dir=storage_dir), codec=KG_SCALE_ARTIFACT_CODEC
+    )
     scale_roots = artifacts.indexed_notebook_ids()
     candidates = [(nb, artifacts.scale_dir(nb), "index") for nb in scale_roots]
     # a standalone viz without a scale root, over the synchronous viz budget

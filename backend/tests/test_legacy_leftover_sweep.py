@@ -363,8 +363,9 @@ def test_scale_disk_roots_match_artifact_store_layout(repo):
     钉住两边不失配(同款先例:_artifact_siblings 与 indexed_notebook_ids
     共享 scratch 常量的交叉 pin)。"""
     from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
+    from app.services.kg.scale_artifact_codec import KG_SCALE_ARTIFACT_CODEC
 
-    store = ScaleArtifactStore(repo.settings)
+    store = ScaleArtifactStore(repo.settings, codec=KG_SCALE_ARTIFACT_CODEC)
     derived = {
         Path(store.scale_dir("x")).parent.name,
         Path(store.viz_dir("x")).parent.name,

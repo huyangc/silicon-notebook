@@ -31,6 +31,7 @@ from app.models.schemas import NotebookCreate
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
 from app.services.embedding import FakeEmbedder
 from app.services.kg import scale_index as scale_index_module
+from app.services.kg.scale_artifact_codec import KG_SCALE_ARTIFACT_CODEC
 from app.services.scale_artifact_catalog import ScaleArtifactCatalog
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
@@ -43,7 +44,7 @@ class _CountingStore(ScaleArtifactStore):
     ``load_scale`` 重载了几次。"""
 
     def __init__(self, settings) -> None:
-        super().__init__(settings)
+        super().__init__(settings, codec=KG_SCALE_ARTIFACT_CODEC)
         self.stat_calls = 0
         self.load_calls = 0
 
@@ -413,7 +414,7 @@ def test_the_added_stat_is_orders_of_magnitude_below_a_manifest_read(tmp_path):
     100 倍的余量,用来抓「stat 退化成了真读盘」这类灾难性回归,不做精确计时。
     """
     settings = Settings(storage_dir=str(tmp_path))
-    store = ScaleArtifactStore(settings)
+    store = ScaleArtifactStore(settings, codec=KG_SCALE_ARTIFACT_CODEC)
     directory = store.scale_dir("nb")
     os.makedirs(directory, exist_ok=True)
     with open(os.path.join(str(directory), "manifest.json"), "w") as handle:

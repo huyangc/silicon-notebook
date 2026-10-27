@@ -16,10 +16,10 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import scipy.sparse as sp
 
+from app.domain.kg.source_partition import SourcePartitionUnavailable
 from app.repositories.filesystem.scale_artifact_store import MANIFEST_ABSENT
 from app.services.kg.edge_schema import is_queryable_edge_pair
 from app.services.kg.scale_index import personalized_ppr
-from app.services.kg.source_partition_index import SourcePartitionUnavailable
 from app.services.retrieval import RetrievalSupport
 from app.services.source_subgraph import SourceSubgraphCapability
 

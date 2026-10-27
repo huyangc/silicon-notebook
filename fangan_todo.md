@@ -414,19 +414,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 - [ ] **≥ 150 行的函数共 182 个**（`backend/app` 全量，含嵌套函数），`ask_service.py` 9155 行、
       `knowledge_lifecycle.py` 8519 行两个大文件（2026-10-28 master）。函数天花板守卫只盯基线里登记的 24 个函数，新出现的长
       函数不会被自动纳入。没有统一拆分计划，按触碰到的模块逐个处理。
-- [ ] **仓储层反向 import services 仍有 4 条**（基线 `repository_service_import_ceiling`：other 4、
-      postgres 0、sqlite 0；守卫只拦增长）。原 7 条里的 ①–③（backend factory 与 PostgreSQL wrapper）
-      已上移到 services，见 `fangan_done.md` §61。剩下的全在
-      `repositories/filesystem/scale_artifact_store.py:40`、`:41`、`:475`、`:536`，导入
-      `services.kg.{scale_index, viz_index, source_partition_index}`。它们没有沿用 ①–③ 的办法（整文件
-      上移）：`ScaleArtifactStore` 是 scale/viz 索引的磁盘持久化 store（目录布局、manifest 探针、
-      tmp → live 换位），这些 import 只为调用 `load_*` / `save_*` 编解码函数，而编解码函数和 KG 算法写在
-      同一批模块里。把 store 搬进 services 等于把持久化层放进服务层，不符合「store 独占持久化」的分层。
-      正解是把文件格式编解码层从合计约 2.2K 行的三个 KG 算法模块里拆出、下沉到 domain 或 filesystem
-      （`source_partition_index` 还依赖 `services.source_subgraph`），或者改成构造注入。两种做法都会动
-      大库 scale index 的加载热路径；store 按模块属性在调用时取 `load_scale_index` 等函数，这样磁盘缓存
-      用例对模块属性打的 monkeypatch 才会生效，搬走编解码函数就得一起迁移这些打桩点；测试里还有 6 处直接
-      构造 `ScaleArtifactStore(settings)`。所以需另行设计，并先测量加载耗时。
 - [ ] **owner-view 守卫的两张豁免表**：`frontend/tests/guards/owner-view-no-reflatten-guard.test.mjs` 的
       `GRANDFATHERED_DESTRUCTURE_HOOKS`（`askSession`、`sourceLibrary` 两段先于守卫存在的整体解构，
       `frontend/app/page.tsx` 的 `} = askSession` 在 2252 行、`} = sourceLibrary` 在 891 行；同一豁免也

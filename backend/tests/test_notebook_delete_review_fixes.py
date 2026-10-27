@@ -685,11 +685,14 @@ def test_artifact_siblings_and_indexed_notebook_ids_share_the_same_scratch_shape
         )
 
     from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
+    from app.services.kg.scale_artifact_codec import KG_SCALE_ARTIFACT_CODEC
 
     class _Settings:
         storage_dir = str(tmp_path)
 
-    published = ScaleArtifactStore(_Settings()).indexed_notebook_ids()
+    published = ScaleArtifactStore(
+        _Settings(), codec=KG_SCALE_ARTIFACT_CODEC
+    ).indexed_notebook_ids()
     assert published == sorted([notebook_id, other_id])
 
 

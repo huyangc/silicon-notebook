@@ -18,20 +18,19 @@ from typing import Any, Mapping
 import numpy as np
 import scipy.sparse as sp
 
+# The format version, the generation gate, the directory key and the
+# capability-failure type live in app.domain.kg.source_partition (the store,
+# both maintenance backends, the offline CLI and the selected-source PPR lane
+# all need them); this module imports them for its own use.
+from app.domain.kg.source_partition import (
+    SOURCE_PARTITION_FORMAT_VERSION,
+    SourcePartitionUnavailable,
+    build_generation_mismatch,
+    source_partition_key,
+)
 from app.services.kg.edge_schema import is_queryable_edge_pair
 from app.services.kg.scale_index import build_transition
 from app.services.source_subgraph import GRAPH_CONTRACT_VERSION
-
-# Sunk to app.domain.kg.source_partition in B3 (app.repositories'
-# maintenance modules import it directly there); re-exported here
-# unchanged for this module's own use and existing importers such as
-# filesystem/scale_artifact_store.py. ``build_generation_mismatch`` lives
-# there for the same reason (P1, codex PR#643 R26) — the store, both
-# maintenance backends and the offline CLI all apply the same gate.
-from app.domain.kg.source_partition import (  # noqa: F401
-    SOURCE_PARTITION_FORMAT_VERSION,
-    build_generation_mismatch,
-)
 
 _PARTITION_FILES = (
     "graph.npz",
@@ -40,14 +39,6 @@ _PARTITION_FILES = (
     "object_types.npy",
     "relation_endpoints.npy",
 )
-
-
-class SourcePartitionUnavailable(RuntimeError):
-    """A capability failure, never permission to use the whole graph."""
-
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
-        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -85,10 +76,6 @@ def _json_list(value: Any) -> list[Any]:
 
 def _identity(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def source_partition_key(source_id: str) -> str:
-    return hashlib.sha256(source_id.encode("utf-8")).hexdigest()
 
 
 def _file_sha256(path: Path) -> str:
