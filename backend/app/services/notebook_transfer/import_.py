@@ -80,6 +80,7 @@ import os
 import shutil
 import struct
 import time
+import urllib.parse
 import zipfile
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -554,6 +555,36 @@ def _require_text(value: Any) -> str:
     return value
 
 
+def _check_served_values(source: ArchiveRowSource) -> None:
+    """Values a serving path trusts because this deployment only ever persists
+    them in one shape, refused (``ArchiveError``) when an archive carries any
+    other: an attachment's MIME type is one of the image types the asset routes
+    serve inline (``ALLOWED_MIME_EXTENSIONS``) -- a hand-made archive could
+    otherwise have this origin serve HTML or SVG -- and a source's link, which
+    the source list renders as a link and a re-parse downloads, is an http(s)
+    URL (what URL import accepts)."""
+    for batch in source.batches("notebook_assets"):
+        for row in batch:
+            mime = row.get("mime")
+            if not isinstance(mime, str) or mime not in ALLOWED_MIME_EXTENSIONS:
+                raise ArchiveError("附件的 MIME 类型不在允许的图片类型之内")
+    for batch in source.batches("sources"):
+        for row in batch:
+            url = row.get("source_url")
+            if url not in (None, "") and not _is_web_url(url):
+                raise ArchiveError("来源链接不是 http(s) 地址")
+
+
+def _is_web_url(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parts = urllib.parse.urlsplit(value)
+    except ValueError:
+        return False
+    return parts.scheme.lower() in ("http", "https") and bool(parts.hostname)
+
+
 def _require_text_list(value: Any) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ArchiveError("global_object_types 的字段类型不符")
@@ -641,6 +672,7 @@ class NotebookImportService:
         check_columns(manifest, self._store.import_table_columns(ARCHIVE_TABLES))
         check_file_paths(inspection.files)
         source = ArchiveRowSource(archive, manifest, adapt=lambda table, row: row, page_rows=1000)
+        _check_served_values(source)
         (notebook_row,) = [row for batch in source.batches("notebooks") for row in batch]
         local: dict[str, set[str]] = {}
         for batch in source.batches("notebook_object_schemas"):

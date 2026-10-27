@@ -2336,8 +2336,11 @@ bash scripts/cli.sh notebook import ./nb-a.snbk --owner alice --name "Imported c
   version (a newer version is refused), every table's and file's size, sha256 and row count,
   exactly one notebook row, every column name a plain identifier this database has (a column
   this database lacks is refused: the exporting deployment runs a newer build, upgrade this one
-  first), and the carried file paths (two that collide on a case-insensitive or
-  Unicode-normalising file system are refused).
+  first), the carried file paths (two that collide on a case-insensitive or
+  Unicode-normalising file system are refused), and the values a serving path trusts because
+  this deployment only ever stores them in one shape: an attachment whose MIME type is not one
+  of the image types the asset routes serve inline, or a source link that is not an http(s)
+  URL, refuses the file.
 - **Strict references.** A reference column naming a row the file does not carry refuses the
   whole file ("文件内容不完整") -- the export clears every pointer leaving its closure, so this
   only happens to an incomplete or edited file. An id inside stored JSON (payload, evidence,
