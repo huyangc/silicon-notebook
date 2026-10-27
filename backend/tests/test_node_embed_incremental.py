@@ -69,7 +69,7 @@ def test_node_embed_progress_monotonic(repo):
             for i in range(6)]
     repo.store_kg(nb.id, None, objs, [])
     # 同上:清空 store_kg 内联 embed 的既有产物,复现「待补向量」前置态,
-    # 让下面 _backfill_knowledge_embeddings 真的有事可做、能观测到多次 progress。
+    # 让下面的 embed_objects_batch 真的有事可做、能观测到多次 progress。
     with repo._write() as db:
         db.execute("DELETE FROM knowledge_embeddings WHERE notebook_id=?", (nb.id,))
     seen = []
@@ -78,7 +78,8 @@ def test_node_embed_progress_monotonic(repo):
                 for r in db.execute(
                     "SELECT id, payload FROM knowledge_objects WHERE notebook_id=?",
                     (nb.id,)).fetchall()]
-        repo._backfill_knowledge_embeddings(db, nb.id, rows,
-                                            progress=lambda d, t: seen.append((d, t)))
+        repo._runtime.source_embedding.embed_objects_batch(
+            nb.id, [{"_oid": row["id"], "payload": row["payload"]} for row in rows],
+            progress=lambda d, t: seen.append((d, t)))
     assert seen and seen[-1][0] == seen[-1][1]           # 末次 done==total
     assert [d for d, _ in seen] == sorted(d for d, _ in seen)  # done 单调不减

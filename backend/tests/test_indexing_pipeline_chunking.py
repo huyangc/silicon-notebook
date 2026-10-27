@@ -134,12 +134,12 @@ def test_pending_blocks_writes_then_one_transaction_publishes_all_visible_source
     first = _insert_source(repo, notebook.id, "alpha")
     second = _insert_source(repo, notebook.id, "beta")
     hidden = _insert_source(repo, notebook.id, "private memory")
-    repo._build_chunks_for_source(first)
-    repo._build_chunks_for_source(second)
+    repo._runtime.source_chunking.build_chunks_for_source(first)
+    repo._runtime.source_chunking.build_chunks_for_source(second)
     # Chunk it while it is still an ordinary row, then flip it to memory: a
     # Memory source can no longer be chunked (E4-1 guard), and the point of this
     # test is that a publish leaves pre-existing hidden chunk rows alone.
-    repo._build_chunks_for_source(hidden)
+    repo._runtime.source_chunking.build_chunks_for_source(hidden)
     with repo._write() as db:
         db.execute("UPDATE sources SET source_type='memory' WHERE id=?", (hidden,))
     before = _chunk_texts(repo, notebook.id)
@@ -204,7 +204,7 @@ def test_pending_blocks_writes_then_one_transaction_publishes_all_visible_source
 def test_late_generation_rolls_back_without_mixing(repo):
     notebook = repo.create_notebook(NotebookCreate(name="stale"))
     first = _insert_source(repo, notebook.id, "old")
-    repo._build_chunks_for_source(first)
+    repo._runtime.source_chunking.build_chunks_for_source(first)
     old_chunks = _chunk_texts(repo, notebook.id)
     pipeline_id, version, generation = _intent(repo, notebook.id)
     job_id = _attach_job(repo, notebook.id, generation)
@@ -237,7 +237,7 @@ def test_late_generation_rolls_back_without_mixing(repo):
 def test_fully_staged_late_generation_is_discarded_without_live_mutation(repo):
     notebook = repo.create_notebook(NotebookCreate(name="late-stage"))
     source_id = _insert_source(repo, notebook.id, "old generation")
-    repo._build_chunks_for_source(source_id)
+    repo._runtime.source_chunking.build_chunks_for_source(source_id)
     before = _chunk_texts(repo, notebook.id)
     pipeline_id, version, generation = _intent(repo, notebook.id)
     job_id = _attach_job(repo, notebook.id, generation)
@@ -284,8 +284,8 @@ def test_whole_notebook_bound_failure_keeps_old_publication_pending(
     notebook = bounded.create_notebook(NotebookCreate(name="bounded"))
     first = _insert_source(bounded, notebook.id, "one")
     second = _insert_source(bounded, notebook.id, "two")
-    bounded._build_chunks_for_source(first)
-    bounded._build_chunks_for_source(second)
+    bounded._runtime.source_chunking.build_chunks_for_source(first)
+    bounded._runtime.source_chunking.build_chunks_for_source(second)
     old_chunks = _chunk_texts(bounded, notebook.id)
     pipeline_id, version, generation = _intent(bounded, notebook.id)
     job_id = _attach_job(bounded, notebook.id, generation)
@@ -311,7 +311,7 @@ def test_whole_notebook_bound_failure_keeps_old_publication_pending(
 def test_facade_reuses_durable_rebuild_job_and_returns_before_worker(repo, monkeypatch):
     notebook = repo.create_notebook(NotebookCreate(name="durable"))
     source_id = _insert_source(repo, notebook.id, "durable body")
-    repo._build_chunks_for_source(source_id)
+    repo._runtime.source_chunking.build_chunks_for_source(source_id)
     submitted = {}
 
     def capture(function, *args, **kwargs):
@@ -520,7 +520,7 @@ def test_rebuild_publishes_and_clears_per_source_fallback_badges(repo, monkeypat
 
     notebook = repo.create_notebook(NotebookCreate(name="rebuild badge"))
     source_id = _insert_source(repo, notebook.id, "rebuild me")
-    repo._build_chunks_for_source(source_id)
+    repo._runtime.source_chunking.build_chunks_for_source(source_id)
     host = repo._runtime.source_chunking.indexing_pipelines
 
     def malformed(pipeline_id, elements, **_kwargs):
@@ -699,7 +699,7 @@ def test_publisher_waits_for_inflight_ingestion_and_fails_closed_on_timeout(repo
 
     # 发布点:排空超时 → 弃 stage + failed 可重试。
     source_id = _insert_source(repo, notebook.id, "drain text")
-    repo._build_chunks_for_source(source_id)
+    repo._runtime.source_chunking.build_chunks_for_source(source_id)
     pipeline_id, version, generation = _intent(repo, notebook.id)
     job_id = _attach_job(repo, notebook.id, generation)
     repo._runtime.indexing_pipeline.rebuild(

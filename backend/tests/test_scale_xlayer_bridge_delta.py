@@ -89,7 +89,7 @@ def test_case_a_external_base_uses_full_domain_equals_oracle(repo):
     base_idx = repo._scale_index(base.id, allow_stale=True)
     base_indexes = [(base.id, base_idx)]
 
-    all_node_ids, all_edges, _ = repo._active_kg_delta(active.id)
+    all_node_ids, all_edges, _ = repo.retrieval.graph._active_kg_delta(active.id)
     assert len(all_node_ids) >= 2
 
     oracle_edges = repo.retrieval.graph._scale_xlayer_bridge_edges(
@@ -133,7 +133,7 @@ def test_case_b_self_indexed_plus_external_base_keeps_core_bridges(repo):
     base_indexes = [(base.id, base_idx), (selfnb.id, self_idx)]
 
     # Self is indexed with no post-watermark sources → delta is empty.
-    delta_ids, delta_edges, _ = repo._active_kg_delta(selfnb.id)
+    delta_ids, delta_edges, _ = repo.retrieval.graph._active_kg_delta(selfnb.id)
     assert delta_ids == [], "fixture: self fully indexed, delta must be empty"
 
     # Pre-delta-scoping oracle: full domain for every participant.
@@ -175,7 +175,7 @@ def test_self_only_participant_uses_delta_no_full_load(repo, monkeypatch):
     assert self_idx is not None
     base_indexes = [(selfnb.id, self_idx)]
 
-    delta_ids, delta_edges, _ = repo._active_kg_delta(selfnb.id)
+    delta_ids, delta_edges, _ = repo.retrieval.graph._active_kg_delta(selfnb.id)
     assert "eNew" in delta_ids and "eS" not in delta_ids
 
     calls = {"full": 0, "delta": 0}
@@ -211,7 +211,7 @@ def test_self_only_empty_delta_no_load_at_all(repo, monkeypatch):
                                  oid="eS", sid="sS", mark_base=False)
     self_idx = repo._scale_index(selfnb.id, allow_stale=True)
     base_indexes = [(selfnb.id, self_idx)]
-    delta_ids, _, _ = repo._active_kg_delta(selfnb.id)
+    delta_ids, _, _ = repo.retrieval.graph._active_kg_delta(selfnb.id)
     assert delta_ids == []
 
     calls = {"full": 0, "delta": 0}

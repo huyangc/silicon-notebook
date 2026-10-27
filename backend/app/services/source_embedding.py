@@ -887,24 +887,3 @@ class SourceEmbeddingService:
             # __init__ 的通知面注释);matrix 逐出没有这个问题:它是幂等 pop、无重算代价。
         return written
 
-    def backfill_knowledge_embeddings(self, db, notebook_id: str,
-                                      objects: List[dict], progress=None) -> None:
-        """Embed + persist any knowledge objects missing a vector, concurrently
-        (rides embed_objects_batch). No-op when all are embedded or no
-        embedder. Task 26: orchestration moved from the facade; the "have"
-        probe reads through the caller's connection so the facade `_connect`
-        boundary stays observable."""
-        if not getattr(
-            self.embedder("knowledge_object_embedding"), "configured", True
-        ):
-            return
-        have = self.vectors.embedded_object_ids(db, notebook_id)
-        missing = [
-            {"_oid": obj["id"], "payload": obj.get("payload", {})}
-            for obj in objects
-            if obj["id"] not in have and _payload_text(obj.get("payload", {})).strip()
-        ]
-        if missing:
-            self.embed_objects_batch(notebook_id, missing, progress=progress)
-        elif progress:
-            progress(0, 0)

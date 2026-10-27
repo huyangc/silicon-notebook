@@ -746,12 +746,6 @@ class ChunkStore:
         return [_compat_element_ids(row) for row in rows]
 
     @staticmethod
-    def count_row(connection, notebook_id: str):
-        return connection.execute(
-            "SELECT COUNT(*) AS c FROM chunks WHERE notebook_id=%s", (notebook_id,)
-        ).fetchone()
-
-    @staticmethod
     def hydrate_rows(connection, chunk_ids: Sequence[str]):
         ids = list(chunk_ids)
         if not ids:

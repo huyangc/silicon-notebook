@@ -50,7 +50,7 @@ def _seed_library(repo, notebook_id: str, prefix: str, *, name: str = _MOE) -> s
                  f"{name} routing is described in document {prefix} part {index}.",
                  now),
             )
-    repo._chunk_and_embed_source(source_id)
+    repo._runtime.source_chunking.chunk_and_embed_source(source_id)
 
     def _evidence(element_id: str) -> list[dict]:
         return [{
@@ -168,11 +168,11 @@ def test_chain_knowledge_objects_from_an_unchecked_library_are_gone(
 def test_chain_relations_from_an_unchecked_library_are_gone(federated_corpus):
     repo, active, base, _local_source, _base_sources = federated_corpus
 
-    unscoped = repo.retrieval.federated_retrieve_relations(active, _QUERY)
+    unscoped = repo.retrieval.candidates.federated_retrieve_relations(active, _QUERY)
     assert {hit.notebook_id for hit in unscoped} == {active, base}
 
     with _base_excluded(active):
-        scoped = repo.retrieval.federated_retrieve_relations(active, _QUERY)
+        scoped = repo.retrieval.candidates.federated_retrieve_relations(active, _QUERY)
     assert scoped, "当前库自己的关系检索不得被库维度收窄顺带关掉(R1)"
     assert {hit.notebook_id for hit in scoped} == {active}
 
@@ -240,7 +240,7 @@ def test_chain_never_queries_an_unchecked_library(federated_corpus, monkeypatch)
     keys = [(active, local_source)] + [(base, sid) for sid in base_sources]
     with _base_excluded(active):
         repo.retrieval.federated_retrieve(active, _QUERY)
-        repo.retrieval.federated_retrieve_relations(active, _QUERY)
+        repo.retrieval.candidates.federated_retrieve_relations(active, _QUERY)
         repo.retrieval.federated_retrieve_elements(
             active, _QUERY, allowed_source_keys=keys, limit=8,
         )
@@ -279,7 +279,7 @@ def test_incident_shape_local_document_is_not_drowned_by_the_mounted_library(
         }
         surfaced |= {
             evidence.source_id
-            for hit in repo.retrieval.federated_retrieve_relations(active, _QUERY)
+            for hit in repo.retrieval.candidates.federated_retrieve_relations(active, _QUERY)
             for evidence in hit.evidence
         }
         surfaced |= {
@@ -324,13 +324,13 @@ def test_knowledge_context_gates_the_library_at_the_assembly_point(
     names = {str(hit.payload.get("name") or "") for hit in library_hits}
     assert all(names), "baseline: the library's hits must carry renderable names"
 
-    block, id_map = repo._answer_context(active, library_hits)
+    block, id_map = repo._runtime.evidence_context_component.knowledge_context(active, library_hits)
     assert id_map and any(name in block for name in names), (
         "baseline: unscoped, the library's node does render into the prompt"
     )
 
     with _base_excluded(active):
-        block, id_map = repo._answer_context(active, library_hits)
+        block, id_map = repo._runtime.evidence_context_component.knowledge_context(active, library_hits)
     assert not id_map, f"unchecked library became citable: {id_map}"
     assert not [name for name in names if name in block], (
         f"unchecked library reached the prompt: {block!r}"

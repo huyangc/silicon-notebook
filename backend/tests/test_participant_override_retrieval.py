@@ -76,7 +76,7 @@ def _seed_source(repo, notebook_id: str, prefix: str) -> str:
                 (f"el-{prefix}-{index}", source_id, f"p{index}",
                  f"{_QUERY} 的要点在文档 {prefix} 第 {index} 节里展开。", _NOW),
             )
-    repo._chunk_and_embed_source(source_id)
+    repo._runtime.source_chunking.chunk_and_embed_source(source_id)
     return source_id
 
 

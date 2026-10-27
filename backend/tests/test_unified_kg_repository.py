@@ -45,10 +45,10 @@ def test_cluster_and_candidate_crud(repo):
     repo._runtime.knowledge_governance.write_merge_candidate(nb.id, "K1", "K2", 0.85)
     pend = repo.pending_merges(nb.id)
     assert len(pend) == 1 and pend[0]["status"] == "pending"
-    repo._runtime.knowledge_governance.set_merge_decision(nb.id, pend[0]["id"], "rejected")
+    repo.reject_merge(nb.id, pend[0]["id"])
     assert repo.pending_merges(nb.id) == []
     assert repo._runtime.knowledge_governance.decided_pairs(nb.id) == {("K1", "K2"): "rejected"}
-    repo._runtime.knowledge_governance.set_merge_decision(nb.id, pend[0]["id"], "confirmed")
+    repo.confirm_merge(nb.id, pend[0]["id"])
     assert repo._runtime.knowledge_governance.decided_pairs(nb.id) == {("K1", "K2"): "confirmed"}
 
 
@@ -84,7 +84,7 @@ def test_set_merge_decision_rejects_bad_status(repo):
     repo._runtime.knowledge_governance.write_merge_candidate(nb.id, "K1", "K2", 0.85)
     cid = repo.pending_merges(nb.id)[0]["id"]
     with pytest.raises(ValueError):
-        repo._runtime.knowledge_governance.set_merge_decision(nb.id, cid, "maybe")
+        repo._runtime.knowledge_governance._set_merge_decision(nb.id, cid, "maybe")
 
 def test_rebuild_merges_same_concept_across_sources(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -113,7 +113,7 @@ def test_unified_graph_concept_level_cached(repo):
     # the full graph is cached (same object); unified_graph wraps it with metadata.
     # codex #772 R16 P2: the cache value is (graph_seq_row_version, graph) so a
     # cross-process writer's version bump is detected on the next read.
-    assert repo._unified_graph_full(nb.id, "concept") is repo._unified_cache[(nb.id,"concept")][1]
+    assert repo._runtime.knowledge_lifecycle._unified_graph_full(nb.id, "concept") is repo._runtime.retrieval_snapshots.unified_cache[(nb.id,"concept")][1]
 
 
 def test_unified_graph_limit_returns_core_subgraph(repo):
@@ -139,10 +139,10 @@ def test_store_kg_invalidates_unified_cache(repo):
     repo.store_kg(nb.id, None, [{"local_id":"a","object_type":"concept","payload":{"name":"A","section_path":""},"evidence":[]}], [])
     repo.rebuild_unified_kg(nb.id)
     repo.unified_graph(nb.id, level="concept")
-    assert (nb.id, "concept") in repo._unified_cache
+    assert (nb.id, "concept") in repo._runtime.retrieval_snapshots.unified_cache
     # a new store_kg must evict the cache
     repo.store_kg(nb.id, None, [{"local_id":"b","object_type":"concept","payload":{"name":"B","section_path":""},"evidence":[]}], [])
-    assert (nb.id, "concept") not in repo._unified_cache
+    assert (nb.id, "concept") not in repo._runtime.retrieval_snapshots.unified_cache
 
 def test_concept_detail_lists_members_and_attached(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -637,8 +637,8 @@ def test_rebuild_applies_llm_confirmed_auto_candidate(repo):
     """LLM 兜底: auto_candidate 经 LLM 确认 merge 后, rebuild 应将两个概念合入同一簇。"""
     from app.services.sqlite_repository import _now
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    o1 = repo._test_insert_object(nb.id, "concept", {"name": "operational amplifier"})
-    o2 = repo._test_insert_object(nb.id, "concept", {"name": "op amplifier circuit"})
+    o1 = repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "operational amplifier"})
+    o2 = repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "op amplifier circuit"})
     # 用16维向量(与 EMBED_DIM=16 匹配), 方向相同 -> 余弦相似度=1.0(≥hi=0.94)
     vec = [1.0] + [0.0] * 15
     with repo._write() as db:

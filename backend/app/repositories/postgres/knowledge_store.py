@@ -1797,15 +1797,6 @@ class KnowledgeStore:
         with self.database.connect() as db:
             return self.any_mounted_has_kg_on(db, notebook_id, viewer_id=viewer_id)
 
-    def any_mounted_has_kg_compat(
-        self, notebook_id: str, db: "Any | None" = None, *, viewer_id: str | None
-    ) -> bool:
-        return (
-            self.any_mounted_has_kg_on(db, notebook_id, viewer_id=viewer_id)
-            if db is not None
-            else self.any_mounted_has_kg(notebook_id, viewer_id=viewer_id)
-        )
-
     def retrieval_objects_compat(
         self, db: Any, notebook_id: str, object_type: str,
         statuses, id_filter,
@@ -3662,30 +3653,6 @@ class KnowledgeStore:
             (notebook_id, normalize_timestamp(now)),
         )
 
-    def stale_object_ids_for_source(
-        self, db: Any, source_id: str, notebook_id: str
-    ) -> List[str]:
-        """Return knowledge_objects.id values whose evidence references source_id.
-
-        Fast path (backfilled notebooks): a single indexed SQL lookup against
-        knowledge_object_sources — O(matches), not O(notebook size).
-
-        Legacy path (not yet backfilled): filter the JSONB evidence in keyset-
-        paged database queries. Interactive delete/reparse must not turn into a
-        notebook-wide read/parse/write backfill while holding its transaction;
-        the explicit batch-ingest backfill remains responsible for populating
-        the reverse index and flipping the marker."""
-        object_ids: List[str] = []
-        after_id = ""
-        while True:
-            batch = self._stale_object_ids_for_source_batch(
-                db, source_id, notebook_id, after_id=after_id
-            )
-            if not batch:
-                return object_ids
-            object_ids.extend(batch)
-            after_id = batch[-1]
-
     def _stale_object_ids_for_source_batch(
         self,
         db: Any,
@@ -3871,10 +3838,6 @@ class KnowledgeStore:
             db.execute(
                 "DELETE FROM element_embeddings WHERE source_id = ANY(%s)", (ids,)
             )
-
-    @staticmethod
-    def delete_relations_for_source(db: Any, source_id: str) -> None:
-        db.execute("DELETE FROM knowledge_relations WHERE source_id = %s", (source_id,))
 
     def begin_extraction_run(
         self,
@@ -4334,28 +4297,6 @@ class KnowledgeStore:
     # The last facade SQL bodies, moved verbatim.  All connection-taking —
     # the facade keeps its `_connect`/`_write` boundaries (and the frozen
     # patch seats on them) and passes the possibly-wrapped connection down.
-
-    @staticmethod
-    def source_has_kg(db: Any, source_id: str) -> bool:
-        """True iff the source has a complete KG graph.
-
-        Direct/governance rows without extraction history remain compatible.
-        When extraction history exists, the latest KG run must be completed so
-        a failed legacy partial write cannot masquerade as resumable completion.
-        """
-        row = db.execute(
-            "SELECT EXISTS("
-            "  SELECT 1 FROM knowledge_objects ko "
-            "  WHERE ko.source_id = %s AND ko.source_id != '' "
-            "  AND COALESCE(("
-            "    SELECT er.status FROM extraction_runs er "
-            "    WHERE er.source_id=ko.source_id AND er.run_type='kg' "
-            "    ORDER BY er.created_at DESC, er.ordinal DESC LIMIT 1"
-            "  ), 'completed')='completed'"
-            ") AS exists",
-            (source_id,),
-        ).fetchone()
-        return bool(row["exists"])
 
     def insert_test_object(
         self,

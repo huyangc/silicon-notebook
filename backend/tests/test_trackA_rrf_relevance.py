@@ -64,13 +64,13 @@ def test_element_sim_raises_relevance_above_keyword_only(tmp_path, monkeypatch):
     query = "cascode aaa bbb ccc ddd"
 
     # Baseline: same call WITHOUT element_sims -> keyword-only relevance.
-    base = repo._rrf_scored(query, kg_objs, knowledge_sims)
+    base = repo.retrieval.candidates._rrf_scored(query, kg_objs, knowledge_sims)
     base_hit = next((r for r in base if r.object_id == "obj-1"), None)
     assert base_hit is not None, "obj-1 not in baseline results"
 
     # With element sim 0.9 injected, relevance must rise above the keyword-only
     # baseline (best-of picks the 0.9 element sim over the absent knowledge sim).
-    results = repo._rrf_scored(query, kg_objs, knowledge_sims,
+    results = repo.retrieval.candidates._rrf_scored(query, kg_objs, knowledge_sims,
                                element_sims=element_sims)
     hit = next((r for r in results if r.object_id == "obj-1"), None)
     assert hit is not None, "obj-1 not in results"
@@ -95,7 +95,7 @@ def test_knowledge_sim_still_works_in_rrf_path(tmp_path, monkeypatch):
     knowledge_sims = {"obj-2": 0.85}
     element_sims = {}
 
-    results = repo._rrf_scored("miller compensation", kg_objs,
+    results = repo.retrieval.candidates._rrf_scored("miller compensation", kg_objs,
                                 knowledge_sims, element_sims=element_sims)
     hit = next((r for r in results if r.object_id == "obj-2"), None)
     assert hit is not None

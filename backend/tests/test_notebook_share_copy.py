@@ -765,10 +765,10 @@ def test_copy_notebook_chunked_transactions_release_lock_between_chunks(repo, mo
 
     def contender():
         release.wait(timeout=5)
-        got = repo._write_lock.acquire(timeout=3)
+        got = repo._runtime.database.write_lock.acquire(timeout=3)
         if got:
             acquired.set()
-            repo._write_lock.release()
+            repo._runtime.database.write_lock.release()
 
     t = threading.Thread(target=contender)
     t.start()
@@ -866,7 +866,7 @@ def test_copy_sweeper_only_removes_expired_copy_jobs(repo):
             (expired_id,),
         )
 
-    assert repo._sweep_stuck_copies(created_by=owner) == 1
+    assert repo._runtime.notebook_copies.sweep_stuck_copies(created_by=owner) == 1
     with repo._connect() as db:
         assert db.execute("SELECT 1 FROM notebooks WHERE id=?", (current_id,)).fetchone()
         assert db.execute("SELECT 1 FROM notebooks WHERE id=?", (expired_id,)).fetchone() is None
@@ -907,7 +907,7 @@ def test_copy_sweeper_reaps_per_notebook_and_cleans_disk(repo, monkeypatch):
         return original_write(*args, **kwargs)
 
     monkeypatch.setattr(database, "write", _write_spy)
-    assert repo._sweep_stuck_copies(created_by=owner) == 2
+    assert repo._runtime.notebook_copies.sweep_stuck_copies(created_by=owner) == 2
     monkeypatch.setattr(database, "write", original_write)
 
     assert writes["n"] == 2, (
@@ -956,7 +956,7 @@ def test_copy_sweeper_cleans_disk_per_commit_even_when_later_tx_fails(repo, monk
 
     monkeypatch.setattr(database, "write", failing_second_write)
     with pytest.raises(RuntimeError):
-        repo._sweep_stuck_copies(created_by=owner)
+        repo._runtime.notebook_copies.sweep_stuck_copies(created_by=owner)
     monkeypatch.setattr(database, "write", original_write)
 
     with repo._connect() as db:

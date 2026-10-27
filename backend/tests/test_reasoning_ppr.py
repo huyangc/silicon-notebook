@@ -224,10 +224,10 @@ def test_answer_context_id_offset_shifts_keys(repo):
     nb = _seed_two_doc_moe(repo)
     hits = repo._retrieve_scored(nb.id, "Mixture-of-Experts")[:2]
     assert hits
-    block, id_map = repo._answer_context(nb.id, hits, id_offset=repo._MIX_KG_KEY_BASE)
+    block, id_map = repo._runtime.evidence_context_component.knowledge_context(nb.id, hits, id_offset=repo._MIX_KG_KEY_BASE)
     assert all(int(k[1:]) > repo._MIX_KG_KEY_BASE for k in id_map)   # k1001+
     # 默认 offset=0 保持旧行为
-    _b0, id0 = repo._answer_context(nb.id, hits)
+    _b0, id0 = repo._runtime.evidence_context_component.knowledge_context(nb.id, hits)
     assert "k1" in id0
 
 
@@ -245,7 +245,7 @@ def test_answer_reasoning_mixes_chunks_as_citable(repo):
             return json.dumps({"answer": "跨文档证据 [k1].", "grounded": True})
     bind_chat_client(repo, "ask_answer", _Echo())
 
-    answer, grounded, anchors, _counts = repo._answer_reasoning(
+    answer, grounded, anchors, _counts = repo._runtime.ask_component._answer_reasoning(
         nb.id, "对比 MoE", hits, [], chunks=chunks)
     assert anchors and anchors[0].object_type == "chunk"   # k1 = chunk 段一等引用
 
@@ -261,7 +261,7 @@ def test_answer_reasoning_empty_chunks_unchanged(repo):
             return json.dumps({"answer": "KG 证据 [k1].", "grounded": True})
     bind_chat_client(repo, "ask_answer", _Echo())
 
-    answer, grounded, anchors, _counts = repo._answer_reasoning(nb.id, "MoE", hits, [], chunks=None)
+    answer, grounded, anchors, _counts = repo._runtime.ask_component._answer_reasoning(nb.id, "MoE", hits, [], chunks=None)
     assert anchors and anchors[0].object_type == "concept"  # k1 = KG 锚(旧行为)
 
 
@@ -286,7 +286,7 @@ def test_answer_reasoning_makes_direct_source_element_citable(repo):
     llm = _Echo()
     bind_chat_client(repo, "ask_answer", llm)
     repo.settings.kg_query_refine_enabled = False
-    answer, grounded, anchors, _counts = repo._answer_reasoning(
+    answer, grounded, anchors, _counts = repo._runtime.ask_component._answer_reasoning(
         nb.id, "如何路由", [], [element], chunks=None,
     )
     assert "[Direct source elements]" in llm.prompt

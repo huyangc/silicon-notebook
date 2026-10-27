@@ -35,19 +35,19 @@ def test_probe_never_builds(repo):
     repo.rebuild_unified_kg(nb.id)
     # 但 rebuild 会主动建;为测"未建"态,删掉 kg_viz 再探
     import shutil
-    shutil.rmtree(repo._viz_index_dir(nb.id), ignore_errors=True)
-    repo._viz_idx_cache.pop(nb.id, None)
-    probe = repo._viz_index_probe(nb.id)
+    shutil.rmtree(str(repo._runtime.scale_artifact_store.viz_dir(nb.id)), ignore_errors=True)
+    repo._runtime.scale_artifacts.viz_cache.pop(nb.id, None)
+    probe = repo._runtime.scale_artifacts.viz_probe(nb.id)
     assert probe["viz_indexed"] is False
     assert probe["viz_stale"] is False
     # 探针没有偷偷构建
-    assert not os.path.exists(os.path.join(repo._viz_index_dir(nb.id), "manifest.json"))
+    assert not os.path.exists(os.path.join(str(repo._runtime.scale_artifact_store.viz_dir(nb.id)), "manifest.json"))
 
 
 def test_rebuild_refreshes_viz_index(repo):
     nb = _seed(repo)
     repo.rebuild_unified_kg(nb.id)
-    probe = repo._viz_index_probe(nb.id)
+    probe = repo._runtime.scale_artifacts.viz_probe(nb.id)
     assert probe["viz_indexed"] is True
     assert probe["viz_nodes"] == 2
     assert probe["viz_stale"] is False
@@ -56,12 +56,12 @@ def test_rebuild_refreshes_viz_index(repo):
 def test_stale_after_mutation(repo):
     nb = _seed(repo)
     repo.rebuild_unified_kg(nb.id)         # 建了新鲜索引
-    repo._viz_idx_cache.pop(nb.id, None)
+    repo._runtime.scale_artifacts.viz_cache.pop(nb.id, None)
     # 变更 KG(加对象)→ version 变 → 磁盘旧索引变 stale
     repo.store_kg(nb.id, None, [
         {"local_id": "c", "object_type": "concept", "payload": {"name": "bias", "section_path": ""}, "evidence": []},
     ], [])
-    probe = repo._viz_index_probe(nb.id)
+    probe = repo._runtime.scale_artifacts.viz_probe(nb.id)
     assert probe["viz_indexed"] is False
     assert probe["viz_stale"] is True
 

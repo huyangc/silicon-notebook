@@ -2580,30 +2580,6 @@ class AskService:
                 notebook_id,
             )
 
-    def unconfigured_model_response_current(
-        self, notebook_id: str, question: str, conversation_id: str, mode: str,
-    ) -> AskResponse:
-        return self._unconfigured_model_response(
-            notebook_id, question, conversation_id, mode,
-            user_id=self.current_user_id(),
-        )
-
-    def save_answer_current(
-        self, notebook_id: str, question: str, response: AskResponse,
-        conversation_id: Optional[str] = None,
-    ) -> str:
-        return self._save_answer(
-            notebook_id, question, response, conversation_id,
-            user_id=self.current_user_id(),
-        )
-
-    def ensure_conversation_current(
-        self, db, notebook_id: str, conversation_id: Optional[str], question: str
-    ) -> str:
-        return self.ask_state.ensure_conversation(
-            db, notebook_id, conversation_id, question, self.current_user_id()
-        )
-
     def begin_job_current(
         self, notebook_id: str, payload, mode: str, cancel_event,
         *, submitted_via: StoredSubmittedVia = "", output: AskOutput = "answer",
@@ -7625,7 +7601,7 @@ class AskService:
                     top_n=None, max_steps=None,
                     intent_queries=tuple(prepared.intent_queries), limits=limits, intent_keywords=prepared.intent_keywords,
                     # 关闭字段投影与 intent trace 同源；检索器只能通过
-                    # ``as_mapping`` 进入既有 project_run_step 收窄点。
+                    # ``as_json_mapping`` 进入既有 project_run_step 收窄点。
                     intent=prepared.intent_projection,
                 ),
                 retrieval_runtime,

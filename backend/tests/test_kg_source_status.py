@@ -64,15 +64,18 @@ def _insert_source(
 
 
 # ---------------------------------------------------------------------------
-# _source_has_kg helper
+# SourceSummary.kg_extracted (list_sources)
 # ---------------------------------------------------------------------------
+
+
+def _kg_extracted(repo, notebook_id: str, source_id: str) -> bool:
+    return {item.id: item for item in repo.list_sources(notebook_id)}[source_id].kg_extracted
 
 def test_source_has_kg_false_when_no_objects(repo):
     """A source with no knowledge_objects rows → kg_extracted=False."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     src_id = _insert_source(repo, nb.id)
-    with repo._connect() as db:
-        assert repo._source_has_kg(db, src_id) is False
+    assert _kg_extracted(repo, nb.id, src_id) is False
 
 
 def test_source_has_kg_true_when_objects_present(repo):
@@ -80,9 +83,8 @@ def test_source_has_kg_true_when_objects_present(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     src_id = _insert_source(repo, nb.id)
     # Insert a knowledge_objects row linked to this source
-    repo._test_insert_object(nb.id, "concept", {"name": "MOSFET"}, source_id=src_id)
-    with repo._connect() as db:
-        assert repo._source_has_kg(db, src_id) is True
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "MOSFET"}, source_id=src_id)
+    assert _kg_extracted(repo, nb.id, src_id) is True
 
 
 def test_source_has_kg_ignores_empty_source_id(repo):
@@ -90,22 +92,21 @@ def test_source_has_kg_ignores_empty_source_id(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     src_id = _insert_source(repo, nb.id)
     # Insert a knowledge_objects row with empty source_id (legacy/no-source case)
-    repo._test_insert_object(nb.id, "concept", {"name": "Threshold"}, source_id="")
-    with repo._connect() as db:
-        assert repo._source_has_kg(db, src_id) is False
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "Threshold"}, source_id="")
+    assert _kg_extracted(repo, nb.id, src_id) is False
 
 
 # ---------------------------------------------------------------------------
-# _count_pending_kg_sources helper
+# pending-KG source count (the summary's visible_pending_kg_sources)
 # ---------------------------------------------------------------------------
 
 def test_pending_count_zero_when_all_have_kg(repo):
     """If all parsed sources have KG, pending count is 0."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     src_id = _insert_source(repo, nb.id)
-    repo._test_insert_object(nb.id, "concept", {"name": "Gate"}, source_id=src_id)
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "Gate"}, source_id=src_id)
     with repo._connect() as db:
-        assert repo._count_pending_kg_sources(db, nb.id) == 0
+        assert repo._runtime.notebook_summaries.visible_pending_kg_sources(db, nb.id) == 0
 
 
 def test_pending_count_one_when_one_missing_kg(repo):
@@ -114,9 +115,9 @@ def test_pending_count_one_when_one_missing_kg(repo):
     src_with_kg = _insert_source(repo, nb.id)
     _insert_source(repo, nb.id)
     # Give KG only to src_with_kg
-    repo._test_insert_object(nb.id, "concept", {"name": "Oxide"}, source_id=src_with_kg)
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "Oxide"}, source_id=src_with_kg)
     with repo._connect() as db:
-        assert repo._count_pending_kg_sources(db, nb.id) == 1
+        assert repo._runtime.notebook_summaries.visible_pending_kg_sources(db, nb.id) == 1
 
 
 def test_pending_count_ignores_unparsed_sources(repo):
@@ -125,7 +126,7 @@ def test_pending_count_ignores_unparsed_sources(repo):
     # This source has no source_elements (with_elements=False)
     _insert_source(repo, nb.id, with_elements=False)
     with repo._connect() as db:
-        assert repo._count_pending_kg_sources(db, nb.id) == 0
+        assert repo._runtime.notebook_summaries.visible_pending_kg_sources(db, nb.id) == 0
 
 
 def test_pending_count_drops_after_kg_added(repo):
@@ -133,21 +134,23 @@ def test_pending_count_drops_after_kg_added(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     src_id = _insert_source(repo, nb.id)
     with repo._connect() as db:
-        assert repo._count_pending_kg_sources(db, nb.id) == 1
+        assert repo._runtime.notebook_summaries.visible_pending_kg_sources(db, nb.id) == 1
     # Now add KG
-    repo._test_insert_object(nb.id, "concept", {"name": "Vt"}, source_id=src_id)
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "Vt"}, source_id=src_id)
     with repo._connect() as db:
-        assert repo._count_pending_kg_sources(db, nb.id) == 0
+        assert repo._runtime.notebook_summaries.visible_pending_kg_sources(db, nb.id) == 0
 
 
-def test_compat_pending_helper_is_physical_while_summary_is_visible(repo):
+def test_pending_count_leaves_hidden_projection_sources_out(repo):
+    """Memory/Knowhow projection rows are physical sources without KG, but
+    the pending count the summary shows only counts the visible one."""
     nb = repo.create_notebook(NotebookCreate(name="mixed pending"))
     _insert_source(repo, nb.id, source_type="markdown")
     _insert_source(repo, nb.id, source_type="memory")
     _insert_source(repo, nb.id, source_type="knowhow")
 
     with repo._connect() as db:
-        assert repo._count_pending_kg_sources(db, nb.id) == 3
+        assert repo._runtime.notebook_summaries.visible_pending_kg_sources(db, nb.id) == 1
     assert repo.get_notebook(nb.id).kg_pending_sources == 1
 
 
@@ -165,7 +168,7 @@ def test_source_summary_kg_extracted_field(repo):
     assert src_summary.kg_extracted is False
 
     # After adding a KG object linked to this source: kg_extracted should be True
-    repo._test_insert_object(nb.id, "concept", {"name": "Drain"}, source_id=src_id)
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "Drain"}, source_id=src_id)
     src_summary = repo.get_source(src_id)
     assert src_summary.kg_extracted is True
 
@@ -181,12 +184,12 @@ def test_notebook_summary_kg_pending_sources_field(repo):
     assert nb_summary.kg_pending_sources == 2
 
     # Give KG to src1
-    repo._test_insert_object(nb.id, "concept", {"name": "Source"}, source_id=src1)
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "Source"}, source_id=src1)
     nb_summary = repo.get_notebook(nb.id)
     assert nb_summary.kg_pending_sources == 1
 
     # Give KG to src2 as well
-    repo._test_insert_object(nb.id, "concept", {"name": "Drain"}, source_id=src2)
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "Drain"}, source_id=src2)
     nb_summary = repo.get_notebook(nb.id)
     assert nb_summary.kg_pending_sources == 0
 
@@ -200,7 +203,7 @@ def test_list_sources_includes_kg_extracted_field(repo):
     assert len(items) == 1
     assert items[0].kg_extracted is False
 
-    repo._test_insert_object(nb.id, "concept", {"name": "Gate"}, source_id=src_id)
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "Gate"}, source_id=src_id)
     items = repo.list_sources(nb.id)
     assert items[0].kg_extracted is True
 
@@ -236,7 +239,7 @@ def test_failed_latest_extraction_does_not_hide_partial_source_graph(repo):
     """A failed run plus leftover rows is unfinished and must be resumable."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     src_id = _insert_source(repo, nb.id)
-    repo._test_insert_object(
+    repo._runtime.knowledge_query.insert_test_object(
         nb.id, "concept", {"name": "Partial"}, source_id=src_id
     )
     now = _now()
@@ -253,9 +256,9 @@ def test_failed_latest_extraction_does_not_hide_partial_source_graph(repo):
     from app.repositories.sqlite import knowledge_counts_cache
     knowledge_counts_cache.invalidate(nb.id)
 
+    assert _kg_extracted(repo, nb.id, src_id) is False
     with repo._connect() as db:
-        assert repo._source_has_kg(db, src_id) is False
-        assert repo._count_pending_kg_sources(db, nb.id) == 1
+        assert repo._runtime.notebook_summaries.visible_pending_kg_sources(db, nb.id) == 1
     assert repo.get_source(src_id).kg_extracted is False
     pages = list(repo._runtime.knowledge_lifecycle._kg_target_batches(
         nb.id, "incremental"
@@ -274,7 +277,7 @@ def test_completed_partial_run_remains_pending_and_is_retryable(repo):
     """
     nb = repo.create_notebook(NotebookCreate(name="partial completed"))
     src_id = _insert_source(repo, nb.id)
-    repo._test_insert_object(
+    repo._runtime.knowledge_query.insert_test_object(
         nb.id, "concept", {"name": "Partial"}, source_id=src_id
     )
     now = _now()
@@ -306,7 +309,7 @@ def test_failed_partial_run_with_existing_graph_is_retried_without_deleting(repo
     """A failed partial run must preserve the last usable graph on retry."""
     nb = repo.create_notebook(NotebookCreate(name="failed partial"))
     src_id = _insert_source(repo, nb.id)
-    repo._test_insert_object(
+    repo._runtime.knowledge_query.insert_test_object(
         nb.id, "concept", {"name": "Still usable"}, source_id=src_id
     )
     now = _now()
@@ -347,7 +350,7 @@ def test_completed_extraction_invalidates_prewarmed_pending_cache(repo):
             """,
             (run_id, nb.id, src_id, now, now),
         )
-    repo._test_insert_object(
+    repo._runtime.knowledge_query.insert_test_object(
         nb.id, "concept", {"name": "Complete"}, source_id=src_id
     )
 

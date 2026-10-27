@@ -524,7 +524,7 @@ def test_build_chunks_bumps_seq_and_refreshes_elem_chunk_map(repo, monkeypatch):
                    "VALUES (?,?,?,?,?,?,?)",
                    (f"el-{sid}-0001", sid, "paragraph", "p1", "hello " * 60, "{}", now))
     seq_before = _mutation_seq(repo, nb.id)
-    repo._build_chunks_for_source(sid)
+    repo._runtime.source_chunking.build_chunks_for_source(sid)
     assert _mutation_seq(repo, nb.id) > seq_before  # choke point bumped unconditionally
 
     refreshed = repo.retrieval.graph._elem_chunk_map(nb.id)
@@ -784,7 +784,7 @@ def test_edge_centrality_bounded_top_k_is_deterministic(repo, monkeypatch):
     nb_id = _seed_centrality_graph(repo, n_extra_chain=4)
 
     first = repo._edge_centrality_map(nb_id)
-    repo._vector_cache.invalidate(f"{nb_id}:edge_centrality")
+    repo._runtime.retrieval_snapshots.vector_cache.invalidate(f"{nb_id}:edge_centrality")
     second = repo._edge_centrality_map(nb_id)
     assert first == second
 
@@ -840,7 +840,7 @@ def test_edge_centrality_bounded_load_no_full_objects_query(repo, monkeypatch):
     # Warm the version-cache machinery's own queries first (out of scope for
     # this spy) so only the loader's queries are observed below.
     repo._scale_index_version(nb_id)
-    repo._vector_cache.invalidate(f"{nb_id}:edge_centrality")
+    repo._runtime.retrieval_snapshots.vector_cache.invalidate(f"{nb_id}:edge_centrality")
 
     seen_payload_query = {"hit": False}
     orig_connect = repo._connect

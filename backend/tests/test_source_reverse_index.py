@@ -26,6 +26,22 @@ def repo(tmp_path, monkeypatch):
     return SQLiteRepository(settings)
 
 
+def _stale_object_ids(repo, db, source_id: str, notebook_id: str) -> list:
+    """Every stale object id for one source, paged through the production
+    keyset primitive the delete/reparse paths use."""
+    store = repo._runtime.knowledge
+    found: list = []
+    after_id = ""
+    while True:
+        batch = store._stale_object_ids_for_source_batch(
+            db, source_id, notebook_id, after_id=after_id
+        )
+        if not batch:
+            return found
+        found.extend(batch)
+        after_id = batch[-1]
+
+
 def _insert_source(repo, notebook_id: str, title: str = "Doc") -> str:
     source_id = f"src-{uuid4().hex[:10]}"
     now = _now()
@@ -69,7 +85,7 @@ def _legacy_scan_oracle(repo, notebook_id: str, source_id: str) -> set:
 def test_new_notebook_starts_with_complete_empty_source_index(repo):
     nb = repo.create_notebook(NotebookCreate(name="new"))
     with repo._connect() as db:
-        assert repo._source_index_backfilled(db, nb.id)
+        assert repo._runtime.knowledge.source_index_backfilled(db, nb.id)
 
     source_id = _insert_source(repo, nb.id)
     repo.store_kg(nb.id, source_id, [{
@@ -79,7 +95,7 @@ def test_new_notebook_starts_with_complete_empty_source_index(repo):
         "evidence": [_ev(source_id)],
     }], [])
     with repo._connect() as db:
-        assert repo._source_index_backfilled(db, nb.id)
+        assert repo._runtime.knowledge.source_index_backfilled(db, nb.id)
         assert db.execute(
             "SELECT COUNT(*) AS c FROM knowledge_object_sources "
             "WHERE notebook_id=?",
@@ -97,7 +113,7 @@ def test_smoke_seed_maintains_certified_source_index(repo):
         source_id=source_id,
     )
     with repo._connect() as db:
-        assert repo._source_index_backfilled(db, nb.id)
+        assert repo._runtime.knowledge.source_index_backfilled(db, nb.id)
         row = db.execute(
             "SELECT source_id FROM knowledge_object_sources "
             "WHERE notebook_id=? AND object_id=?",
@@ -119,7 +135,7 @@ def test_graph_clear_preserves_unknown_source_index_state(repo):
     repo.delete_notebook_kg(nb.id)
 
     with repo._connect() as db:
-        assert not repo._source_index_backfilled(db, nb.id)
+        assert not repo._runtime.knowledge.source_index_backfilled(db, nb.id)
 
 
 def test_reverse_lookup_matches_legacy_scan_oracle_multi_source_evidence(repo):
@@ -143,7 +159,7 @@ def test_reverse_lookup_matches_legacy_scan_oracle_multi_source_evidence(repo):
     for target in (s1, s2, s3):
         oracle = _legacy_scan_oracle(repo, nb.id, target)
         with repo._connect() as db:
-            found = set(repo._find_stale_knowledge_ids_for_source(db, target, nb.id))
+            found = set(_stale_object_ids(repo, db, target, nb.id))
         assert found == oracle
         assert found  # sanity: each source actually matches something
 
@@ -170,7 +186,7 @@ def test_unbackfilled_lookup_filters_in_database_without_backfilling(repo):
         )
 
     with repo._connect() as db:
-        assert not repo._source_index_backfilled(db, nb.id)
+        assert not repo._runtime.knowledge.source_index_backfilled(db, nb.id)
         with repo._connect() as db2:
             count_before = db2.execute(
                 "SELECT COUNT(*) c FROM knowledge_object_sources WHERE notebook_id=?", (nb.id,)
@@ -178,11 +194,11 @@ def test_unbackfilled_lookup_filters_in_database_without_backfilling(repo):
     assert count_before == 0
 
     with repo._write() as db:
-        found = repo._find_stale_knowledge_ids_for_source(db, s1, nb.id)
+        found = _stale_object_ids(repo, db, s1, nb.id)
     assert len(found) == 1
 
     with repo._connect() as db:
-        assert not repo._source_index_backfilled(db, nb.id)
+        assert not repo._runtime.knowledge.source_index_backfilled(db, nb.id)
         rows = db.execute(
             "SELECT object_id, source_id FROM knowledge_object_sources WHERE notebook_id=?",
             (nb.id,),
@@ -219,7 +235,7 @@ def test_unbackfilled_lookup_only_expands_valid_top_level_arrays(repo):
             (nb.id,),
         )
     with repo._write() as db:
-        found = repo._find_stale_knowledge_ids_for_source(db, s1, nb.id)
+        found = _stale_object_ids(repo, db, s1, nb.id)
     assert found == ["mixed-json"]
 
 
@@ -257,7 +273,7 @@ def test_clear_source_batches_large_object_id_sets(repo):
             "VALUES (?,?,?)",
             [(row[0], s1, nb.id) for row in stale_rows],
         )
-        repo._mark_source_index_backfilled(db, nb.id)
+        repo._runtime.knowledge.mark_source_index_backfilled(db, nb.id)
         db.set_trace_callback(delete_statements.append)
         repo._clear_source_extraction_state(db, s1, nb.id, clear_embeddings=False)
         db.set_trace_callback(None)
@@ -448,16 +464,16 @@ def test_copy_notebook_uses_legacy_filter_without_mutating_reverse_index(repo):
     copy = repo._runtime.sharing.copy_notebook(nb.id, new_owner_id="user-local")
 
     with repo._connect() as db:
-        assert not repo._source_index_backfilled(db, copy.id)
+        assert not repo._runtime.knowledge.source_index_backfilled(db, copy.id)
         copied_source = db.execute(
             "SELECT id FROM sources WHERE notebook_id=?", (copy.id,)
         ).fetchone()["id"]
 
     with repo._write() as db:
-        found = repo._find_stale_knowledge_ids_for_source(db, copied_source, copy.id)
+        found = _stale_object_ids(repo, db, copied_source, copy.id)
     assert len(found) == 1
     with repo._connect() as db:
-        assert not repo._source_index_backfilled(db, copy.id)
+        assert not repo._runtime.knowledge.source_index_backfilled(db, copy.id)
         assert db.execute(
             "SELECT COUNT(*) AS c FROM knowledge_object_sources WHERE notebook_id=?",
             (copy.id,),

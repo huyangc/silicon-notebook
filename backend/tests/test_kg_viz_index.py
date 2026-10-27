@@ -40,13 +40,13 @@ def _star(repo):
 def _clear_viz(repo, nb_id):
     """Wipe any viz index that rebuild_unified_kg proactively built, so we can
     test the lazy/async paths as if nothing had been built yet."""
-    shutil.rmtree(repo._viz_index_dir(nb_id), ignore_errors=True)
-    repo._viz_idx_cache.pop(nb_id, None)
+    shutil.rmtree(str(repo._runtime.scale_artifact_store.viz_dir(nb_id)), ignore_errors=True)
+    repo._runtime.scale_artifacts.viz_cache.pop(nb_id, None)
 
 
 def _wait_until_not_building(repo, nb_id, cap_seconds=10):
     deadline = time.time() + cap_seconds
-    while nb_id in repo._viz_building:
+    while nb_id in repo._runtime.scale_artifacts.viz_building:
         if time.time() > deadline:
             raise AssertionError("background viz build did not finish within cap")
         time.sleep(0.05)
@@ -64,7 +64,7 @@ def test_unified_graph_large_nb_reports_unavailable_and_builds_nothing(repo, mon
     nb = _star(repo)
     _clear_viz(repo, nb.id)
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
-    manifest_path = os.path.join(repo._viz_index_dir(nb.id), "manifest.json")
+    manifest_path = os.path.join(str(repo._runtime.scale_artifact_store.viz_dir(nb.id)), "manifest.json")
     assert not os.path.exists(manifest_path)
     refusals: list = []
     real_emit = repo._runtime.scale_artifacts._emit_viz_lazy_build_refused
@@ -91,7 +91,7 @@ def test_unified_graph_large_nb_reports_unavailable_and_builds_nothing(repo, mon
     assert result["truncated"] is False
     # 闸的实物证据:没有产物被写出,也没有任何后台构建在飞。
     assert not os.path.exists(manifest_path)
-    assert nb.id not in repo._viz_building
+    assert nb.id not in repo._runtime.scale_artifacts.viz_building
 
 
 def test_unified_graph_reports_viz_building_truthfully_when_one_is_running(repo, monkeypatch):
@@ -223,7 +223,7 @@ def test_unified_graph_unavailable_until_the_index_build_publishes(repo, monkeyp
     assert first["viz_unavailable"] is True
     again = repo.unified_graph(nb.id, level="object", limit=10)
     assert again["viz_unavailable"] is True      # 再打开一次仍然什么都不会发生
-    assert nb.id not in repo._viz_building
+    assert nb.id not in repo._runtime.scale_artifacts.viz_building
     repo._runtime.scale_artifacts.build_viz(nb.id)                  # 指定生产者发布产物
     ready = repo.unified_graph(nb.id, level="object", limit=10)
     assert not ready.get("viz_building")
@@ -238,19 +238,19 @@ def test_unified_graph_small_nb_unchanged(repo):
     result = repo.unified_graph(nb.id, level="object", limit=10)
     assert not result.get("viz_building")
     assert len(result["nodes"]) > 0
-    assert os.path.exists(os.path.join(repo._viz_index_dir(nb.id), "manifest.json"))
+    assert os.path.exists(os.path.join(str(repo._runtime.scale_artifact_store.viz_dir(nb.id)), "manifest.json"))
 
 
 def test_viz_stale_served_while_rebuilding(repo, monkeypatch):
     nb = _star(repo)
     # viz index already built fresh by rebuild_unified_kg above.
-    assert os.path.exists(os.path.join(repo._viz_index_dir(nb.id), "manifest.json"))
+    assert os.path.exists(os.path.join(str(repo._runtime.scale_artifact_store.viz_dir(nb.id)), "manifest.json"))
     # Drift the KG version without re-running rebuild_unified_kg (so the disk
     # viz index becomes stale relative to _scale_index_version).
     repo.store_kg(nb.id, None, [
         {"local_id": "d", "object_type": "concept", "payload": {"name": "leakage", "section_path": ""}, "evidence": []},
     ], [])
-    repo._viz_idx_cache.pop(nb.id, None)
+    repo._runtime.scale_artifacts.viz_cache.pop(nb.id, None)
     result = repo.unified_graph(nb.id, level="object", limit=10)
     # Stale data is benign to serve immediately...
     assert len(result["nodes"]) > 0
@@ -279,13 +279,13 @@ def test_stale_viz_reports_building_even_if_the_refresh_already_finished(
     repo.store_kg(nb.id, None, [
         {"local_id": "d", "object_type": "concept", "payload": {"name": "leakage", "section_path": ""}, "evidence": []},
     ], [])
-    repo._viz_idx_cache.pop(nb.id, None)
+    repo._runtime.scale_artifacts.viz_cache.pop(nb.id, None)
     scale = repo._runtime.scale_artifacts
     monkeypatch.setattr(scale, "_spawn_viz_build", scale.build_viz)
 
     result = repo.unified_graph(nb.id, level="object", limit=10)
 
-    assert nb.id not in repo._viz_building
+    assert nb.id not in repo._runtime.scale_artifacts.viz_building
     assert result["viz_building"] is True
     assert not result.get("viz_unavailable")
 
@@ -306,7 +306,7 @@ def test_refused_stale_refresh_does_not_call_on_refresh(repo, monkeypatch):
     repo.store_kg(nb.id, None, [
         {"local_id": "d", "object_type": "concept", "payload": {"name": "leakage", "section_path": ""}, "evidence": []},
     ], [])
-    repo._viz_idx_cache.pop(nb.id, None)
+    repo._runtime.scale_artifacts.viz_cache.pop(nb.id, None)
     scale = repo._runtime.scale_artifacts
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
     monkeypatch.setattr(scale, "_spawn_viz_build", lambda _nb: None)
@@ -335,13 +335,13 @@ def test_stale_viz_refresh_is_refused_for_a_large_notebook(repo, monkeypatch):
     或把判据反向,这条会红——viz_building 里会出现这本库。
     """
     nb = _star(repo)
-    manifest_path = os.path.join(repo._viz_index_dir(nb.id), "manifest.json")
+    manifest_path = os.path.join(str(repo._runtime.scale_artifact_store.viz_dir(nb.id)), "manifest.json")
     assert os.path.exists(manifest_path)
     # 让磁盘产物相对当前版本变陈旧(与 test_viz_stale_served_while_rebuilding 同法)。
     repo.store_kg(nb.id, None, [
         {"local_id": "d", "object_type": "concept", "payload": {"name": "leakage", "section_path": ""}, "evidence": []},
     ], [])
-    repo._viz_idx_cache.pop(nb.id, None)
+    repo._runtime.scale_artifacts.viz_cache.pop(nb.id, None)
     scale = repo._runtime.scale_artifacts
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
     spawned: list[str] = []
@@ -366,7 +366,7 @@ def test_stale_viz_refresh_still_spawns_for_a_small_notebook(repo, monkeypatch):
     repo.store_kg(nb.id, None, [
         {"local_id": "d", "object_type": "concept", "payload": {"name": "leakage", "section_path": ""}, "evidence": []},
     ], [])
-    repo._viz_idx_cache.pop(nb.id, None)
+    repo._runtime.scale_artifacts.viz_cache.pop(nb.id, None)
     scale = repo._runtime.scale_artifacts
     # default viz_sync_build_max_objects (20000) → 4 objects is small
     spawned: list[str] = []
@@ -385,7 +385,7 @@ def _republish_viz_root_out_of_band(repo, nb_id):
 
     两个 DB 判据(version / cluster_seq)都不会动,所以只有磁盘签名能看见它。
     """
-    live = Path(str(repo._viz_index_dir(nb_id)))
+    live = Path(str(str(repo._runtime.scale_artifact_store.viz_dir(nb_id))))
     staged = live.parent / f"{live.name}.newgen"
     shutil.copytree(live, staged)
     shutil.rmtree(live)
@@ -411,7 +411,7 @@ def test_a_refused_stale_viz_is_served_warm_instead_of_reloaded(repo, monkeypatc
     repo.store_kg(nb.id, None, [
         {"local_id": "d", "object_type": "concept", "payload": {"name": "leakage", "section_path": ""}, "evidence": []},
     ], [])
-    repo._viz_idx_cache.pop(nb.id, None)
+    repo._runtime.scale_artifacts.viz_cache.pop(nb.id, None)
     scale = repo._runtime.scale_artifacts
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
     spawned: list[str] = []
@@ -445,7 +445,7 @@ def test_the_stale_viz_slot_is_replaced_when_the_index_build_publishes(repo, mon
     repo.store_kg(nb.id, None, [
         {"local_id": "d", "object_type": "concept", "payload": {"name": "leakage", "section_path": ""}, "evidence": []},
     ], [])
-    repo._viz_idx_cache.pop(nb.id, None)
+    repo._runtime.scale_artifacts.viz_cache.pop(nb.id, None)
     scale = repo._runtime.scale_artifacts
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
     monkeypatch.setattr(scale, "_spawn_viz_build", lambda nbid: None)
@@ -524,8 +524,8 @@ def test_unified_graph_no_limit_large_nb_never_full_derives(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
     result = repo.unified_graph(nb.id, level="object")
     assert result["viz_unavailable"] is True
-    assert (nb.id, "object") not in repo._unified_cache
-    assert (nb.id, "concept") not in repo._unified_cache
+    assert (nb.id, "object") not in repo._runtime.retrieval_snapshots.unified_cache
+    assert (nb.id, "concept") not in repo._runtime.retrieval_snapshots.unified_cache
 
 
 def test_unified_graph_concept_level_large_nb_guarded(repo, monkeypatch):
@@ -537,8 +537,8 @@ def test_unified_graph_concept_level_large_nb_guarded(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
     result = repo.unified_graph(nb.id, level="concept")
     assert result["viz_unavailable"] is True
-    assert (nb.id, "object") not in repo._unified_cache
-    assert (nb.id, "concept") not in repo._unified_cache
+    assert (nb.id, "object") not in repo._runtime.retrieval_snapshots.unified_cache
+    assert (nb.id, "concept") not in repo._runtime.retrieval_snapshots.unified_cache
 
 
 def test_unified_graph_no_limit_small_nb_unchanged(repo):
@@ -561,7 +561,7 @@ def test_unified_graph_no_limit_large_nb_uses_default_limit_when_index_ready(rep
     truncation via the same `truncated` key the bounded path already uses."""
     nb = _star(repo)
     # viz index already built fresh by rebuild_unified_kg in _star().
-    assert os.path.exists(os.path.join(repo._viz_index_dir(nb.id), "manifest.json"))
+    assert os.path.exists(os.path.join(str(repo._runtime.scale_artifact_store.viz_dir(nb.id)), "manifest.json"))
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
     monkeypatch.setattr(repo.settings, "viz_default_limit", 1)
     result = repo.unified_graph(nb.id, level="object")
@@ -661,7 +661,7 @@ def test_a_consumed_once_set_no_longer_silences_the_large_rebuild_tail(repo, mon
 
     repo.maybe_auto_index(nb.id)     # 入库/检索回退先消费掉 once-set(生产上的常态)
     assert len(calls) == 1
-    assert nb.id in repo._auto_index_checked
+    assert nb.id in repo._runtime.scale_artifacts.auto_index_checked
     repo.rebuild_unified_kg(nb.id)   # 重建让那次判定作废——尾部必须重新评估
 
     assert [c[0] for c in calls] == [nb.id, nb.id]

@@ -62,7 +62,6 @@ _VIEWER_METHODS = frozenset({
     "mounted_base_ids",
     "any_mounted_has_kg_on",
     "any_mounted_has_kg",
-    "any_mounted_has_kg_compat",
     "follow_start_row",
     "mounted_bases",
     "notebook_list_summary_facts",
@@ -153,12 +152,6 @@ _SITES = {
      "NotebookSummaryQuery._base_evidence_available",
      "notebook_has_usable_base_kg"):
         (_EXPLICIT, 1, "the summary's user (N-6), handed down by get()"),
-    ("app/services/repository_facade.py",
-     "RepositoryFacade._any_base_notebook_has_kg", "any_mounted_has_kg_compat"):
-        (_EXPLICIT, 1, "facade pass-through of its caller's viewer"),
-    ("app/services/repository_facade.py", "RepositoryFacade._mounted_bases",
-     "mounted_bases"):
-        (_EXPLICIT, 1, "facade pass-through of its caller's viewer"),
     ("app/services/repository_facade.py",
      "RepositoryFacade.participant_notebook_ids", "participant_notebook_ids"):
         (_EXPLICIT, 1, "facade pass-through of its caller's viewer"),

@@ -46,7 +46,7 @@ def _insert_source_with_element(repo, notebook_id: str) -> str:
 def test_update_knowledge_requires_matching_notebook(repo):
     nb_a = repo.create_notebook(NotebookCreate(name="A"))
     nb_b = repo.create_notebook(NotebookCreate(name="B"))
-    obj_b = repo._test_insert_object(nb_b.id, "claim", {"name": "B-only claim"})
+    obj_b = repo._runtime.knowledge_query.insert_test_object(nb_b.id, "claim", {"name": "B-only claim"})
 
     with pytest.raises(KeyError):
         repo.update_knowledge(nb_a.id, obj_b, KnowledgeUpdate(status="deprecated"))
@@ -58,13 +58,13 @@ def test_update_knowledge_requires_matching_notebook(repo):
 def test_merge_knowledge_requires_same_notebook(repo):
     nb_a = repo.create_notebook(NotebookCreate(name="A"))
     nb_b = repo.create_notebook(NotebookCreate(name="B"))
-    obj_a = repo._test_insert_object(nb_a.id, "claim", {"name": "A claim"})
-    obj_b = repo._test_insert_object(nb_b.id, "claim", {"name": "B claim"})
+    obj_a = repo._runtime.knowledge_query.insert_test_object(nb_a.id, "claim", {"name": "A claim"})
+    obj_b = repo._runtime.knowledge_query.insert_test_object(nb_b.id, "claim", {"name": "B claim"})
 
     with pytest.raises(KeyError):
         repo.merge_knowledge(nb_a.id, obj_a, MergeRequest(into_id=obj_b))
 
-    obj_a_2 = repo._test_insert_object(nb_a.id, "claim", {"name": "A claim duplicate"})
+    obj_a_2 = repo._runtime.knowledge_query.insert_test_object(nb_a.id, "claim", {"name": "A claim duplicate"})
     merged = repo.merge_knowledge(nb_a.id, obj_a_2, MergeRequest(into_id=obj_a))
     assert merged.id == obj_a
 

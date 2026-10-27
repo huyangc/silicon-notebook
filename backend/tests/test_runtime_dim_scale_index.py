@@ -71,7 +71,7 @@ def test_manifest_dim_reflects_runtime_truncation(repo, monkeypatch):
     idx = repo._scale_index(nb.id, allow_stale=True)
     assert idx.chunk_ann_labels, "chunk ANN 应建成"
     # 三方一致:manifest dim == 运行时维 == 打开的 ANN 维度可 knn
-    ann = repo._open_scale_ann(idx, "chunk")
+    ann = repo._runtime.scale_artifacts.open_ann(idx, "chunk")
     if ann is not None:
         assert ann.dim == 16
 
@@ -108,8 +108,8 @@ def test_resolve_scale_mode_forces_full_on_dim_mismatch(repo, monkeypatch):
     repo.build_scale_index(nb.id)
     _set_runtime(repo, monkeypatch, 16)
     # 即便 auto/fold,dim 失配也必须解析为 full
-    assert repo._resolve_scale_mode(nb.id, "auto") == "full"
-    assert repo._resolve_scale_mode(nb.id, "fold") == "full"
+    assert repo._runtime.scale_artifacts._resolve_mode(nb.id, "auto") == "full"
+    assert repo._runtime.scale_artifacts._resolve_mode(nb.id, "fold") == "full"
 
 
 def test_fold_refuses_dim_mismatch_and_emits_event(repo, monkeypatch):
@@ -174,7 +174,7 @@ def test_chunk_ann_dim_mismatch_emits_event(repo, monkeypatch):
     import numpy as np
     # 手造 16 维查询向量(与 manifest dim=32 失配)直调 _retrieve_chunks_ann
     q16 = np.random.default_rng(1).normal(size=16).astype(np.float32).tolist()
-    out = repo._retrieve_chunks_ann(nb.id, "q", q16, idx, recall=5)
+    out = repo.retrieval.candidates._retrieve_chunks_ann(nb.id, "q", q16, idx, recall=5)
     assert out is None
     dm = [e for e in events if e.get("kind") == "dim_mismatch" and e.get("site") == "chunk_ann"]
     assert len(dm) == 1 and dm[0]["manifest_dim"] == 32 and dm[0]["query_dim"] == 16

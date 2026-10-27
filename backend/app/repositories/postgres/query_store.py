@@ -596,12 +596,6 @@ class QueryStore:
         return bool(row["exists"])
 
     @staticmethod
-    def pending_kg_source_count(db: Any, notebook_id: str) -> int:
-        # seq-gated 进程缓存(kg_mutation_seq),对齐 sqlite;查询判据见 cache 模块 _pending_query。
-        from app.repositories.postgres import knowledge_counts_cache
-        return knowledge_counts_cache.pending_source_count(db, notebook_id)
-
-    @staticmethod
     def visible_pending_kg_source_count(db: Any, notebook_id: str) -> int:
         # checkup H6:seq-gated 缓存,前端自动拉 checkup 时大库不再每次全扫(codex 第4轮 P2)。
         from app.repositories.postgres import knowledge_counts_cache
@@ -668,8 +662,8 @@ class QueryStore:
         user-visible content, which would otherwise double-count next to the
         Memory panel's own count / inflate the count past what list_sources
         shows (SourceStore.list_sources carries the SAME exclusion — see its
-        docstring). Internal paths (pending_kg_source_count above, copy
-        materialization, scale-index scans) keep counting the true full set
+        docstring). Internal paths (copy materialization, scale-index scans)
+        keep counting the true full set
         and must NOT reuse this method."""
         row = db.execute(
             "SELECT COUNT(*) AS count FROM sources "

@@ -50,7 +50,7 @@ def test_kg_object_candidates_core_and_delta(repo, monkeypatch):
     assert {o["id"] for o in objs} == {"o1"}
     # 候选:ANN 核(o1/o2)⊕ delta(o3)
     idx = repo._scale_index(nb.id, allow_stale=True)
-    cand = repo._kg_object_candidates(nb.id, repo._embed_query("MOSFET amplifier"), idx, recall=10)
+    cand = repo.retrieval.candidates._kg_object_candidates(nb.id, repo._embed_query("MOSFET amplifier"), idx, recall=10)
     assert "o3" in cand                        # delta 对象在候选
     assert set(cand.keys()) & {"o1", "o2"}     # ANN 核也在候选
     assert all(0.0 <= s <= 1.0 for s in cand.values())
@@ -176,7 +176,7 @@ def test_source_scoped_kg_candidates_do_not_starve_or_hydrate_third_source(
                 "(object_id,source_id,notebook_id) VALUES (?,?,?)",
                 (object_id, source_id, nb.id),
             )
-        repo._mark_source_index_backfilled(db, nb.id)
+        repo._runtime.knowledge.mark_source_index_backfilled(db, nb.id)
 
     monkeypatch.setattr(repo.settings, "chunk_recall", 2)
     original = repo.retrieval.candidates._knowledge_objects
@@ -303,7 +303,7 @@ def test_source_scoped_kg_uses_evidence_fallback_without_reverse_index(repo):
     # The interactive fallback is read-only; explicit maintenance remains the
     # only way to certify an unknown historical notebook as fully indexed.
     with repo._connect() as db:
-        assert not repo._source_index_backfilled(db, nb.id)
+        assert not repo._runtime.knowledge.source_index_backfilled(db, nb.id)
 
 
 def test_all_selected_ceiling_keeps_ann_when_reverse_index_is_unknown(repo):

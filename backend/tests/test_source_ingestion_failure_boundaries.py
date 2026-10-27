@@ -310,7 +310,7 @@ def test_metadata_augmentation_model_failure_falls_back_deterministically(repo):
             raise RuntimeError("llm down")
 
     bind_chat_client(repo, "notebook_metadata", _BoomLLM())
-    repo._augment_notebook_meta(nb.id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(nb.id)
     got = repo.get_notebook(nb.id)
     assert got.name == "Bandgap Reference Design"      # first title, [:40]
     assert "本笔记本收录了 1 个来源" in got.purpose

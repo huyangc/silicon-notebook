@@ -81,7 +81,7 @@ def test_follow_chain_uses_facade_keeps_direction_and_does_not_persist(repo):
 
 def test_follow_chain_incoming_normalizes_to_stored_source_target(repo):
     nb, ids, _ = _seed_chain(repo)
-    result = repo._follow_chain(
+    result = repo.retrieval.graph.follow_chain(
         nb.id, ids["Conclusion C"], edge_type="derived_from",
         target_object_id=ids["Premise A"], direction="in")
     assert len(result.inferences) == 1
@@ -93,12 +93,12 @@ def test_follow_chain_incoming_normalizes_to_stored_source_target(repo):
 @pytest.mark.parametrize("edge_type", ["supports", "depends_on", "contrasts_with", "about"])
 def test_follow_chain_rejects_non_transitive_types(repo, edge_type):
     nb, ids, _ = _seed_chain(repo, edge_type=edge_type)
-    assert repo._follow_chain(nb.id, ids["Premise A"], edge_type=edge_type).inferences == []
+    assert repo.retrieval.graph.follow_chain(nb.id, ids["Premise A"], edge_type=edge_type).inferences == []
 
 
 def test_follow_chain_requires_quote_on_every_hop(repo):
     nb, ids, _ = _seed_chain(repo, second_evidence=False)
-    assert repo._follow_chain(
+    assert repo.retrieval.graph.follow_chain(
         nb.id, ids["Premise A"], edge_type="derived_from").inferences == []
 
 
@@ -110,7 +110,7 @@ def test_follow_chain_does_not_repackage_an_existing_direct_edge(repo):
         "edge_type": "derived_from",
         "evidence": [{"quote": "Premise A directly yields Conclusion C"}],
     }])
-    assert repo._follow_chain(
+    assert repo.retrieval.graph.follow_chain(
         nb.id, ids["Premise A"], edge_type="derived_from").inferences == []
 
 
@@ -119,7 +119,7 @@ def test_follow_chain_excludes_rejected_edge_and_deprecated_node(repo):
     with repo._write() as db:
         db.execute("UPDATE knowledge_relations SET review_status='rejected' WHERE id=?",
                    (relation_ids[1],))
-    assert repo._follow_chain(
+    assert repo.retrieval.graph.follow_chain(
         nb.id, ids["Premise A"], edge_type="derived_from").inferences == []
 
     with repo._write() as db:
@@ -127,7 +127,7 @@ def test_follow_chain_excludes_rejected_edge_and_deprecated_node(repo):
                    (relation_ids[1],))
         db.execute("UPDATE knowledge_objects SET status='deprecated' WHERE id=?",
                    (ids["Bridge B"],))
-    assert repo._follow_chain(
+    assert repo.retrieval.graph.follow_chain(
         nb.id, ids["Premise A"], edge_type="derived_from").inferences == []
 
 
@@ -137,7 +137,7 @@ def test_follow_chain_rejects_incompatible_validity_scope(repo):
         {"region": ["saturation"]},
         {"region": ["triode"]},
     ))
-    assert repo._follow_chain(
+    assert repo.retrieval.graph.follow_chain(
         nb.id, ids["Premise A"], edge_type="derived_from").inferences == []
 
 
@@ -147,7 +147,7 @@ def test_follow_chain_rejects_start_in_unmounted_base(repo):
     active = repo.create_notebook(NotebookCreate(name="active"))
     base, base_ids, _ = _seed_chain(repo)
     repo.mark_notebook_base(base.id)
-    assert repo._follow_chain(
+    assert repo.retrieval.graph.follow_chain(
         active.id, base_ids["Premise A"], edge_type="derived_from").inferences == []
 
 
@@ -158,11 +158,11 @@ def test_follow_chain_can_read_base_but_not_unrelated_personal(repo):
     repo.replace_notebook_bases(active.id, [base.id], "user-local")
     other, other_ids, _ = _seed_chain(repo)
 
-    base_result = repo._follow_chain(
+    base_result = repo.retrieval.graph.follow_chain(
         active.id, base_ids["Premise A"], edge_type="derived_from")
     assert len(base_result.inferences) == 1
     assert all(h.tier == "base" for h in base_result.inferences[0].hops)
-    assert repo._follow_chain(
+    assert repo.retrieval.graph.follow_chain(
         active.id, other_ids["Premise A"], edge_type="derived_from").inferences == []
 
 
@@ -177,10 +177,10 @@ def test_base_chain_trust_is_higher_than_personal(repo):
             f"UPDATE knowledge_relations SET review_status='verified' "
             f"WHERE id IN ({','.join('?' for _ in relation_ids)})", relation_ids)
 
-    personal_trust = repo._follow_chain(
+    personal_trust = repo.retrieval.graph.follow_chain(
         personal.id, personal_ids["Premise A"], edge_type="derived_from"
     ).inferences[0].chain_trust
-    base_trust = repo._follow_chain(
+    base_trust = repo.retrieval.graph.follow_chain(
         active.id, base_ids["Premise A"], edge_type="derived_from"
     ).inferences[0].chain_trust
     assert base_trust > personal_trust
@@ -203,7 +203,7 @@ def test_direct_edge_beyond_frontier_limit_still_suppresses_inference(repo):
 
     decoy_ids = []
     for index in range(7):
-        old = repo._test_insert_object(
+        old = repo._runtime.knowledge_query.insert_test_object(
             nb.id, "claim", {"name": f"Decoy {index}", "section_path": "D"})
         new = f"ko-D{index}"
         with repo._write() as db:
@@ -216,7 +216,7 @@ def test_direct_edge_beyond_frontier_limit_still_suppresses_inference(repo):
 
     # B plus seven D* targets fill LIMIT 8; Z sorts after them. The valid A-B-Z
     # path is still found because B is in the frontier.
-    assert len(repo._follow_chain(
+    assert len(repo.retrieval.graph.follow_chain(
         nb.id, "ko-A", edge_type="derived_from", max_fan_out=8).inferences) == 1
 
     # Direct A-Z is the ninth outgoing edge and therefore absent from edge_rows,
@@ -225,7 +225,7 @@ def test_direct_edge_beyond_frontier_limit_still_suppresses_inference(repo):
         "source_object_id": "ko-A", "target_object_id": "ko-Z",
         "edge_type": "derived_from", "evidence": [{"quote": "direct A to Z"}],
     }])
-    assert repo._follow_chain(
+    assert repo.retrieval.graph.follow_chain(
         nb.id, "ko-A", edge_type="derived_from", max_fan_out=8).inferences == []
 
 
@@ -236,7 +236,7 @@ def test_truncated_supernode_direct_guard_fails_closed(repo):
                    (relation_ids[0],))
     decoys = []
     for index in range(64):
-        decoy = repo._test_insert_object(
+        decoy = repo._runtime.knowledge_query.insert_test_object(
             nb.id, "claim", {"name": f"High-degree decoy {index}"})
         decoys.append({
             "source_object_id": ids["Premise A"], "target_object_id": decoy,
@@ -246,7 +246,7 @@ def test_truncated_supernode_direct_guard_fails_closed(repo):
 
     # fan_out=8 => raw endpoint budget=64; 65 outgoing rows means absence of a
     # direct A→C edge cannot be proven inside the budget, so no inference ships.
-    assert repo._follow_chain(
+    assert repo.retrieval.graph.follow_chain(
         nb.id, ids["Premise A"], edge_type="derived_from",
         max_fan_out=8).inferences == []
 
@@ -299,7 +299,7 @@ def test_promoted_hop_anchor_is_a_pointer_free_snapshot_without_a_scope(repo):
     first = id_map["k2001"]
     assert (first["source_id"], first["element_id"]) == ("", "")
     assert first["source_title"] == "Stored Title"
-    anchors = repo._parse_answer_anchors("claim [k2001]", id_map)
+    anchors = repo._runtime.evidence_context_component.parse_anchors("claim [k2001]", id_map)
     repo._runtime.evidence_context_component.attach_citation_images(
         [(anchor, (anchor.element_id,)) for anchor in anchors])
     rendered = json.dumps(

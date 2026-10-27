@@ -76,7 +76,7 @@ def test_answer_reasoning_refines_when_enabled(repo):
     bind_chat_client(repo, "ask_answer", answer_client)
     repo.settings.kg_query_refine_enabled = True
     nb, hits = _seed_hit(repo)
-    answer, grounded, anchors, _counts = repo._answer_reasoning(
+    answer, grounded, anchors, _counts = repo._runtime.ask_component._answer_reasoning(
         nb.id, "how does cascode affect output resistance?", hits, [], ""
     )
     assert refine_client.refine_calls == 1
@@ -96,7 +96,7 @@ def test_answer_reasoning_no_refine_when_disabled(repo):
     bind_chat_client(repo, "ask_answer", answer_client)
     repo.settings.kg_query_refine_enabled = False  # default is now True; disable explicitly
     nb, hits = _seed_hit(repo)
-    answer, grounded, anchors, _counts = repo._answer_reasoning(nb.id, "q?", hits, [], "")
+    answer, grounded, anchors, _counts = repo._runtime.ask_component._answer_reasoning(nb.id, "q?", hits, [], "")
     assert refine_client.refine_calls == 0
     assert answer_client.refine_calls == 0
     assert answer_client.answer_calls == 1
@@ -108,7 +108,7 @@ def test_refine_context_prepends_focused_evidence(repo):
         def chat_json(self, messages, schema_hint, **kw):
             import json as _j
             return _j.dumps({"relevant": ["Engram separates storage from computation"]})
-    out = repo._refine_context("What is Engram?",
+    out = repo._runtime.ask_component._refine_context("What is Engram?",
                                "k1: [concept][personal] Engram", _FakeRefineLLM())
     assert out.startswith("Focused relevant evidence")
     assert "k1: [concept][personal] Engram" in out
@@ -130,7 +130,7 @@ def test_refine_context_drops_wrong_typed_items(repo, relevant):
             ).content
 
     original = "k1: original evidence"
-    result = repo._refine_context("q", original, Client())
+    result = repo._runtime.ask_component._refine_context("q", original, Client())
     if isinstance(relevant[0], str):
         assert result == "Focused relevant evidence (for this question):\n- retained fact\n\n" + original
     else:
@@ -141,9 +141,9 @@ def test_refine_context_noop_when_disabled(repo, monkeypatch):
     cb = "k1: [concept][personal] Engram"
     class _C:
         configured = True
-    assert repo._refine_context("q", cb, _C()) == cb
+    assert repo._runtime.ask_component._refine_context("q", cb, _C()) == cb
 
 def test_refine_context_noop_when_client_unconfigured(repo):
     class _C:
         configured = False
-    assert repo._refine_context("q", "k1: x", _C()) == "k1: x"
+    assert repo._runtime.ask_component._refine_context("q", "k1: x", _C()) == "k1: x"

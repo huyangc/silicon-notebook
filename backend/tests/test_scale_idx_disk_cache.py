@@ -28,21 +28,21 @@ def test_read_manifest_version(repo, tmp_path):
     out_dir = tmp_path / "idxdir"
     out_dir.mkdir()
     # 无 manifest → None
-    assert repo._read_manifest_version(str(out_dir)) is None
+    assert repo._runtime.scale_artifact_store.read_manifest_version(str(out_dir)) is None
     # 有 manifest → 返回 version list
     (out_dir / "manifest.json").write_text(json.dumps({"version": ["a", 3, "t"]}))
-    assert repo._read_manifest_version(str(out_dir)) == ["a", 3, "t"]
+    assert repo._runtime.scale_artifact_store.read_manifest_version(str(out_dir)) == ["a", 3, "t"]
     # 损坏 JSON → None(不抛)
     (out_dir / "manifest.json").write_text("{not json")
-    assert repo._read_manifest_version(str(out_dir)) is None
+    assert repo._runtime.scale_artifact_store.read_manifest_version(str(out_dir)) is None
     # 无 version 字段 → None
     (out_dir / "manifest.json").write_text(json.dumps({"n_nodes": 5}))
-    assert repo._read_manifest_version(str(out_dir)) is None
+    assert repo._runtime.scale_artifact_store.read_manifest_version(str(out_dir)) is None
 
 
 def test_load_lock_table_present(repo):
-    assert isinstance(repo._scale_idx_load_lock, threading.Lock().__class__)
-    assert repo._scale_idx_load_locks == {}
+    assert isinstance(repo._runtime.scale_artifacts.load_lock, threading.Lock().__class__)
+    assert repo._runtime.scale_artifacts.load_locks == {}
 
 
 def _insert_source_chunk(repo, nb_id, sid, cid, text, day):
@@ -109,7 +109,7 @@ def test_combined_graph_cache_hits_under_ingestion(repo, monkeypatch):
     nb = _indexed_nb_with_delta(repo)
     base_indexes = [(nb.id, repo._scale_index(nb.id, allow_stale=True))]
     loads = {"n": 0}
-    orig = repo._vector_cache.get
+    orig = repo._runtime.retrieval_snapshots.vector_cache.get
 
     def counting_get(key, version, loader):
         # 只计数 scale_combined 的加载,忽略 entchunk/elemchunk 等其他 cache 键
@@ -120,11 +120,11 @@ def test_combined_graph_cache_hits_under_ingestion(repo, monkeypatch):
         else:
             wrapped = loader
         return orig(key, version, wrapped)
-    monkeypatch.setattr(repo._vector_cache, "get", counting_get)
+    monkeypatch.setattr(repo._runtime.retrieval_snapshots.vector_cache, "get", counting_get)
 
-    repo._scale_combined_graph(nb.id, base_indexes)
+    repo.retrieval.graph._scale_combined_graph(nb.id, base_indexes)
     _insert_source_chunk(repo, nb.id, "sC", "cC", "carol", 3)  # bump kg_mutation_seq
-    repo._scale_combined_graph(nb.id, base_indexes)
+    repo.retrieval.graph._scale_combined_graph(nb.id, base_indexes)
     assert loads["n"] == 1     # flag 关:active churn 不进 key → 第二次命中缓存
 
 
@@ -134,7 +134,7 @@ def test_combined_graph_rebuilds_when_flag_on_and_delta_changes(repo, monkeypatc
     nb = _indexed_nb_with_delta(repo)
     base_indexes = [(nb.id, repo._scale_index(nb.id, allow_stale=True))]
     loads = {"n": 0}
-    orig = repo._vector_cache.get
+    orig = repo._runtime.retrieval_snapshots.vector_cache.get
 
     def counting_get(key, version, loader):
         # 只计数 scale_combined 的加载,忽略 entchunk/elemchunk 等其他 cache 键
@@ -145,11 +145,11 @@ def test_combined_graph_rebuilds_when_flag_on_and_delta_changes(repo, monkeypatc
         else:
             wrapped = loader
         return orig(key, version, wrapped)
-    monkeypatch.setattr(repo._vector_cache, "get", counting_get)
+    monkeypatch.setattr(repo._runtime.retrieval_snapshots.vector_cache, "get", counting_get)
 
-    repo._scale_combined_graph(nb.id, base_indexes)
+    repo.retrieval.graph._scale_combined_graph(nb.id, base_indexes)
     _insert_source_chunk(repo, nb.id, "sC", "cC", "carol", 3)
-    repo._scale_combined_graph(nb.id, base_indexes)
+    repo.retrieval.graph._scale_combined_graph(nb.id, base_indexes)
     assert loads["n"] == 2     # flag 开:delta 变 → 版本键变 → 重建
 
 
@@ -160,7 +160,7 @@ def test_active_kg_delta_skips_count_when_gated(repo, monkeypatch):
     real = repo.retrieval.graph._index_delta
     monkeypatch.setattr(repo.retrieval.graph, "_index_delta",
                         lambda n: (calls.__setitem__("index_delta", calls["index_delta"] + 1), real(n))[1])
-    out = repo._active_kg_delta(nb.id)
+    out = repo.retrieval.graph._active_kg_delta(nb.id)
     assert out == ([], [], [])
     assert calls["index_delta"] == 0   # 门控早退:不触碰 _index_delta
 
@@ -169,7 +169,7 @@ def test_active_kg_delta_gathers_when_flag_on(repo, monkeypatch):
     """flag 开:仍 gather delta(不早退),保持既有行为。"""
     monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
     nb = _indexed_nb_with_delta(repo)
-    node_ids, edges, chunk_ids = repo._active_kg_delta(nb.id)
+    node_ids, edges, chunk_ids = repo.retrieval.graph._active_kg_delta(nb.id)
     assert "cB" in chunk_ids            # delta chunk 被 gather
 
 
@@ -199,7 +199,7 @@ def test_combined_graph_key_keeps_active_ver_for_unindexed_active_over_base(repo
 
     base_indexes = [(base.id, repo._scale_index(base.id, allow_stale=True))]
     loads = {"n": 0}
-    orig = repo._vector_cache.get
+    orig = repo._runtime.retrieval_snapshots.vector_cache.get
 
     def counting_get(key, version, loader):
         if key.endswith(":scale_combined"):
@@ -209,11 +209,11 @@ def test_combined_graph_key_keeps_active_ver_for_unindexed_active_over_base(repo
         else:
             wrapped = loader
         return orig(key, version, wrapped)
-    monkeypatch.setattr(repo._vector_cache, "get", counting_get)
+    monkeypatch.setattr(repo._runtime.retrieval_snapshots.vector_cache, "get", counting_get)
 
-    repo._scale_combined_graph(active.id, base_indexes)
+    repo.retrieval.graph._scale_combined_graph(active.id, base_indexes)
     _insert_source_chunk(repo, active.id, "sC", "cC", "carol", 3)  # active KG 变更
-    repo._scale_combined_graph(active.id, base_indexes)
+    repo.retrieval.graph._scale_combined_graph(active.id, base_indexes)
     assert loads["n"] == 2      # active_ver 保留在 key 里 → 变更触发重建,不陈旧命中
 
 

@@ -75,7 +75,7 @@ def test_answer_context_dedups_merged_claims(repo):
     hits = [RetrievedKnowledge(object_id=i, object_type="claim",
                                payload={"name": "cascode raises output resistance"}, evidence=[])
             for i in ids.values()]
-    block, id_map = repo._answer_context(nb.id, hits)
+    block, id_map = repo._runtime.evidence_context_component.knowledge_context(nb.id, hits)
     assert len(id_map) == 1   # the two merged claims collapse to one context line
 
 
@@ -114,7 +114,7 @@ def test_answer_context_folds_across_tiers(repo):
                                payload={"name": "cascode"}, evidence=[], notebook_id=base.id),
             RetrievedKnowledge(object_id=ids[per.id], object_type="concept",
                                payload={"name": "cascode"}, evidence=[], notebook_id=per.id)]
-    block, id_map = repo._answer_context(per.id, hits)
+    block, id_map = repo._runtime.evidence_context_component.knowledge_context(per.id, hits)
     assert len(id_map) == 1     # 跨 tier 同名折叠(旧行为:2 行)
 
 
@@ -137,7 +137,7 @@ def test_answer_context_shows_base_relations(repo):
     hits = [RetrievedKnowledge(object_id=r["id"], object_type="concept",
                                payload={"name": r["nm"]}, evidence=[], notebook_id=base.id)
             for r in rows]
-    block, id_map = repo._answer_context(per.id, hits)   # active=per, 命中全在 base
+    block, id_map = repo._runtime.evidence_context_component.knowledge_context(per.id, hits)   # active=per, 命中全在 base
     assert "relations:" in block and "depends_on" in block   # 旧行为:base 边不可见
 
 

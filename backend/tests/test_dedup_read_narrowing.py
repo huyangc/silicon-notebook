@@ -110,10 +110,10 @@ def _assert_matches_oracle(repo, notebook_id: str, object_type: str) -> list:
 
 def test_matches_oracle_for_a_multi_member_block_and_a_singleton(repo):
     nb = repo.create_notebook(NotebookCreate(name="multi-member"))
-    repo._test_insert_object(nb.id, "concept", {"name": "MOSFET"})
-    repo._test_insert_object(nb.id, "concept", {"name": "mosfet"})
-    repo._test_insert_object(nb.id, "concept", {"name": "MOSFET "})
-    repo._test_insert_object(nb.id, "concept", {"name": "Cascode"})  # singleton
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "MOSFET"})
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "mosfet"})
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "MOSFET "})
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "Cascode"})  # singleton
 
     groups = _assert_matches_oracle(repo, nb.id, "concept")
     assert len(groups) == 1
@@ -124,9 +124,9 @@ def test_matches_oracle_for_a_multi_member_block_and_a_singleton(repo):
 
 def test_matches_oracle_and_excludes_deprecated_members(repo):
     nb = repo.create_notebook(NotebookCreate(name="deprecated-filter"))
-    a = repo._test_insert_object(nb.id, "concept", {"name": "Amplifier"})
-    b = repo._test_insert_object(nb.id, "concept", {"name": "amplifier"})
-    dead = repo._test_insert_object(nb.id, "concept", {"name": "AMPLIFIER"})
+    a = repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "Amplifier"})
+    b = repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "amplifier"})
+    dead = repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "AMPLIFIER"})
     with repo._write() as db:
         db.execute("UPDATE knowledge_objects SET status='deprecated' WHERE id=?", (dead,))
 
@@ -148,9 +148,9 @@ def test_deprecated_filter_pushdown_catches_a_regression_if_removed(repo, monkey
     from app.repositories.sqlite.knowledge_store import KnowledgeStore
 
     nb = repo.create_notebook(NotebookCreate(name="deprecated-mutation"))
-    repo._test_insert_object(nb.id, "concept", {"name": "Amplifier"})
-    repo._test_insert_object(nb.id, "concept", {"name": "amplifier"})
-    dead = repo._test_insert_object(nb.id, "concept", {"name": "AMPLIFIER"})
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "Amplifier"})
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "amplifier"})
+    dead = repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "AMPLIFIER"})
     with repo._write() as db:
         db.execute("UPDATE knowledge_objects SET status='deprecated' WHERE id=?", (dead,))
 
@@ -179,11 +179,11 @@ def test_deprecated_filter_pushdown_catches_a_regression_if_removed(repo, monkey
 
 def test_matches_oracle_for_acronym_alias_redirection(repo):
     nb = repo.create_notebook(NotebookCreate(name="acronym"))
-    full = repo._test_insert_object(
+    full = repo._runtime.knowledge_query.insert_test_object(
         nb.id, "concept", {"name": "Compressed Sparse Attention (CSA)"}
     )
-    bare = repo._test_insert_object(nb.id, "concept", {"name": "CSA"})
-    repo._test_insert_object(nb.id, "concept", {"name": "Unrelated"})  # singleton
+    bare = repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "CSA"})
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "Unrelated"})  # singleton
 
     groups = _assert_matches_oracle(repo, nb.id, "concept")
     assert len(groups) == 1
@@ -194,17 +194,17 @@ def test_matches_oracle_for_acronym_alias_redirection(repo):
 
 def test_matches_oracle_for_procedure_steps_signature(repo):
     nb = repo.create_notebook(NotebookCreate(name="procedure"))
-    p1 = repo._test_insert_object(nb.id, "procedure", {
+    p1 = repo._runtime.knowledge_query.insert_test_object(nb.id, "procedure", {
         "name": "Boot Sequence",
         "steps": [{"name": "Power On"}, {"name": "Load Kernel"}],
     })
-    p2 = repo._test_insert_object(nb.id, "procedure", {
+    p2 = repo._runtime.knowledge_query.insert_test_object(nb.id, "procedure", {
         "name": "boot sequence",
         "steps": [{"name": "power on"}, {"name": "load kernel"}],
     })
     # Same name, DIFFERENT steps signature — must stay a distinct (singleton)
     # seed, not merged onto p1/p2's block.
-    repo._test_insert_object(nb.id, "procedure", {
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "procedure", {
         "name": "Boot Sequence",
         "steps": [{"name": "Different Step"}],
     })
@@ -218,11 +218,11 @@ def test_matches_oracle_for_procedure_steps_signature(repo):
 
 def test_similarity_score_matches_oracle_for_a_small_block(repo):
     nb = repo.create_notebook(NotebookCreate(name="similarity"))
-    repo._test_insert_object(nb.id, "concept", {
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {
         "name": "Amplifier",
         "definition": "A device that boosts electrical signals using transistors",
     })
-    repo._test_insert_object(nb.id, "concept", {
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {
         "name": "amplifier",
         "definition": "A component used to boost audio signals for output",
     })
@@ -238,10 +238,10 @@ def test_similarity_score_matches_oracle_for_a_small_block(repo):
 
 def test_stable_sort_tie_break_matches_oracle(repo):
     nb = repo.create_notebook(NotebookCreate(name="tie-break"))
-    repo._test_insert_object(nb.id, "concept", {"name": "Twin One"})
-    repo._test_insert_object(nb.id, "concept", {"name": "twin one"})
-    repo._test_insert_object(nb.id, "concept", {"name": "Twin Two"})
-    repo._test_insert_object(nb.id, "concept", {"name": "twin two"})
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "Twin One"})
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "twin one"})
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "Twin Two"})
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "twin two"})
 
     groups = _assert_matches_oracle(repo, nb.id, "concept")
     assert len(groups) == 2
@@ -265,9 +265,9 @@ def test_pass2_backfill_is_reordered_to_pass1_order_regardless_of_sql_row_order(
     `id IN (...)` backfill happens to return."""
     nb = repo.create_notebook(NotebookCreate(name="pass2-order"))
     ids = [
-        repo._test_insert_object(nb.id, "concept", {"name": "Widget"}),
-        repo._test_insert_object(nb.id, "concept", {"name": "widget"}),
-        repo._test_insert_object(nb.id, "concept", {"name": "WIDGET"}),
+        repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "Widget"}),
+        repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "widget"}),
+        repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "WIDGET"}),
     ]
 
     governance = repo._runtime.knowledge_governance

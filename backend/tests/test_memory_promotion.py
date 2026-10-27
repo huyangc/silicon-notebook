@@ -682,7 +682,7 @@ def test_admin_approval_fails_closed_on_candidate_memory_notebook_mismatch(
 
 def test_memory_promotion_dedupes_into_existing_base_object(repo, promotion_setup):
     owner, _other, _notebook, base, memory = promotion_setup
-    existing = repo._test_insert_object(
+    existing = repo._runtime.knowledge_query.insert_test_object(
         base.id, "concept", {"name": "compensation"}
     )
     proposal = repo.propose_memory_promotion(memory.id, owner.id)
@@ -909,7 +909,7 @@ def test_promotion_routes_record_the_authenticated_admin_reviewer(tmp_path, monk
     )
     assert reject_response.status_code == 200, reject_response.text
 
-    knowledge_id = repo_api._test_insert_object(
+    knowledge_id = repo_api._runtime.knowledge_query.insert_test_object(
         notebook_id, "concept", {"name": "Authenticated reviewer"}
     )
     knowledge_proposal = repo_api.propose_promotion(notebook_id, knowledge_id)

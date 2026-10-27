@@ -223,7 +223,7 @@ def test_pipeline_switch_stages_and_publishes_the_marker(tmp_path, monkeypatch):
     try:
         notebook_id = cases.create_notebook(repo)
         source_id = cases.seed_source(repo, notebook_id)
-        repo._build_chunks_for_source(source_id)
+        repo._runtime.source_chunking.build_chunks_for_source(source_id)
         staged = []
         stage_store = repo._runtime.kg_build_jobs
         real_stage = stage_store.stage_indexing_pipeline_chunks

@@ -28,7 +28,7 @@ def _seed(repo):
 
 def test_overlay_block_idmap_hits(repo):
     nb = _seed(repo)
-    block, id_map, hits, supports = repo._chunk_kg_overlay(
+    block, id_map, hits, supports = repo.retrieval.candidates._chunk_kg_overlay(
         nb.id, "cascode output resistance", "", id_offset=5
     )
     assert isinstance(block, str) and id_map
@@ -39,7 +39,7 @@ def test_overlay_block_idmap_hits(repo):
 
 def test_overlay_empty_no_kg(repo):
     nb = repo.create_notebook(NotebookCreate(name="e"))
-    assert repo._chunk_kg_overlay(nb.id, "x", "", 0) == ("", {}, [], {})
+    assert repo.retrieval.candidates._chunk_kg_overlay(nb.id, "x", "", 0) == ("", {}, [], {})
 
 
 def test_kg_source_chunks_maps_evidence_to_chunk(repo):

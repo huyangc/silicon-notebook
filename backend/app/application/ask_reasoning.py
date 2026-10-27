@@ -86,20 +86,6 @@ class ReasoningIntentProjection:
     expected_output: str
     mandatory_topics: tuple[str, ...]
 
-    def as_mapping(self) -> Mapping[str, object]:
-        return MappingProxyType({
-            "resolved_question": self.resolved_question,
-            "result_scope": self.result_scope,
-            "completeness_required": self.completeness_required,
-            "retrieval_effort": self.retrieval_effort,
-            "entities": self.entities,
-            "constraints": self.constraints,
-            "excluded_topics": self.excluded_topics,
-            "assumptions": self.assumptions,
-            "expected_output": self.expected_output,
-            "mandatory_topics": self.mandatory_topics,
-        })
-
     def as_json_mapping(self) -> dict[str, object]:
         """Fresh legacy-shaped projection for callbacks and service adapters."""
         return {

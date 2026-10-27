@@ -949,7 +949,7 @@ def case_removal_by_others_never_deletes_memory(world: World) -> None:
     repo._runtime.sharing.unshare_notebook(world.shared)
     assert not repo._runtime.sharing.is_member(world.shared, world.bob.id)
     assert_intact(world, "bob")
-    repo._runtime.sharing.leave_notebook(world.elsewhere, world.alice.id)
+    repo._runtime.sharing.remove_member(world.elsewhere, world.alice.id)
     assert not repo._runtime.sharing.is_member(world.elsewhere, world.alice.id)
     assert_intact(world, "alice_elsewhere")
     assert world.sql.count(

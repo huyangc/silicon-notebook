@@ -579,7 +579,7 @@ def test_assemble_never_resolves_a_foreign_library_source(repo):
                            payload={"name": object_id}, evidence=[])
         for object_id in ("ko-prom", "ko-own")
     ]
-    _block, id_map = repo._answer_context(nb.id, hits)
+    _block, id_map = repo._runtime.evidence_context_component.knowledge_context(nb.id, hits)
     eng = _mk_engine(repo, _OutlineLLM())
     outline = [{"title": "A", "scope": "sa", "sub_queries": ["qa"]}]
     keys = list(id_map)

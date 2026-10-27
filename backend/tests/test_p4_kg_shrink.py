@@ -38,19 +38,19 @@ def test_notebook_has_kg(repo):
 
 def test_should_extract_false_when_auto_off_and_no_kg(repo):
     nb = repo.create_notebook(NotebookCreate(name="n"))
-    assert repo._should_extract_kg(nb.id) is False
+    assert repo._runtime.source_ingestion.should_extract_kg(nb.id) is False
 
 
 def test_should_extract_true_when_auto_on(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "kg_auto_extract", True)
     nb = repo.create_notebook(NotebookCreate(name="n"))
-    assert repo._should_extract_kg(nb.id) is True
+    assert repo._runtime.source_ingestion.should_extract_kg(nb.id) is True
 
 
 def test_should_extract_true_when_notebook_already_has_kg(repo):
     nb = repo.create_notebook(NotebookCreate(name="n"))
     _seed_concept(repo, nb.id)
-    assert repo._should_extract_kg(nb.id) is True
+    assert repo._runtime.source_ingestion.should_extract_kg(nb.id) is True
 
 
 # ---------------------------------------------------------------------------
@@ -205,21 +205,21 @@ def test_any_base_notebook_has_kg(repo):
     base = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base.id)
     repo.replace_notebook_bases(active.id, [base.id], "user-local")
-    assert repo._any_base_notebook_has_kg(active.id, viewer_id="user-local") is False
+    assert repo._runtime.knowledge.any_mounted_has_kg(active.id, viewer_id="user-local") is False
     # personal notebook with KG must NOT count as base:
     pers = repo.create_notebook(NotebookCreate(name="p"))
     repo.store_kg(pers.id, None, [
         {"local_id": "P1", "object_type": "concept",
          "payload": {"name": "P"}, "evidence": []}], [])
-    assert repo._any_base_notebook_has_kg(active.id, viewer_id="user-local") is False
+    assert repo._runtime.knowledge.any_mounted_has_kg(active.id, viewer_id="user-local") is False
     # now give the BASE notebook KG:
     repo.store_kg(base.id, None, [
         {"local_id": "B1", "object_type": "concept",
          "payload": {"name": "B"}, "evidence": []}], [])
-    assert repo._any_base_notebook_has_kg(active.id, viewer_id="user-local") is True
+    assert repo._runtime.knowledge.any_mounted_has_kg(active.id, viewer_id="user-local") is True
     # unrelated notebook that never mounted base must NOT see the gate open:
     unmounted = repo.create_notebook(NotebookCreate(name="unmounted"))
-    assert repo._any_base_notebook_has_kg(unmounted.id, viewer_id="user-local") is False
+    assert repo._runtime.knowledge.any_mounted_has_kg(unmounted.id, viewer_id="user-local") is False
 
 
 def test_base_kg_available_on_notebook_summary(repo):
@@ -416,7 +416,7 @@ def test_citations_from_reasoning_hits_carries_base_tier(repo):
     # top_hits federated across base ⊕ active, then bound to Citation objects.
     top_hits = repo.retrieval.federated_retrieve(active.id, "Engram")
     cited_element_ids = {ev.element_id for item in top_hits for ev in item.evidence}
-    citations = repo._citations_from(
+    citations = repo._runtime.evidence_context_component.citations_from(
         top_hits, cited_element_ids, "KG evidence", notebook_id=active.id)
 
     tier_by_source = {c.source_id: c.tier for c in citations}
@@ -456,7 +456,7 @@ def test_citations_from_reasoning_hits_blanks_self_notebook_id(repo):
     # Mirrors ask_reasoning's own call shape (sqlite_repository.py ~12118-12120).
     top_hits = repo.retrieval.federated_retrieve(active.id, "Engram")
     cited_element_ids = {ev.element_id for item in top_hits for ev in item.evidence}
-    citations = repo._citations_from(
+    citations = repo._runtime.evidence_context_component.citations_from(
         top_hits, cited_element_ids, "KG evidence", notebook_id=active.id)
 
     nb_by_source = {c.source_id: c.notebook_id for c in citations}
@@ -474,7 +474,7 @@ def test_tier_map_for_batches_and_defaults_unknown_to_personal(repo):
     repo.mark_notebook_base(base.id)
     personal = repo.create_notebook(NotebookCreate(name="personal"))
 
-    tier_map = repo._tier_map_for({base.id, personal.id, "nonexistent-nb-id"})
+    tier_map = repo._runtime.evidence_context_component.tier_map({base.id, personal.id, "nonexistent-nb-id"})
 
     assert tier_map[base.id] == "base"
     assert tier_map[personal.id] == "personal"
@@ -484,5 +484,5 @@ def test_tier_map_for_batches_and_defaults_unknown_to_personal(repo):
 
 
 def test_tier_map_for_empty_input_returns_empty_dict_without_querying(repo):
-    assert repo._tier_map_for(set()) == {}
-    assert repo._tier_map_for([]) == {}
+    assert repo._runtime.evidence_context_component.tier_map(set()) == {}
+    assert repo._runtime.evidence_context_component.tier_map([]) == {}

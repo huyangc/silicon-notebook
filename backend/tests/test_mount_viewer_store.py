@@ -68,9 +68,6 @@ def store_world(tmp_path, monkeypatch):
             lambda db, nb, v: knowledge.any_mounted_has_kg_on(db, nb, viewer_id=v)
         ),
         any_mounted_has_kg=lambda nb, v: knowledge.any_mounted_has_kg(nb, viewer_id=v),
-        any_mounted_has_kg_compat=lambda nb, v: knowledge.any_mounted_has_kg_compat(
-            nb, viewer_id=v
-        ),
         follow_start=on_db(
             lambda db, object_id, nb, v: knowledge.follow_start_row(
                 db, object_id, nb, USABLE_STATUSES, viewer_id=v
@@ -90,7 +87,6 @@ def store_world(tmp_path, monkeypatch):
         mounted_base_ids=lambda nb: unified.mounted_base_ids(nb),
         any_mounted_has_kg_on=on_db(lambda db, nb: knowledge.any_mounted_has_kg_on(db, nb)),
         any_mounted_has_kg=lambda nb: knowledge.any_mounted_has_kg(nb),
-        any_mounted_has_kg_compat=lambda nb: knowledge.any_mounted_has_kg_compat(nb),
         follow_start_row=on_db(
             lambda db, nb: knowledge.follow_start_row(db, "ko-b", nb, USABLE_STATUSES)
         ),

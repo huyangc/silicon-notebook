@@ -1001,8 +1001,9 @@ def test_pre_isolation_scale_indexes_are_queued_on_postgres(
             (directory / "manifest.json").write_text(json.dumps({"memory_isolation": 1}))
         assert service.pre_isolation_scale_notebook_ids() == []
     finally:
-        for notebook_id in list(repository._runtime.scale_artifacts.idle_queue):
-            repository._runtime.scale_artifacts.dequeue_idle(notebook_id)
+        scale = repository._runtime.scale_artifacts
+        with scale.building_lock:
+            scale.idle_queue.clear()
         repository.close()
 
 

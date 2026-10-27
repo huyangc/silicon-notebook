@@ -316,12 +316,6 @@ default), so this is additive: none of them change behavior.
                                            ``knowledge_embeddings`` — a
                                            different table emb_c never reads.
                                            Out of scope for this gate.
-    backfill_knowledge_embeddings          Explicitly filters to object ids
-      (ask()-triggered)                   MISSING a vector
-                                           (``embedded_object_ids``) before
-                                           embedding; rides the same
-                                           INSERT-only ``embed_objects_batch``
-                                           as store_kg. No bump added.
 
 Deliberately NOT moved into a transaction, with the reason for each:
 
@@ -457,10 +451,6 @@ class KgMutationCoordinator:
         self.notebook_languages = notebook_languages
         self._write = write
         self._now = now
-
-    @property
-    def unified_cache(self) -> MutableMapping[tuple, object]:
-        return self.snapshots.unified_cache
 
     @property
     def vector_cache(self) -> VectorCache:

@@ -85,7 +85,7 @@ def test_ent_chunk_map(repo):
 
 def test_ppr_graph_has_cross_doc_bridge(repo):
     nb = _seed_two_doc_moe(repo)
-    G, key_to_idx, chunk_idx_to_id = repo._ppr_graph(nb.id)
+    G, key_to_idx, chunk_idx_to_id = repo.retrieval.graph._ppr_graph(nb.id)
     assert set(chunk_idx_to_id.values()) == {"cA", "cB"}
     assert "cluster:K-moe" in key_to_idx
     router = key_to_idx["cluster:K-moe"]
@@ -129,13 +129,13 @@ def test_runtime_ppr_memberships_and_complete_graph_ignore_set_iteration(
         lambda _notebook_id: current["value"],
     )
 
-    first = repo._ppr_graph(notebook.id)
-    repo._vector_cache.invalidate(f"{notebook.id}:ppr_graph")
+    first = repo.retrieval.graph._ppr_graph(notebook.id)
+    repo._runtime.retrieval_snapshots.vector_cache.invalidate(f"{notebook.id}:ppr_graph")
     current["value"] = {
         "e1": _OrderedMembershipSet(("cA", "cB")),
         "e2": _OrderedMembershipSet(("cA", "cB")),
     }
-    second = repo._ppr_graph(notebook.id)
+    second = repo.retrieval.graph._ppr_graph(notebook.id)
 
     expected_memberships = [
         ("e1", "cA"),
@@ -179,10 +179,10 @@ def test_ppr_graph_cache_evicted_on_invalidate(repo):
     """
     nb = _seed_two_doc_moe(repo)
     # Prime the cache — graph should have the cluster:K-moe router
-    G1, key_to_idx1, _ = repo._ppr_graph(nb.id)
+    G1, key_to_idx1, _ = repo.retrieval.graph._ppr_graph(nb.id)
     assert "cluster:K-moe" in key_to_idx1, "pre-condition: cluster must be present"
     cache_key = f"{nb.id}:ppr_graph"
-    assert cache_key in repo._vector_cache._store, "pre-condition: cache must be populated"
+    assert cache_key in repo._runtime.retrieval_snapshots.vector_cache._store, "pre-condition: cache must be populated"
 
     # Delete all concept_clusters rows within the same second (version-tuple counts
     # for concept_clusters drop to 0, but MAX(created_at) becomes '' — if the cache
@@ -197,12 +197,12 @@ def test_ppr_graph_cache_evicted_on_invalidate(repo):
     repo._invalidate_unified_cache(nb.id)
 
     # The cache key must be gone
-    assert cache_key not in repo._vector_cache._store, (
+    assert cache_key not in repo._runtime.retrieval_snapshots.vector_cache._store, (
         "ppr_graph cache entry must be evicted by _invalidate_unified_cache"
     )
 
     # A fresh call must rebuild from DB (no cluster_groups → no cluster router node)
-    G2, key_to_idx2, _ = repo._ppr_graph(nb.id)
+    G2, key_to_idx2, _ = repo.retrieval.graph._ppr_graph(nb.id)
     assert "cluster:K-moe" not in key_to_idx2, (
         "after invalidation and cluster deletion, rebuilt graph must have no cluster router"
     )
@@ -258,8 +258,8 @@ def test_ppr_retrieve_empty_when_no_kg(repo):
 
 def test_ppr_reset_vector_seeds_entities_and_chunks(repo):
     nb = _seed_two_doc_moe(repo)
-    G, key_to_idx, chunk_idx_to_id = repo._ppr_graph(nb.id)
-    reset = repo._ppr_reset_vector(nb.id, "Mixture-of-Experts (MoE)", key_to_idx)
+    G, key_to_idx, chunk_idx_to_id = repo.retrieval.graph._ppr_graph(nb.id)
+    reset = repo.retrieval.graph._ppr_reset_vector(nb.id, "Mixture-of-Experts (MoE)", key_to_idx)
     assert isinstance(reset, dict) and reset
     assert all(w > 0 for w in reset.values())
     ent_idxs = {key_to_idx["e1"], key_to_idx["e2"]}
@@ -299,10 +299,10 @@ def _seed_hub_vs_rare(repo):
 
 def test_specificity_divides_hub_entity_by_chunk_count(repo):
     nb = _seed_hub_vs_rare(repo)
-    G, key_to_idx, _ = repo._ppr_graph(nb.id)
+    G, key_to_idx, _ = repo.retrieval.graph._ppr_graph(nb.id)
     q = "Attention"
     rel = {h.object_id: h.relevance for h in repo.retrieval.candidates.federated_retrieve(nb.id, q)}
-    reset = repo._ppr_reset_vector(nb.id, q, key_to_idx)
+    reset = repo.retrieval.graph._ppr_reset_vector(nb.id, q, key_to_idx)
     iH, i1 = key_to_idx["eH"], key_to_idx["e1"]
     assert reset[iH] == rel["eH"] / 3      # eH 在 3 chunk → 降权
     assert reset[i1] == rel["e1"]           # e1 在 1 chunk → 不变
@@ -339,21 +339,21 @@ def _seed_relevant_irrelevant(repo):
 
 def test_fact_rerank_filters_irrelevant_seed(repo, monkeypatch):
     nb = _seed_relevant_irrelevant(repo)
-    G, key_to_idx, _ = repo._ppr_graph(nb.id)
+    G, key_to_idx, _ = repo.retrieval.graph._ppr_graph(nb.id)
     monkeypatch.setattr(repo.settings, "ppr_fact_rerank_enabled", True)
     bind_chat_client(repo, "evidence_refine", _FilterLLM())
-    reset = repo._ppr_reset_vector(nb.id, "topic", key_to_idx)
+    reset = repo.retrieval.graph._ppr_reset_vector(nb.id, "topic", key_to_idx)
     assert key_to_idx["ekeep"] in reset
     assert key_to_idx["edrop"] not in reset
 
 
 def test_fact_rerank_fail_open_when_no_llm(repo, monkeypatch):
     nb = _seed_relevant_irrelevant(repo)
-    G, key_to_idx, _ = repo._ppr_graph(nb.id)
+    G, key_to_idx, _ = repo.retrieval.graph._ppr_graph(nb.id)
     monkeypatch.setattr(repo.settings, "ppr_fact_rerank_enabled", True)
     class _Down: configured = False
     bind_chat_client(repo, "evidence_refine", _Down())
-    reset = repo._ppr_reset_vector(nb.id, "topic", key_to_idx)
+    reset = repo.retrieval.graph._ppr_reset_vector(nb.id, "topic", key_to_idx)
     assert key_to_idx["ekeep"] in reset
     assert key_to_idx["edrop"] in reset
 
@@ -388,7 +388,7 @@ def test_ppr_graph_variant_edges(repo):
                        (oid, nb.id, "concept", "approved", "", json.dumps({"name": nm}), "[]", "s", now, now))
             db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
                        "VALUES (?,?,?,?,?,?,?)", (f"c{oid}", nb.id, f"K-{oid}", oid, nm, "concept", now))
-    G, key_to_idx, _ = repo._ppr_graph(nb.id)
+    G, key_to_idx, _ = repo.retrieval.graph._ppr_graph(nb.id)
     assert key_to_idx["v3"] in set(G.successor_indices(key_to_idx["v2"]))  # variant edge built
 
 
@@ -413,7 +413,7 @@ def test_ppr_graph_federates_base_tier(repo):
                        (oid, nb_id, "concept", "approved", "", json.dumps({"name": "Mixture-of-Experts (MoE)"}), ev, sid, now, now))
             db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
                        "VALUES (?,?,?,?,?,?,?)", (f"c{oid}", nb_id, "K-moe", oid, "MoE", "concept", now))
-    G_on, idx_on, _ = repo._ppr_graph(active.id)
+    G_on, idx_on, _ = repo.retrieval.graph._ppr_graph(active.id)
     assert "eb" in idx_on and "chunk:cb" in idx_on and "ea" in idx_on
     router = idx_on["cluster:K-moe"]
     assert {idx_on["ea"], idx_on["eb"]} <= set(G_on.successor_indices(router))
@@ -435,7 +435,7 @@ def test_ppr_graph_emb_synonym_edges(repo, monkeypatch):
             db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
                        "VALUES (?,?,?,?,?,?,?)", (f"c{oid}", nb.id, f"K-{oid}", oid, oid, "concept", now))
     monkeypatch.setattr(repo.settings, "ppr_emb_synonym_enabled", True)
-    G, key_to_idx, _ = repo._ppr_graph(nb.id)
+    G, key_to_idx, _ = repo.retrieval.graph._ppr_graph(nb.id)
     assert key_to_idx["e1"] in set(G.successor_indices(key_to_idx["e0"]))   # e0≈e1 → emb edge
     assert key_to_idx["e2"] not in set(G.successor_indices(key_to_idx["e0"]))  # orthogonal → none
 
@@ -487,7 +487,7 @@ def test_self_only_combined_graph_reuses_scale_index_identity(repo):
 
     # The shared VectorCache may evict the wrapper during a long-lived process;
     # a miss must still be O(1) over the ScaleIndex-owned prepared core.
-    repo._vector_cache.invalidate(f"{base.id}:scale_combined")
+    repo._runtime.retrieval_snapshots.vector_cache.invalidate(f"{base.id}:scale_combined")
     rebuilt = repo.retrieval.graph._scale_combined_graph(
         base.id, [(base.id, index)]
     )
@@ -670,9 +670,9 @@ def test_build_scale_index_does_not_populate_vector_cache(repo, monkeypatch):
             AssertionError("full build must not read through RetrievalSnapshotCache")
         ),
     )
-    before_keys = {k for k in repo._vector_cache._store if ":matrix:" in k}
+    before_keys = {k for k in repo._runtime.retrieval_snapshots.vector_cache._store if ":matrix:" in k}
     repo._runtime.scale_builder.build(nb.id)
-    after_keys = {k for k in repo._vector_cache._store if ":matrix:" in k}
+    after_keys = {k for k in repo._runtime.retrieval_snapshots.vector_cache._store if ":matrix:" in k}
     new_keys = after_keys - before_keys
     assert not new_keys, f"build_scale_index must not populate VectorCache matrix entries: {new_keys}"
 

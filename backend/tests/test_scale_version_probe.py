@@ -80,7 +80,7 @@ def test_kwtok_bounded_skips_count_and_matches_live(repo_factory):
 
     with repo._connect() as real_db:
         db = _SpyConn(real_db)
-        ts = repo._keyword_token_sets(db, nb, objs, bounded=True)
+        ts = repo.retrieval.candidates._keyword_token_sets(db, nb, objs, bounded=True)
     assert not any("COUNT" in s for s in seen_sql)
     expected = frozenset(_tokens(f"{_payload_text(objs[0]['payload'])} "))
     assert ts["o1"] == expected

@@ -46,7 +46,7 @@ def test_in_network_relation_surfaced_in_context(repo):
     ids = _ids_by_name(repo, nb.id)
     hits = [_hit(ids["Claim Alpha"], "Claim Alpha"),
             _hit(ids["Claim Beta"], "Claim Beta")]
-    block, id_map = repo._answer_context(nb.id, hits)
+    block, id_map = repo._runtime.evidence_context_component.knowledge_context(nb.id, hits)
     assert "relations:" in block
     assert "supports" in block
     # the relation references the two k-ids the hits received
@@ -62,7 +62,7 @@ def test_no_relations_line_when_single_hit(repo):
          "payload": {"name": "Claim Alpha", "section_path": "1"}, "evidence": []},
     ], [])
     ids = _ids_by_name(repo, nb.id)
-    block, _ = repo._answer_context(nb.id, [_hit(ids["Claim Alpha"], "Claim Alpha")])
+    block, _ = repo._runtime.evidence_context_component.knowledge_context(nb.id, [_hit(ids["Claim Alpha"], "Claim Alpha")])
     assert "relations:" not in block   # need >=2 in-context objects for a relation
 
 
@@ -79,7 +79,7 @@ def test_no_relations_line_when_edge_endpoint_not_in_context(repo):
     ])
     ids = _ids_by_name(repo, nb.id)
     # only A is in context -> the A->B edge is NOT in-network
-    block, _ = repo._answer_context(nb.id, [_hit(ids["Claim Alpha"], "Claim Alpha")])
+    block, _ = repo._runtime.evidence_context_component.knowledge_context(nb.id, [_hit(ids["Claim Alpha"], "Claim Alpha")])
     assert "relations:" not in block
 
 
@@ -117,7 +117,7 @@ def test_in_network_relation_rows_deduplicates_cross_source_duplicate_edges(repo
     # End-to-end: the rendered block is unaffected either way (evidence_context's
     # own seen_relations de-dup already hid this at the Python layer before T2;
     # this asserts no regression, not the DISTINCT effect itself).
-    block, id_map = repo._answer_context(
+    block, id_map = repo._runtime.evidence_context_component.knowledge_context(
         nb.id, [_hit(a_id, "Claim Alpha"), _hit(b_id, "Claim Beta")],
     )
     keys = list(id_map.keys())

@@ -34,6 +34,18 @@ MIN_SIZE = 3
 Edge = Tuple[str, str, int]
 
 
+def _previous(canonical_ids: Sequence[str], board_key_of: Dict[str, str]) -> PreviousPartition:
+    """An old partition aligned to ``canonical_ids``, fed through the
+    production ``PreviousPartitionBuilder`` one (canonical, board_key) row at
+    a time; a canonical outside ``canonical_ids`` only counts towards its old
+    board's size."""
+    index_of = {c: i for i, c in enumerate(canonical_ids)}
+    builder = PreviousPartitionBuilder(len(canonical_ids))
+    for canonical_id in sorted(board_key_of):
+        builder.add(index_of.get(canonical_id), board_key_of[canonical_id])
+    return builder.build()
+
+
 # ------------------------------------------------------------------ 夹具
 
 
@@ -113,7 +125,7 @@ def _arrays(ids: Sequence[str], edges: Sequence[Edge]):
 def _run(ids: Sequence[str], edges: Sequence[Edge], *, previous: Optional[Dict[str, str]] = None,
          warm: bool = False, min_size: int = MIN_SIZE):
     src, dst, weight = _arrays(ids, edges)
-    prev = None if previous is None else PreviousPartition.from_mapping(ids, previous)
+    prev = None if previous is None else _previous(ids, previous)
     return partition_boards(ids, src, dst, weight, min_size=min_size, previous=prev, warm=warm)
 
 
@@ -815,7 +827,7 @@ def test_invalid_input_is_rejected(case):
     elif case == "warm_without_previous":
         kwargs["warm"] = True
     elif case == "misaligned_previous":
-        kwargs["previous"] = PreviousPartition.from_mapping(["a", "b"], {"a": "k"})
+        kwargs["previous"] = _previous(["a", "b"], {"a": "k"})
         kwargs["warm"] = True
     elif case == "min_size_zero":
         kwargs["min_size"] = 0

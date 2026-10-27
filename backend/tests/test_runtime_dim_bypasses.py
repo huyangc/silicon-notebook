@@ -93,7 +93,7 @@ def test_gather_elements_vector_truncated_and_same_space_as_query(repo):
             ("e1", "s1", nb.id, json.dumps(repo._runtime.models.embedding("retrieval_query_embedding").embed_texts([text])[0]), NOW))
 
     with repo._connect() as db:
-        elements = repo._gather_elements(db, nb.id)
+        elements = repo.retrieval.candidates._gather_elements(db, nb.id)
     assert len(elements) == 1
     vec = elements[0]["vector"]
     assert vec is not None and len(vec) == 16
@@ -190,7 +190,7 @@ def test_tier2_ann_guard_compares_runtime_dim_and_truncates_query(repo):
 
     idx = _FakeIdx(dim=16, labels=["ex1"])
     ann = _FakeAnn()
-    out = repo._tier2_bridge_candidates_ann(
+    out = repo._runtime.knowledge_lifecycle._tier2_bridge_candidates_ann(
         nb.id, idx, ann, [{"object_id": "new1", "name": "Precision Voltage Source"}],
         {"new1": ""}, seed_version=1, override=frozenset())
 
@@ -215,7 +215,7 @@ def test_stream_seed_reps_truncates_both_blob_and_json_branches(repo):
     _insert_kvec(repo, nb.id, "c3", [0.5] * 8, blob=False)   # 异维残留 → 过滤
 
     from app.services.kg_merge import _norm
-    reps, members, first = repo._stream_seed_reps(
+    reps, members, first = repo._runtime.knowledge_lifecycle._stream_seed_reps(
         nb.id, "concept", concept_seed_version=1, run_id="t4", compute_reps=True)
 
     assert reps, "reps 非空"

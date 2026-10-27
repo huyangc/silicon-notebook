@@ -39,7 +39,7 @@ def client(repo, monkeypatch):
 def _seed_notebook_with_n_objects(repo, n):
     nb = repo.create_notebook(NotebookCreate(name="kb"))
     for i in range(n):
-        repo._test_insert_object(nb.id, "concept", {"name": f"c{i}"})
+        repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": f"c{i}"})
     return nb.id
 
 

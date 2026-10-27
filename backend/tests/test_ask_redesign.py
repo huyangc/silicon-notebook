@@ -80,7 +80,7 @@ def test_parse_answer_anchors_keeps_only_cited(repo):
         "k2": {"object_id": "o2", "object_type": "claim", "name": "unused",
                "definition": None, "snippet": None, "source_title": "", "location_label": ""},
     }
-    anchors = repo._parse_answer_anchors("Engram is a module [k1]. Improving it is open.", id_map)
+    anchors = repo._runtime.evidence_context_component.parse_anchors("Engram is a module [k1]. Improving it is open.", id_map)
     keys = {a.key for a in anchors}
     assert keys == {"k1"}                    # k2 not cited -> excluded
     assert anchors[0].label == "Engram"
@@ -136,7 +136,7 @@ def test_concept_dedup_degrades_gracefully_without_clusters(repo):
             (nb.id,)).fetchall()
     oids = [r["id"] for r in rows]
     for oid in oids:
-        assert repo._concept_cluster_id(nb.id, oid) == oid   # falls back to object_id
+        assert oid not in repo.retrieval.cluster_map(nb.id)   # unclustered: the id is its own canonical
     # P4-5: ask_fast retired; mode="graph" is itself retired now too and aliases
     # to chunk (_RETIRED_MODES) — kept here as an incidental regression check
     # that the alias still resolves cleanly through this KG-only fixture.

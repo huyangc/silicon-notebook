@@ -226,6 +226,245 @@ def test_only_known_registering_decorators_exempt_a_member(decorator, registers)
     assert audit.is_registering_decorator(decorator) is registers
 
 
+# ---------------------------------------------------------------- receivers
+
+
+def _synthetic(source: str, monkeypatch):
+    """Load ``source`` as an app module and return what the census needs to
+    read it: its members, the receiver-aware production references and the
+    by-name ones (the S2-D reading)."""
+    import types as _types
+    import uuid
+
+    name = f"app._census_fixture_{uuid.uuid4().hex[:12]}"
+    rel = f"backend/{name.replace('.', '/')}.py"
+    module = _types.ModuleType(name)
+    module.__file__ = str(ROOT / rel)
+    monkeypatch.setitem(sys.modules, name, module)
+    exec(compile(source, rel, "exec"), module.__dict__)
+    tree = ast.parse(source)
+    by_key: dict = {}
+    order: list = []
+    audit.members_of_tree(rel, tree, by_key, order)
+    members = [by_key[k] for k in order]
+    index = audit.ReceiverIndex(members)
+    index.contexts[rel] = audit.FileContext(index, rel, tree)
+    keys = {(m.qualname, m.name): m.key for m in members}
+    collector = audit._RefCollector(rel, keys, context=index.contexts[rel])
+    collector.visit(tree)
+    by_name = audit._RefCollector(rel, keys, receivers=False)
+    by_name.visit(tree)
+    return {m.qualname + "." + m.name: m for m in members}, collector.refs, by_name.refs
+
+
+def _test_ref(member) -> "audit.Ref":
+    return audit.Ref(member.name, None, "backend/tests/test_x.py", 1, None)
+
+
+RECEIVERS = '''
+class Store:
+    def fetch(self):
+        return 1
+
+
+class Cache:
+    def fetch(self):
+        return 2
+
+
+class Service:
+    def __init__(self, store: Store) -> None:
+        self.store = store
+
+    def run(self):
+        return self.store.fetch()
+
+
+def build() -> Service:
+    return Service(Store())
+
+
+def main() -> int:
+    return build().run()
+'''
+
+
+def test_same_name_members_of_different_classes_are_told_apart(monkeypatch):
+    """``Store.fetch`` and ``Cache.fetch`` share a name. Production reaches
+    ``Store.fetch`` through an annotated constructor parameter stored on
+    ``self``; only a test calls ``Cache.fetch``. Read by name, the live one
+    hides the dead one; read through the receiver, they separate."""
+    members, refs, by_name_refs = _synthetic(RECEIVERS, monkeypatch)
+    store, cache = members["Store.fetch"], members["Cache.fetch"]
+    tests = [_test_ref(cache)]
+    verdicts = _classify(list(members.values()), refs, tests)
+    assert verdicts[store.key].bucket == "keep"
+    assert verdicts[cache.key].bucket == "test-only"
+    masked = _classify(list(members.values()), by_name_refs, tests)
+    assert masked[cache.key].bucket == "keep"  # the S2-D blind spot
+
+
+def test_an_unresolved_receiver_counts_for_every_member_of_the_name(monkeypatch):
+    members, refs, _ = _synthetic(
+        RECEIVERS + '''
+
+def anything(thing):
+    return thing.fetch()
+''',
+        monkeypatch,
+    )
+    fetches = [r for r in refs if r.name == "fetch" and r.targets is None]
+    assert [r.fallback for r in fetches] == ["receiver type unknown"]
+    verdicts = _classify(list(members.values()), refs, [_test_ref(members["Cache.fetch"])])
+    assert verdicts[members["Cache.fetch"].key].bucket == "keep"
+    assert verdicts[members["Store.fetch"].key].bucket == "keep"
+
+
+def test_a_construction_site_types_an_injected_attribute(monkeypatch):
+    """An unannotated ``__init__`` parameter takes the type of what every
+    production construction passes; an annotated one is widened by them
+    (a partial fake handed in as a Protocol)."""
+    members, refs, _ = _synthetic(
+        RECEIVERS.replace("store: Store", "store")
+        + '''
+
+def build_cached() -> Service:
+    return Service(Cache())
+''',
+        monkeypatch,
+    )
+    verdicts = _classify(list(members.values()), refs, [])
+    assert verdicts[members["Store.fetch"].key].bucket == "keep"
+    assert verdicts[members["Cache.fetch"].key].bucket == "keep"
+    fetch = next(r for r in refs if r.name == "fetch")
+    assert fetch.targets == {members["Store.fetch"].key, members["Cache.fetch"].key}
+
+
+def test_a_protocol_receiver_reaches_its_implementors_and_their_declarations(monkeypatch):
+    members, refs, _ = _synthetic(
+        '''
+from typing import Protocol
+
+
+class Port(Protocol):
+    def fetch(self) -> int: ...
+    def put(self) -> None: ...
+
+
+class Full:
+    def fetch(self):
+        return 1
+
+    def put(self):
+        return None
+
+
+class Unrelated:
+    def fetch(self):
+        return 2
+
+
+def use(port: Port) -> int:
+    return port.fetch()
+
+
+def direct() -> int:
+    return Full().put() or 0
+''',
+        monkeypatch,
+    )
+    verdicts = _classify(list(members.values()), refs, [_test_ref(members["Unrelated.fetch"])])
+    assert verdicts[members["Port.fetch"].key].bucket == "keep"
+    assert verdicts[members["Full.fetch"].key].bucket == "keep"
+    assert verdicts[members["Unrelated.fetch"].key].bucket == "test-only"
+    # ``Full().put()`` reaches ``Full.put`` and the declaration it implements.
+    assert verdicts[members["Port.put"].key].bucket == "keep"
+
+
+def test_a_bare_name_references_a_member_only_inside_its_class_body(monkeypatch):
+    members, refs, _ = _synthetic(
+        '''
+class A:
+    def helper(self):
+        return 1
+
+    alias = helper
+
+
+class B:
+    def helper(self):
+        return 2
+
+
+def module_function():
+    helper = 3  # a local that happens to share the name
+    return helper
+''',
+        monkeypatch,
+    )
+    verdicts = _classify(list(members.values()), refs, [_test_ref(members["B.helper"])])
+    assert verdicts[members["A.helper"].key].bucket == "keep"
+    assert verdicts[members["B.helper"].key].bucket == "test-only"
+
+
+def test_a_registered_member_keeps_the_protocol_declaration_it_implements(monkeypatch):
+    members, refs, _ = _synthetic(
+        '''
+from typing import Protocol
+
+
+class Port(Protocol):
+    def fetch(self) -> int: ...
+
+
+class Impl:
+    def fetch(self):
+        return 1
+''',
+        monkeypatch,
+    )
+    impl, port = members["Impl.fetch"], members["Port.fetch"]
+    receivers = audit.ReceiverIndex(list(members.values()))
+    extra = audit.registered_declaration_refs({impl.key}, list(members.values()), receivers)
+    assert [(r.owner, r.targets) for r in extra] == [(impl.key, frozenset({port.key}))]
+    tests = [_test_ref(impl)]
+    unregistered = _classify(list(members.values()), refs, tests)
+    assert unregistered[port.key].bucket == "test-only"  # the test's by-name reference
+    registered = _classify(list(members.values()), refs + extra, tests, kept={impl.key})
+    assert registered[port.key].bucket == "keep"
+
+
+def test_the_fixture_generator_is_scanned_for_calls_but_not_for_strings():
+    source = 'repo.begin_ask_job(nb)\nOWNERS = {"stale_member": "Store"}\n'
+    data = audit._RefCollector("scripts/x.py", {}, receivers=True, strings_are_data=True)
+    data.visit(ast.parse(source))
+    assert {r.name for r in data.refs} == {"begin_ask_job"}
+    plain = audit._RefCollector("scripts/x.py", {}, receivers=True)
+    plain.visit(ast.parse(source))
+    assert {"begin_ask_job", "stale_member"} <= {r.name for r in plain.refs}
+    assert "scripts/generate_repository_contract_fixtures.py" in audit.STRING_DATA_FILES
+
+
+def test_the_facade_layer_is_censused_and_only_its_pinned_surface_is_exempt():
+    facade = audit.facade_classes()
+    assert ("app.services.repository_facade", "RepositoryFacade") in facade
+    assert ("app.services.sqlite_repository", "SQLiteRepository") in facade
+    assert ("app.services.postgres_repository", "PostgresRepository") in facade
+    surface = audit.facade_surface_names()
+    by_key: dict = {}
+    order: list = []
+    tree = audit._parse(ROOT / audit.FACADE_REL)
+    audit.members_of_tree(audit.FACADE_REL, tree, by_key, order)
+    members = [by_key[k] for k in order if by_key[k].qualname == "RepositoryFacade"]
+    assert members, "RepositoryFacade members are part of the census"
+    pinned = next(m for m in members if m.name in surface)
+    unpinned = next(m for m in members if m.name not in surface and m.name.startswith("_"))
+    assert audit.exemption_reason(pinned, facade, surface) == (
+        "facade public surface (facade_surface.json)"
+    )
+    assert audit.exemption_reason(unpinned, facade, surface) is None
+
+
 def test_extension_surface_needs_the_whole_protocol_not_one_shared_name():
     from typing import Protocol
 

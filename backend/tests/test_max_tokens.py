@@ -144,7 +144,7 @@ def test_answer_synthesis_requests_answer_cap(repo):
     bind_chat_client(repo, "ask_answer", llm)
     chunks = [RetrievedChunk(chunk_id="c1", source_id="s", source_title="D",
                              section_path="1", text="cascode raises rout", relevance=0.8)]
-    repo._answer_mix("q", chunks, "(none)", {}, "")
+    repo._runtime.ask_component._answer_mix("q", chunks, "(none)", {}, "")
     assert llm.kwargs.get("max_tokens") == 12345
 
 

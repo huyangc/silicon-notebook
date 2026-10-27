@@ -83,9 +83,9 @@ def test_kg_building_set_and_lock_are_lifecycle_owned_shared_objects(repo):
 
 def test_lifecycle_holds_the_facade_cache_objects_by_identity(repo):
     lifecycle = repo._runtime.knowledge_lifecycle
-    assert lifecycle.unified_cache is repo._unified_cache
+    assert lifecycle.unified_cache is repo._runtime.retrieval_snapshots.unified_cache
     assert lifecycle.scale_artifacts is repo._runtime.scale_artifacts
-    assert lifecycle.scale_artifacts.viz_building is repo._viz_building
+    assert lifecycle.scale_artifacts.viz_building is repo._runtime.scale_artifacts.viz_building
 
 
 def test_source_ingestion_uses_direct_service_dependencies(repo):
@@ -133,11 +133,11 @@ def test_delete_notebook_kg_evicts_the_warm_unified_graph_cache(repo):
     # Warm the cache: this READ populates self.unified_cache[(nb, "concept")].
     warm = repo.unified_graph(notebook.id, level="concept")
     assert len(warm["nodes"]) == 2
-    assert (notebook.id, "concept") in repo._unified_cache
+    assert (notebook.id, "concept") in repo._runtime.retrieval_snapshots.unified_cache
 
     repo.delete_notebook_kg(notebook.id)
 
-    assert (notebook.id, "concept") not in repo._unified_cache, (
+    assert (notebook.id, "concept") not in repo._runtime.retrieval_snapshots.unified_cache, (
         "delete_notebook_kg must evict the warm (notebook_id, level) entry, "
         "not just leave it to be overwritten by a later unrelated write"
     )

@@ -263,7 +263,7 @@ def test_batch_source_processing_skips_notebook_metadata(repo, tmp_path, monkeyp
         assert db.execute("SELECT COUNT(*) FROM source_elements").fetchone()[0] > 0
         assert db.execute("SELECT COUNT(*) FROM chunk_embeddings").fetchone()[0] > 0
     # Skipping a batch must not permanently disable the notebook's automation.
-    repo._augment_notebook_meta(nb_id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(nb_id)
     assert len(calls) == 1
     assert repo.get_notebook(nb_id).purpose == "两份来源的描述。"
 
@@ -2750,7 +2750,7 @@ def test_run_backfill_source_index_populates_reverse_index_and_marks(repo):
         rows = {(r["object_id"], r["source_id"]) for r in db.execute(
             "SELECT object_id, source_id FROM knowledge_object_sources WHERE notebook_id=?",
             (nb_id,)).fetchall()}
-        assert repo._source_index_backfilled(db, nb_id)
+        assert repo._runtime.knowledge.source_index_backfilled(db, nb_id)
     assert rows == {("ko-1", "src-a"), ("ko-1", "src-b"), ("ko-2", "src-b")}
 
 
@@ -2845,7 +2845,7 @@ def test_source_index_backfill_generation_drift_fails_closed(repo):
     assert failed["status"] == "failed"
     assert failed["failure_code"] == "kg_generation_changed"
     with repo._connect() as db:
-        assert not repo._source_index_backfilled(db, nb_id)
+        assert not repo._runtime.knowledge.source_index_backfilled(db, nb_id)
 
     restarted = repo.maintenance.begin_source_index_backfill(nb_id)
     assert restarted["status"] == "running"
@@ -2862,7 +2862,7 @@ def test_clear_source_index_unpublishes_fast_path_until_backfill_finishes(repo):
     assert repo.maintenance.clear_source_index(nb_id) == 1
 
     with repo._connect() as db:
-        assert not repo._source_index_backfilled(db, nb_id)
+        assert not repo._runtime.knowledge.source_index_backfilled(db, nb_id)
         assert db.execute(
             "SELECT COUNT(*) c FROM knowledge_object_sources WHERE notebook_id=?",
             (nb_id,),
@@ -2885,8 +2885,8 @@ def test_run_backfill_source_index_all_notebooks_covers_every_notebook(repo):
     assert out["rows"] == 2
 
     with repo._connect() as db:
-        assert repo._source_index_backfilled(db, nb_a)
-        assert repo._source_index_backfilled(db, nb_b)
+        assert repo._runtime.knowledge.source_index_backfilled(db, nb_a)
+        assert repo._runtime.knowledge.source_index_backfilled(db, nb_b)
 
 
 def test_run_backfill_source_index_paginates_in_batches(repo, monkeypatch):
@@ -2923,7 +2923,7 @@ def test_main_backfill_source_index_end_to_end(repo, capsys):
     out = capsys.readouterr().out
     assert "backfill-source-index done" in out
     with repo._connect() as db:
-        assert repo._source_index_backfilled(db, nb_id)
+        assert repo._runtime.knowledge.source_index_backfilled(db, nb_id)
 
 
 def test_main_backfill_source_index_does_not_require_embedder_configured(repo, monkeypatch, capsys):
@@ -2935,7 +2935,7 @@ def test_main_backfill_source_index_does_not_require_embedder_configured(repo, m
     rc = bi.main(["backfill-source-index", "--notebook-id", nb_id])
     assert rc == 0
     with repo._connect() as db:
-        assert repo._source_index_backfilled(db, nb_id)
+        assert repo._runtime.knowledge.source_index_backfilled(db, nb_id)
 
 
 def test_arg_parser_backfill_source_index_phase():

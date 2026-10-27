@@ -924,6 +924,7 @@ class KnowledgeQueryService:
             source_id, object_id, allowed_source_ids=allowed_source_ids
         )
 
+    # 测试观察点（构造点）：用例直接落一个知识对象；生产写入走 store_kg。
     def insert_test_object(
         self, notebook_id: str, object_type: str, payload: dict, source_id: str = ""
     ) -> str:

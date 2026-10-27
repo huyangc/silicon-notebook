@@ -105,7 +105,7 @@ def test_indexed_fixture_is_detected_without_rebuild(repo, monkeypatch):
     _write_minimum_valid_scale_artifact(repo, notebook.id)
     monkeypatch.setattr(repo.settings, "notebook_copy_max_rows", 0)
 
-    assert repo._needs_index(notebook.id) is False
+    assert repo._runtime.ask_component._needs_index(notebook.id) is False
 
 
 def test_needs_index_truth_table(repo, monkeypatch):
@@ -113,16 +113,16 @@ def test_needs_index_truth_table(repo, monkeypatch):
     big = repo.create_notebook(__import__("app.models.schemas", fromlist=["NotebookCreate"]).NotebookCreate(name="bignoidx"))
     _add_chunk(repo, big.id, "s1", "c1", "alpha")
     monkeypatch.setattr(repo.settings, "notebook_copy_max_rows", 0)
-    assert repo._needs_index(big.id) is True
+    assert repo._runtime.ask_component._needs_index(big.id) is True
     # 小库无索引 → False(小库允许暴力,不要求索引)
     monkeypatch.setattr(repo.settings, "notebook_copy_max_rows", 5000)
-    assert repo._needs_index(big.id) is False
+    assert repo._runtime.ask_component._needs_index(big.id) is False
 
 
 def test_needs_index_false_when_indexed(repo, monkeypatch):
     nb = _index_nb(repo)
     monkeypatch.setattr(repo.settings, "notebook_copy_max_rows", 0)  # 大库
-    assert repo._needs_index(nb.id) is False   # 有磁盘索引 → 不提示
+    assert repo._runtime.ask_component._needs_index(nb.id) is False   # 有磁盘索引 → 不提示
 
 
 def test_save_answer_sets_index_required(repo, monkeypatch):
@@ -132,7 +132,7 @@ def test_save_answer_sets_index_required(repo, monkeypatch):
     _add_chunk(repo, nb.id, "s1", "c1", "alpha")
     monkeypatch.setattr(repo.settings, "notebook_copy_max_rows", 0)
     resp = AskResponse(conclusion="x")
-    repo._save_answer(nb.id, "q", resp)
+    repo._runtime.ask_component._save_answer(nb.id, "q", resp, user_id=repo.current_user().id)
     assert resp.index_required is True
 
 
@@ -141,5 +141,5 @@ def test_save_answer_index_required_false_small(repo):
     nb = repo.create_notebook(NotebookCreate(name="small2"))
     _add_chunk(repo, nb.id, "s1", "c1", "alpha")
     resp = AskResponse(conclusion="x")
-    repo._save_answer(nb.id, "q", resp)
+    repo._runtime.ask_component._save_answer(nb.id, "q", resp, user_id=repo.current_user().id)
     assert resp.index_required is False

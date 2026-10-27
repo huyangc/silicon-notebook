@@ -257,12 +257,12 @@ def test_resolve_fold_escalates_to_full_after_kg_rebuild(repo):
     repo.rebuild_unified_kg(nb.id)
     repo.build_scale_index(nb.id)
     # 索引刚建成、其后无 rebuild → fold 保持 fold(不误升级)。
-    assert repo._resolve_scale_mode(nb.id, "fold") == "fold"
+    assert repo._runtime.scale_artifacts._resolve_mode(nb.id, "fold") == "fold"
     # 模拟索引建成后的一次「刷新图谱」:last_rebuild_at 推进到明显更晚。
     with repo._write() as db:
         db.execute("UPDATE unified_kg_state SET last_rebuild_at=? WHERE notebook_id=?",
                    ("2099-01-01T00:00:00", nb.id))
-    assert repo._resolve_scale_mode(nb.id, "fold") == "full"
+    assert repo._runtime.scale_artifacts._resolve_mode(nb.id, "fold") == "full"
 
 
 def _seed_small_base(repo):
@@ -518,7 +518,7 @@ def test_cross_layer_synonym_bridge_adds_edges(repo, monkeypatch):
     assert base_idx is not None, "base scale index must be loadable before settings change"
 
     # Count edges in combined graph WITHOUT bridge (disabled).
-    active_node_ids, active_edges, _ = repo._active_kg_delta(active.id)
+    active_node_ids, active_edges, _ = repo.retrieval.graph._active_kg_delta(active.id)
     _, A_no = si.splice_active(
         list(base_idx.node_ids), base_idx.transition,
         active_node_ids, active_edges)
@@ -949,7 +949,7 @@ def test_fold_scale_index_delta(repo, legacy_sidecar, monkeypatch):
 
     # 新内容经 ANN 可召回(_retrieve_chunks_ann 返回 (scored, ids, mat))
     qv = repo._embed_query("bandgap reference special")
-    out = repo._retrieve_chunks_ann(nb.id, "bandgap reference special", qv, idx, recall=10)
+    out = repo.retrieval.candidates._retrieve_chunks_ann(nb.id, "bandgap reference special", qv, idx, recall=10)
     assert out is not None
     scored = out[0]
     assert scored and "c2" in {c.chunk_id for c in scored}
@@ -1010,15 +1010,15 @@ def test_trigger_when_and_mode(repo, monkeypatch):
     r = repo.trigger_scale_index_rebuild(nb.id, when="idle")
     assert r["status"] == "queued"
     assert repo.scale_index_status(nb.id)["state"] == "queued"
-    assert nb.id in repo._scale_idle_queue
+    assert nb.id in repo._runtime.scale_artifacts.idle_queue
     # force drain(绕过时间窗)→ 建成、出队、state 回 indexed
-    repo._process_idle_queue(force=True)
+    repo._runtime.scale_artifacts._process_idle_queue(force=True)
     import time
     for _ in range(50):
-        if not repo._scale_building and nb.id not in repo._scale_idle_queue:
+        if not repo._runtime.scale_artifacts.building and nb.id not in repo._runtime.scale_artifacts.idle_queue:
             break
         time.sleep(0.1)
-    assert nb.id not in repo._scale_idle_queue
+    assert nb.id not in repo._runtime.scale_artifacts.idle_queue
     assert repo.scale_index_status(nb.id)["exists"] is True
 
 
@@ -1048,7 +1048,7 @@ def test_trigger_idle_then_fold_builds_via_fold(repo, monkeypatch):
         db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)", ("c2", nb.id, json.dumps(v), now))
 
     # _resolve_scale_mode(auto) 应选 fold(有索引)
-    assert repo._resolve_scale_mode(nb.id, "auto") == "fold"
+    assert repo._runtime.scale_artifacts._resolve_mode(nb.id, "auto") == "fold"
 
     # 监视 fold 被调用
     calls = {"fold": 0, "build": 0}
@@ -1065,9 +1065,9 @@ def test_trigger_idle_then_fold_builds_via_fold(repo, monkeypatch):
 
     r = repo.trigger_scale_index_rebuild(nb.id, when="idle", mode="auto")
     assert r["status"] == "queued"
-    repo._process_idle_queue(force=True)
+    repo._runtime.scale_artifacts._process_idle_queue(force=True)
     for _ in range(50):
-        if not repo._scale_building and nb.id not in repo._scale_idle_queue:
+        if not repo._runtime.scale_artifacts.building and nb.id not in repo._runtime.scale_artifacts.idle_queue:
             break
         time.sleep(0.1)
     assert calls["fold"] == 1, "idle→auto 未走 fold"
@@ -1316,7 +1316,7 @@ def test_resolve_index_owner_prefers_request_user(repo):
     requester = repo._runtime.identity.create_user("a00222222", "pw")
     token = sr._REQUEST_USER.set(requester)
     try:
-        assert repo._resolve_index_owner(nb.id) == requester.id
+        assert repo._runtime.scale_artifacts._resolve_index_owner(nb.id) == requester.id
         assert requester.id != creator.id  # 确认真走的是 _REQUEST_USER 分支而非巧合同值
     finally:
         sr._REQUEST_USER.reset(token)
@@ -1333,7 +1333,7 @@ def test_resolve_index_owner_falls_back_to_created_by(repo):
         db.execute("UPDATE notebooks SET created_by=? WHERE id=?", (creator.id, nb.id))
 
     assert sr._REQUEST_USER.get() is None  # fixture/test isolation: nothing left set
-    assert repo._resolve_index_owner(nb.id) == creator.id
+    assert repo._runtime.scale_artifacts._resolve_index_owner(nb.id) == creator.id
 
 
 def test_resolve_index_owner_none_when_neither_available(repo):
@@ -1341,7 +1341,7 @@ def test_resolve_index_owner_none_when_neither_available(repo):
     的边角)→ None,调用方(_notify_index_done)应静默跳过通知而非报错。"""
     from app.services import sqlite_repository as sr
     assert sr._REQUEST_USER.get() is None
-    assert repo._resolve_index_owner("nonexistent-notebook-id") is None
+    assert repo._runtime.scale_artifacts._resolve_index_owner("nonexistent-notebook-id") is None
 
 
 # Fast inner-loop opt-out: these tests build real HNSW/ANN scale indexes.

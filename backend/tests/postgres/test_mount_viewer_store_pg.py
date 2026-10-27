@@ -77,9 +77,6 @@ def pg_store_world(postgres_database):
             lambda db, nb, v: KnowledgeStore.any_mounted_has_kg_on(db, nb, viewer_id=v)
         ),
         any_mounted_has_kg=lambda nb, v: knowledge.any_mounted_has_kg(nb, viewer_id=v),
-        any_mounted_has_kg_compat=lambda nb, v: knowledge.any_mounted_has_kg_compat(
-            nb, viewer_id=v
-        ),
         follow_start=on_db(
             lambda db, object_id, nb, v: KnowledgeStore.follow_start_row(
                 db, object_id, nb, USABLE_STATUSES, viewer_id=v
@@ -101,7 +98,6 @@ def pg_store_world(postgres_database):
             lambda db, nb: KnowledgeStore.any_mounted_has_kg_on(db, nb)
         ),
         any_mounted_has_kg=lambda nb: knowledge.any_mounted_has_kg(nb),
-        any_mounted_has_kg_compat=lambda nb: knowledge.any_mounted_has_kg_compat(nb),
         follow_start_row=on_db(
             lambda db, nb: KnowledgeStore.follow_start_row(db, "ko-b", nb, USABLE_STATUSES)
         ),

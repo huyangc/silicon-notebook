@@ -85,7 +85,7 @@ def test_indexed_fresh_no_trigger(repo, monkeypatch):
     calls = []
     monkeypatch.setattr(repo._runtime.scale_artifacts, "trigger",
                          lambda nbid, when="now", mode="auto": calls.append((nbid, when, mode)))
-    repo._auto_index_checked.discard(nb.id)  # force re-evaluation past once-set
+    repo._runtime.scale_artifacts.auto_index_checked.discard(nb.id)  # force re-evaluation past once-set
     repo.maybe_auto_index(nb.id)
     assert calls == []
 
@@ -144,9 +144,9 @@ def test_once_set_blocks_repeat_then_dirty_rearms(repo, monkeypatch):
     monkeypatch.setattr(repo._runtime.scale_artifacts, "trigger",
                          lambda nbid, when="now", mode="auto": calls.append((nbid, when, mode)))
     repo.maybe_auto_index(nb.id)  # small nb -> no trigger, but added to once-set
-    assert nb.id in repo._auto_index_checked
+    assert nb.id in repo._runtime.scale_artifacts.auto_index_checked
     repo._mark_unified_kg_dirty(nb.id)
-    assert nb.id not in repo._auto_index_checked
+    assert nb.id not in repo._runtime.scale_artifacts.auto_index_checked
 
 
 def test_ineligible_or_in_progress_trigger_exception_swallowed(repo, monkeypatch):
@@ -161,7 +161,7 @@ def test_ineligible_or_in_progress_trigger_exception_swallowed(repo, monkeypatch
 
     monkeypatch.setattr(repo._runtime.scale_artifacts, "trigger", _boom)
     repo.maybe_auto_index(nb.id)  # must not raise
-    assert nb.id in repo._auto_index_checked
+    assert nb.id in repo._runtime.scale_artifacts.auto_index_checked
 
 
 def test_scale_index_auto_when_literal_valid_values(monkeypatch):
@@ -209,7 +209,7 @@ def test_large_chunk_light_eligible_and_really_enqueues(repo, monkeypatch):
     assert st["state"] == "unindexed"
     assert st["eligible"] is True
     repo.maybe_auto_index(nb.id)  # real trigger, no spy/stub
-    assert nb.id in repo._scale_idle_queue
+    assert nb.id in repo._runtime.scale_artifacts.idle_queue
 
 
 def test_small_nb_not_eligible(repo):
@@ -232,10 +232,10 @@ def test_batch_burst_o1_early_exit_skips_copy_stats(repo, monkeypatch):
 
     # First call: real trigger_scale_index_rebuild runs (when=idle -> queued), no stubbing.
     repo.maybe_auto_index(nb.id)
-    assert nb.id in repo._scale_idle_queue
+    assert nb.id in repo._runtime.scale_artifacts.idle_queue
 
     # Simulate the per-source once-set discard from _mark_unified_kg_dirty.
-    repo._auto_index_checked.discard(nb.id)
+    repo._runtime.scale_artifacts.auto_index_checked.discard(nb.id)
 
     calls = []
     orig = repo._runtime.scale_artifacts.notebook_copy_stats
@@ -243,4 +243,4 @@ def test_batch_burst_o1_early_exit_skips_copy_stats(repo, monkeypatch):
                          lambda *a, **k: calls.append(a) or orig(*a, **k))
     repo.maybe_auto_index(nb.id)
     assert calls == []
-    assert nb.id in repo._auto_index_checked
+    assert nb.id in repo._runtime.scale_artifacts.auto_index_checked

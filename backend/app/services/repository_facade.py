@@ -75,7 +75,6 @@ from app.models.ask import (
     AskOutput,
     AskRequest,
     AskResponse,
-    Citation,
     ConversationBulkDeleteResult,
     ConversationDetail,
     ConversationSummary,
@@ -90,8 +89,6 @@ from app.models.ask import (
 from app.models.knowledge import (
     DuplicateGroup,
     KnowledgeGraph,
-    KnowledgeRecord,
-    KnowledgeRef,
     KnowledgeTypeCount,
     KnowledgeUpdate,
     ObjectSchemaCreate,
@@ -100,7 +97,7 @@ from app.models.knowledge import (
     MergeRequest,
     PaginatedKnowledge,
 )
-from app.domain.retrieval import ChunkRetrievalPlan, RetrievedChunk, RetrievedRelation
+from app.domain.retrieval import RetrievedChunk
 from app.services import kg_ingest
 from app.services.ask_followup import FollowupResolution
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
@@ -123,7 +120,6 @@ from app.services.model_work import ModelNotConfiguredError
 from app.services.notebook_catalog import NotebookSummaryQuery
 from app.repositories.bundle import PersistenceBundleFactory
 from app.services.repository_runtime import RepositoryRuntime, RepositoryCompatibilitySeams
-from app.services.source_ingestion import SourcePipelineHooks
 from app.repositories.source_files import safe_filename as _safe_filename  # noqa: F401 — compatibility export
 from app.services.parsers import mineru_content_list_to_elements
 from app.services.knowhow.assets import AssetService
@@ -141,11 +137,8 @@ from app.services.prompts import (
 from app.services.repository import UploadedSourceFile
 from app.services.knowledge_query import KnowledgeQueryService
 from app.services.knowledge_governance import KnowledgeGovernanceService
-from app.services.schema_registry import SchemaRegistryService
 from app.services.retrieval_candidates import CandidateRetrievalService
-from app.services.retrieval_service import RetrievalService
 from app.services.retrieval import (
-    NeighborExpansion,
     RetrievedKnowledge,
     RetrievedElement,
     W_KEYWORD,
@@ -826,150 +819,6 @@ class RepositoryFacade:
     def parallelism(self, workload_id: str) -> int:
         return self._runtime.models.parallelism(workload_id)
 
-    # Task 17: the retrieval caches live on the runtime's RetrievalSnapshotCache
-    # (one owner). These handles are write-through descriptors over the SAME
-    # objects — never facade-only copies. A vector-cache swap propagates to
-    # every consumer because the KG mutation coordinator reads through the
-    # snapshot cache; a unified-cache swap also refreshes the lifecycle
-    # service's held reference (it keeps the dict by identity).
-    @property
-    def _vector_cache(self):
-        return self._runtime.retrieval_snapshots.vector_cache
-
-    @_vector_cache.setter
-    def _vector_cache(self, cache) -> None:
-        self._runtime.retrieval_snapshots.vector_cache = cache
-
-    @property
-    def _unified_cache(self):
-        return self._runtime.retrieval_snapshots.unified_cache
-
-    @_unified_cache.setter
-    def _unified_cache(self, cache) -> None:
-        return self._runtime.set_unified_cache(cache)
-
-    # Task 20: every scale/viz mutable object has one owner.  These descriptors
-    # preserve the frozen facade attributes and test swap seams while writing
-    # through to ScaleArtifactRuntime and its Task-18/19 consumers.
-    @property
-    def _scale_idx_cache(self):
-        return self._runtime.scale_artifacts.scale_cache
-
-    @_scale_idx_cache.setter
-    def _scale_idx_cache(self, value) -> None:
-        self._runtime.scale_artifacts.scale_cache = value
-
-    @property
-    def _viz_idx_cache(self):
-        return self._runtime.scale_artifacts.viz_cache
-
-    @_viz_idx_cache.setter
-    def _viz_idx_cache(self, value) -> None:
-        self._runtime.scale_artifacts.viz_cache = value
-
-    @property
-    def _scale_ver_cache(self):
-        return self._runtime.scale_artifacts.version_memo
-
-    @_scale_ver_cache.setter
-    def _scale_ver_cache(self, value) -> None:
-        self._runtime.scale_artifacts.version_memo = value
-
-    @property
-    def _scale_ver_lock(self):
-        return self._runtime.scale_artifacts.version_lock
-
-    @_scale_ver_lock.setter
-    def _scale_ver_lock(self, value) -> None:
-        self._runtime.scale_artifacts.version_lock = value
-
-    @property
-    def _scale_ver_locks(self):
-        return self._runtime.scale_artifacts.version_locks
-
-    @_scale_ver_locks.setter
-    def _scale_ver_locks(self, value) -> None:
-        self._runtime.scale_artifacts.version_locks = value
-
-    @property
-    def _scale_idx_load_lock(self):
-        return self._runtime.scale_artifacts.load_lock
-
-    @_scale_idx_load_lock.setter
-    def _scale_idx_load_lock(self, value) -> None:
-        self._runtime.scale_artifacts.load_lock = value
-
-    @property
-    def _scale_idx_load_locks(self):
-        return self._runtime.scale_artifacts.load_locks
-
-    @_scale_idx_load_locks.setter
-    def _scale_idx_load_locks(self, value) -> None:
-        self._runtime.scale_artifacts.load_locks = value
-
-    @property
-    def _scale_building(self):
-        return self._runtime.scale_artifacts.building
-
-    @_scale_building.setter
-    def _scale_building(self, value) -> None:
-        return self._runtime.scale_artifacts.set_building(value)
-
-    @property
-    def _scale_building_lock(self):
-        return self._runtime.scale_artifacts.building_lock
-
-    @_scale_building_lock.setter
-    def _scale_building_lock(self, value) -> None:
-        return self._runtime.scale_artifacts.set_building_lock(value)
-
-    @property
-    def _scale_idle_queue(self):
-        return self._runtime.scale_artifacts.idle_queue
-
-    @_scale_idle_queue.setter
-    def _scale_idle_queue(self, value) -> None:
-        self._runtime.scale_artifacts.idle_queue = value
-
-    @property
-    def _scale_scheduler_started(self):
-        return self._runtime.scale_artifacts.scheduler_started
-
-    @_scale_scheduler_started.setter
-    def _scale_scheduler_started(self, value) -> None:
-        return self._runtime.scale_artifacts.set_scheduler_started(value)
-
-    @property
-    def _auto_index_checked(self):
-        return self._runtime.scale_artifacts.auto_index_checked
-
-    @_auto_index_checked.setter
-    def _auto_index_checked(self, value) -> None:
-        return self._runtime.set_auto_index_checked(value)
-
-    @property
-    def _viz_building(self):
-        return self._runtime.scale_artifacts.viz_building
-
-    @_viz_building.setter
-    def _viz_building(self, value) -> None:
-        self._runtime.scale_artifacts.viz_building = value
-
-    @property
-    def _viz_building_lock(self):
-        return self._runtime.scale_artifacts.viz_building_lock
-
-    @_viz_building_lock.setter
-    def _viz_building_lock(self, value) -> None:
-        self._runtime.scale_artifacts.viz_building_lock = value
-
-    def _resolve_path(self, value: str) -> Path:
-        return self._runtime.database.resolve_path(value)
-
-
-
-
-
     def _connect(self) -> object:
         return self._runtime.database.connect()
 
@@ -985,29 +834,10 @@ class RepositoryFacade:
         with self._runtime.database.write() as db:
             yield db
 
-
-
-
-
     # Gate-5 migration (Task 13): the four rebuild-checkpoint helpers moved to
     # UnifiedKgStore (kg_rebuild_checkpoint row-level read/writes on the same
     # shared database lock). These frozen-signature delegates stay callable;
     # rebuild_unified_kg and the test patch seats target the store seam.
-    def _rebuild_ckpt_gc(self, notebook_id: str, input_version: str) -> None:
-        self._runtime.unified_kg.checkpoint_gc(notebook_id, input_version)
-
-    def _rebuild_ckpt_clear(self, notebook_id: str) -> None:
-        self._runtime.unified_kg.checkpoint_clear(notebook_id)
-
-    def _rebuild_ckpt_load(self, notebook_id: str, input_version: str, stage: str) -> Dict[str, dict]:
-        return self._runtime.unified_kg.checkpoint_load(notebook_id, input_version, stage)
-
-    def _rebuild_ckpt_put(self, notebook_id: str, input_version: str, stage: str,
-                          rows: List[Tuple[str, dict]]) -> None:
-        return self._runtime.unified_kg.checkpoint_put_current(
-            notebook_id, input_version, stage, rows
-        )
-
     @property
     def agent_profile(self):
         """Agentic Memory P1's per-notebook "understanding" store (T2).
@@ -1097,70 +927,10 @@ class RepositoryFacade:
         """
         return self._runtime.agent_observations
 
-    def _count(self, db: object, table: str, column: str, value: str) -> int:
-        return self._runtime.notebook_summaries.count(db, table, column, value)
-
-    def _count_knowledge(self, db: object, notebook_id: str, object_type: str) -> int:
-        return self._runtime.knowledge.count_knowledge(
-            db, notebook_id, object_type, USABLE_STATUSES
-        )
-
-    def _has_kg(self, db: object, notebook_id: str) -> bool:
-        return self._runtime.notebook_summaries.has_kg(db, notebook_id)
-
-    def _source_has_kg(self, db: object, source_id: str) -> bool:
-        """True iff the source has ≥1 knowledge_objects row with a matching source_id."""
-        return self._runtime.knowledge.source_has_kg(db, source_id)
-
-    def _count_pending_kg_sources(self, db: object, notebook_id: str) -> int:
-        return self._runtime.notebook_summaries.count_pending_kg_sources(db, notebook_id)
-
-    def _any_base_notebook_has_kg(
-        self, notebook_id: str, db: "object | None" = None, *, viewer_id: str | None
-    ) -> bool:
-        """True iff 该 notebook 挂载的参考库里有任一已建 KG(对 ``viewer_id`` 生效的挂载)。"""
-        return self._runtime.knowledge.any_mounted_has_kg_compat(
-            notebook_id, db, viewer_id=viewer_id
-        )
-
-    def _mounted_bases(
-        self, notebook_id: str, db: "object | None" = None, *, viewer_id: str | None
-    ) -> "tuple[list, list]":
-        """(参考库列表, 其中已建 KG 的库 id) —— 第二项过去是 `any(has_kg)` 布尔,现在是
-        那批 id;`bool(...)` 与旧值逐字等价,故按布尔消费的调用方行为不变。"""
-        return self._runtime.notebook_summaries.mounted_bases(
-            notebook_id, db, viewer_id=viewer_id
-        )
-
     def _source_ids_from_evidence(self, evidence_json: Optional[str | list]) -> set:
         """PURE parse of an evidence JSON TEXT value into its distinct
         source_ids — canonical body lives on KnowledgeStore (Task 13)."""
         return self._runtime.knowledge.source_ids_from_evidence(evidence_json)
-
-    def _upsert_knowledge_object_sources(
-        self, db: object, object_id: str, notebook_id: str, evidence_json: Optional[str]
-    ) -> None:
-        self._runtime.knowledge.replace_object_sources(
-            db, object_id, notebook_id, evidence_json
-        )
-
-    def _delete_knowledge_object_sources(
-        self, db: object, object_ids: List[str]
-    ) -> None:
-        return self._runtime.knowledge.delete_object_sources(db, object_ids)
-
-    def _source_index_backfilled(self, db: object, notebook_id: str) -> bool:
-        return self._runtime.knowledge.source_index_backfilled(db, notebook_id)
-
-    def _mark_source_index_backfilled(self, db: object, notebook_id: str) -> None:
-        self._runtime.knowledge.mark_source_index_backfilled(db, notebook_id)
-
-    def _find_stale_knowledge_ids_for_source(
-        self, db: object, source_id: str, notebook_id: str
-    ) -> List[str]:
-        return self._runtime.knowledge.stale_object_ids_for_source(
-            db, source_id, notebook_id
-        )
 
     def _clear_source_extraction_state(
         self,
@@ -1438,9 +1208,6 @@ class RepositoryFacade:
     # Frozen public signatures; the facade keeps notebook_copy_stats' own
     # scale-profile memo (cross-domain bridge) and the _insert_row seat.
     # ------------------------------------------------------------------
-    def share_state(self, notebook_id: str) -> dict:
-        return self._runtime.sharing.share_state(notebook_id)
-
     def notebook_copy_stats(self, notebook_id: str) -> dict:
         return self._runtime.scale_artifacts.notebook_copy_stats(notebook_id)
 
@@ -1452,9 +1219,6 @@ class RepositoryFacade:
 
     def _insert_row(self, db, table: str, data: dict) -> None:
         return self._runtime.sharing_store.insert_row_values(db, table, data)
-
-    def _sweep_stuck_copies(self, created_by: "str | None" = None) -> int:
-        return self._runtime.sharing.sweep_stuck_copies(created_by)
 
     def user_can_access_notebook(self, notebook_id: str, user_id: str) -> bool:
         return self._runtime.sharing.user_can_access_notebook(notebook_id, user_id)
@@ -1488,36 +1252,6 @@ class RepositoryFacade:
     # KG search: FTS5 (lexical) + ANN (semantic) + hydration
     # ------------------------------------------------------------------
 
-    def _semantic_search(self, notebook_id: str, q: str, k: int) -> list:
-        """ANN semantic search over the notebook's scale index.
-
-        Returns [{object_id, name:'', score, match:'semantic'}] or []
-        on any failure / missing index.
-        """
-        return self._runtime.knowledge_query.semantic_search(notebook_id, q, k)
-
-    def _hydrate_search_hits(self, notebook_id: str, hits: list) -> list:
-        """Enrich merged hits with object_type and fill missing names.
-
-        Drops hits for objects that no longer exist or are deprecated.
-        Always uses the fresh payload name when available (Fix 2: overrides
-        the possibly-stale FTS-provided name so renames are reflected).
-        """
-        return self._runtime.knowledge_query.hydrate_search_hits(notebook_id, hits)
-
-    def _fold_hits_to_canonical(self, notebook_id: str, hits: list, k: int) -> list:
-        """Fix 1: fold raw ko-<obj> ids in hits to K-<canonical> ids.
-
-        Uses a BOUNDED query (only the ≤k hit ids) against concept_clusters —
-        does NOT load the full cluster_map which can be 5M entries at scale.
-        For each hit that has a cluster row: replace object_id with canonical_id
-        and set name to canonical_name (so it matches the viz node label).
-        Hits without a cluster row (non-concept types, or pre-rebuild state) are
-        kept as-is. After folding, dedup by object_id keeping MAX score, re-sort
-        by score desc, truncate to k.
-        """
-        return self._runtime.knowledge_query.fold_hits_to_canonical(notebook_id, hits, k)
-
     def kg_search(self, notebook_id: str, q: str, k: int = 30) -> list:
         """Search KG objects by name (FTS5 lexical) union ANN semantic.
 
@@ -1530,7 +1264,6 @@ class RepositoryFacade:
         """
         return self._runtime.knowledge_query.search(notebook_id, q, k)
 
-
     def list_sources(self, notebook_id: str) -> List[SourceSummary]:
         return self._runtime.source_ingestion.list_sources(notebook_id)
 
@@ -1541,10 +1274,6 @@ class RepositoryFacade:
         return self._runtime.source_ingestion.list_sources_page(
             notebook_id, offset, limit, q
         )
-
-    def visible_source_ids(self, notebook_id: str, source_ids: List[str]) -> List[str]:
-        """Return the requested ids that are visible imported sources of notebook."""
-        return self._runtime.index_projections.visible_source_ids(notebook_id, source_ids)
 
     def all_visible_source_ids(self, notebook_id: str) -> List[str]:
         """Return the current notebook's complete user-visible source id set."""
@@ -1699,9 +1428,6 @@ class RepositoryFacade:
         only to the user who created it, filtered in the adapter's SQL."""
         return self._runtime.source_store.hidden_source_ids(notebook_id, owner_id)
 
-    def visible_source_count(self, notebook_id: str) -> int:
-        return self._runtime.source_store.visible_document_count(notebook_id)
-
     def visible_source_scope_snapshot(
         self, notebook_id: str, source_ids: List[str]
     ) -> tuple[List[str], int]:
@@ -1727,14 +1453,6 @@ class RepositoryFacade:
         self, source_ids: Sequence[str]
     ) -> list[dict[str, Any]]:
         return self._runtime.source_store.report_source_identity_rows(source_ids)
-
-    def _source_pipeline_hooks(self) -> SourcePipelineHooks:
-        """Task 12: mint FRESH hooks on every ingestion call from the facade's
-        own bound seats — post-construction per-instance monkeypatches
-        (_run_extraction, _mark_unified_kg_dirty, ...) keep being observed.
-        Gate 5 replaces these temporary callbacks with real services.  Never
-        store the hooks (not on the runtime, not on the facade)."""
-        return self._runtime.source_ingestion.pipeline_hooks()
 
     def import_sources(self, notebook_id: str, payload: SourceImportRequest) -> List[SourceSummary]:
         self.require_indexing_pipeline_write(notebook_id)
@@ -1788,12 +1506,6 @@ class RepositoryFacade:
     _CJK_RE = CandidateRetrievalService._CJK_RE
     _LATIN_RE = CandidateRetrievalService._LATIN_RE
 
-    def _notebook_langs(self, notebook_id: str) -> List[str]:
-        return self.retrieval.candidates._notebook_langs(notebook_id)
-
-    def _should_extract_kg(self, notebook_id: str) -> bool:
-        return self._runtime.source_ingestion.should_extract_kg(notebook_id)
-
     def build_notebook_kg(
         self,
         notebook_id: str,
@@ -1821,18 +1533,12 @@ class RepositoryFacade:
             skip_policy=skip_policy,
         )
 
+    # 测试观察点：facade 这层的索引流水线写闸是被测对象（S2 批 B 裁决保留）。
     def rebuild_notebook_kg(self, notebook_id: str) -> dict:
         """Full re-extract (delete+build, kg_building 覆盖 delete 阶段) —
         KnowledgeLifecycleService owns the orchestration (Task 15)."""
         self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.knowledge_lifecycle.rebuild_notebook_kg(notebook_id)
-
-    def _parse_url_via_local(
-        self, source_id: str, url: str, file_name: str
-    ) -> List[SourceElement]:
-        return self._runtime.source_ingestion.parse_url_via_local(
-            source_id, url, file_name
-        )
 
     def process_source(self, source_id: str) -> SourceSummary:
         source = self._runtime.source_store.get_source(source_id)
@@ -1872,11 +1578,6 @@ class RepositoryFacade:
         source = self._runtime.source_store.get_source(source_id)
         self.require_indexing_pipeline_write(source.notebook_id)
         return self._runtime.source_ingestion.parse_source_compat(source_id)
-
-    def _augment_notebook_meta(self, notebook_id: str, pending_source_id: str = "") -> None:
-        return self._runtime.source_ingestion.augment_notebook_metadata(
-            notebook_id, pending_source_id
-        )
 
     # --- Task-12 catalog callbacks — SQL now lives on the notebook/source
     # --- stores (Task 26); the ingestion service owns the metadata-
@@ -1968,13 +1669,6 @@ class RepositoryFacade:
         self.require_indexing_pipeline_write(source.notebook_id)
         return self._runtime.source_ingestion.run_extraction(source_id)
 
-    def _relink_extra_relations(
-        self, objects: List[dict], relations: List[dict], source_id: str
-    ) -> List[dict]:
-        return self._runtime.source_ingestion.relink_extra_relations(
-            objects, relations, source_id
-        )
-
     def _run_extraction(self, source_id: str) -> None:
         return self._runtime.source_ingestion.run_extraction(source_id)
 
@@ -2033,12 +1727,6 @@ class RepositoryFacade:
     def _notebook_tier(self, notebook_id: str) -> str:
         return self._runtime.notebook_store.tier(notebook_id)
 
-    def _source_raw_text(self, source, elements) -> str:
-        return self._runtime.source_files.read_source(source, elements)
-
-    def _embed_source(self, source_id: str) -> None:
-        return self._runtime.source_embedding.embed_source(source_id)
-
     def _invalidate_checkup_missing_vector_counts(self, notebook_id: str) -> None:
         """element/chunk 向量写事件 → 体检 H4/H5 memo 失效的转发终点(构造期挂上
         ``runtime.on_source_vectors_written``,见 __init__)。按**调用时刻**的
@@ -2071,10 +1759,6 @@ class RepositoryFacade:
             object_id, notebook_id, payload, mark_dirty_in_tx=mark_dirty_in_tx
         )
 
-    def _flush_object_vectors(self, notebook_id: str, rows: list) -> int:
-        """把一批 (oid, vector) 落 knowledge_embeddings(一个写事务,幂等 REPLACE)。"""
-        return self._runtime.source_embedding.flush_object_vectors(notebook_id, rows)
-
     def _embed_objects_batch(self, notebook_id: str, items: List[dict],
                              progress=None, commit_every: Optional[int] = None) -> int:
         return self._runtime.source_embedding.embed_objects_batch(
@@ -2086,48 +1770,11 @@ class RepositoryFacade:
             notebook_id, rel_items
         )
 
-    def _build_chunks_for_source(self, source_id: str) -> None:
-        source = self._runtime.source_store.get_source(source_id)
-        self.require_indexing_pipeline_write(source.notebook_id)
-        return self._runtime.source_chunking.build_chunks_for_source(source_id)
-
-    def _embed_chunks_for_source(self, source_id: str) -> None:
-        return self._runtime.source_embedding.embed_chunks_for_source(source_id)
-
-    def _chunk_and_embed_source(self, source_id: str) -> None:
-        source = self._runtime.source_store.get_source(source_id)
-        self.require_indexing_pipeline_write(source.notebook_id)
-        return self._runtime.source_chunking.chunk_and_embed_source(source_id)
-
-    def _embed_chunks_batch(self, notebook_id: str, items: List[dict]) -> int:
-        return self._runtime.source_embedding.embed_chunks_batch(notebook_id, items)
-
-    def _backfill_knowledge_embeddings(self, db: object,
-                                       notebook_id: str, objects: List[dict],
-                                       progress=None) -> None:
-        """Embed + persist any knowledge objects missing a vector, concurrently
-        (reuses the concurrent embed_objects_batch). No-op when all are embedded
-        or no embedder. Lets ask() build a complete knowledge matrix without
-        materializing a Python-list dict of every vector.  SourceEmbeddingService
-        owns the orchestration (Task 26); frozen-signature delegate."""
-        return self._runtime.source_embedding.backfill_knowledge_embeddings(
-            db, notebook_id, objects, progress=progress
-        )
-
-
     def knowledge_types(self, notebook_id: str) -> List[KnowledgeTypeCount]:
         """All object types present in this notebook with non-deprecated counts,
         so the UI can render a tab per type — including academic/textbook types
         that have no bespoke card."""
         return self._runtime.knowledge_query.knowledge_types(notebook_id)
-
-    def _knowledge_record(
-        self, object_type: str, obj: dict, schema: Optional[ObjectSchema]
-    ) -> KnowledgeRecord:
-        """KG 对象 → KnowledgeRecord 展示投影 — canonical body 随 ask_reasoning
-        的 related_knowledge 消费点移入 ask_service (Task 24);list_knowledge
-        继续经本冻结签名 delegate 使用同一投影。"""
-        return self._runtime.knowledge_query.knowledge_record(object_type, obj, schema)
 
     def list_knowledge(
         self,
@@ -2150,10 +1797,6 @@ class RepositoryFacade:
 
     # --- Editable extraction-schema registry (Task 13: SchemaRegistryService
     # --- owns validation/sampling/LLM induction; KnowledgeStore owns rows) ---
-    @staticmethod
-    def _object_schema_from_row(row) -> ObjectSchemaModel:
-        return SchemaRegistryService.from_row(row)
-
     def effective_schemas(self, notebook_id: str = "") -> Dict[str, ObjectSchema]:
         """Active object schemas as an ObjectSchema registry for extraction —
         DB rows overlaid on the code defaults."""
@@ -2232,9 +1875,6 @@ class RepositoryFacade:
         misleadingly-partial one."""
         return self._runtime.knowledge_query.graph(notebook_id)
 
-    def _kg_headline(self, payload: dict) -> str:
-        return self._runtime.knowledge_query.kg_headline(payload)
-
     def store_kg(self, notebook_id: str, source_id: Optional[str],
                  objects: List[dict], relations: List[dict]) -> Tuple[int, int]:
         """Insert KG nodes/edges — KnowledgeLifecycleService owns the chunked
@@ -2244,6 +1884,7 @@ class RepositoryFacade:
             notebook_id, source_id, objects, relations
         )
 
+    # 测试观察点：facade 这层的索引流水线写闸是被测对象（S2 批 B 裁决保留）。
     def relink_notebook_kg(self, notebook_id: str) -> dict:
         """Backfill relink of degree-0 KG nodes — KnowledgeLifecycleService
         owns the orchestration (Task 15); frozen-signature delegate."""
@@ -2386,28 +2027,8 @@ class RepositoryFacade:
             notebook_id, rel_id, status, actor_id=actor_id
         )
 
-    def _delete_relations_for_source(self, db, source_id: str) -> None:
-        self._runtime.knowledge.delete_relations_for_source(db, source_id)
-
     # --- Concept-cluster / merge-candidate CRUD (Task 5) -------------------
 
-    def _tier2_bridge_candidates_ann(self, notebook_id: str, idx, ann,
-                                     new_objs: list,
-                                     frozen_canonical: Dict[str, str], *,
-                                     seed_version: int,
-                                     override: "frozenset[str]") -> list:
-        """ANN-backed Tier2 bridge candidate detection — KnowledgeLifecycleService
-        owns the body (Task 15); frozen-signature delegate.
-
-        PR-C:整表 ``cluster_map_`` 形参换成了 ``frozen_canonical`` —— ANN 命中的
-        canonical 折叠改走有界 ``cluster_fold_rows``,但**本批新对象**那几个 id 的
-        取值必须由调用方在 ``append_clusters`` 之前冻结好交进来(合同与理由见服务端
-        方法的 docstring)。``seed_version`` / ``override``:库已发布的概念种子空间
-        (桥接 id 与本次安置同一个空间)。"""
-        return self._runtime.knowledge_lifecycle._tier2_bridge_candidates_ann(
-            notebook_id, idx, ann, new_objs, frozen_canonical,
-            seed_version=seed_version, override=override,
-        )
     def cluster_map(self, notebook_id: str) -> Dict[str, str]:
         """Cached {member_object_id: canonical_id} — RetrievalCandidateService owns
         the loader + version-cache body (Task 21); frozen-signature delegate。单一
@@ -2417,20 +2038,6 @@ class RepositoryFacade:
 
     def pending_merges(self, notebook_id: str) -> List[dict]:
         return self._runtime.knowledge_governance.pending_merges(notebook_id)
-
-    def _pending_merges_batch(self, notebook_id: str, limit: int) -> List[dict]:
-        """Bounded SQL-LIMIT fetch of pending merge candidates —
-        KnowledgeGovernanceService owns the body (Task 16); frozen-signature
-        delegate."""
-        return self._runtime.knowledge_governance._pending_merges_batch(
-            notebook_id, limit
-        )
-
-    def _has_pending_merges(self, notebook_id: str) -> bool:
-        """Cheap EXISTS continuation test for the merge-review drain loop —
-        KnowledgeGovernanceService owns the body (Task 16); frozen-signature
-        delegate."""
-        return self._runtime.knowledge_governance._has_pending_merges(notebook_id)
 
     def confirm_merge(self, notebook_id: str, candidate_id: str) -> None:
         """Confirm a merge candidate — KnowledgeGovernanceService owns the
@@ -2515,15 +2122,6 @@ class RepositoryFacade:
             notebook_id, batch=batch
         )
 
-    def decided_seed_pairs(self, notebook_id: str) -> Dict[frozenset, str]:
-        """{frozenset({seed_a, seed_b}): status} for confirmed/rejected/deferred.
-
-        Seed-name keys are STABLE across rebuilds (canonical ids shift when a
-        cluster's min-member changes; seed names don't). Legacy rows written
-        before the seed_a/seed_b columns existed carry '' → fall back to
-        strip-"K-"(canonical), matching the old decided_pairs key derivation."""
-        return self._runtime.knowledge_governance.decided_seed_pairs(notebook_id)
-
     def concept_whitelist_terms(self) -> set:
         return self._runtime.knowledge_governance.concept_whitelist_terms()
 
@@ -2542,12 +2140,6 @@ class RepositoryFacade:
         # mutation call site keeps funnelling through this wrapper.
         self._runtime.kg_mutations.invalidate_unified_cache(notebook_id)
 
-    def _cluster_input_version(self, notebook_id: str, *, exclude_emb_count: bool = False) -> str:
-        """O(1) clustering-input content hash (v2, exclude_emb_count checkpoint
-        namespace) — lifecycle-owned (Task 15); frozen-signature delegate."""
-        return self._runtime.knowledge_lifecycle._cluster_input_version(
-            notebook_id, exclude_emb_count=exclude_emb_count
-        )
     def _mark_unified_kg_dirty(self, notebook_id: str) -> None:
         # Task 14: the kg_mutation_seq dirty bump is coordinator-owned. This
         # wrapper stays the single funnel every KG write goes through (and the
@@ -2579,13 +2171,6 @@ class RepositoryFacade:
         """Unified-KG state summary — KnowledgeLifecycleService owns the read
         (Task 15); frozen-signature delegate."""
         return self._runtime.knowledge_lifecycle.unified_kg_status(notebook_id)
-    def _edge_support_map(self, notebook_id: str) -> Dict[tuple, tuple]:
-        """{(canonical_src, edge_type, canonical_tgt): (support_count, source_count)}。
-        GraphRetrievalService owns the loader + version-cache body (Task 21);
-        frozen-signature delegate（同 cluster_map：消除共享缓存键 "{nb}:edge_support"
-        的双所有权，loader 只此一家）。"""
-        return self.retrieval.graph._edge_support_map(notebook_id)
-
     def _annotate_edge_support(self, notebook_id: str, edges: List[dict]) -> List[dict]:
         """给 unified/neighbors 形状的边({source_object_id,target_object_id,edge_type})
         附 support_count/source_count。查表键先过 cluster_map 折叠:unified 图只折叠
@@ -2600,25 +2185,6 @@ class RepositoryFacade:
         KnowledgeLifecycleService owns the orchestration (Task 15)."""
         return self._runtime.knowledge_lifecycle.unified_graph(notebook_id, level, limit)
 
-    def _unified_graph_full(self, notebook_id: str, level: str = "concept") -> dict:
-        """Full derived unified graph (unified_cache-backed) — lifecycle-owned
-        (Task 15; the canonical patch seat is repo._runtime.knowledge_lifecycle)."""
-        return self._runtime.knowledge_lifecycle._unified_graph_full(notebook_id, level)
-
-    def _viz_dict(self, idx):
-        """viz arrays → viz_neighbors dict shape — lifecycle-owned (Task 15)."""
-        return self._runtime.knowledge_lifecycle._viz_dict(idx)
-
-    def _viz_node(self, idx, fid, name_by_id, type_by_id):
-        """One folded viz node in unified_graph shape — lifecycle-owned (Task 15)."""
-        return self._runtime.knowledge_lifecycle._viz_node(idx, fid, name_by_id, type_by_id)
-
-    def _unified_graph_bounded(self, notebook_id: str, idx, limit: int) -> dict:
-        """Degree-top-N core from the persisted folded viz graph —
-        lifecycle-owned (Task 15); frozen-signature delegate."""
-        return self._runtime.knowledge_lifecycle._unified_graph_bounded(
-            notebook_id, idx, limit
-        )
     def kg_neighbors(
         self,
         notebook_id: str,
@@ -2636,40 +2202,6 @@ class RepositoryFacade:
             source_notebook_id=source_notebook_id,
         )
 
-    def _kg_neighbors_db(self, notebook_id: str, object_id: str, cap: int) -> dict:
-        """DB fallback for kg_neighbors — lifecycle-owned (Task 15)."""
-        return self._runtime.knowledge_lifecycle._kg_neighbors_db(
-            notebook_id, object_id, cap
-        )
-
-    def _object_meta(self, notebook_id: str, folded_ids, cmap):
-        """{folded_id: (object_type, name)} hydration — lifecycle-owned (Task 15)."""
-        return self._runtime.knowledge_lifecycle._object_meta(
-            notebook_id, folded_ids, cmap
-        )
-    def _stream_seed_reps(self, notebook_id: str, object_type: str, *,
-                          concept_seed_version: int, run_id: str = "",
-                          compute_reps: bool = True):
-        """Streamed seed aggregation (ORDER BY rowid anchored) — lifecycle-owned
-        (Task 15; the canonical patch seat is repo._runtime.knowledge_lifecycle).
-        Seeds come from the type's seed space, concepts in
-        ``concept_seed_version``."""
-        return self._runtime.knowledge_lifecycle._stream_seed_reps(
-            notebook_id, object_type, concept_seed_version=concept_seed_version,
-            run_id=run_id, compute_reps=compute_reps,
-        )
-    def _write_cluster_map_streamed(self, notebook_id: str, object_type: str,
-                                    seed_to_canonical: Dict[str, str],
-                                    canonical_names: Dict[str, str],
-                                    desc_by_cid: Optional[Dict[str, str]] = None,
-                                    desc_sig_by_cid: Optional[Dict[str, str]] = None,
-                                    run_id: str = "") -> None:
-        """Streamed concept_clusters writer — lifecycle-owned (Task 15; the
-        canonical patch seat is repo._runtime.knowledge_lifecycle)."""
-        return self._runtime.knowledge_lifecycle._write_cluster_map_streamed(
-            notebook_id, object_type, seed_to_canonical, canonical_names,
-            desc_by_cid, desc_sig_by_cid, run_id
-        )
     def rebuild_unified_kg(self, notebook_id: str,
                            progress: Optional[Callable[[str, int, int], None]] = None,
                            force: bool = False, fresh: bool = False) -> int:
@@ -2756,13 +2288,6 @@ class RepositoryFacade:
             after=after,
         )
 
-    def _element_texts(self, db, element_ids, *, with_ordinal: bool = False,
-                       owner_notebook_id: Optional[str] = None):
-        return self._runtime.knowledge._element_texts(
-            db, element_ids, with_ordinal=with_ordinal,
-            owner_notebook_id=owner_notebook_id,
-        )
-
     def _enrich_evidence(
         self, db, evidence, *, owner_notebook_id: Optional[str] = None,
         sources_only: bool = False,
@@ -2787,23 +2312,9 @@ class RepositoryFacade:
             allowed_source_ids=allowed_source_ids,
         )
 
-    # test-only helper; later tasks may replace it with a public insert path
-    def _test_insert_object(self, notebook_id: str, object_type: str, payload: dict, source_id: str = "") -> str:
-        return self._runtime.knowledge_query.insert_test_object(
-            notebook_id, object_type, payload, source_id
-        )
-
     # --- Governance: promotion state machine (Track F) -------------------
     # KnowledgeGovernanceService owns the domain (Task 16); the facade keeps
     # frozen-signature delegates.
-
-    @staticmethod
-    def _promotion_row_to_dict(row: object, *, payload=None, evidence=None) -> dict:
-        """Map a promotion_candidates row to the PromotionCandidate-shaped dict —
-        canonical body lives with the governance service (Task 16)."""
-        return KnowledgeGovernanceService.promotion_dict(
-            row, payload=payload, evidence=evidence
-        )
 
     def propose_promotion(
         self, notebook_id: str, object_id: str, *, target_base_id: str = "",
@@ -2837,28 +2348,6 @@ class RepositoryFacade:
             candidate_id, reviewer_id=reviewer_id
         )
 
-    def _seed_fn_for(self, object_type: str, *, concept_seed_version: int):
-        """Return the kg_merge seed function for a KG object type, concepts in
-        seed space ``concept_seed_version``."""
-        return self._runtime.governance.seed_for(
-            object_type, concept_seed_version=concept_seed_version)
-
-    def _find_base_dedup_match(
-        self, object_type: str, src_payload: dict, base_objs: List[object], *,
-        concept_seed_version: int,
-    ) -> str:
-        """Exact-seed dedup (v1) — canonical body lives with the governance
-        store's promotion primitive (Task 13); concepts compared in the base
-        notebook's published seed space."""
-        return self._runtime.governance.find_base_match(
-            object_type, src_payload, base_objs,
-            concept_seed_version=concept_seed_version,
-        )
-
-    def _merge_evidence_lists(self, base_ev: list, src_ev: list) -> list:
-        """Union two evidence lists, deduping on (source_id, element_id, quoted_span)."""
-        return self._runtime.governance.merge_evidence(base_ev, src_ev)
-
     def reject_promotion_as_reviewer(
         self, candidate_id: str, reason: str, reviewer_id: str
     ) -> dict:
@@ -2877,31 +2366,6 @@ class RepositoryFacade:
         (M1) is additive."""
         return self._runtime.knowledge_governance.update_knowledge(
             notebook_id, knowledge_id, payload, actor_id=actor_id
-        )
-
-    @staticmethod
-    def _knowledge_headline(object_type: str, payload: dict) -> str:
-        """Headline extraction for a KG payload — canonical body lives with the
-        governance service (Task 16); shared with list_knowledge's record
-        projection."""
-        return KnowledgeGovernanceService.headline(object_type, payload)
-
-    def _knowledge_ref(self, obj: dict, object_type: str) -> KnowledgeRef:
-        """KnowledgeRef projection — KnowledgeGovernanceService owns the body
-        (Task 16); frozen-signature delegate."""
-        return self._runtime.knowledge_governance._knowledge_ref(obj, object_type)
-
-    @staticmethod
-    def _payload_join(payload: dict) -> str:
-        """Flatten payload text — canonical body lives with the governance
-        service (Task 16)."""
-        return KnowledgeGovernanceService.joined_payload(payload)
-
-    def _knowledge_similarity(self, a: dict, b: dict, element_vectors: dict) -> float:
-        """Keyword ∨ evidence-vector similarity — KnowledgeGovernanceService
-        owns the body (Task 16); frozen-signature delegate."""
-        return self._runtime.knowledge_governance._knowledge_similarity(
-            a, b, element_vectors
         )
 
     def find_duplicates(self, notebook_id: str, object_type: str) -> List[DuplicateGroup]:
@@ -2950,40 +2414,9 @@ class RepositoryFacade:
     def _embed_query(self, query: str) -> Optional[List[float]]:
         return self.retrieval.candidates._embed_query(query)
 
-    def _runtime_dim(self) -> int:
-        """本 repo 生效的运行时截断维(读 self.settings,非全局 get_settings)。
-        build_matrix 内部裸调 resolve_runtime_dim() 读全局单例,生产两者同一对象,
-        但测试/多实例下 self.settings 才是真相 —— 建 ANN/矩阵的 build_matrix 调用
-        应显式传本值,使工件维度由本 repo 配置决定(见 T5 manifest 真相化)。"""
-        return self.retrieval.runtime_dim()
-
-    def _gather_elements(self, db: object, notebook_id: str,
-                         with_vectors: bool = True) -> List[dict]:
-        # 运行时截断旁路(计划 §1.2 旁路 1):element 兜底不走 build_matrix,逐向量
-        # 进 retrieval.cosine 与 _embed_query(已截断,T2)比较 —— cosine 对 len 不等
-        # 静默返 0.0,漏截 = 全部 element 静默零相似度。
-        return self.retrieval.candidates._gather_elements(db, notebook_id, with_vectors)
-
-    @staticmethod
-    def _element_vectors(elements: List[dict]) -> dict:
-        return CandidateRetrievalService._element_vectors(elements)
-
-    def _gather_chunks(self, db: object, notebook_id: str) -> List[dict]:
-        return self.retrieval.candidates._gather_chunks(db, notebook_id)
-
-    def _vector_matrix_version(self, db: object, notebook_id: str, table: str):
-        return self.retrieval.candidates._vector_matrix_version(db, notebook_id, table)
-
     def _vector_matrix(self, db: object, notebook_id: str,
                        table: str, id_col: str):
         return self.retrieval.candidates._vector_matrix(db, notebook_id, table, id_col)
-
-    def _vector_matrix_warm(self, db: object, notebook_id: str, table: str) -> bool:
-        return self.retrieval.candidates._vector_matrix_warm(db, notebook_id, table)
-
-    def _keyword_token_sets(self, db, notebook_id: str, objects: list,
-                            bounded: bool = False) -> dict:
-        return self.retrieval.candidates._keyword_token_sets(db, notebook_id, objects, bounded)
 
     def _federated_rx_graph(self, active_notebook_id: str):
         return self.retrieval.graph._federated_rx_graph(active_notebook_id)
@@ -2994,60 +2427,11 @@ class RepositoryFacade:
     def _mention_extra_edges(self, notebook_id: str) -> List[Tuple[str, str, float]]:
         return self.retrieval.graph._mention_extra_edges(notebook_id)
 
-    def _ppr_graph(self, notebook_id: str):
-        return self.retrieval.graph._ppr_graph(notebook_id)
-
     # ── scale index (offline build) ──────────────────────────────────────────
-
-    def _probe_scale_version_signal(self, notebook_id: str):
-        """Cheap probe: (seq, cseq, settings_tail, kg_reset_epoch) for
-        `notebook_id` (batch-3-W1 PR-2 appended kg_reset_epoch at the
-        trailing position). O(1) — a single unified_kg_state row read plus the
-        one-row Memory-source probe (E4-6: the isolation pair of a notebook
-        holding Memory rides the signal), no table aggregates — always run,
-        never single-flighted (it's the
-        signal used to decide whether the expensive cold path is needed at
-        all, so it must never itself block on another thread's cold
-        compute).
-
-        P0-A: clusters used to be re-read here every call via a concept_clusters
-        COUNT/MAX(created_at) (millions of rows at scale) because rebuild
-        deliberately keeps kg_mutation_seq stable across a rebuild (idempotency)
-        while still rewriting concept_clusters — seq alone couldn't see that
-        rewrite. Now cluster_mutation_seq (bumped in the SAME commit as every
-        concept_clusters write — write_clusters / append_clusters /
-        incremental_fuse_source's orphan sweep / the rebuild streamed writer)
-        carries that signal at O(1), so this probe never touches concept_clusters
-        at all; the real COUNT/MAX only run in _compute_scale_version_cold on a
-        memo miss."""
-        # runtime_dim 是 settings_tail 的一员(T3/R4);mention_seq(P2 共提桥)
-        # 折进 settings_tail —— 两者经 _compute_scale_version_cold 流入
-        # _scale_index_version,进而与磁盘 manifest.version 对照。Task 18:单行
-        # 探针读移入 IndexProjectionStore(经 _connect 席位,spy/单飞注入照常观测)。
-        return self._runtime.index_projections.version_signal(notebook_id)
-
-    def _compute_scale_version_cold(self, notebook_id: str, seq: int,
-                                     settings_tail: tuple) -> list:
-        """冷路径:五表聚合(clusters 聚合从热路径移到这里——P0-A 后热路径只读
-        unified_kg_state 单行,COUNT/MAX 只在 memo miss 时算)。version list 的
-        内容与格式与 P0-A 前逐位一致(clusters 仍在第 8、9 位),磁盘
-        manifest.version 兼容性不受影响。只从 _scale_index_version 的 per-nb
-        单飞锁内部调用,不直接对外暴露。Task 18:五表聚合读移入
-        IndexProjectionStore.version_facts(经 _connect 席位);settings_tail
-        仍由本方法追加 —— 与 memo 键取自同一次探针,list 格式逐位不变。"""
-        return self._runtime.index_projections.version_with_settings(
-            notebook_id, settings_tail
-        )
 
     def _scale_index_version(self, notebook_id: str) -> list:
         """Compatibility delegate to the runtime-owned version memo."""
         return self._runtime.scale_artifacts.version(notebook_id)
-
-    def _read_manifest_version(self, out_dir: str):
-        """廉价读 out_dir/manifest.json 的 version 字段(几 KB,sub-ms)。
-        文件缺失/损坏/无 version → None(fail-soft)。Task 18:移入
-        ScaleArtifactStore(磁盘 manifest 探针 O(1) 语义不变)。"""
-        return self._runtime.scale_artifact_store.read_manifest_version(out_dir)
 
     def _scale_index(self, notebook_id: str, allow_stale: bool = False):
         """Return a valid ScaleIndex or None.  Task 18:exact/allow_stale 语义
@@ -3057,24 +2441,6 @@ class RepositoryFacade:
         return self._runtime.scale_artifacts.load(
             notebook_id, allow_stale=allow_stale
         )
-
-    def _open_scale_ann(self, idx, kind: str):
-        """惰性 open + memoize hnswlib handle 到 ScaleIndex 实例。失败/无工件→None。
-        Task 18:移入 ScaleArtifactCatalog.open_ann(manifest dim 探针 + fail-open
-        回退语义不变)。"""
-        return self._runtime.scale_artifacts.open_ann(idx, kind)
-
-    def _spawn_viz_build(self, notebook_id: str) -> None:
-        """Compatibility delegate to the runtime-owned viz scheduler."""
-        return self._runtime.scale_artifacts._spawn_viz_build(notebook_id)
-
-    def _viz_index(self, notebook_id: str):
-        """Compatibility delegate to runtime viz artifact selection."""
-        return self._runtime.scale_artifacts.viz_index(notebook_id)
-
-    def _viz_index_probe(self, notebook_id: str) -> dict:
-        """Compatibility delegate to the read-only runtime viz probe."""
-        return self._runtime.scale_artifacts.viz_probe(notebook_id)
 
     def _gather_kg_graph(self, notebook_id: str, source_ids=None, synonym_edges=None,
                           as_arrays: bool = False):
@@ -3110,14 +2476,6 @@ class RepositoryFacade:
         """Compatibility delegate to the runtime-owned scale builder."""
         return self._runtime.scale_builder._index_delta(notebook_id)
 
-    def _scale_index_eligible(self, notebook_id: str, *, tier: "str | None" = None,
-                              exists: "bool | None" = None,
-                              total_chunks: "int | None" = None) -> bool:
-        """Compatibility delegate to runtime scale eligibility."""
-        return self._runtime.scale_artifacts.eligible(
-            notebook_id, tier=tier, exists=exists, total_chunks=total_chunks
-        )
-
     def scale_index_status(self, notebook_id: str) -> dict:
         """Compatibility delegate to runtime scale status."""
         return self._runtime.scale_artifacts.status(notebook_id)
@@ -3126,14 +2484,6 @@ class RepositoryFacade:
         """Compatibility delegate to the runtime's read-only combined status."""
         return self._runtime.scale_artifacts.index_status(notebook_id)
 
-    def _resolve_scale_mode(self, notebook_id: str, mode: str) -> str:
-        """Compatibility delegate to runtime fold/full selection."""
-        return self._runtime.scale_artifacts._resolve_mode(notebook_id, mode)
-
-    def _resolve_index_owner(self, notebook_id: str) -> "str | None":
-        """Compatibility delegate to runtime notification ownership."""
-        return self._runtime.scale_artifacts._resolve_index_owner(notebook_id)
-
     def _notebook_name(self, notebook_id: str) -> str:
         """Compatibility delegate to runtime notification naming."""
         return self._runtime.scale_artifacts._notebook_name(notebook_id)
@@ -3141,18 +2491,6 @@ class RepositoryFacade:
     def _notify_index_done(self, notebook_id: str) -> None:
         """Compatibility delegate to runtime index-completion notification."""
         return self._runtime.scale_artifacts.notify_index_done(notebook_id)
-
-    def _run_scale_op(self, notebook_id: str, mode: str) -> None:
-        """Compatibility delegate to the runtime daemon launcher."""
-        return self._runtime.scale_artifacts._run_scale_op(notebook_id, mode)
-
-    def _process_idle_queue(self, force: bool = False) -> None:
-        """Compatibility delegate to runtime idle-queue draining."""
-        return self._runtime.scale_artifacts._process_idle_queue(force=force)
-
-    def _ensure_scale_scheduler(self) -> None:
-        """Compatibility delegate to the runtime scheduler."""
-        return self._runtime.scale_artifacts._ensure_scheduler()
 
     def trigger_scale_index_rebuild(self, notebook_id: str, when: str = "now",
                                     mode: str = "auto") -> dict:
@@ -3169,58 +2507,18 @@ class RepositoryFacade:
             notebook_id, when=when, mode=mode, manual=True
         )
 
-    def _dequeue_scale_idle(self, notebook_id: str) -> bool:
-        """Compatibility helper for the runtime-owned idle queue."""
-        return self._runtime.scale_artifacts.dequeue_idle(notebook_id)
-
     def cancel_scale_index(self, notebook_id: str) -> dict:
         """Compatibility delegate to runtime cancellation."""
         return self._runtime.scale_artifacts.cancel(notebook_id)
-
-    def _maybe_enqueue_scale_fold(self, notebook_id: str) -> None:
-        """Compatibility delegate to runtime auto-fold policy."""
-        return self._runtime.scale_artifacts.maybe_enqueue_fold(notebook_id)
 
     def maybe_auto_index(self, notebook_id: str) -> None:
         """Compatibility delegate to runtime automatic indexing."""
         return self._runtime.scale_artifacts.maybe_auto_index(notebook_id)
 
-    def _viz_arrays_from_graph(self, full: dict):
-        """Compatibility delegate for callers that already derived a graph."""
-        return self._runtime.scale_artifacts.viz_arrays_from_graph(full)
-
-    def _derive_object_graph_lite(self, notebook_id: str) -> dict:
-        """Compatibility delegate to the builder's lite DB projection."""
-        return self._runtime.scale_builder._derive_object_graph_lite(notebook_id)
-
-    def _viz_index_dir(self, notebook_id: str) -> str:
-        return str(self._runtime.scale_artifact_store.viz_dir(notebook_id))
-
-    def _active_kg_delta(self, notebook_id: str):
-        return self.retrieval.graph._active_kg_delta(notebook_id)
-
-    def _delta_vector_matrix(self, db: object, notebook_id: str,
-                             table: str, id_col: str, node_ids: List[str]):
-        return self.retrieval.graph._delta_vector_matrix(db, notebook_id, table, id_col, node_ids)
-
-    def _scale_xlayer_bridge_edges(self, notebook_id: str, base_indexes,
-                                   active_edges, active_node_ids=None):
-        return self.retrieval.graph._scale_xlayer_bridge_edges(notebook_id, base_indexes, active_edges, active_node_ids)
-
-    def _scale_combined_graph(self, notebook_id: str, base_indexes):
-        return self.retrieval.graph._scale_combined_graph(notebook_id, base_indexes)
-
     def _ppr_retrieve(self, notebook_id: str, question: str) -> List["RetrievedChunk"]:
         return self.retrieval.graph.ppr_retrieve(notebook_id, question)
 
-    def _ppr_reset_vector(self, notebook_id: str, question: str,
-                          key_to_idx: Dict[str, int]) -> Dict[int, float]:
-        return self.retrieval.graph._ppr_reset_vector(notebook_id, question, key_to_idx)
-
     _PPR_RERANK_SCHEMA = '{"relevant_ids": [""]}'
-
-    def _ppr_fact_rerank(self, question: str, kg_hits: list) -> list:
-        return self.retrieval.graph._ppr_fact_rerank(question, kg_hits)
 
     def _rule_card(self, item: RetrievedKnowledge) -> RuleCard:
         return self._runtime.knowledge_query.rule_card(item)
@@ -3228,27 +2526,6 @@ class RepositoryFacade:
     @staticmethod
     def _as_retrieved(obj: dict, object_type: str) -> RetrievedKnowledge:
         return KnowledgeQueryService.as_retrieved(obj, object_type)
-
-    def _tier_map_for(self, notebook_ids: Iterable[str]) -> Dict[str, str]:
-        """Batch-resolve {notebook_id: tier} in one query (mirrors
-        federated_retrieve's tier_map pass). Used by citation-building sites
-        that fan across several notebooks (e.g. PPR chunks that can span
-        base ⊕ active) so tier lookup is O(distinct notebooks), not O(citations).
-        Missing/unknown ids default to "personal" (safe: matches Citation.tier's
-        own default, never silently mislabels a source as authoritative base)."""
-        return self._runtime.evidence_context_component.tier_map(notebook_ids)
-
-    def _citations_from(
-        self,
-        items: List[RetrievedKnowledge],
-        valid_element_ids: set,
-        label: str,
-        *,
-        notebook_id: str,
-    ) -> List[Citation]:
-        return self._runtime.evidence_context_component.citations_from(
-            items, valid_element_ids, label, notebook_id=notebook_id
-        )
 
     # SQLite default SQLITE_MAX_VARIABLE_NUMBER-safe chunk size for `IN (...)`
     # placeholder lists (mirrors the ~900 convention used elsewhere in this file).
@@ -3259,19 +2536,6 @@ class RepositoryFacade:
         SQL IN 占位符的 delta 位点必须经它——SQLite 3.32+ 变量上限 32,766,
         生产 48,739 delta source 已真实打爆(too many SQL variables)。"""
         return self.retrieval.in_batches(ids, self._IN_CHUNK)
-
-    def _relations_with_names(self, db: object, notebook_id: str,
-                              relation_ids: Optional[List[str]] = None) -> List[dict]:
-        return self.retrieval.candidates._relations_with_names(db, notebook_id, relation_ids)
-
-    def _relation_ann_candidates(self, notebook_id, query_vector, idx, recall) -> dict:
-        return self.retrieval.candidates._relation_ann_candidates(notebook_id, query_vector, idx, recall)
-
-    def _retrieve_relations_scored(self, notebook_id: str, query: str) -> List["RetrievedRelation"]:
-        return self.retrieval.candidates._retrieve_relations_scored(notebook_id, query)
-
-    def _kg_object_candidates(self, notebook_id, query_vector, idx, recall) -> dict:
-        return self.retrieval.candidates._kg_object_candidates(notebook_id, query_vector, idx, recall)
 
     @property
     def retrieval(self):
@@ -3312,23 +2576,6 @@ class RepositoryFacade:
             allowed_source_ids=allowed_source_ids,
         )
 
-    def _retrieve_neighbors(self, notebook_id: str, object_id: str,
-                            edge_type: Optional[str] = None,
-                            direction: str = "both") -> NeighborExpansion:
-        return self.retrieval.candidates.retrieve_neighbors(notebook_id, object_id, edge_type, direction)
-
-    def _follow_chain(
-        self,
-        active_notebook_id: str,
-        start_object_id: str,
-        edge_type: Optional[str] = None,
-        target_object_id: str = "",
-        direction: str = "out",
-        max_fan_out: int = 8,
-        max_results: int = 4,
-    ):
-        return self.retrieval.graph.follow_chain(active_notebook_id, start_object_id, edge_type, target_object_id, direction, max_fan_out, max_results)
-
     def _retrieve_elements(self, notebook_id: str, query: str,
                            limit: int = 8, *,
                            allowed_source_ids=None) -> List[RetrievedElement]:
@@ -3344,83 +2591,8 @@ class RepositoryFacade:
     def _retrieve_chunks(self, notebook_id: str, query: str, recall: int = 0):
         return self.retrieval.candidates._retrieve_chunks(notebook_id, query, recall)
 
-    def _retrieve_chunks_fts_degraded(self, notebook_id, query, query_vector,
-                                      recall, n_chunks):
-        return self.retrieval.candidates._retrieve_chunks_fts_degraded(notebook_id, query, query_vector, recall, n_chunks)
-
-    def _retrieve_chunks_ann(
-        self, notebook_id, query, query_vector, idx, recall, *,
-        allowed_source_ids=None,
-    ):
-        if allowed_source_ids is None:
-            return self.retrieval.candidates._retrieve_chunks_ann(
-                notebook_id, query, query_vector, idx, recall
-            )
-        return self.retrieval.candidates._retrieve_chunks_ann(
-            notebook_id, query, query_vector, idx, recall,
-            allowed_source_ids=allowed_source_ids,
-        )
-
-    def _hydrate_chunk_candidates(self, cand_ids):
-        return self.retrieval.candidates._hydrate_chunk_candidates(cand_ids)
-
     def _retrieve_chunks_multi(self, notebook_id, sub_queries):
         return self.retrieval.candidates._retrieve_chunks_multi(notebook_id, sub_queries)
-
-    def _keyword_chunk_candidates(self, notebook_id: str, keywords: str,
-                                  recall: int = 0):
-        return self.retrieval.candidates._keyword_chunk_candidates(notebook_id, keywords, recall)
-
-    @staticmethod
-    def _union_chunk_candidates(base: list, extra: list) -> list:
-        return RetrievalService.merge_chunk_candidates(base, extra)
-
-    def _mmr_select_chunks(self, scored, ids, mat, k: int, lambda_: float):
-        return self.retrieval.candidates._mmr_select_chunks(scored, ids, mat, k, lambda_)
-
-    def _chunk_answer_context(self, chunks, budget_chars: "int | None" = None,
-                               notebook_id: str = "") -> tuple:
-        """产出长上下文综合用的 id 标注块 + id_map。chunk.text 已含 [section] 前缀
-        (P1 build_chunks),故每行直接 `k_i: <text>`。id_map 形状与 KG 版一致,
-        使 _parse_answer_anchors 原样复用(object_id=chunk_id, object_type=chunk)。
-        tier:与 _answer_context(KG 版)同一模式——按每 chunk 自己的 notebook_id 解析
-        (PPR/概念漫游可掺 base 库 chunk,c.notebook_id 已标;单库路径留空回退调用方
-        传入的 notebook_id)。批量一次查询(O(distinct notebook) 非 O(chunk)),
-        循环内只查表。"""
-        return self._runtime.evidence_context_component.chunk_context(
-            chunks, notebook_id=notebook_id, budget_chars=budget_chars
-        )
-
-    def _answer_chunks(
-        self,
-        question,
-        chunks,
-        history="",
-        cancel_event: CancelEvent = None,
-        notebook_id: str = "",
-    ) -> tuple:
-        """长上下文综合 — 冻结签名 delegate(engine body 在 AskService,Task 24)。"""
-        return self._runtime.ask_component._answer_chunks(
-            question, chunks, history, cancel_event=cancel_event,
-            notebook_id=notebook_id)
-
-    def _answer_mix(
-        self,
-        question,
-        chunks,
-        kg_block,
-        kg_id_map,
-        history="",
-        cancel_event: CancelEvent = None,
-        notebook_id: str = "",
-    ) -> tuple:
-        """mix 长上下文综合 — 冻结签名 delegate(engine body 在 AskService,Task 24)。"""
-        return self._runtime.ask_component._answer_mix(
-            question, chunks, kg_block, kg_id_map, history,
-            cancel_event=cancel_event, notebook_id=notebook_id)
-
-    def _build_chunk_retrieval_plan(self, notebook_id: str, sub_queries: list) -> ChunkRetrievalPlan:
-        return self.retrieval.candidates._build_chunk_retrieval_plan(notebook_id, sub_queries)
 
     def ask(
         self,
@@ -3501,41 +2673,8 @@ class RepositoryFacade:
     # kg/graph_reason.py 的答案期链路验证函数与 _federated_rx_graph/
     # _kg_source_chunks 等底层基础设施保留(follow_chain/chunk mix 分支仍消费)。
     # 随之删除的还有：is_process_query import（原 ask_fast 独占调用）。
-    # 保留的 helper（_rrf_scored 等）仍被其他 ask_* 路径或测试直接调用，尚未可删。
     # 旧 LLM 打分重排 helper 已删——被 qwen3-rerank(RerankClient)取代。
     # _answer_kg 已删(P4-5死码)，query-refine 移入 _refine_context。
-
-    def _concept_cluster_id(self, notebook_id: str, object_id: str) -> str:
-        """Canonical unified-cluster id for a concept `object_id`, reusing the
-        same `concept_clusters` membership map `concept_detail` relies on
-        (`cluster_map` -> {member_object_id: canonical_id}). When clustering is
-        not populated for the notebook (no cluster row for this object), fall
-        back to `object_id` so dedup degrades gracefully (no merge, no crash)."""
-        return self.retrieval.concept_cluster_id(notebook_id, object_id)
-
-    def _rrf_scored(
-        self,
-        query: str,
-        kg_objs: Dict[str, List[dict]],
-        knowledge_sims: Optional[Dict[str, float]],
-        element_sims: Optional[Dict[str, float]] = None,
-    ) -> List[RetrievedKnowledge]:
-        return self.retrieval.candidates._rrf_scored(query, kg_objs, knowledge_sims, element_sims)
-
-    def _graph_seed_fusion(
-        self,
-        notebook_id: str,
-        question: str,
-        base_seeds: List[str],
-        cancel_event: CancelEvent = None,
-    ) -> List[str]:
-        return self.retrieval.candidates._graph_seed_fusion(notebook_id, question, base_seeds, cancel_event)
-
-    def _chunk_kg_overlay(self, notebook_id: str, query: str, hl: str, id_offset: int):
-        return self.retrieval.candidates._chunk_kg_overlay(notebook_id, query, hl, id_offset)
-
-    def _elem_chunk_map(self, notebook_id: str) -> Dict[str, list]:
-        return self.retrieval.graph._elem_chunk_map(notebook_id)
 
     def _kg_source_chunks(
         self, notebook_id: str, object_ids: list, *, support_by_object=None
@@ -3554,19 +2693,6 @@ class RepositoryFacade:
     _MIX_KG_KEY_BASE = 1000
     _MIX_PROMPT_BUFFER_TOKENS = 2000
 
-    def _truncate_kg_block(self, block: str, max_tokens: int) -> str:
-        """按行截断 KG block 至 token 预算(整行保留)。被截掉的行其 [k] 仍留在 id_map,
-        _parse_answer_anchors 解析无害(只损失上下文,不破坏引用)。镜像 truncate_by_tokens。"""
-        return self._runtime.evidence_context_component.truncate_kg_block(
-            block, max_tokens
-        )
-
-    def _gather_vector_chunks(self, notebook_id: str, sub_queries: list) -> list:
-        return self.retrieval.candidates._gather_vector_chunks(notebook_id, sub_queries)
-
-    def _mix_retrieve(self, notebook_id: str, query: str, hl: str, sub_queries: list) -> tuple:
-        return self.retrieval.candidates._mix_retrieve(notebook_id, query, hl, sub_queries)
-
     def participant_notebook_ids(
         self, notebook_id: str, *, viewer_id: str | None
     ) -> List[str]:
@@ -3582,97 +2708,6 @@ class RepositoryFacade:
         调用方必须说出「替谁取」——MCP 传令牌所属用户,公开页传分享创建者。"""
         return self._runtime.notebook_store.participant_notebook_ids(
             notebook_id, viewer_id=viewer_id
-        )
-
-    def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge],
-                        id_offset: int = 0) -> tuple:
-        return self._runtime.evidence_context_component.knowledge_context(
-            notebook_id, top_hits, id_offset=id_offset
-        )
-
-    def _rewrite_followup_query(
-        self,
-        history: str,
-        question: str,
-        cancel_event: CancelEvent = None,
-    ) -> str:
-        """Follow-up 检索改写 — 冻结签名 delegate(engine body 在 AskService,Task 24)。"""
-        return self._runtime.ask_component._rewrite_followup_query(
-            history, question, cancel_event)
-
-    def _refine_context(
-        self,
-        question: str,
-        context_block: str,
-        client,
-        cancel_event: CancelEvent = None,
-    ) -> str:
-        """问题感知证据精炼 — 冻结签名 delegate(engine body 在 AskService,Task 24)。"""
-        return self._runtime.ask_component._refine_context(
-            question, context_block, client, cancel_event)
-
-    def _answer_with_retry(self, synth, model_label):
-        """答案合成有界重试 — 冻结签名 delegate(engine body 在 AskService,Task 24;
-        空 content 重试一次 + 诚实降级 + 补 model_error,见服务端 docstring)。"""
-        return self._runtime.ask_component._answer_with_retry(synth, model_label)
-
-    def _answer_reasoning(
-        self,
-        notebook_id,
-        question,
-        top_hits,
-        elements,
-        history="",
-        cancel_event: CancelEvent = None,
-        chunks=None,
-        chains=None,
-    ):
-        """reasoning 答案合成 — 冻结签名 delegate(engine body 在 AskService,Task 24)。"""
-        return self._runtime.ask_component._answer_reasoning(
-            notebook_id, question, top_hits, elements, history,
-            cancel_event=cancel_event, chunks=chunks, chains=chains)
-
-    def _unconfigured_model_response(self, notebook_id: str, question: str,
-                                     conversation_id: str, mode: str) -> AskResponse:
-        """未配主 LLM 的统一短路响应 — 冻结签名 delegate(engine body 在
-        AskService,Task 24),身份适配 current_user().id。"""
-        return self._runtime.ask_component.unconfigured_model_response_current(
-            notebook_id, question, conversation_id, mode)
-
-    def _parse_answer_anchors(self, answer: str, id_map: dict) -> list:
-        """Resolve the `[k_i]` markers present in `answer` into AnswerAnchor
-        objects (deduped, in first-seen order). Markers not in `id_map` and
-        items never cited are dropped."""
-        return self._runtime.evidence_context_component.parse_anchors(answer, id_map)
-
-    def _needs_index(self, notebook_id: str) -> bool:
-        """大库无索引提示位判定 — 冻结签名 delegate(index-required 计算随
-        _save_answer 收口移入 AskService,Task 24;判定失败退化 False 不拖垮 ask)。"""
-        return self._runtime.ask_component._needs_index(notebook_id)
-
-    def _save_answer(
-        self,
-        notebook_id: str,
-        question: str,
-        response: AskResponse,
-        conversation_id: Optional[str] = None,
-    ) -> str:
-        """所有 ask handler 的答案落存收口 — 冻结签名 delegate(index_required
-        装饰 + 行持久化在 AskService._save_answer → AskStateStore,Task 24),
-        身份适配 current_user().id。"""
-        return self._runtime.ask_component.save_answer_current(
-            notebook_id, question, response, conversation_id)
-
-    def _ensure_conversation(
-        self, db, notebook_id: str, conversation_id: Optional[str], question: str
-    ) -> str:
-        """Return the conversation id for this turn: append to an existing
-        conversation in this notebook (touching `updated_at`), or create a new
-        one (id `conv-<hex>`, title from the first question).  Rides the
-        CALLER's connection; identity resolves here — the store takes the
-        explicit user_id and preserves the created_by scoping verbatim."""
-        return self._runtime.ask_component.ensure_conversation_current(
-            db, notebook_id, conversation_id, question
         )
 
     def begin_ask_job(self, notebook_id: str, payload, mode: str, cancel_event) -> tuple[str, str]:
@@ -3698,19 +2733,6 @@ class RepositoryFacade:
         """显式取消(属主校验)。set 在途 worker 的 cancel_event;非属主/不存在 → KeyError。"""
         return self._runtime.ask_component.cancel_job(job_id, user_id)
 
-    @property
-    def _ask_cancel_events(self) -> dict:
-        """WS2a 兼容座:在途 ask 的 {job_id: cancel_event} 注册表 dict 本体
-        (真身在 runtime-owned AskCancellationRegistry,Task 23)。冻结的测试
-        断言(`repo._ask_cancel_events.get(job_id) is ev`)继续观察同一对象;
-        显式 cancel 端点是唯一真取消入口,断连绝不 set。"""
-        return self._runtime.ask_cancellations.events
-
-    @property
-    def _ask_cancel_lock(self) -> threading.Lock:
-        """WS2a 兼容座:注册表守卫锁(真身随注册表在 runtime,一个所有者)。"""
-        return self._runtime.ask_cancellations.lock
-
     def append_ask_trace(self, job_id: str, step: dict) -> None:
         """把一个 trace step 追加进 ask_trace_steps 子表(append-only,O(1) 单行
         INSERT;取号+插入同事务,细节在 AskStateStore.append_trace)。
@@ -3721,11 +2743,6 @@ class RepositoryFacade:
         job_id 落行;基线本就不解析用户,这里传占位保持零额外开销(Task 24 的
         引擎调用会带真实值)。"""
         return self._runtime.ask_component.append_trace_fail_open(job_id, step)
-
-    def _read_ask_trace(self, db, job_id: str) -> list:
-        """从 ask_trace_steps 子表按 seq 顺序读回一个 job 的完整轨迹(容错细节
-        在 AskStateStore.read_trace;冻结签名 delegate,骑调用者连接)。"""
-        return self._runtime.ask_state.read_trace(db, job_id)
 
     def ask_job_origin(self, job_id: str) -> "dict | None":
         """Creator, notebook, submission surface, question, mode,
@@ -3749,16 +2766,6 @@ class RepositoryFacade:
         return self._runtime.ask_state.guarded_ask_detail(
             job_id, actor_id=actor_id, reader_id=reader_id
         )
-
-    def _cleanup_empty_conversation(self, conversation_id: str) -> None:
-        """删掉没有任何 answer 的会话(取消首轮留下的空壳);有答案则保留。"""
-        return self._runtime.ask_state.cleanup_empty_conversation(conversation_id)
-
-    def _conversation_history(self, db, conversation_id: str, limit: int = 5) -> str:
-        """Build the prior-turns history block (oldest->newest, last `limit`
-        turns) from stored answer payloads.  Frozen-signature delegate riding
-        the caller's connection (the mode engines own the transaction)."""
-        return self._runtime.ask_state.conversation_history(db, conversation_id, limit)
 
     def get_conversation(self, conversation_id: str) -> "ConversationDetail":
         """Rebuild a ConversationDetail from the conversations row + its answer
@@ -3890,9 +2897,6 @@ class RepositoryFacade:
             notebook_id, report_id, understanding
         )
 
-    def _report_row_to_dict(self, row, *, full: bool) -> dict:
-        return self._runtime.report_store.row_to_dict(row, full=full)
-
     def get_report(self, notebook_id: str, report_id: str) -> dict:
         return self._runtime.report_store.get_report(notebook_id, report_id)
 
@@ -3940,7 +2944,6 @@ class RepositoryFacade:
         _launch_plan_job/_launch_generate_job delegate here."""
         return self._runtime.report_execution
 
-
     def pending_actions(self, user_id: str) -> dict:
         """聚合当前用户「我创建的」notebook 的三类待办(深度报告待确认/治理队列/
         索引状态),供「待确认中心」铃铛使用。REST 与后续流式端点共用同一计算核心。
@@ -3980,29 +2983,11 @@ class RepositoryFacade:
     # compatibility name pointing at the same object.
     _NOTEBOOK_COUNT_TYPES: Dict[str, str] = NotebookSummaryQuery._NOTEBOOK_COUNT_TYPES
 
-    def _knowledge_type_counts(self, db: object, notebook_id: str) -> Dict[str, int]:
-        return self._runtime.notebook_summaries.knowledge_type_counts(db, notebook_id)
-
-    def _notebook_from_row(self, db: object, row: object) -> NotebookSummary:
-        return self._runtime.notebook_summaries.viewer_from_row(db, row)
-
-    def _source_from_row(self, db: object, row: object) -> SourceSummary:
-        return self._runtime.source_store.source_from_row(db, row)
-
-    def _sources_from_rows(self, db: object, rows: List[object]) -> List[SourceSummary]:
-        return self._runtime.source_store.sources_from_rows(db, rows)
-
-    def _extraction_warning(self, db: object, source_id: str) -> Optional[str]:
-        return self._runtime.source_store.extraction_warning(db, source_id)
-
     def _source_type_from_name(self, file_name: str) -> str:
         return self._runtime.source_ingestion.source_type(file_name)
 
     def _summarize_source(self, title: str, elements: List[SourceElement]) -> str:
         return self._runtime.source_ingestion.summarize(title, elements)
-
-    def _delete_file(self, file_path: str) -> None:
-        return self._runtime.source_files.delete(file_path)
 
     @property
     def storage_dir(self):
@@ -4131,14 +3116,6 @@ class RepositoryFacade:
 
     def delete_knowhow_table(self, table_id: str) -> dict:
         return self._runtime.knowhow_store.delete_knowhow_table(table_id)
-
-    def set_knowhow_hidden_source(self, table_id: str, source_id: str) -> None:
-        return self._runtime.knowhow_store.set_knowhow_hidden_source(
-            table_id, source_id
-        )
-
-    def bump_knowhow_mutation_seq(self, table_id: str) -> int:
-        return self._runtime.knowhow_store.bump_knowhow_mutation_seq(table_id)
 
     def insert_notebook_asset(
         self,

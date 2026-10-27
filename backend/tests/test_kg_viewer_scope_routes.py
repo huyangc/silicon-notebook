@@ -242,7 +242,7 @@ def test_routes_apply_the_rule_to_clusters_and_legacy_siblings(two_users_client)
     phantom_c = repo.cluster_map(nb)[phantom]
 
     def legacy(name, source_id, evidence):
-        oid = repo._test_insert_object(
+        oid = repo._runtime.knowledge_query.insert_test_object(
             nb, "procedure", {"name": name, "section_path": "L"}, source_id=source_id)
         raw = json.dumps(evidence)
         with repo._connect() as db:

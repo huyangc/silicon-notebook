@@ -77,7 +77,7 @@ def _oracle_sources(repo, notebook_id):
             "SELECT * FROM sources WHERE notebook_id = ? ORDER BY created_at ASC",
             (notebook_id,),
         ).fetchall()
-        return [repo._source_from_row(db, row) for row in rows]
+        return [repo._runtime.source_store.source_from_row(db, row) for row in rows]
 
 
 def test_list_sources_equals_per_row_oracle(repo):
@@ -137,14 +137,14 @@ def test_extraction_warning_tie_break_matches_per_row(repo):
     got = repo.list_sources(nb.id)
     s1 = next(s for s in got if s.id == "s1")
     with repo._connect() as db:
-        oracle_warning = repo._extraction_warning(db, "s1")
+        oracle_warning = repo._runtime.source_store.extraction_warning(db, "s1")
     assert s1.extraction_warning == oracle_warning, (
         f"batched tie-break diverged from per-row oracle (per_row_winner={per_row_winner})")
 
 
 def test_sources_from_rows_empty_list_short_circuits(repo):
     with repo._connect() as db:
-        assert repo._sources_from_rows(db, []) == []
+        assert repo._runtime.source_store.sources_from_rows(db, []) == []
 
 
 # --------------------------------------------------------------------------
@@ -260,7 +260,7 @@ def test_kg_extracted_batch_query_is_driven_by_page_source_ids(repo):
 
         db.execute = spying_execute
         try:
-            repo._sources_from_rows(db, rows)
+            repo._runtime.source_store.sources_from_rows(db, rows)
         finally:
             del db.execute
 

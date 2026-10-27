@@ -112,7 +112,7 @@ def _seed_chunks(repo, texts):
                 "INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) "
                 "VALUES (?,?,?,?,?,?,?)",
                 (f"el-{sid}-{i:04d}", sid, "paragraph", f"p{i}", t, "{}", now))
-    repo._chunk_and_embed_source(sid)
+    repo._runtime.source_chunking.chunk_and_embed_source(sid)
     return nb, sid
 
 
@@ -143,7 +143,7 @@ def _add_chunked_source(repo, notebook_id, texts, *, source_id=None):
                     text, "{}", now,
                 ),
             )
-    repo._chunk_and_embed_source(sid)
+    repo._runtime.source_chunking.chunk_and_embed_source(sid)
     return sid
 
 
@@ -158,7 +158,7 @@ def test_retrieve_chunks_returns_scored_with_matrix(repo):
 def test_mmr_select_caps_and_subsets(repo):
     nb, _ = _seed_chunks(repo, [f"shared topic alpha detail {i} " * 20 for i in range(8)])
     scored, ids, mat = repo._retrieve_chunks(nb.id, "shared topic alpha")
-    picked = repo._mmr_select_chunks(scored, ids, mat, k=3, lambda_=0.5)
+    picked = repo.retrieval.candidates._mmr_select_chunks(scored, ids, mat, k=3, lambda_=0.5)
     assert len(picked) <= 3
     assert {p.chunk_id for p in picked} <= {c.chunk_id for c in scored}
 
@@ -237,7 +237,7 @@ def test_report_ann_skips_generic_fts_and_reports_pure_leaf_timings(
     monkeypatch.setattr(repo.event_log, "emit", events.append)
 
     with retrieval_run(run_kind="report_planning"):
-        out = repo._retrieve_chunks_ann(
+        out = repo.retrieval.candidates._retrieve_chunks_ann(
             nb.id,
             "indexed report evidence",
             repo._embed_query("indexed report evidence"),
@@ -415,7 +415,7 @@ def test_ann_union_lexical_timeout_is_not_a_model_error(repo, monkeypatch):
         raise ChunkLexicalSearchTimeout("secret database diagnostic")
 
     monkeypatch.setattr(repo._runtime.knowledge, "chunk_fts_search", _timeout)
-    result = repo._retrieve_chunks_ann(
+    result = repo.retrieval.candidates._retrieve_chunks_ann(
         nb.id, query, repo._embed_query(query), idx, recall=2
     )
     assert result is not None
@@ -452,7 +452,7 @@ def test_ann_union_lexical_failure_is_an_event_not_a_model_error(
     sink = []
     token = _ASK_MODEL_ERRORS.set(sink)
     try:
-        result = repo._retrieve_chunks_ann(
+        result = repo.retrieval.candidates._retrieve_chunks_ann(
             nb.id, query, repo._embed_query(query), idx, recall=2,
             allowed_source_ids=(sid,),
         )
@@ -505,7 +505,7 @@ def test_ann_union_lexical_failure_banners_when_scope_is_unknown(
     sink = []
     token = _ASK_MODEL_ERRORS.set(sink)
     try:
-        result = repo._retrieve_chunks_ann(
+        result = repo.retrieval.candidates._retrieve_chunks_ann(
             nb.id, query, repo._embed_query(query), idx, recall=2,
         )
     finally:
@@ -564,7 +564,7 @@ def test_ann_union_lexical_failure_banners_when_fts_is_sole_recall(
     token = _ASK_MODEL_ERRORS.set(sink)
     try:
         with retrieval_run(run_kind=run_kind):
-            result = repo._retrieve_chunks_ann(
+            result = repo.retrieval.candidates._retrieve_chunks_ann(
                 nb.id, query, repo._embed_query(query), idx, recall=10,
                 allowed_source_ids=(old_source, delta_source),
             )
@@ -616,7 +616,7 @@ def test_ann_union_lexical_failure_is_supplement_when_delta_covers_new_source(
     sink = []
     token = _ASK_MODEL_ERRORS.set(sink)
     try:
-        result = repo._retrieve_chunks_ann(
+        result = repo.retrieval.candidates._retrieve_chunks_ann(
             nb.id, query, repo._embed_query(query), idx, recall=10,
             allowed_source_ids=(old_source, delta_source),
         )
@@ -685,7 +685,7 @@ def test_ann_union_lexical_failure_is_sole_when_delta_returns_no_rows(
     sink = []
     token = _ASK_MODEL_ERRORS.set(sink)
     try:
-        result = repo._retrieve_chunks_ann(
+        result = repo.retrieval.candidates._retrieve_chunks_ann(
             nb.id, query, repo._embed_query(query), idx, recall=10,
             allowed_source_ids=(old_source, embedded_source, unembedded_source),
         )
@@ -725,7 +725,7 @@ def test_ann_union_lexical_control_flow_is_re_raised(repo, monkeypatch, control)
     events = []
     monkeypatch.setattr(repo.event_log, "emit", events.append)
     with pytest.raises(exc_type):
-        repo._retrieve_chunks_ann(
+        repo.retrieval.candidates._retrieve_chunks_ann(
             nb.id, query, repo._embed_query(query), idx, recall=2
         )
     assert not [e for e in events if e.get("site") == "chunk_ann_union"]
@@ -814,7 +814,7 @@ def test_report_ann_keeps_exact_channel_without_generic_fts_union(
         ),
     )
     with retrieval_run(run_kind="report_planning"):
-        assert repo._retrieve_chunks_ann(
+        assert repo.retrieval.candidates._retrieve_chunks_ann(
             nb.id,
             query,
             repo._embed_query(query),
@@ -864,7 +864,7 @@ def test_source_scoped_ann_filters_before_topk(repo, monkeypatch):
     monkeypatch.setattr(
         repo._runtime.knowledge, "chunk_fts_search", lambda *_a, **_k: []
     )
-    out = repo._retrieve_chunks_ann(
+    out = repo.retrieval.candidates._retrieve_chunks_ann(
         nb.id,
         query,
         vector,
@@ -883,7 +883,7 @@ def test_source_scoped_ann_without_sidecar_requests_bounded_fts_fallback(repo):
         manifest={"dim": 16},
     )
 
-    assert repo._retrieve_chunks_ann(
+    assert repo.retrieval.candidates._retrieve_chunks_ann(
         "nb",
         "query",
         [0.25] * 16,
@@ -927,7 +927,7 @@ def test_source_scoped_ann_keeps_filter_for_partial_or_unknown_code_coverage(
         lambda _ids: ([], [], None),
     )
 
-    assert repo._retrieve_chunks_ann(
+    assert repo.retrieval.candidates._retrieve_chunks_ann(
         "nb",
         "query",
         [0.25] * 16,
@@ -944,7 +944,7 @@ def test_source_scoped_ann_keeps_filter_for_partial_or_unknown_code_coverage(
         chunk_ann_source_counts=np.asarray([1], dtype=np.int64),
         manifest={"dim": 16},
     )
-    assert repo._retrieve_chunks_ann(
+    assert repo.retrieval.candidates._retrieve_chunks_ann(
         "nb",
         "query",
         [0.25] * 16,
@@ -980,7 +980,7 @@ def test_source_scoped_ann_without_any_eligible_source_requests_fts_fallback(
         repo.retrieval.candidates, "_open_scale_ann", lambda *_: _Ann()
     )
 
-    assert repo._retrieve_chunks_ann(
+    assert repo.retrieval.candidates._retrieve_chunks_ann(
         "nb",
         "query",
         [0.25] * 16,
@@ -1063,7 +1063,7 @@ def test_report_unscoped_ann_applies_actor_source_ceiling_before_knn(
     )
 
     with retrieval_run(run_kind="report_generation", actor_id="actor-b"):
-        out = repo._retrieve_chunks_ann(
+        out = repo.retrieval.candidates._retrieve_chunks_ann(
             "shared-library", "visible evidence", [1.0] + [0.0] * 15,
             index, recall=1,
         )
@@ -1099,10 +1099,10 @@ def test_report_unscoped_ann_authority_probe_failure_fails_closed(
     )
 
     with retrieval_run(run_kind="report_planning", actor_id="actor"):
-        assert repo._retrieve_chunks_ann(
+        assert repo.retrieval.candidates._retrieve_chunks_ann(
             "shared-library", "query", [0.25] * 16, index, recall=1
         ) == ([], [], None)
-        assert repo._retrieve_chunks_ann(
+        assert repo.retrieval.candidates._retrieve_chunks_ann(
             "shared-library", "another query", [0.25] * 16, index, recall=1
         ) == ([], [], None)
 
@@ -1410,7 +1410,7 @@ def test_report_unscoped_ann_source_ceiling_is_singleflight_across_leaves(
     )
 
     def _leaf(query):
-        return repo._retrieve_chunks_ann(
+        return repo.retrieval.candidates._retrieve_chunks_ann(
             "shared-library", query, [0.25] * 16, index, recall=1
         )
 
@@ -1563,7 +1563,7 @@ def test_report_ann_source_scope_plan_is_singleflight_across_leaves(
     )
 
     def _leaf(query):
-        return repo._retrieve_chunks_ann(
+        return repo.retrieval.candidates._retrieve_chunks_ann(
             "shared-library",
             query,
             [0.25] * 16,
@@ -1678,10 +1678,10 @@ def test_report_source_ceiling_stays_frozen_across_index_reload(
     )
 
     with retrieval_run(run_kind="report_generation", actor_id="actor"):
-        first = repo._retrieve_chunks_ann(
+        first = repo.retrieval.candidates._retrieve_chunks_ann(
             "shared-library", "query", [0.25] * 16, first_index, recall=2
         )
-        second = repo._retrieve_chunks_ann(
+        second = repo.retrieval.candidates._retrieve_chunks_ann(
             "shared-library", "query", [0.25] * 16, reloaded_index, recall=2
         )
 
@@ -1725,7 +1725,7 @@ def test_report_mixed_indexed_and_delta_scope_restores_bounded_fts(
     allowed = (old_source, delta_source)
     query = "indexed report evidence DELTA9000"
     with retrieval_run(run_kind="report_planning"):
-        out = repo._retrieve_chunks_ann(
+        out = repo.retrieval.candidates._retrieve_chunks_ann(
             nb.id,
             query,
             repo._embed_query(query),
@@ -1792,14 +1792,14 @@ def test_report_unscoped_sidecar_missing_source_restores_bounded_fts(
     query = "MOUNTDELTA9000 mounted evidence"
     actor_id = repo.current_user().id
     with retrieval_run(run_kind="report_generation", actor_id=actor_id):
-        out = repo._retrieve_chunks_ann(
+        out = repo.retrieval.candidates._retrieve_chunks_ann(
             nb.id,
             query,
             repo._embed_query(query),
             idx,
             recall=10,
         )
-        repeated = repo._retrieve_chunks_ann(
+        repeated = repo.retrieval.candidates._retrieve_chunks_ann(
             nb.id,
             query,
             repo._embed_query(query),
@@ -1837,7 +1837,7 @@ def test_report_empty_source_missing_from_sidecar_does_not_trigger_fts(
     )
 
     with retrieval_run(run_kind="report_generation"):
-        out = repo._retrieve_chunks_ann(
+        out = repo.retrieval.candidates._retrieve_chunks_ann(
             nb.id,
             "indexed evidence",
             repo._embed_query("indexed evidence"),
@@ -1870,7 +1870,7 @@ def test_report_empty_source_is_reprobed_after_chunk_commit_without_kg_bump(
     monkeypatch.setattr(repo.retrieval.candidates, "_chunk_fts_hits", _spy)
     allowed = (indexed_source, pending_source)
     with retrieval_run(run_kind="report_generation"):
-        first = repo._retrieve_chunks_ann(
+        first = repo.retrieval.candidates._retrieve_chunks_ann(
             nb.id,
             "indexed baseline",
             repo._embed_query("indexed baseline"),
@@ -1910,7 +1910,7 @@ def test_report_empty_source_is_reprobed_after_chunk_commit_without_kg_bump(
             ).fetchone()["kg_mutation_seq"]
         assert after_seq == before_seq
 
-        second = repo._retrieve_chunks_ann(
+        second = repo.retrieval.candidates._retrieve_chunks_ann(
             nb.id,
             "LATECHUNK9000 report evidence",
             repo._embed_query("LATECHUNK9000 report evidence"),
@@ -1982,7 +1982,7 @@ def test_retrieve_chunks_ann_includes_post_build_delta(repo, monkeypatch):
     idx = repo._scale_index(nb.id, allow_stale=True)
     assert idx is not None and getattr(idx, "chunk_ann_labels", None)
     assert "c3" not in set(idx.chunk_ann_labels)  # 前提:c3 确实不在存量 ANN
-    out = repo._retrieve_chunks_ann(nb.id, "gamma delta topic", repo._embed_query("gamma delta topic"), idx, recall=10)
+    out = repo.retrieval.candidates._retrieve_chunks_ann(nb.id, "gamma delta topic", repo._embed_query("gamma delta topic"), idx, recall=10)
     assert out is not None
     scored, ids, mat = out
     assert "c3" in {c.chunk_id for c in scored}   # ⊕ delta:新上传的 c3 被召回
@@ -2028,7 +2028,7 @@ def test_chunk_ann_unions_lexical(repo, monkeypatch):
     assert "c_lex" in set(idx.chunk_ann_labels), "前置:c_lex 在存量 ANN(非 delta 路径召回)"
 
     # recall=8:ANN top-8 全被 8 个填充 chunk 占满(语义弱),c_lex(反向向量)语义漏
-    out = repo._retrieve_chunks_ann(nb.id, query, qv, idx, recall=8)
+    out = repo.retrieval.candidates._retrieve_chunks_ann(nb.id, query, qv, idx, recall=8)
     assert out is not None
     scored = out[0]
     assert "c_lex" in {c.chunk_id for c in scored}   # 词法命中被并入并打分排序

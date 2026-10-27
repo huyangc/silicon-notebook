@@ -107,7 +107,7 @@ def test_all_source_batches_share_bound_service_peak(repo_factory):
     source_ids = [_insert_source_with_elements(repo, notebook.id, 40) for _ in range(3)]
 
     with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = [pool.submit(repo._embed_source, source_id) for source_id in source_ids]
+        futures = [pool.submit(repo._runtime.source_embedding.embed_source, source_id) for source_id in source_ids]
         assert raw.saturated.wait(timeout=10), "bound service never admitted two calls"
         raw.release.set()
         for future in futures:
@@ -128,7 +128,7 @@ def test_source_failed_batch_isolated_under_scheduler(repo_factory):
     source_id = _insert_source_with_elements(repo, notebook.id, 30)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(repo._embed_source, source_id)
+        future = pool.submit(repo._runtime.source_embedding.embed_source, source_id)
         assert raw.saturated.wait(timeout=10), "source batches never reached configured capacity"
         raw.release.set()
         future.result()

@@ -39,7 +39,7 @@ def test_begin_creates_running_job_and_conversation(repo):
     st = repo._runtime.ask_state.ask_job_detail(job_id)
     assert st["status"] == "running" and st["conversation_id"] == conv_id
     assert st["created_by"] == repo.current_user().id
-    assert repo._ask_cancel_events.get(job_id) is ev   # 注册表登记
+    assert repo._runtime.ask_cancellations.events.get(job_id) is ev   # 注册表登记
     # begin_ask_job(冻结签名,不接 submitted_via)不经网页/MCP 任一入口——
     # 未记录的进程内调用统一落 ""(不回填、不猜)。
     with repo._connect() as db:
@@ -108,7 +108,7 @@ def test_finish_done_records_answer_and_deregisters(repo):
     repo.finish_ask_job(job_id, "done", answer_id="ans-x")
     st = repo._runtime.ask_state.ask_job_detail(job_id)
     assert st["status"] == "done" and st["answer_id"] == "ans-x"
-    assert job_id not in repo._ask_cancel_events        # 注销
+    assert job_id not in repo._runtime.ask_cancellations.events        # 注销
 
 
 def test_cancel_sets_event_owner_scoped(repo):
@@ -139,7 +139,7 @@ def test_finish_cancelled_keeps_conversation_with_prior_answers(repo):
     ev = threading.Event()
     p1 = AskRequest(question="Q1?", mode="chunk")
     job1, conv_id = repo.begin_ask_job(nb.id, p1, "chunk", ev)
-    repo._save_answer(nb.id, "Q1?", _fake_answer(conv_id), conv_id)  # 该会话已有答案
+    repo._runtime.ask_component._save_answer(nb.id, "Q1?", _fake_answer(conv_id), conv_id, user_id=repo.current_user().id)  # 该会话已有答案
     repo.finish_ask_job(job1, "done", answer_id="ans-1")
     # 第二轮取消,会话仍有前一轮答案 → 不删
     p2 = AskRequest(question="Q2?", mode="chunk", conversation_id=conv_id)
@@ -378,9 +378,9 @@ def test_begin_and_finish_delegate_persistence_to_runtime_ask_state(repo, monkey
     ev = threading.Event()
     payload = AskRequest(question="Q?", mode="chunk")
     job_id, conv_id = repo.begin_ask_job(nb.id, payload, "chunk", ev)
-    assert repo._ask_cancel_events.get(job_id) is ev      # facade 注册表仍在
+    assert repo._runtime.ask_cancellations.events.get(job_id) is ev      # facade 注册表仍在
     repo.finish_ask_job(job_id, "cancelled")
-    assert job_id not in repo._ask_cancel_events          # 注销
+    assert job_id not in repo._runtime.ask_cancellations.events          # 注销
     assert seen == [("begin", repo.current_user().id), ("finish", "cancelled")]
     with pytest.raises(KeyError):
         repo.get_conversation(conv_id)                    # 空壳清理仍生效

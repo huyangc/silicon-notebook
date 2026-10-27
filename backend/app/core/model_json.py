@@ -367,10 +367,6 @@ class ModelJsonShape:
     content: str
     deviations: tuple[ShapeDeviation, ...] = ()
 
-    @property
-    def normalised(self) -> bool:
-        return any(item.fix for item in self.deviations)
-
 
 # Cap on deviations one reply may report: the walk is bounded by the reply
 # size anyway, but a pathological list of thousands of wrong-typed items must

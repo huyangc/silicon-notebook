@@ -72,7 +72,7 @@ def _seed_chunks(repo, texts):
                 "INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) "
                 "VALUES (?,?,?,?,?,?,?)",
                 (f"el-{sid}-{i:04d}", sid, "paragraph", f"p{i}", t, "{}", now))
-    repo._chunk_and_embed_source(sid)
+    repo._runtime.source_chunking.chunk_and_embed_source(sid)
     return nb, sid
 
 
@@ -92,7 +92,7 @@ def _add_chunk_source(repo, nb_id, texts):
                 "INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) "
                 "VALUES (?,?,?,?,?,?,?)",
                 (f"el-{sid}-{i:04d}", sid, "paragraph", f"p{i}", t, "{}", now))
-    repo._chunk_and_embed_source(sid)
+    repo._runtime.source_chunking.chunk_and_embed_source(sid)
     return sid
 
 
@@ -1658,7 +1658,7 @@ def test_chunk_answer_context_resolves_tier_per_chunk_notebook_id(repo):
                         notebook_id=own_nb.id),
     ]
 
-    _, id_map = repo._chunk_answer_context(chunks, notebook_id=own_nb.id)
+    _, id_map = repo._runtime.evidence_context_component.chunk_context(chunks, notebook_id=own_nb.id)
 
     tier_by_chunk = {v["object_id"]: v["tier"] for v in id_map.values()}
     assert tier_by_chunk["ck-empty"] == "personal", (

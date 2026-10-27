@@ -29,7 +29,6 @@
         "build_scale_index",
         "bulk_delete_conversations",
         "bulk_delete_memories",
-        "bump_knowhow_mutation_seq",
         "cancel_ask_job",
         "cancel_scale_index",
         "chat",
@@ -53,7 +52,7 @@
         "conflict_resolution_admitted",
         "conversation_creator",
         "conversation_share_state",
-          "create_agent_profile",
+        "create_agent_profile",
         "create_knowhow_milestone",
         "create_knowhow_table",
         "create_knowhow_table_with_rows",
@@ -64,7 +63,6 @@
         "create_object_schema",
         "create_report",
         "current_user",
-        "decided_seed_pairs",
         "delete_agent_profile",
         "delete_conversation",
         "delete_knowhow_cell_code",
@@ -211,12 +209,10 @@
         "set_indexing_pipeline",
         "set_knowhow_anchor_column",
         "set_knowhow_column_kind",
-        "set_knowhow_hidden_source",
         "set_notebook_personal",
         "settings",
         "share_conversation",
         "share_report",
-        "share_state",
         "shared_by_me",
         "shared_preview",
         "source_elements",
@@ -262,8 +258,6 @@
         "validate_cell_target",
         "validate_reasoning_submission",
         "visible_document_count",
-        "visible_source_count",
-        "visible_source_ids",
         "visible_source_scope_snapshot",
         "warm_open_path_caches"
       ]
@@ -274,7 +268,6 @@
         "checkup",
         "close_local",
         "db_path",
-        "eval_insert_source_for_test",
         "maintenance"
       ]
     }
@@ -288,7 +281,7 @@
     "allowed": []
   },
   "facade_protocol_binding_gaps": {},
-  "ports_protocol_method_count": 979,
+  "ports_protocol_method_count": 964,
   "function_length_ceiling": {
     "backend/app/extensions/ask.py::AskCompletedObserverHost.observe_application": 154,
     "backend/app/extensions/parser_chain.py::ParserProviderChainHost._run": 307,

@@ -469,9 +469,6 @@ def test_runtime_owns_the_coordinator_and_facade_shares_its_registry(repo):
     assert runtime.ask_execution.job_submitter is background_jobs
     # Task 24: 协调器的执行体解析到 runtime-owned AskService(一个所有者)
     assert runtime.ask_execution.ask() is runtime.ask_service()
-    # 冻结的 facade 兼容座与注册表是同一对象(一个所有者)
-    assert repo._ask_cancel_events is runtime.ask_cancellations.events
-    assert repo._ask_cancel_lock is runtime.ask_cancellations.lock
 
     nb = repo.create_notebook(NotebookCreate(name="t23"))
     ev = threading.Event()

@@ -131,10 +131,6 @@ class SchemaRegistryService:
         self.current_user_id = current_user_id
 
     @staticmethod
-    def from_row(row) -> ObjectSchemaModel:
-        return object_schema_from_row(row)
-
-    @staticmethod
     def _runtime_schema(row) -> ObjectSchema:
         return ObjectSchema(
             type=row["object_type"],

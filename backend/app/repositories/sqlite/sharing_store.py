@@ -1241,13 +1241,6 @@ class SharingStore:
                 ).fetchone()
         return row["notebook_id"] if row else None
 
-    def answer_notebook_id(self, answer_id: str) -> "str | None":
-        with self.database.connect() as db:
-            row = db.execute(
-                "SELECT notebook_id FROM answers WHERE id = ?", (answer_id,)
-            ).fetchone()
-        return row["notebook_id"] if row else None
-
     # ------------------------------------------------------- copy primitives
     def snapshot_copy_rows(self, notebook_id: str) -> dict[str, list[dict]]:
         """Read every copyable table's rows in ONE stable-snapshot read

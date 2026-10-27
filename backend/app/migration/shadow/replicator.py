@@ -218,10 +218,6 @@ class BatchResult:
     duration_seconds: float
     oversized_event: bool = False
 
-    @property
-    def lag(self) -> int:
-        return max(0, self.source_max_seq - self.checkpoint_after)
-
 
 class ShadowReplicationError(RuntimeError):
     """Base class for safe forward-replication failures."""

@@ -58,19 +58,19 @@ def test_evicted_scale_index_reloads_correctly_from_disk(repo, monkeypatch):
     from the on-disk persisted index (build_scale_index already wrote it) —
     not return None / stale data — exactly like a cold-cache first access."""
     from app.services.vector_cache import LRUProcessCache
-    repo._scale_idx_cache = LRUProcessCache(max_entries=1)
+    repo._runtime.scale_artifacts.scale_cache = LRUProcessCache(max_entries=1)
 
     nb_a = _seed_and_build(repo, "alpha")
     idx_a_first = repo._scale_index(nb_a)
     assert idx_a_first is not None
-    assert nb_a in repo._scale_idx_cache
+    assert nb_a in repo._runtime.scale_artifacts.scale_cache
 
     nb_b = _seed_and_build(repo, "beta")
     idx_b = repo._scale_index(nb_b)
     assert idx_b is not None
     # cap=1 -> nb_a's cache entry evicted when nb_b was inserted.
-    assert nb_a not in repo._scale_idx_cache
-    assert nb_b in repo._scale_idx_cache
+    assert nb_a not in repo._runtime.scale_artifacts.scale_cache
+    assert nb_b in repo._runtime.scale_artifacts.scale_cache
 
     # Re-access nb_a: must reload transparently (from disk) with the SAME
     # manifest version/content — not a stale/corrupted/None result.
@@ -79,13 +79,13 @@ def test_evicted_scale_index_reloads_correctly_from_disk(repo, monkeypatch):
     assert idx_a_reloaded.manifest.get("version") == idx_a_first.manifest.get("version")
     assert list(idx_a_reloaded.node_ids) == list(idx_a_first.node_ids)
     # Cache now holds nb_a again (evicting nb_b, cap=1).
-    assert nb_a in repo._scale_idx_cache
-    assert nb_b not in repo._scale_idx_cache
+    assert nb_a in repo._runtime.scale_artifacts.scale_cache
+    assert nb_b not in repo._runtime.scale_artifacts.scale_cache
 
 
 def test_evicted_viz_index_reloads_correctly(repo, monkeypatch):
     from app.services.vector_cache import LRUProcessCache
-    repo._viz_idx_cache = LRUProcessCache(max_entries=1)
+    repo._runtime.scale_artifacts.viz_cache = LRUProcessCache(max_entries=1)
 
     nb_a = repo.create_notebook(NotebookCreate(name="viz-a"))
     repo.store_kg(nb_a.id, None, [
@@ -95,7 +95,7 @@ def test_evicted_viz_index_reloads_correctly(repo, monkeypatch):
     repo.rebuild_unified_kg(nb_a.id)
     manifest_a = repo._runtime.scale_artifacts.build_viz(nb_a.id)
     assert manifest_a is not None
-    assert nb_a.id in repo._viz_idx_cache
+    assert nb_a.id in repo._runtime.scale_artifacts.viz_cache
 
     nb_b = repo.create_notebook(NotebookCreate(name="viz-b"))
     repo.store_kg(nb_b.id, None, [
@@ -104,13 +104,13 @@ def test_evicted_viz_index_reloads_correctly(repo, monkeypatch):
     ], [])
     repo.rebuild_unified_kg(nb_b.id)
     repo._runtime.scale_artifacts.build_viz(nb_b.id)
-    assert nb_a.id not in repo._viz_idx_cache  # evicted, cap=1
-    assert nb_b.id in repo._viz_idx_cache
+    assert nb_a.id not in repo._runtime.scale_artifacts.viz_cache  # evicted, cap=1
+    assert nb_b.id in repo._runtime.scale_artifacts.viz_cache
 
-    reloaded = repo._viz_index(nb_a.id)
+    reloaded = repo._runtime.scale_artifacts.viz_index(nb_a.id)
     assert reloaded is not None
     assert reloaded.manifest.get("version") == manifest_a["version"]
-    assert nb_a.id in repo._viz_idx_cache
+    assert nb_a.id in repo._runtime.scale_artifacts.viz_cache
 
 
 # Fast inner-loop opt-out: these tests build real HNSW/ANN scale indexes.
@@ -226,5 +226,5 @@ def test_repo_scale_idx_cache_is_large_aware(repo):
     """The facade wires _scale_idx_cache as LargeAwareLRUCache; _viz_idx_cache
     stays a plain LRUProcessCache (viz arrays are far smaller than ANN matrices)."""
     from app.services.vector_cache import LargeAwareLRUCache, LRUProcessCache
-    assert isinstance(repo._scale_idx_cache, LargeAwareLRUCache)
-    assert type(repo._viz_idx_cache) is LRUProcessCache
+    assert isinstance(repo._runtime.scale_artifacts.scale_cache, LargeAwareLRUCache)
+    assert type(repo._runtime.scale_artifacts.viz_cache) is LRUProcessCache

@@ -12,6 +12,7 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import Evidence, KnowledgeUpdate, NotebookCreate
 from app.services.embedding import FakeEmbedder
+from app.services.knowledge_governance import promotion_row_to_dict
 from app.services.sqlite_repository import USABLE_STATUSES, SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
 
@@ -50,7 +51,7 @@ def _make_personal_with_base(repo, personal_name="personal", base_name="base"):
 
 def _insert_claim(repo, notebook_id, name):
     """Insert a claim into a (personal) notebook via the test helper."""
-    return repo._test_insert_object(
+    return repo._runtime.knowledge_query.insert_test_object(
         notebook_id, "claim", {"name": name, "section_path": "1"}
     )
 
@@ -107,7 +108,7 @@ class TestPromotionStateMachine:
         the tier guard's actual message."""
         base = _make_base_nb(repo)
         # store_kg into base lands as 'reviewed'; insert directly for the test.
-        oid = repo._test_insert_object(base.id, "claim", {"name": "base claim"})
+        oid = repo._runtime.knowledge_query.insert_test_object(base.id, "claim", {"name": "base claim"})
         with pytest.raises(ValueError, match="review gate"):
             repo.propose_promotion(base.id, oid)
 
@@ -199,9 +200,8 @@ class TestPromotionStateMachine:
         Task 13 审查 #4 adds target_base_name (also batch-resolved, same
         `id IN (...)` house pattern) — the oracle recomputes it per-row here
         via a plain SELECT, mirroring how payload/evidence are recomputed
-        above. `_promotion_row_to_dict` itself doesn't take target_base_name
-        (that facade wrapper's signature is frozen — see facade_surface.json),
-        so it's spliced into the oracle dict after the fact instead."""
+        above, and splices it into the row mapper's dict after the fact
+        (``promotion_row_to_dict`` leaves it at its '' default)."""
         nb, base = _make_personal_with_base(repo)
         oids = [_insert_claim(repo, nb.id, f"oracle claim {i}") for i in range(5)]
         for oid in oids:
@@ -230,7 +230,7 @@ class TestPromotionStateMachine:
                     "SELECT name FROM notebooks WHERE id=?",
                     (row["target_base_id"],),
                 ).fetchone()
-                entry = repo._promotion_row_to_dict(row, payload=payload, evidence=evidence)
+                entry = promotion_row_to_dict(row, payload=payload, evidence=evidence)
                 entry["target_base_name"] = target_nb["name"] if target_nb else ""
                 oracle.append(entry)
 
@@ -293,7 +293,7 @@ class TestPromotionStateMachine:
     def test_approve_promotion_deduplicates_against_existing_base_objects(self, repo):
         nb, base = _make_personal_with_base(repo)
         # Existing base object with the SAME normalized claim text.
-        existing = repo._test_insert_object(
+        existing = repo._runtime.knowledge_query.insert_test_object(
             base.id, "claim", {"name": "Cascode raises output resistance."}
         )
         # Personal object with equivalent text (different casing/punct).
@@ -408,7 +408,7 @@ def client(tmp_path, monkeypatch):
 
 def _seed_personal_object(client, name="route claim"):
     nb = client.post("/api/notebooks", json={"name": "personal"}).json()
-    oid = client._repo._test_insert_object(nb["id"], "claim", {"name": name})
+    oid = client._repo._runtime.knowledge_query.insert_test_object(nb["id"], "claim", {"name": name})
     return nb["id"], oid
 
 
@@ -482,7 +482,7 @@ class TestPromotionRoutes:
 
     def test_propose_base_notebook_returns_400(self, client):
         base_id = _seed_base(client)
-        oid = client._repo._test_insert_object(base_id, "claim", {"name": "base obj"})
+        oid = client._repo._runtime.knowledge_query.insert_test_object(base_id, "claim", {"name": "base obj"})
         r = client.post(f"/api/notebooks/{base_id}/knowledge/{oid}/promote")
         assert r.status_code == 400
 

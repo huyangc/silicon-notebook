@@ -495,7 +495,7 @@ def _seed_source_with_a_captioned_figure(repo) -> tuple[str, str]:
              json.dumps({"asset_id": ASSET_ID, "caption": FIGURE_CAPTION},
                         ensure_ascii=False), now),
         )
-    repo._chunk_and_embed_source(source_id)
+    repo._runtime.source_chunking.chunk_and_embed_source(source_id)
     return notebook.id, source_id
 
 
@@ -538,7 +538,7 @@ def _seed_source_with_the_figure_leading_its_chunk(repo) -> tuple[str, str]:
             (f"el-{source_id}-0002", source_id, "paragraph", "p1",
              f"{UNIQUE_TERM} 收敛需要在综合阶段预留时序裕量。", "{}", now),
         )
-    repo._chunk_and_embed_source(source_id)
+    repo._runtime.source_chunking.chunk_and_embed_source(source_id)
     return notebook.id, source_id
 
 

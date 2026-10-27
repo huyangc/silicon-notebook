@@ -235,8 +235,8 @@ def test_open_scale_ann_relation_kind_memoizes(repo, monkeypatch):
         return real(self, *a, **k)
 
     monkeypatch.setattr(hnswlib.Index, "load_index", spy)
-    h1 = repo._open_scale_ann(idx, "relation")
-    h2 = repo._open_scale_ann(idx, "relation")
+    h1 = repo._runtime.scale_artifacts.open_ann(idx, "relation")
+    h2 = repo._runtime.scale_artifacts.open_ann(idx, "relation")
     assert h1 is not None and h1 is h2
     assert calls["n"] == 1
 
@@ -266,7 +266,7 @@ def test_retrieve_relations_ann_matches_full_matrix_oracle(repo):
     oracle = dict(top_k_sims(qv, ids, mat, len(ids)))
     oracle_top = max(oracle.items(), key=lambda kv: kv[1])[0]
 
-    hits = repo._retrieve_relations_scored(nb.id, "kind_of")
+    hits = repo.retrieval.candidates._retrieve_relations_scored(nb.id, "kind_of")
     assert hits
     top_hit_ids = {h.relation_id for h in hits[:3]}
     assert oracle_top in top_hit_ids or len(rel_ids) <= 3
@@ -276,7 +276,7 @@ def test_retrieve_relations_scored_returns_valid_scores(repo):
     nb = _seed_relation(repo)
     _backfill_relation_vector(repo, nb.id)
     repo.build_scale_index(nb.id)
-    hits = repo._retrieve_relations_scored(nb.id, "MOSFET current mirror")
+    hits = repo.retrieval.candidates._retrieve_relations_scored(nb.id, "MOSFET current mirror")
     assert hits
     assert all(0.0 <= h.score for h in hits)
 
@@ -303,7 +303,7 @@ def test_relation_ann_unions_bounded_lexical_endpoint_candidates(repo, monkeypat
     _backfill_relation_vector(repo, nb.id)
     repo.build_scale_index(nb.id)
     with repo._connect() as db:
-        rows = repo._relations_with_names(db, nb.id)
+        rows = repo.retrieval.candidates._relations_with_names(db, nb.id)
     decoy_id = next(row["id"] for row in rows if "semantic source" in row["text"])
     lexical_id = next(row["id"] for row in rows if "ZXCV9000 controller" in row["text"])
 
@@ -314,7 +314,7 @@ def test_relation_ann_unions_bounded_lexical_endpoint_candidates(repo, monkeypat
         lambda *_args, **_kwargs: {decoy_id: 0.9},
     )
 
-    hits = repo._retrieve_relations_scored(nb.id, "ZXCV9000 controller")
+    hits = repo.retrieval.candidates._retrieve_relations_scored(nb.id, "ZXCV9000 controller")
     assert lexical_id in {hit.relation_id for hit in hits}
 
 
@@ -453,7 +453,7 @@ def test_retrieve_relations_ann_plus_delta_finds_post_watermark_relation(repo, m
             "INSERT INTO relation_embeddings (relation_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
             ("rel-delta", nb.id, json.dumps(v), now))
 
-    hits = repo._retrieve_relations_scored(nb.id, "bandgap reference")
+    hits = repo.retrieval.candidates._retrieve_relations_scored(nb.id, "bandgap reference")
     assert any(h.relation_id == "rel-delta" for h in hits)
 
 
@@ -509,7 +509,7 @@ def test_relation_scoring_ann_bypasses_large_cold_guard(repo, monkeypatch):
     _backfill_relation_vector(repo, nb.id)
     repo.build_scale_index(nb.id)
     # Evict any matrix warmth so ONLY the ANN branch can explain a non-skip.
-    repo._vector_cache.invalidate(f"{nb.id}:matrix:relation_embeddings")
+    repo._runtime.retrieval_snapshots.vector_cache.invalidate(f"{nb.id}:matrix:relation_embeddings")
     monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda notebook_id: {"copyable": False, "size": {}})
 
@@ -522,7 +522,7 @@ def test_relation_scoring_ann_bypasses_large_cold_guard(repo, monkeypatch):
 
     monkeypatch.setattr(repo.event_log, "emit", spy_emit)
 
-    hits = repo._retrieve_relations_scored(nb.id, "MOSFET current mirror")
+    hits = repo.retrieval.candidates._retrieve_relations_scored(nb.id, "MOSFET current mirror")
     skip_events = [e for e in events if e.get("kind") == "relation_scoring_skipped"]
     assert not skip_events, "ANN branch must pre-empt the #171 guard"
     assert hits

@@ -225,7 +225,7 @@ class TestKgGate:
             {"local_id": "K1", "object_type": "concept",
              "payload": {"name": "Gain", "definition": "增益"}, "evidence": []},
         ], [])
-        assert repo._any_base_notebook_has_kg(a.id, viewer_id="user-local") is False
+        assert repo._runtime.knowledge.any_mounted_has_kg(a.id, viewer_id="user-local") is False
 
     def test_mounted_base_with_kg_opens_gate(self, repo):
         a = repo.create_notebook(NotebookCreate(name="a"))
@@ -236,7 +236,7 @@ class TestKgGate:
              "payload": {"name": "Gain", "definition": "增益"}, "evidence": []},
         ], [])
         repo.replace_notebook_bases(a.id, [base.id], "user-local")
-        assert repo._any_base_notebook_has_kg(a.id, viewer_id="user-local") is True
+        assert repo._runtime.knowledge.any_mounted_has_kg(a.id, viewer_id="user-local") is True
 
 
 class TestScaleEligible:
@@ -249,9 +249,9 @@ class TestScaleEligible:
     def test_mounted_personal_notebook_becomes_index_eligible(self, repo):
         a = repo.create_notebook(NotebookCreate(name="项目"))
         mine = repo.create_notebook(NotebookCreate(name="我的大笔记"))
-        assert repo._scale_index_eligible(mine.id) is False
+        assert repo._runtime.scale_artifacts.eligible(mine.id) is False
         repo.replace_notebook_bases(a.id, [mine.id], "user-local")
-        assert repo._scale_index_eligible(mine.id) is True
+        assert repo._runtime.scale_artifacts.eligible(mine.id) is True
 
     def test_unmounted_personal_notebook_stays_ineligible(self, repo):
         """对照组:纯粹创建/挂载别的库不该误伤——只有「自己被挂」才翻转。"""
@@ -259,7 +259,7 @@ class TestScaleEligible:
         other = repo.create_notebook(NotebookCreate(name="别的库"))
         mine = repo.create_notebook(NotebookCreate(name="我的大笔记"))
         repo.replace_notebook_bases(a.id, [other.id], "user-local")
-        assert repo._scale_index_eligible(mine.id) is False
+        assert repo._runtime.scale_artifacts.eligible(mine.id) is False
 
 
 class TestPromotionTarget:
@@ -269,7 +269,7 @@ class TestPromotionTarget:
     挂 >1 个必须由调用方显式指定,不能替用户猜。"""
 
     def _concept(self, repo, notebook_id, name="Gain"):
-        return repo._test_insert_object(
+        return repo._runtime.knowledge_query.insert_test_object(
             notebook_id, "concept", {"name": name, "definition": "增益"}
         )
 
@@ -734,10 +734,10 @@ class TestApiUnauthorizedWrite:
         )
         assert mounted.status_code == 200
 
-        source_id = repo_api._test_insert_object(
+        source_id = repo_api._runtime.knowledge_query.insert_test_object(
             base["id"], "concept", {"name": "Base source concept"}
         )
-        target_id = repo_api._test_insert_object(
+        target_id = repo_api._runtime.knowledge_query.insert_test_object(
             base["id"], "claim", {"name": "Base target claim"}
         )
         with repo_api._write() as db:
@@ -1121,7 +1121,7 @@ class TestPromotionTargetApi:
         return TestClient(create_app())
 
     def _concept(self, repo, notebook_id):
-        return repo._test_insert_object(
+        return repo._runtime.knowledge_query.insert_test_object(
             notebook_id, "concept", {"name": "Gain", "definition": "增益"}
         )
 
@@ -1317,7 +1317,7 @@ class TestPromotionQueueTargetBaseName:
         return TestClient(create_app())
 
     def _concept(self, repo, notebook_id):
-        return repo._test_insert_object(
+        return repo._runtime.knowledge_query.insert_test_object(
             notebook_id, "concept", {"name": "Gain", "definition": "增益"}
         )
 
@@ -1613,7 +1613,7 @@ class TestApprovePromotionRevalidatesTarget:
         return TestClient(create_app())
 
     def _concept(self, repo, notebook_id, name="Gain"):
-        return repo._test_insert_object(
+        return repo._runtime.knowledge_query.insert_test_object(
             notebook_id, "concept", {"name": name, "definition": "增益"}
         )
 
@@ -1714,7 +1714,7 @@ class TestApprovePromotionRevalidatesTarget:
 
 class TestApprovePromotionRetryDespiteTargetLifecycle:
     def _concept(self, repo, notebook_id, name="Gain"):
-        return repo._test_insert_object(
+        return repo._runtime.knowledge_query.insert_test_object(
             notebook_id, "concept", {"name": name, "definition": "增益"}
         )
 
@@ -1806,7 +1806,7 @@ class TestApprovePromotionRetryDespiteTargetLifecycle:
         base = repo.create_notebook(NotebookCreate(name="base"))
         repo.mark_notebook_base(base.id)
         repo.replace_notebook_bases(a.id, [base.id], "user-local")
-        existing = repo._test_insert_object(
+        existing = repo._runtime.knowledge_query.insert_test_object(
             base.id, "concept", {"name": "Gain", "definition": "增益"}
         )
         oid = self._concept(repo, a.id)  # 与 existing 同名同定义 → 命中去重

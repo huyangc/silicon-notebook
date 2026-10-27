@@ -44,7 +44,7 @@ def test_columns_exist_and_decided_seed_pairs(repo):
     _mk(repo, nb, "m3", "K-u", "K-v", "u", "v", "deferred")
     # pending 不计入
     _mk(repo, nb, "m4", "K-a", "K-b", "a", "b", "pending")
-    dsp = repo.decided_seed_pairs(nb)
+    dsp = repo._runtime.knowledge_governance.decided_seed_pairs(nb)
     assert dsp[frozenset(("x", "y"))] == "confirmed"
     assert dsp[frozenset(("p", "q"))] == "rejected"
     assert dsp[frozenset(("u", "v"))] == "deferred"
@@ -56,5 +56,5 @@ def test_decided_seed_pairs_falls_back_to_canonical(repo):
     _built_before_upgrade(repo, nb)
     # 存量行:seed_a/seed_b 为空 → 回退 strip-"K-"
     _mk(repo, nb, "m1", "K-foo", "K-bar", "", "", "rejected")
-    dsp = repo.decided_seed_pairs(nb)
+    dsp = repo._runtime.knowledge_governance.decided_seed_pairs(nb)
     assert dsp[frozenset(("foo", "bar"))] == "rejected"

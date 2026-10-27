@@ -737,13 +737,6 @@ class ChunkStore:
         ).fetchall()
 
     @staticmethod
-    def count_row(db: sqlite3.Connection, notebook_id: str):
-        return db.execute(
-            "SELECT COUNT(*) AS c FROM chunks WHERE notebook_id = ?",
-            (notebook_id,),
-        ).fetchone()
-
-    @staticmethod
     def hydrate_rows(db: sqlite3.Connection, chunk_ids: Sequence[str]):
         ids = list(chunk_ids)
         if not ids:

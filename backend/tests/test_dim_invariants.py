@@ -139,13 +139,7 @@ def test_write_path_stores_native_dim_under_runtime_truncation(repo):
     repo.store_kg(nb.id, None,
                   [{"local_id": "o1", "object_type": "concept",
                     "payload": {"name": "Bandgap"}, "evidence": []}], [])
-    # KG 节点向量写路径:_backfill 走 embedder→encode_vector(原生维),不经截断
-    with repo._connect() as db:
-        objs = db.execute(
-            "SELECT id, payload FROM knowledge_objects WHERE notebook_id=?", (nb.id,)).fetchall()
-    with repo._write() as db:
-        repo._backfill_knowledge_embeddings(
-            db, nb.id, [{"id": o["id"], "payload": o["payload"]} for o in objs])
+    # KG 节点向量写路径:store_kg 内联 embed 走 embedder→encode_vector(原生维),不经截断
     with repo._connect() as db:
         rows = db.execute(
             "SELECT vector FROM knowledge_embeddings WHERE notebook_id=?", (nb.id,)).fetchall()

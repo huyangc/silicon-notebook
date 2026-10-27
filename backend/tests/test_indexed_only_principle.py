@@ -202,10 +202,10 @@ def test_ppr_splice_includes_self_delta_when_opted_in(repo, monkeypatch):
 def test_resolve_scale_mode_upgrades_big_delta_fold_to_full(repo, monkeypatch):
     nb, _oid = _build_indexed_nb_with_delta_object(repo)   # 1 个 delta source
     monkeypatch.setattr(repo.settings, "scale_fold_max_delta_sources", 0)
-    assert repo._resolve_scale_mode(nb.id, "fold") == "full"
-    assert repo._resolve_scale_mode(nb.id, "auto") == "full"
+    assert repo._runtime.scale_artifacts._resolve_mode(nb.id, "fold") == "full"
+    assert repo._runtime.scale_artifacts._resolve_mode(nb.id, "auto") == "full"
     monkeypatch.setattr(repo.settings, "scale_fold_max_delta_sources", 500)
-    assert repo._resolve_scale_mode(nb.id, "fold") == "fold"
+    assert repo._runtime.scale_artifacts._resolve_mode(nb.id, "fold") == "fold"
 
 
 def test_fold_threshold_env_alias(monkeypatch, tmp_path):

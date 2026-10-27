@@ -92,7 +92,7 @@ def test_seq_gate_and_flag(repo):
 # --------------------------------------------------------------------------- #
 def test_ppr_graph_contains_mention_edges(repo):
     nb = _seed_bridge_nb(repo)
-    G, key_to_idx, _ = repo._ppr_graph(nb.id)
+    G, key_to_idx, _ = repo.retrieval.graph._ppr_graph(nb.id)
     # 桥 claim 节点应连到 GQA/MQA 的 cluster router
     with repo._connect() as db:
         row = db.execute("SELECT claim_object_id, concept_canonical_id FROM mention_edges "

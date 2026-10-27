@@ -398,8 +398,7 @@ class SourceStore:
         projection source, mirroring the SAME mechanism rather than inventing
         a second one), and would otherwise double-count right next to the
         Memory panel / show a phantom "Knowhow 表：…" source card. Internal
-        paths (get_source, pending_kg_source_count, copy materialization,
-        scale-index scans) deliberately keep the true full set — do not add
+        paths (get_source, copy materialization, scale-index scans) deliberately keep the true full set — do not add
         this filter there."""
         with self.database.connect() as db:
             rows = db.execute(

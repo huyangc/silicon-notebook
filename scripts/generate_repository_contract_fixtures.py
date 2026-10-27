@@ -117,24 +117,18 @@ ATTRIBUTE_MEMBER_OWNERS = {
 }
 
 SQLITE_WRAPPER_ALLOWED_MEMBERS = {
-    "__init__", "db_path", "_write_lock", "_connect", "close_local",
-    "_clear_source_extraction_state", "_knowledge_objects", "_migrate",
-    "_migrate_legacy", "_add_column_if_missing", "_migration_1",
+    "__init__", "db_path", "_connect", "close_local",
+    "_clear_source_extraction_state", "_knowledge_objects", "_migration_1",
     "_migration_2", "_migration_3", "_migration_4", "_migration_5",
     "_migration_6", "_migration_7", "_migration_8", "_migration_9",
     "_migration_10", "_migration_19", "_migration_27", "_run_migration",
     "_recover_interrupted_jobs",
-    "_recover_interrupted_jobs_legacy", "_seed", "_seed_legacy",
-    "maintenance", "checkup", "eval_insert_source_for_test",
-    "_backfill_relation_embeddings", "_source_ids_from_evidence",
-    "_delete_knowledge_object_sources", "_insert_row", "_seed_fn_for",
-    "_merge_evidence_lists", "_read_ask_trace",
+    "maintenance", "checkup",
+    "_source_ids_from_evidence", "_insert_row",
 }
 
 SQLITE_WRAPPER_ALLOWED_BACKEND_IMPORTS = {
-    "app.repositories.sqlite.ask_state_store",
     "app.repositories.sqlite.bundle",
-    "app.repositories.sqlite.governance_store",
     "app.repositories.sqlite.knowledge_store",
     "app.repositories.sqlite.maintenance",
     "app.repositories.sqlite.migrations",

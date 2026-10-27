@@ -80,8 +80,8 @@ def test_store_kg_skips_unresolved_relations(repo):
 
 def test_add_and_read_relations(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    a = repo._test_insert_object(nb.id, "concept", {"name": "MOSFET"})
-    b = repo._test_insert_object(nb.id, "claim", {"name": "MOSFET has threshold voltage"})
+    a = repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "MOSFET"})
+    b = repo._runtime.knowledge_query.insert_test_object(nb.id, "claim", {"name": "MOSFET has threshold voltage"})
     add_relations(repo, nb.id, None, [
         {"source_object_id": b, "target_object_id": a, "edge_type": "about",
          "evidence": [{"quote": "threshold voltage of the MOSFET"}]},
@@ -444,8 +444,8 @@ def test_partial_retry_store_failure_rolls_back_to_old_graph(repo, monkeypatch):
 
 def test_knowledge_graph_from_kg_tables(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    c = repo._test_insert_object(nb.id, "concept", {"name": "Engram"})
-    k = repo._test_insert_object(nb.id, "claim", {"name": "Engram improves perplexity"})
+    c = repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "Engram"})
+    k = repo._runtime.knowledge_query.insert_test_object(nb.id, "claim", {"name": "Engram improves perplexity"})
     add_relations(repo, nb.id, None, [{"source_object_id": k, "target_object_id": c,
                                       "edge_type": "about", "evidence": []}])
     g = repo.knowledge_graph(nb.id)
@@ -464,7 +464,7 @@ def test_knowledge_graph_from_kg_tables(repo):
 def test_ask_returns_kg_knowledge(repo):
     # P4-5: ask_fast retired; verify KG retrieval via _retrieve_scored directly.
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo._test_insert_object(nb.id, "claim", {"name": "Engram improves perplexity"})
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "claim", {"name": "Engram improves perplexity"})
     hits = repo._retrieve_scored(nb.id, "does engram improve perplexity?")
     assert any("Engram" in (h.payload.get("name") or "") for h in hits)
 
@@ -475,12 +475,12 @@ def test_1hop_relation_is_stored(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
 
     # Claim that matches the query by name.
-    claim_id = repo._test_insert_object(
+    claim_id = repo._runtime.knowledge_query.insert_test_object(
         nb.id, "claim", {"name": "Engram improves perplexity"}
     )
     # Concept whose name does NOT appear in the query; would never surface
     # through text scoring alone.
-    concept_id = repo._test_insert_object(
+    concept_id = repo._runtime.knowledge_query.insert_test_object(
         nb.id, "concept", {"name": "XyZzY_unrelated_concept"}
     )
     # Wire them with an 'about' relation: claim -> concept.

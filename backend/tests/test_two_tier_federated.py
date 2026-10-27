@@ -155,7 +155,7 @@ class TestTask4:
                    "definition": "capacitance", "snippet": None,
                    "source_title": "", "location_label": "", "tier": "base"},
         }
-        anchors = repo._parse_answer_anchors("Capacitance [k1].", id_map)
+        anchors = repo._runtime.evidence_context_component.parse_anchors("Capacitance [k1].", id_map)
         assert anchors[0].tier == "base"
 
     def test_answer_prompt_contains_conflict_rule(self):
@@ -202,5 +202,5 @@ class TestTask5:
                    "source_title": "", "location_label": ""},
             # No 'tier' key — simulates pre-federation id_map
         }
-        anchors = repo._parse_answer_anchors("Oxide BV [k1].", id_map)
+        anchors = repo._runtime.evidence_context_component.parse_anchors("Oxide BV [k1].", id_map)
         assert anchors[0].tier == "personal"

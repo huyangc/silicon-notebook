@@ -57,7 +57,7 @@ def _items(repo, notebook_id, count):
     rows = []
     for index in range(count):
         name = f"Concept number {index}"
-        object_id = repo._test_insert_object(notebook_id, "concept", {"name": name})
+        object_id = repo._runtime.knowledge_query.insert_test_object(notebook_id, "concept", {"name": name})
         rows.append({"_oid": object_id, "payload": {"name": name}})
     return rows
 

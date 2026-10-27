@@ -989,6 +989,8 @@ class ReportEngine:
         result.baseline_chunks = baseline
         result.chunks = visible
 
+    # 测试观察点（构造点）：用例从一个仓库拿报告引擎；生产经
+    # report_execution.engine_factory 构造。
     @classmethod
     def from_repository(cls, repository, settings, cancel_event: CancelEvent = None):
         """Frozen-call-site adapter; extracts narrow ports and retains no facade."""

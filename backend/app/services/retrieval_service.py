@@ -764,9 +764,6 @@ class RetrievalService:
     def cluster_map(self, notebook_id):
         return self.graph.cluster_map(notebook_id)
 
-    def concept_cluster_id(self, notebook_id, object_id):
-        return self.cluster_map(notebook_id).get(object_id, object_id)
-
     def weak_support_relations(self, notebook_id, object_ids):
         """canonical 层上支撑薄弱的相关边 → List[GapRelationRow](设计文档 §3.3)。
 
@@ -899,18 +896,6 @@ class RetrievalService:
         return resolve_runtime_dim(self.candidates.settings)
 
     @staticmethod
-    def element_vectors(elements):
-        from app.services.retrieval_candidates import CandidateRetrievalService
-
-        return CandidateRetrievalService._element_vectors(elements)
-
-    @staticmethod
-    def merge_chunk_candidates(base, extra):
-        from app.services.retrieval_candidates import CandidateRetrievalService
-
-        return CandidateRetrievalService._union_chunk_candidates(base, extra)
-
-    @staticmethod
     def in_batches(ids, batch_size: int = 900):
         values = list(dict.fromkeys(ids))
         return (
@@ -923,12 +908,6 @@ class RetrievalService:
         return filter_retrieval_items(
             _notebook_id(args, kwargs, keyword="active_notebook_id"), "knowledge",
             self.candidates.federated_retrieve(*args, **kwargs),
-        )
-
-    def federated_retrieve_relations(self, *args, **kwargs):
-        return filter_retrieval_items(
-            _notebook_id(args, kwargs, keyword="active_notebook_id"), "relation",
-            self.candidates.federated_retrieve_relations(*args, **kwargs),
         )
 
 

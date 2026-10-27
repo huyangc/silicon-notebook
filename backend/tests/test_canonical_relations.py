@@ -147,7 +147,7 @@ def test_annotation_does_not_stick_to_unified_cache(repo):
     nb = _mk_nb_with_relations(repo)
     g1 = repo.unified_graph(nb.id, level="object")
     assert any(e.get("source_count") for e in g1["edges"])
-    cached = repo._unified_cache.get((nb.id, "object"))
+    cached = repo._runtime.retrieval_snapshots.unified_cache.get((nb.id, "object"))
     assert cached is not None
     # codex #772 R16 P2: the cache value is now (graph_seq_row_version, graph)
     # so a cross-process writer's version bump can be detected on the next
@@ -323,7 +323,7 @@ def test_answer_context_folds_boundedly_not_via_full_cluster_map(repo, monkeypat
         RetrievedKnowledge(object_id=b_id, object_type="claim",
                             payload={"name": "Claim Beta"}, evidence=[]),
     ]
-    repo._answer_context(nb.id, hits)
+    repo._runtime.evidence_context_component.knowledge_context(nb.id, hits)
 
     assert fold_calls, "cluster_fold_rows must be called at least once"
     for _notebook_id, batch in fold_calls:
@@ -365,7 +365,7 @@ def test_relation_support_lookup_folds_boundedly_and_never_scans_full_support_ta
     gain_id = _ids_by_name(repo, nb.id, "gain")[0]
 
     graph = repo.retrieval.graph
-    repo._vector_cache.invalidate(f"{nb.id}:clustermap")
+    repo._runtime.retrieval_snapshots.vector_cache.invalidate(f"{nb.id}:clustermap")
 
     def _forbidden_cluster_map_rows(*args, **kwargs):
         raise AssertionError(
@@ -386,7 +386,7 @@ def test_relation_support_lookup_folds_boundedly_and_never_scans_full_support_ta
         RetrievedKnowledge(object_id=gain_id, object_type="concept",
                             payload={"name": "gain"}, evidence=[]),
     ]
-    block, _id_map = repo._answer_context(nb.id, hits)
+    block, _id_map = repo._runtime.evidence_context_component.knowledge_context(nb.id, hits)
 
     assert "relations:" in block
     assert "kind_of" in block
@@ -453,12 +453,12 @@ def test_relation_support_counts_only_in_ceiling_sources(repo, ceiling, suffix):
     nb, a_id, b_id = _mk_nb_with_three_source_edge(repo)
     hits = _two_hits(a_id, b_id)
     if ceiling is None:
-        block, _ = repo._answer_context(nb.id, hits)
+        block, _ = repo._runtime.evidence_context_component.knowledge_context(nb.id, hits)
     else:
         with source_scope_context(
             nb.id, {"mode": "include", "source_ids": ceiling, "narrowed": True}, None,
         ):
-            block, _ = repo._answer_context(nb.id, hits)
+            block, _ = repo._runtime.evidence_context_component.knowledge_context(nb.id, hits)
     assert "kind_of" in block, block
     if suffix is None:
         assert "(×" not in block, block
@@ -479,7 +479,7 @@ def test_relation_with_no_in_ceiling_row_is_not_rendered(repo):
     with source_scope_context(
         nb.id, {"mode": "include", "source_ids": ["s1"], "narrowed": True}, None,
     ):
-        block, id_map = repo._answer_context(nb.id, _two_hits(a_id, b_id))
+        block, id_map = repo._runtime.evidence_context_component.knowledge_context(nb.id, _two_hits(a_id, b_id))
     assert len(id_map) == 2, block
     assert "relations:" not in block and "kind_of" not in block, block
 
@@ -543,9 +543,9 @@ def test_promoted_object_never_shows_the_promoters_private_text_or_title(
     私有元素带 knowhow 定位(``kt-priv-el``),卡片与锚点都不许带出(复审 P3-1)。"""
     public, hit = _mk_promoted_object(repo, title=private_title)
     evidence_context = repo._runtime.evidence_context_component
-    block, id_map = repo._answer_context(public.id, [hit])
+    block, id_map = repo._runtime.evidence_context_component.knowledge_context(public.id, [hit])
     (key,) = id_map
-    anchors = repo._parse_answer_anchors(f"claim [{key}]", id_map)
+    anchors = repo._runtime.evidence_context_component.parse_anchors(f"claim [{key}]", id_map)
     cards = evidence_context.citations_from(
         [hit], {"el-priv"}, "fallback", notebook_id=public.id,
     )
@@ -620,11 +620,11 @@ def test_mixed_pointer_card_and_anchor_carry_no_foreign_element(repo):
         )],
     )
     evidence_context = repo._runtime.evidence_context_component
-    block, id_map = repo._answer_context(public.id, [hit])
+    block, id_map = repo._runtime.evidence_context_component.knowledge_context(public.id, [hit])
     (key, value), = id_map.items()
     assert (value["source_id"], value["element_id"]) == ("s-pub", "")
     assert value["source_title"] == "Public Live Title"
-    anchors = repo._parse_answer_anchors(f"claim [{key}]", id_map)
+    anchors = repo._runtime.evidence_context_component.parse_anchors(f"claim [{key}]", id_map)
     cards = evidence_context.citations_from(
         [hit], {"el-priv"}, "fallback", notebook_id=public.id,
     )
@@ -679,12 +679,12 @@ def test_own_library_titles_images_and_pointers_still_resolve_live(repo):
         )],
     )
     evidence_context = repo._runtime.evidence_context_component
-    _block, id_map = repo._answer_context(nb.id, [hit])
+    _block, id_map = repo._runtime.evidence_context_component.knowledge_context(nb.id, [hit])
     (key, value), = id_map.items()
     assert value["source_title"] == "Renamed Title"
     assert (value["source_id"], value["element_id"]) == ("s-own", "el-own")
     assert "source_foreign" not in value
-    anchors = repo._parse_answer_anchors(f"claim [{key}]", id_map)
+    anchors = repo._runtime.evidence_context_component.parse_anchors(f"claim [{key}]", id_map)
     cards = evidence_context.citations_from([hit], {"el-own"}, "fallback", notebook_id=nb.id)
     evidence_context.attach_citation_images([
         *((anchor, (anchor.element_id,)) for anchor in anchors),
@@ -884,7 +884,7 @@ def test_annotate_edge_support_never_scans_the_full_support_table(repo, monkeypa
     # 上面的夹具没走过 annotate,但同一进程里别的用例可能已把整表结果暖进
     # VectorCache;显式失效,免得变异版靠缓存命中绕开这条守卫(与
     # test_relation_support_lookup_... 同款的假阴性)。
-    repo._vector_cache.invalidate(f"{nb.id}:edge_support")
+    repo._runtime.retrieval_snapshots.vector_cache.invalidate(f"{nb.id}:edge_support")
 
     def _forbidden(*args, **kwargs):
         raise AssertionError(
@@ -906,7 +906,7 @@ def test_annotate_edge_support_on_empty_edges_issues_no_query(repo, monkeypatch)
     → 这条报红。"""
     nb, _edges = _annotate_oracle_fixture(repo)
     kq = repo._runtime.knowledge_query
-    repo._vector_cache.invalidate(f"{nb.id}:edge_support")
+    repo._runtime.retrieval_snapshots.vector_cache.invalidate(f"{nb.id}:edge_support")
 
     calls: list = []
     real_connect = kq.database.connect

@@ -456,9 +456,6 @@ class NotebookSharingService:
             actor_label=actor_label, new_name=new_name,
         )
 
-    def sweep_stuck_copies(self, created_by: "str | None" = None) -> int:
-        return self._copies.sweep_stuck_copies(created_by)
-
     # -------------------------------------------------------- access guards
     def user_can_access_notebook(self, notebook_id: str, user_id: str) -> bool:
         """写权:仅 owner(安全边界,勿放宽)。"""
@@ -732,13 +729,6 @@ class NotebookSharingService:
             notebook = self._summaries.from_row(db, row, user_id=user_id)
         notebook.access = "reader"
         return notebook
-
-    def leave_notebook(self, notebook_id: str, user_id: str) -> None:
-        """Membership-only removal, kept for the frozen facade surface. The
-        user-facing exit (``DELETE /notebooks/{id}/membership``) is
-        ``MemoryService.leave_notebook``, which deletes the leaver's Memory
-        after they acknowledge its count and ends the membership itself."""
-        self.remove_member(notebook_id, user_id)
 
     # -------------------------------------------------------------- ownership
     def source_owner(self, source_id: str) -> "str | None":
