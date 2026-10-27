@@ -96,7 +96,16 @@ contributor constraints, not a second implementation history.
   out of a container, a string or name template, `super()`, a `__getattr__` class)
   still counts by name for every member of that name; the report counts these per
   reason and lists the members kept alive only by them (`kept_by_name_only`). A
-  store through such a receiver is not seen as a binding at all. And a registered
+  store `x.attr = value` through such a receiver may bind `attr` on any class or
+  module, so every read of `attr` counts by name as well. Before S2-E's review
+  fixes such a store was simply not seen: an attribute whose other bindings were
+  `None` placeholders was pinned to nothing and its reads reached no member at all,
+  and one with other bindings reached only theirs. Three more readings were closed
+  the same way: an empty receiver type counts by name; a module global is widened
+  by `module.NAME = value` stores (and unknown when rebound under `global`); an
+  unannotated `__init__` parameter is unknown when the class can be constructed
+  other than by a call spelled with its name (an alias, `functools.partial`, a
+  registry, `type(obj)(...)`, a class decorator). And a registered
   member's body counts as production, so everything a registered observation point
   calls stays alive with it. `--by-name` reruns the old name-only reading for
   comparison.
