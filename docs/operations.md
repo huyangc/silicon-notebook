@@ -2375,11 +2375,13 @@ bash scripts/cli.sh notebook import ./nb-a.snbk --owner alice --name "Imported c
   existed holds clusters of an unknown space: the notebook starts marked for a rebuild and the
   report says `seed_space_unknown`.
 - **After publishing, synchronously:** every Knowhow table is projected again, then the
-  re-embedding legs the report names run (`notebook-reembed`; a notebook with a Knowhow table
-  always gets the chunk, object and relation legs, since the projection rebuilds its objects and
-  edges without vectors and creates the chunks of cells never projected at the source -- without
-  vectors when the Knowhow vectors were not kept; each leg fills only what is still missing);
-  `--reembed skip`
+  re-embedding legs the report names run (`notebook-reembed`). The report names every leg whose
+  rows the import wrote (chunks, elements, objects, relations; a Knowhow table counts for chunks,
+  objects and relations, since the projection rebuilds its objects and edges and creates the
+  chunks of cells never projected at the source, all without vectors when they cannot be kept),
+  whatever the vector verdicts: an archive can lack vectors its source never computed while the
+  models match. Each leg fills only what storage still lacks, so a fully covered notebook makes
+  no model call; `not_needed` means the notebook holds no row any leg embeds. `--reembed skip`
   leaves them to be run later (the report lists them). Then, with `--rebuild-scale auto` and
   only when re-embedding succeeded or was not needed, a full scale-index build on PostgreSQL
   (`scale_build_cli.run_build`, after the ledger check, as `sync import` does); an index over

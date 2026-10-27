@@ -590,6 +590,119 @@ def _embeddable(row: dict) -> bool:
     return row["status"] != "deprecated" and bool(str(payload.get("name") or "").strip())
 
 
+#: Every embedding workload bound, on both ends (so every verdict is "kept").
+_ALL_SERVICES = {
+    "chunk_embedding": archive_cases._Service("openai", "embed-chunks-v1"),
+    "source_element_embedding": archive_cases._Service("openai", "embed-elements-v1"),
+    "knowledge_object_embedding": archive_cases._Service("dashscope", "embed-kg-v2"),
+    "relation_embedding": archive_cases._Service("dashscope", "embed-rel-v1"),
+    "knowhow_embedding": archive_cases._Service("openai", "embed-knowhow-v1"),
+}
+#: Per vector table: its key and the table of the row it belongs to.
+_VECTOR_OWNERS = {
+    "chunk_embeddings": ("chunk_id", "chunks"),
+    "element_embeddings": ("element_id", "source_elements"),
+    "knowledge_embeddings": ("object_id", "knowledge_objects"),
+    "relation_embeddings": ("relation_id", "knowledge_relations"),
+}
+
+
+def _embeddable_gaps(repo, notebook_id: str) -> dict[str, int]:
+    """What the re-embed job's legs still find missing in storage (their own
+    counters: the predicates its discovery uses), per vector table."""
+    maintenance = repo.maintenance
+    return {
+        "chunk_embeddings": int(maintenance.count_missing_chunk_vectors(notebook_id)),
+        "element_embeddings": int(maintenance.count_missing_element_vectors(notebook_id)),
+        "knowledge_embeddings": int(
+            maintenance.count_missing_embeddable_node_vectors(notebook_id)),
+        "relation_embeddings": int(
+            maintenance.count_missing_embeddable_relation_vectors(notebook_id)),
+    }
+
+
+class CountingEmbedder:
+    """A fake embedder that counts its model calls."""
+
+    configured = True
+
+    def __init__(self) -> None:
+        from app.services.embedding import FakeEmbedder
+
+        self._fake = FakeEmbedder(dim=DIM)
+        self.dim = DIM
+        self.calls = 0
+
+    def embed_texts(self, texts):
+        self.calls += 1
+        return self._fake.embed_texts(list(texts))
+
+    def embed_query(self, text):
+        self.calls += 1
+        return self._fake.embed_query(text)
+
+
+def check_legs_follow_storage_coverage(src, src_backend, dst, tmp, monkeypatch) -> None:
+    """The legs follow what storage holds, never the verdicts. Every model
+    matches here (all vectors "kept"), the world holds no Knowhow table: a fully
+    covered import still names the leg of every kind of row it wrote, and
+    running them makes no model call; an archive whose source never computed
+    some vectors (one chunk, element, object and relation of an ordinary source
+    without its vector row) names the same legs, and once they ran the re-embed
+    job's own counters find nothing missing."""
+    from app.services.notebook_reembed import LEGS, NotebookReembedService
+    from app.services.notebook_transfer.export import embedding_identities, export_notebook
+    from tests.model_testkit import bind_embedding_client
+
+    notebook_id = seed_world(src, src_backend, "memory")
+    exported = tmp / "exported.snbk"
+    export_notebook(
+        src._runtime.sharing_store, notebook_id, exported,
+        storage_dir=Path(src.storage_dir), settings=src._runtime.sharing_store.settings,
+        embeddings=embedding_identities(src.settings, _ALL_SERVICES.get),
+        global_object_schemas=src.list_object_schemas(),
+    )
+    # The world's one relation joins two concepts with an edge type no query
+    # reads (so no leg embeds it); give it one that is read.
+    covered = tmp / "covered.snbk"
+    rebuild(exported, covered, rows=lambda table, rows: [
+        {**r, "edge_type": "depends_on"} for r in rows
+    ] if table == "knowledge_relations" else rows)
+    tables = archive_cases.archive_rows(covered)
+    assert not tables["knowhow_tables"]
+    ordinary = {r["id"] for r in tables["sources"] if r.get("source_type") != "memory"}
+    removed: dict[str, str] = {}
+    for vector_table, (key, owner_table) in _VECTOR_OWNERS.items():
+        owners = {r["id"]: r.get("source_id") for r in tables[owner_table]}
+        removed[vector_table] = next(
+            r[key] for r in tables[vector_table] if owners.get(r[key]) in ordinary
+        )
+    gapped = tmp / "gapped.snbk"
+    rebuild(covered, gapped, rows=lambda table, rows: [
+        r for r in rows if r[_VECTOR_OWNERS[table][0]] != removed[table]
+    ] if table in _VECTOR_OWNERS else rows)
+    target_models(dst, monkeypatch, _ALL_SERVICES.get)
+    embedder = CountingEmbedder()
+    bind_embedding_client(dst, embedder, workload_ids=list(_ALL_SERVICES))
+    nothing = dict.fromkeys(_VECTOR_OWNERS, 0)
+
+    full = run_import(dst, covered)
+    assert all(verdict.kept for verdict in full.vectors.values()), full.vectors
+    assert full.reembed_legs == LEGS, full.reembed_legs
+    assert _embeddable_gaps(dst, full.notebook_id) == nothing
+    embedder.calls = 0
+    status = NotebookReembedService(dst).run(full.notebook_id, legs=full.reembed_legs)
+    assert status.state == "succeeded" and embedder.calls == 0, (status, embedder.calls)
+
+    report = run_import(dst, gapped)
+    assert all(verdict.kept for verdict in report.vectors.values()), report.vectors
+    assert report.reembed_legs == LEGS, report.reembed_legs
+    assert _embeddable_gaps(dst, report.notebook_id) == dict.fromkeys(_VECTOR_OWNERS, 1)
+    status = NotebookReembedService(dst).run(report.notebook_id, legs=report.reembed_legs)
+    assert status.state == "succeeded", status
+    assert _embeddable_gaps(dst, report.notebook_id) == nothing, status
+
+
 def check_unprojected_knowhow_cells_end_with_chunk_vectors(src, src_backend, dst, tmp,
                                                            monkeypatch) -> None:
     """Knowhow cells that were never projected travel without a single chunk;
@@ -696,9 +809,9 @@ def check_vectors_kept_byte_for_byte(src, src_backend, dst, tmp, monkeypatch) ->
             }
             expected = {translate.ids[r[key]]: decode_value(r["vector"]) for r in original[table]}
             assert stored == expected and stored, table
-    # Kept object vectors, but the Knowhow tables' objects are rebuilt without
-    # one: the object leg is named all the same.
-    assert report.reembed_legs == ("chunks", "kg_objects", "kg_relations")
+    # Every leg whose rows were written is named, kept vectors or not: each fills
+    # only what storage still lacks.
+    assert report.reembed_legs == ("chunks", "elements", "kg_objects", "kg_relations")
     assert report.dropped == {
         "chunk_embeddings.knowhow_embedding": 4, "relation_embeddings.relation_embedding": 2,
     }
