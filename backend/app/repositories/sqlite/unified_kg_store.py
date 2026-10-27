@@ -1732,42 +1732,6 @@ class UnifiedKgStore:
                 (notebook_id, focal_key, notebook_id)).fetchone()
         return row["canonical_id"] if row else None
 
-    def focal_name_members(
-        self, notebook_id: str, canonical_id: str, focal_key: str, *,
-        limit: int, after: str = "",
-    ) -> List[sqlite3.Row]:
-        """对比焦点 R4 的成员读,**一页**:``canonical_id`` 这个簇里 payload 名字
-        ``lower(name) == focal_key`` 的活成员(已发布代、对象未 deprecated),
-        member id 序里 keyset 游标 ``after`` 之后的前 ``limit`` 个,每行带成员
-        **自己的** ``source_id``。
-
-        只按名字过滤,不带天花板:天花板判定由调用方拿冻结的天花板集合逐行做,
-        并按页翻(``communities.CommunityQueryService._ceiling_focal``:首页小、翻倍、
-        封顶,遇到第一个天花板内成员即停),一整库的来源清单不进这条语句。按
-        ``(notebook_id, canonical_id, member_object_id, …)`` 索引的顺序走簇行、对象
-        按主键探查,``LIMIT`` 让枢纽簇也只读到凑满一页为止。``lower()`` 只折叠
-        ASCII(与 ``resolve_focal`` 的 ``lower(canonical_name)`` 同一口径;PG 孪生
-        用 ``COLLATE "C"`` 对齐)。
-        """
-        seek, seek_params = (
-            ("AND cc.member_object_id > ? AND ko.id > ? ", (after, after))
-            if after else ("", ())
-        )
-        with self.database.connect() as db:
-            return db.execute(
-                "SELECT cc.member_object_id, ko.source_id AS source_id "
-                "FROM concept_clusters cc "
-                "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
-                "WHERE cc.notebook_id=? AND cc.canonical_id=? "
-                "AND ko.status!='deprecated' "
-                f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN} {seek}"
-                "AND lower(CASE WHEN json_valid(ko.payload) "
-                "THEN json_extract(ko.payload, '$.name') END)=? "
-                "ORDER BY cc.member_object_id LIMIT ?",
-                (notebook_id, canonical_id, notebook_id, *seek_params, focal_key,
-                 int(limit)),
-            ).fetchall()
-
     def top_community_for(self, notebook_id: str, canonical_id: str) -> Optional[str]:
         with self.database.connect() as db:
             row = db.execute(

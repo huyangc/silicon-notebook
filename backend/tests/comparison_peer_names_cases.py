@@ -58,6 +58,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from app.models.schemas import NotebookCreate
+from app.repositories.postgres.id_binding import ID_SEPARATOR
 from app.services.communities import CommunityQueryService
 from app.services.source_scope import source_scope_context
 from tests.model_testkit import bind_chat_client
@@ -76,8 +77,8 @@ GHOST = "Ghost Widget"
 HIDDEN_ONLY = "Hidden Widget"
 # A non-ASCII case variant: the visible member is ``Ärger Widget``, the hidden
 # one (and the stored name) ``ärger widget`` -- equal only under a Unicode
-# lowercase, which neither SQLite's ``lower()`` nor PostgreSQL's
-# ``lower(... COLLATE "C")`` applies.
+# lowercase, which neither ``resolve_focal``'s SQL ``lower()`` (ASCII-only on
+# both backends) nor R4's ``communities._ascii_lower`` applies.
 ARGER = "Ärger Widget"
 ARGER_STORED = "ärger widget"
 
@@ -361,25 +362,44 @@ def recorded_statements(world: World) -> Iterator[list[tuple[str, tuple]]]:
         unified.database = original
 
 
-def member_reads(statements) -> tuple[list[str], list[str]]:
+def _bound_ids(param: Any) -> list[str]:
+    """The cluster ids one ``comparison_peer_members`` statement binds (its first
+    parameter): a JSON array on SQLite, ``id_binding``'s text form (or an array)
+    on PostgreSQL."""
+    if isinstance(param, (list, tuple)):
+        return [str(value) for value in param]
+    text = str(param)
+    if text.startswith("["):
+        return [str(value) for value in json.loads(text)]
+    return text.split(ID_SEPARATOR)
+
+
+def _peer_member_reads(statements) -> list[tuple[str, tuple]]:
+    return [(sql, params) for sql, params in statements if "member_name" in sql]
+
+
+def member_reads(statements, *, focal: str = "") -> tuple[list[str], list[str]]:
     """``(batched first-window reads, keyset page reads)`` of
-    ``comparison_peer_members``."""
-    reads = [sql for sql, _params in statements if "member_name" in sql]
+    ``comparison_peer_members`` for R3's peer names -- R4's pages of the focal
+    cluster ``focal`` (the same read, listing that one cluster) left out."""
+    reads = [sql for sql, params in _peer_member_reads(statements)
+             if not focal or _bound_ids(params[0]) != [focal]]
     paged = [sql for sql in reads
              if "ko2.id > ?" in sql or 'ko.id COLLATE "C" > %s' in sql]
     return [sql for sql in reads if sql not in paged], paged
 
 
-def focal_reads(statements) -> list[str]:
-    """R4's ``focal_name_members`` statements (the only read that lowers a
-    payload name)."""
-    return [sql for sql, _params in statements if "lower(" in sql and "payload" in sql]
+def focal_reads(statements, focal: str) -> list[str]:
+    """R4's pages of the focal cluster: ``comparison_peer_members`` listing
+    ``focal`` alone (a peer is never the focal, so R3 never lists it)."""
+    return [sql for sql, params in _peer_member_reads(statements)
+            if _bound_ids(params[0]) == [focal]]
 
 
-def focal_read_limits(statements) -> list[Any]:
-    """The page size bound to each R4 focal read (its last parameter)."""
-    return [params[-1] for sql, params in statements
-            if "lower(" in sql and "payload" in sql]
+def focal_read_limits(statements, focal: str) -> list[Any]:
+    """The page size bound to each R4 focal page (the read's last parameter)."""
+    return [params[-1] for _sql, params in _peer_member_reads(statements)
+            if _bound_ids(params[0]) == [focal]]
 
 
 def stored_name_resolutions(statements) -> list[str]:
@@ -455,30 +475,15 @@ def store_member_read_shape(world: World, monkeypatch) -> None:
         with_canonical_id=True,
     ) == [("K-ghostwidget", GHOST, 10), ("K-quietzebraxylophone", QZX_HIDDEN, 9)]
     assert unified.comention_peers(world.nb, FOCAL_ID, 1, 1) == [(GHOST, 10)]
-    # R4's focal read: one page of the members whose name is the key, each with
-    # its own source_id, keyset over member id.
-    hidden = unified.focal_name_members(
-        world.nb, "K-quietzebraxylophone", QZX_HIDDEN.lower(), limit=8)
-    assert [(r["member_object_id"], r["source_id"]) for r in hidden] == [
-        (oid("q-a2"), world.hidden)]  # q-a1 is deprecated above
-    carried = unified.focal_name_members(
-        world.nb, "K-alphabetagamma", ABG_LONG.lower(), limit=8)
-    assert [(r["member_object_id"], r["source_id"]) for r in carried] == [
-        (oid("a-b"), world.open), (oid("a-c"), world.hidden)]
-    assert unified.focal_name_members(
-        world.nb, "K-alphabetagamma", "nope", limit=8) == []
-    first = unified.focal_name_members(
-        world.nb, "K-pagedgammawidget", PGW_HIDDEN.lower(), limit=8)
+    # R4 pages the focal cluster through the same read: the limit bounds the
+    # members walked, whatever their names; the keyset resumes after the last.
+    first = unified.comparison_peer_members(world.nb, ["K-pagedgammawidget"], limit=8)
     assert [r["member_object_id"] for r in first] == [
         oid(f"p-a{index:02d}") for index in range(8)]
-    rest = unified.focal_name_members(
-        world.nb, "K-pagedgammawidget", PGW_HIDDEN.lower(), limit=16,
-        after=oid("p-a07"))
-    assert [r["member_object_id"] for r in rest] == [oid("p-a08")]
-    # ASCII-only lowering on both backends (the key is the Unicode lowercase).
-    arger = unified.focal_name_members(
-        world.nb, world.arger_id(), ARGER_STORED, limit=8)
-    assert [r["member_object_id"] for r in arger] == [oid("u-a")]
+    rest = unified.comparison_peer_members(
+        world.nb, ["K-pagedgammawidget"], limit=16, after=oid("p-a07"))
+    assert [(r["member_object_id"], r["member_name"]) for r in rest] == [
+        (oid("p-a08"), PGW_HIDDEN), (oid("p-b"), PGW)]
     with_ids = unified.community_member_peers(
         world.nb, world.community, FOCAL_ID, 2, allowed_source_ids=[world.open],
         with_canonical_id=True)
@@ -570,8 +575,8 @@ def absent_ceiling_reads_no_member(world: World, monkeypatch, path: str) -> None
     assert names == (COMENTION_NO_CEILING if path == "comention"
                      else COMMUNITY_NO_CEILING)
     assert hidden_focal, "without a ceiling the stored spelling resolves as before"
+    # Not one member read -- neither R3's nor R4's focal pages (same statement).
     assert member_reads(statements) == ([], [])
-    assert focal_reads(statements) == []
     assert not [sql for sql, _params in statements if "canonical_id, canonical_name" in sql]
     if path == "comention":
         assert comention_row_limits(statements) == [8, 8]
@@ -591,11 +596,11 @@ def one_batched_member_read(world: World, monkeypatch, path: str) -> None:
         with recorded_statements(world) as unresolved:
             assert _names(world, path, focal="No Such Widget") == []
     assert sorted(names) == sorted(COMENTION_IN_CEILING)
-    batched, paged = member_reads(statements)
+    batched, paged = member_reads(statements, focal=FOCAL_ID)
     assert len(batched) == 1, batched
     assert len(paged) == 1, paged
-    assert len(focal_reads(statements)) == 1, statements
-    assert focal_reads(unresolved) == [] and member_reads(unresolved) == ([], [])
+    assert len(focal_reads(statements, FOCAL_ID)) == 1, statements
+    assert member_reads(unresolved) == ([], [])
 
 
 def stale_stored_name_is_not_used(world: World, monkeypatch, path: str) -> None:
@@ -670,22 +675,23 @@ def focal_resolved_once_per_library(world: World, monkeypatch, path: str) -> Non
     assert names == (COMENTION_IN_CEILING if path == "comention"
                      else COMMUNITY_IN_CEILING)
     assert len(stored_name_resolutions(statements)) == 1, statements
-    assert len(focal_reads(statements)) == 1, statements
+    assert len(focal_reads(statements, FOCAL_ID)) == 1, statements
 
 
 def focal_reads_are_bounded_pages(world: World, monkeypatch, path: str) -> None:
-    """R4 reads the focal's key-spelled members a bounded page at a time. PGW's
-    stored name is the hidden spelling of its nine hidden members: the first
-    page (8) is all hidden, the next page (16, after the cursor) holds the rest;
-    with no in-ceiling carrier the focal is unresolved. Once the visible ``p-b``
-    is spelled the same way it is found on that second page and the focal
-    resolves -- the read stops there."""
+    """R4 walks the focal cluster's members a bounded page at a time. PGW's
+    stored name is the hidden spelling of its nine hidden members, the tenth
+    member ``p-b`` is the visible ``PGW``: the first page (8 members) holds no
+    in-ceiling member spelled as the key, the next page (16, after the last
+    member walked) holds the remaining two and is short -- the focal is
+    unresolved. Once ``p-b`` is spelled as the key it is found on that second
+    page and the focal resolves; either way two bounded pages."""
     if path == "community":
         _drop_comentions(world)
     with world.ceiling():
         with recorded_statements(world) as unresolved:
             assert _names(world, path, focal=PGW_HIDDEN) == []
-    assert focal_read_limits(unresolved) == [8, 16]
+    assert focal_read_limits(unresolved, "K-pagedgammawidget") == [8, 16]
     world.set_name("p-b", PGW_HIDDEN)
     try:
         with world.ceiling():
@@ -693,7 +699,7 @@ def focal_reads_are_bounded_pages(world: World, monkeypatch, path: str) -> None:
                 names = _names(world, path, focal=PGW_HIDDEN)
         assert names == ([FOCAL] if path == "comention"
                          else [MIXED, ABG_LONG, FOCAL, QZX])
-        assert focal_read_limits(resolved) == [8, 16]
+        assert focal_read_limits(resolved, "K-pagedgammawidget") == [8, 16]
     finally:
         world.set_name("p-b", PGW)
 
@@ -701,10 +707,11 @@ def focal_reads_are_bounded_pages(world: World, monkeypatch, path: str) -> None:
 def non_ascii_case_variant_focal(world: World, monkeypatch, path: str) -> None:
     """Both backends give one answer for a non-ASCII case variant. The key of
     ``Ärger Widget`` is ``ärger widget`` (Unicode lowercase), which is also the
-    stored name, so the stored-name match resolves it -- but the lowering in
-    SQL is ASCII-only on both backends, so the visible ``Ärger Widget`` is not
-    spelled as the key and only the hidden ``ärger widget`` is: under a ceiling
-    the focal is unresolved; without one it resolves as before."""
+    stored name, so the stored-name match (``lower(canonical_name)``, ASCII-only
+    on both backends) resolves it -- and R4 compares member names with the same
+    ASCII-only lowering, so the visible ``Ärger Widget`` is not spelled as the
+    key and only the hidden ``ärger widget`` is: under a ceiling the focal is
+    unresolved; without one it resolves as before."""
     if path == "community":
         _drop_comentions(world)
     with world.ceiling():

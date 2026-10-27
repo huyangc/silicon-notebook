@@ -126,20 +126,22 @@ def test_sibling_peers_unresolved_focal_silent_empty(repo):
 
 
 def test_resolve_comparison_peers_prefers_comention_then_community(repo, monkeypatch):
-    """共提优先→回退社区:直接单测抽出的共享 helper(免 mock LLM)。"""
-    from app.services import communities as C
+    """共提优先→回退社区:直接单测两处对比调用点共享的
+    ``CommunityQueryService.resolve_comparison_peers``(免 mock LLM)。"""
     nb = _seed_bridge_nb(repo)
     # 有 concept_comentions → source=comention,名单来自共提兄弟(本 fixture 未建社区数据)
-    names, source = C.resolve_comparison_peers(
-        _community_queries(repo), nb.id, "Grouped-query attention (GQA)", "compare gqa and mqa",
+    names, source = _community_queries(repo).resolve_comparison_peers(
+        nb.id, "Grouped-query attention (GQA)", "compare gqa and mqa",
         top_k=5, candidates=50)
     assert source == "comention"
     assert any("Multi-Query Attention" in n for n in names)
-    # 抬高门槛让 sibling_peers 空 → 回退 community_peers(打桩验证被调用 + 结果透传 + source 标记)
-    monkeypatch.setattr(C, "community_peers", lambda *a, **k: ["STUB-COMMUNITY-PEER"])
+    # 抬高门槛让共提路空 → 回退社区路(打桩验证被调用 + 结果透传 + source 标记)
     repo.settings.sibling_min_bridge = 99
-    names2, source2 = C.resolve_comparison_peers(
-        _community_queries(repo), nb.id, "Grouped-query attention (GQA)", "q", top_k=5, candidates=50)
+    service = _community_queries(repo)
+    monkeypatch.setattr(
+        service, "_community_peers_of", lambda *a, **k: ["STUB-COMMUNITY-PEER"])
+    names2, source2 = service.resolve_comparison_peers(
+        nb.id, "Grouped-query attention (GQA)", "q", top_k=5, candidates=50)
     assert source2 == "community"
     assert names2 == ["STUB-COMMUNITY-PEER"]
 
