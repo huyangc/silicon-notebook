@@ -303,6 +303,11 @@ def test_unfinished_sources_fail_and_orphan_attachments_are_dropped(repo, target
     cases.check_unfinished_sources_and_orphan_assets(repo, BACKEND, target, out_dir)
 
 
+def test_cli_interruption_keeps_the_receipts(repo, out_dir, capsys, monkeypatch):
+    cases.check_cli_interruption_keeps_receipts(
+        repo, BACKEND, out_dir, capsys, monkeypatch, confirm=())
+
+
 def test_cli_reports_every_failure(repo, out_dir, capsys, monkeypatch):
     cases.check_cli_reports_every_failure(repo, BACKEND, out_dir, capsys, monkeypatch, confirm=())
 

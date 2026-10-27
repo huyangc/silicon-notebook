@@ -2404,8 +2404,19 @@ Exit status: 0 every file imported (a re-embedding or scale problem is reported,
 done); 1 a file was refused or its import failed for any reason (nothing of it remains; the
 error names only the exception class when it is not a refusal); 2 a usage error, an
 unknown owner or a missing `--confirm-service-stopped`; 3 the database is not at this build's
-schema. Several files import in order and stop at the first failure; `--json` prints
-`{"imported": [...], "failed": [...]}` in every case, without connection details.
+schema; 130 interrupted (Ctrl-C). Several files import in order and stop at the first failure;
+`--json` prints `{"imported": [...], "failed": [...]}` in every case, without connection details.
+
+**Ctrl-C.** An interruption after a notebook is published -- during its Knowhow projection or
+its re-embedding -- keeps the notebook and its receipt (rerunning the file would import it a
+second time): the receipt's re-embedding reads `interrupted` and lists the commands that fill
+what is still missing (`scripts/cli.sh batch embed --notebook-id <id>` for chunks, elements and
+objects, `scripts/cli.sh kg backfill-relations <id>` for relations; both fill only what has no
+vector), tables whose projection was cut short are listed as projection failures (rebuild them
+in the table), no scale index is built for any notebook of the run (`skipped:interrupted`, with
+the build command), no further file is imported, and every receipt is printed, human and
+`--json`. An interruption before publish leaves nothing of that file (the import compensates);
+the receipts of the files before it are still printed.
 
 ## Filling a notebook's missing vectors (`notebook-reembed`)
 

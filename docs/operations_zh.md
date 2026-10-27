@@ -1847,8 +1847,15 @@ bash scripts/cli.sh notebook import ./nb-a.snbk --owner alice --name "导入的�
 
 退出码：0 全部文件导入完成（重新嵌入或 scale 的问题只报告，导入本身已完成）；1 某个文件被拒绝或因任何
 原因导入失败（该文件什么都不留；不是拒绝时错误只给出异常类名）；2 参数错误、用户不存在或缺 `--confirm-service-stopped`；3 库不是本构建的
-schema。多个文件按顺序导入，遇到第一个失败即停；`--json` 在任何情况下都输出
+schema；130 被中断（Ctrl-C）。多个文件按顺序导入，遇到第一个失败即停；`--json` 在任何情况下都输出
 `{"imported": [...], "failed": [...]}`，不含连接信息。
+
+**Ctrl-C。** 笔记本发布之后（Knowhow 投影或重新嵌入期间）被中断：笔记本与它的回执都保留（重跑这个文件会
+再导入一本）；回执里重新嵌入记为 `interrupted`，并列出补齐剩余向量的命令（切块、元素、对象用
+`scripts/cli.sh batch embed --notebook-id <id>`，关系用 `scripts/cli.sh kg backfill-relations <id>`，两者都
+只补没有向量的），投影被打断的表记为投影失败（在表内重建投影即可），本次运行的任何笔记本都不建 scale 索引
+（记为 `skipped:interrupted`，附建索引命令），后续文件不再导入，所有回执照常输出（人读格式与 `--json`）。
+发布之前被中断：该文件什么都不留（导入会补偿），它之前那些文件的回执照常输出。
 
 ## 补齐笔记本缺失的向量（`notebook-reembed`）
 
