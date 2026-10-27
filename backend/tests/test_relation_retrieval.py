@@ -99,8 +99,8 @@ def test_federated_retrieve_relations_spans_base(repo):
 # `_mix_retrieve`(chunk 问答默认 overlay 路径,chunk_kg_overlay_enabled 默认
 # True + rerank 配置齐 + 库里有 KG 就走)调用 `_chunk_kg_overlay` →
 # `federated_retrieve_relations` → `_retrieve_relations_scored`，这条路径
-# **不受** RELATION_RETRIEVAL_ENABLED 门控(该 flag 只挂在 `_graph_seed_fusion`
-# 上，是 reasoning 模式的另一条路)。所以即便 RELATION_RETRIEVAL_ENABLED=False
+# **不受** RELATION_RETRIEVAL_ENABLED 门控(该 flag 现在只决定启动预热是否打开
+# 关系 ANN;旧的 reasoning 关系补种子路径已退役)。所以即便 RELATION_RETRIEVAL_ENABLED=False
 # (默认)，只要 notebook 有 KG，每次默认 chunk 问答都会跑 `_relations_with_names`
 # 的全量 JOIN——这正是 P0-2 的问题。
 #

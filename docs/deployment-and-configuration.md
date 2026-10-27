@@ -1498,8 +1498,7 @@ RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF ranking vs keyword+semantic fusio
 RETRIEVAL_RRF_K              # reciprocal-rank-fusion k (default 60)
 KG_QUERY_REFINE_ENABLED      # question-aware evidence refinement before answering (default true)
 QUERY_REFINE_MAX_CHARS       # max chars of evidence fed to refinement (default 4000)
-RELATION_RETRIEVAL_ENABLED   # relation-vector retrieval for graph/reasoning seeds (default false, opt-in pending eval)
-RELATION_SEED_TOP_N          # top relation/node hits fed as graph seeds when enabled (default 8)
+RELATION_RETRIEVAL_ENABLED   # startup preload also opens and checks the scale index's relation ANN (default false, opt-in pending eval); relation hits are never fused into graph seeds (that path no longer exists, and RELATION_SEED_TOP_N is gone), and the chunk overlay's relation retrieval does not depend on it
 KG_CANONICAL_FOLD_ENABLED    # fold same-canonical fragmented KG nodes at retrieval (default false)
 KG_ABOUT_DOWNWEIGHT_ENABLED  # rank-down-weight weak `about` edges in relation retrieval (default false)
 KNOWHOW_KG_NODE_RETRIEVAL_ENABLED # projected Knowhow cell objects join reasoning/graph KG-node retrieval (default true; false disables only this direct-node path, not cell-chunk search)

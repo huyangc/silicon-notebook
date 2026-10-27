@@ -905,16 +905,14 @@ class Settings(BaseSettings):
     # 单次重排最多送出的候选数。重排服务的接口风格(dashscope / openai)由
     # model-services.toml 里该服务的 protocol 决定,不再是本文件的设置。
     rerank_max_docs: int = Field(500, validation_alias="RERANK_MAX_DOCS")
-    # 关系检索补种子:开启后先用 query_rewrite 的高层关键词查关系索引,把命中关系的
-    # 两端对象并入种子,低层关键词再查一次节点并入;只增不减(原种子保序在前),
-    # 每次查询多一次 query_rewrite 模型调用(retrieval_candidates 的关系补种子入口)。
+    # 关系 ANN 预热:开启后启动预热把规模索引的关系 ANN 也一并打开并校验(声明了却
+    # 打不开就报错)。关系命中「融进图种子」的那条补种子路径已不存在(随图问答引擎
+    # 退役),RELATION_SEED_TOP_N 也随之下线;chunk overlay 的关系检索不受本开关门控。
     # 实验开关(默认值刻意不动):评估后转正或删除,出口登记在 fangan_todo.md「实验开关评估出口」。
     relation_retrieval_enabled: bool = Field(False, validation_alias="RELATION_RETRIEVAL_ENABLED")
-    relation_seed_top_n: int = Field(8, validation_alias="RELATION_SEED_TOP_N")
     # P0-1/2: 关系候选池上限(有关系向量时,先按向量 sim 取 top-N 候选再 hydrate 文本
     # 做关键词+语义融合打分;镜像 chunk_recall 的"猛召回池"语义,非最终截断
-    # 的 relation_seed_top_n/chunk_kg_relation_seed_top_n——池要显著大于
-    # 两者才不伤召回)。
+    # 的 chunk_kg_relation_seed_top_n——池要显著大于它才不伤召回)。
     relation_recall: int = Field(200, validation_alias="RELATION_RECALL")
     # HippoRAG 式 PPR 跨文档检索(graph 模式;默认开)
     graph_ppr_enabled: bool = Field(True, validation_alias="GRAPH_PPR_ENABLED")

@@ -2290,8 +2290,8 @@ class CandidateRetrievalService(_RetrievalState):
         场景)在 top_k_sims 之前要 _vector_matrix(nb, "relation_embeddings"),
         这本身是 O(N_relations × dim) 内存(生产环境百万级关系 × 1024 维即数
         GB,矩阵未 BLOB 化时还要逐行 json.loads,是灾难级耗时)。这条加载绝不能
-        在 ask 路径上对大库懒触发——保护全部调用方(reasoning
-        _graph_seed_fusion、chunk overlay、graph)。守卫:大库
+        在 ask 路径上对大库懒触发——保护全部调用方(chunk overlay 及
+        federated_retrieve_relations 的其余调用方)。守卫:大库
         (not notebook_copy_stats(nb)["copyable"]) 且矩阵未暖在 _vector_cache
         (_vector_matrix_warm 纯 peek,不触发 loader)→ 跳过语义打分,发
         relation_scoring_skipped 事件,返回 []。
