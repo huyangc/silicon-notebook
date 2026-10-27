@@ -131,14 +131,6 @@ _log = logging.getLogger("silicon_notebook.notebook_import")
 _HIDDEN_STATUSES = frozenset({"copying", "deleting", "importing", "pending_delete"})
 #: A schema's status an imported custom object type keeps; anything else is active.
 _SCHEMA_STATUSES = frozenset({"active", "disabled"})
-#: Where a workload's vectors live (``chunk_embeddings`` holds two workloads).
-_WORKLOAD_TABLE = {
-    "chunk_embedding": "chunk_embeddings",
-    "knowhow_embedding": "chunk_embeddings",
-    "source_element_embedding": "element_embeddings",
-    "knowledge_object_embedding": "knowledge_embeddings",
-    "relation_embedding": "relation_embeddings",
-}
 _VECTOR_COLUMN_TABLES = frozenset(VECTOR_TABLES) | {"chunk_questions"}
 #: Write-open of an extracted file: a new file only, never through a link.
 _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -208,7 +200,8 @@ class ImportReport:
     sources_reset: int
     vectors_included: bool
     vectors: Mapping[str, VectorVerdict]
-    #: Legs of ``notebook_reembed`` this notebook needs, in run order.
+    #: Legs of ``notebook_reembed`` this notebook needs, in run order: every leg
+    #: whose rows were written (``reembed_legs``); empty only when none was.
     reembed_legs: tuple[str, ...]
     chunk_questions: Mapping[str, Any]
     #: ``added``: deployment-wide custom types created as this notebook's own
@@ -1055,7 +1048,7 @@ class NotebookImportService:
             sources_reset=run.sources_reset,
             vectors_included=checked.manifest.vectors_included,
             vectors=dict(checked.verdicts),
-            reembed_legs=reembed_legs(checked.verdicts, run, written),
+            reembed_legs=reembed_legs(written),
             chunk_questions={
                 **run.questions,
                 "marks_cleared": len(run.question_dropped_chunks),
@@ -1075,45 +1068,29 @@ class NotebookImportService:
         )
 
 
-def reembed_legs(
-    verdicts: Mapping[str, VectorVerdict], run: NotebookCopyRun, written: Mapping[str, int]
-) -> tuple[str, ...]:
-    """The ``notebook_reembed`` legs an imported notebook needs (PR3 handoff):
-    a workload whose vectors were not kept, or whose rows were dropped for a
-    wrong length, needs its leg when the notebook has rows of that kind
-    (``knowhow_embedding`` is the Knowhow half of ``chunks``). A notebook with a
-    Knowhow table always needs ``chunks``, ``kg_objects`` and ``kg_relations``:
-    the post-publish projection tears down and rebuilds the table's objects and
-    edges, which carry no vector afterwards (a Knowhow-projected object is
-    never copied), and it creates the chunks of every cell the archive carries
-    none for (a table never projected at the source) -- without vectors when
-    the Knowhow vectors were not kept (``embed=False``). The archive's chunk
-    count cannot tell; each leg reads what is still missing from storage, so
-    naming it is free when nothing is."""
+def reembed_legs(written: Mapping[str, int]) -> tuple[str, ...]:
+    """The ``notebook_reembed`` legs an imported notebook needs: every leg whose
+    rows the import wrote -- ``chunks``, ``elements``, ``kg_objects`` and
+    ``kg_relations`` for chunks, source elements, knowledge objects and
+    relations, and a Knowhow table counting for ``chunks``, ``kg_objects`` and
+    ``kg_relations`` (the post-publish projection rebuilds the table's objects
+    and edges, and creates the chunks of cells never projected at the source,
+    all without vectors when they cannot be kept).
 
-    def missing(workload: str) -> bool:
-        return not verdicts[workload].kept or bool(
-            run.dropped.get(f"{_WORKLOAD_TABLE[workload]}.{workload}")
-        )
-
-    knowhow_chunks = len(run.knowhow_chunk_ids_old)
-    document_chunks = written.get("chunks", 0) - knowhow_chunks
-    legs = set()
-    if (document_chunks > 0 and missing("chunk_embedding")) or (
-        knowhow_chunks > 0 and missing("knowhow_embedding")
-    ) or written.get("knowhow_tables", 0):
-        legs.add(LEG_CHUNKS)
-    if written.get("source_elements", 0) and missing("source_element_embedding"):
-        legs.add(LEG_ELEMENTS)
-    if (written.get("knowledge_objects", 0) and missing("knowledge_object_embedding")) or (
-        written.get("knowhow_tables", 0)
-    ):
-        legs.add(LEG_KG_OBJECTS)
-    if (written.get("knowledge_relations", 0) and missing("relation_embedding")) or (
-        written.get("knowhow_tables", 0)
-    ):
-        legs.add(LEG_KG_RELATIONS)
-    return tuple(leg for leg in LEGS if leg in legs)
+    Decided from what was written, never from the vector verdicts: an archive
+    can lack vectors its source never computed (an embed that failed there)
+    while the model identities match, and nothing in the archive says so. Each
+    leg fills only what storage still lacks, so a fully covered notebook makes
+    no model call, and an empty result means the notebook holds no row any leg
+    embeds."""
+    knowhow = bool(written.get("knowhow_tables", 0))
+    named = {
+        LEG_CHUNKS: bool(written.get("chunks", 0)) or knowhow,
+        LEG_ELEMENTS: bool(written.get("source_elements", 0)),
+        LEG_KG_OBJECTS: bool(written.get("knowledge_objects", 0)) or knowhow,
+        LEG_KG_RELATIONS: bool(written.get("knowledge_relations", 0)) or knowhow,
+    }
+    return tuple(leg for leg in LEGS if named[leg])
 
 
 def _published_status(checked: _Preflight) -> str:

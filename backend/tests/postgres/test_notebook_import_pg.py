@@ -86,6 +86,10 @@ def test_vectors_of_the_same_model_land_byte_for_byte_pg(sqlite, pg, out_dir, mo
     cases.check_vectors_kept_byte_for_byte(sqlite, SQLITE, pg, out_dir, monkeypatch)
 
 
+def test_legs_follow_storage_coverage_not_the_verdicts_pg(sqlite, pg, out_dir, monkeypatch):
+    cases.check_legs_follow_storage_coverage(sqlite, SQLITE, pg, out_dir, monkeypatch)
+
+
 def test_unprojected_knowhow_cells_end_with_chunk_vectors_pg(sqlite, pg, out_dir, monkeypatch):
     cases.check_unprojected_knowhow_cells_end_with_chunk_vectors(
         sqlite, SQLITE, pg, out_dir, monkeypatch)

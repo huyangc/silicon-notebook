@@ -76,6 +76,10 @@ def test_vectors_of_the_same_model_land_byte_for_byte(repo, target, out_dir, mon
     cases.check_vectors_kept_byte_for_byte(repo, BACKEND, target, out_dir, monkeypatch)
 
 
+def test_legs_follow_storage_coverage_not_the_verdicts(repo, target, out_dir, monkeypatch):
+    cases.check_legs_follow_storage_coverage(repo, BACKEND, target, out_dir, monkeypatch)
+
+
 def test_unprojected_knowhow_cells_end_with_chunk_vectors(repo, target, out_dir, monkeypatch):
     cases.check_unprojected_knowhow_cells_end_with_chunk_vectors(
         repo, BACKEND, target, out_dir, monkeypatch)
@@ -255,38 +259,24 @@ def test_cluster_seed_ids_are_reminted_from_the_new_objects(repo, out_dir):
     cases.check_cluster_seeds_are_reminted(repo, BACKEND, out_dir)
 
 
-def test_reembed_legs_follow_the_verdicts_and_always_cover_knowhow():
-    """PR3 handoff: a workload not kept needs its leg when there are rows of that
-    kind; a notebook with a Knowhow table always needs ``chunks``, ``kg_objects``
-    and ``kg_relations`` (the post-publish projection rebuilds its objects and
-    edges and creates the chunks of cells never projected, all without vectors
-    when they cannot be kept), even when every vector was kept."""
-    from pathlib import Path as _Path
+def test_reembed_legs_follow_the_rows_written_never_the_verdicts():
+    """Every leg whose rows the import wrote is named, whatever the vector
+    verdicts (an archive can lack vectors its source never computed while the
+    models match); a Knowhow table counts for chunks, objects and relations
+    (the post-publish projection creates them without vectors); nothing
+    written, nothing named."""
+    from app.services.notebook_transfer.import_ import reembed_legs
 
-    from app.services.notebook_copy_writer import NotebookCopyRun
-    from app.services.notebook_transfer.import_ import VectorVerdict, reembed_legs
-
-    def verdicts(*not_kept):
-        return {
-            w: VectorVerdict(kept=w not in not_kept, reason="x", archive=None, target=None)
-            for w in ("chunk_embedding", "source_element_embedding",
-                      "knowledge_object_embedding", "relation_embedding", "knowhow_embedding")
-        }
-
-    run = NotebookCopyRun("nb-old", "n", "u", "nb-new", "now", 10, _Path("/tmp/x"))
-    rows = {"chunks": 3, "source_elements": 2, "knowledge_objects": 2, "knowledge_relations": 1}
-    assert reembed_legs(verdicts(), run, rows) == ()
-    assert reembed_legs(verdicts(), run, {**rows, "knowhow_tables": 1}) == (
+    assert reembed_legs({}) == ()
+    assert reembed_legs({"notebooks": 1, "sources": 2, "knowhow_columns": 0}) == ()
+    assert reembed_legs({"chunks": 3}) == ("chunks",)
+    assert reembed_legs({"source_elements": 2}) == ("elements",)
+    assert reembed_legs({"knowledge_objects": 2}) == ("kg_objects",)
+    assert reembed_legs({"knowledge_relations": 1}) == ("kg_relations",)
+    assert reembed_legs({"chunks": 0, "knowhow_tables": 1}) == (
         "chunks", "kg_objects", "kg_relations")
-    assert reembed_legs(verdicts("chunk_embedding", "relation_embedding"), run, rows) == (
-        "chunks", "kg_relations")
-    assert reembed_legs(verdicts("source_element_embedding"), run, {"chunks": 1}) == ()
-    run.dropped["knowledge_embeddings.knowledge_object_embedding"] = 1
-    assert reembed_legs(verdicts(), run, rows) == ("kg_objects",)
-    run.dropped.clear()
-    run.knowhow_chunk_ids_old.update({"c1", "c2", "c3"})
-    assert reembed_legs(verdicts("knowhow_embedding"), run, rows) == ("chunks",)
-    assert reembed_legs(verdicts("chunk_embedding"), run, rows) == ()
+    rows = {"chunks": 3, "source_elements": 2, "knowledge_objects": 2, "knowledge_relations": 1}
+    assert reembed_legs(rows) == ("chunks", "elements", "kg_objects", "kg_relations")
 
 
 def test_seed_space_travels_sqlite_to_sqlite(repo, target, out_dir):
