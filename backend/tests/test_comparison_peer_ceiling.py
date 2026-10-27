@@ -38,7 +38,7 @@ from tests.model_testkit import bind_all_embedding_clients, bind_chat_client
 OPEN_SOURCE = "s-open"          # 天花板之内
 HIDDEN_SOURCE = "s-hidden"      # 天花板之外(隐藏投影的替身)
 
-FOCAL = "Focal Widget"          # 焦点实体,只由 s-open 支撑
+FOCAL = "Focal Widget"          # 焦点实体,s-open 与 s-hidden 各有一个成员(R4)
 MIXED = "Mixed Widget"          # 天花板内外共同支撑 → 必须保留
 HIDDEN = "Hidden Widget"        # 只由 s-hidden 支撑 → 必须裁掉
 
@@ -256,14 +256,37 @@ def test_absent_ceiling_is_byte_identical(repo, library, service):
 # 4. 空天花板 = 显式 deny,不是「不限」
 # --------------------------------------------------------------------------- #
 def test_empty_ceiling_denies_the_library(repo, library, service):
+    """空天花板是 deny:两路与 ``resolve_comparison_peers`` 都在入口处返回空,
+    一条语句、一个事件都不发。
+
+    焦点的成员改成晋升形状(``source_id=''``):按对象规则它们算天花板内成员,
+    R4 不会替来源闸把焦点挡下来——这一条要证明的是 deny 本身(与 SQL 来源闸
+    同一个 None / 空集之分)。**变异锚点**:把 ``_source_ceiling_kwargs`` 的
+    ``if ceiling is None:`` 改成 ``if not ceiling:`` → 空天花板被当成「无天花板」,
+    兄弟名原样出去,本条红。
+    """
+    with repo._write() as db:
+        db.execute(
+            "UPDATE knowledge_objects SET source_id='' WHERE notebook_id=? "
+            "AND json_extract(payload, '$.name')=?", (library.id, FOCAL))
     with source_scope_context(
         library.id, None, None,
         notebook_source_ceilings=_ceilings(library.id),
     ):
-        assert _sibling_names(service, library.id) == []
-        assert _community_peers(service, library.id) == []
-        assert service.resolve_comparison_peers(
-            library.id, FOCAL, "compare", top_k=8, candidates=16) == ([], "community")
+        with _traced(repo) as statements:
+            assert _sibling_names(service, library.id) == []
+            assert _community_peers(service, library.id) == []
+            assert service.resolve_comparison_peers(
+                library.id, FOCAL, "compare", top_k=8, candidates=16,
+            ) == ([], "community")
+    assert statements == []
+    assert service.event_log.events == []
+    # 同一个晋升形状的焦点在有可见来源的天花板下照常解析(R4 放行它)。
+    with source_scope_context(
+        library.id, None, None,
+        notebook_source_ceilings=_ceilings(library.id, OPEN_SOURCE),
+    ):
+        assert _sibling_names(service, library.id) == [MIXED]
 
 
 def test_nominal_active_is_judged_by_its_own_ceiling(repo, library, service):

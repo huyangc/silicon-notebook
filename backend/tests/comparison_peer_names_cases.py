@@ -166,6 +166,12 @@ class World:
             notebook_source_ceilings={self.nb: frozenset({self.open})},
         )
 
+    def deny(self):
+        """A ceiling frozen to zero sources: an explicit deny."""
+        return source_scope_context(
+            self.nb, None, None, notebook_source_ceilings={self.nb: frozenset()},
+        )
+
     @property
     def unified(self):
         return self.repo._runtime.unified_kg
@@ -343,6 +349,11 @@ def focal_reads(statements) -> list[str]:
     return [sql for sql, _params in statements if "lower(" in sql and "payload" in sql]
 
 
+def stored_name_resolutions(statements) -> list[str]:
+    """``resolve_focal`` statements (the stored-name match)."""
+    return [sql for sql, _params in statements if "lower(canonical_name)" in sql]
+
+
 def comention_row_limits(statements) -> list[Any]:
     """The ``LIMIT`` bound to each co-mention row read (its last parameter)."""
     return [params[-1] for sql, params in statements
@@ -453,6 +464,27 @@ def comention_top_k_counts_named_peers(world: World, monkeypatch) -> None:
     with recorded_statements(world) as bare:
         assert world.service.sibling_peers(world.nb, FOCAL, top_k=1) == [(GHOST, 10)]
     assert comention_row_limits(bare) == [1]
+
+
+def deny_ceiling_is_silent(world: World, monkeypatch) -> None:
+    """A ceiling frozen to zero sources denies the library: both paths and
+    ``resolve_comparison_peers`` answer empty at their entry -- not one
+    statement, not one event -- even for a focal R4 would let through (its
+    member promoted, ``source_id=''``)."""
+    world.set_owner("f-focal", "")
+    try:
+        before = len(world.events)
+        with world.deny():
+            with recorded_statements(world) as statements:
+                assert _names(world, "comention") == []
+                assert _names(world, "community") == []
+                assert world.service.resolve_comparison_peers(
+                    world.nb, FOCAL, "compare", top_k=8, candidates=16,
+                ) == ([], "community")
+        assert statements == []
+        assert world.events[before:] == []
+    finally:
+        world.set_owner("f-focal", world.open)
 
 
 def hidden_spelling_never_names_a_peer(world: World, monkeypatch, path: str) -> None:
@@ -572,6 +604,23 @@ def empty_named_member_does_not_drop(world: World, monkeypatch, path: str) -> No
     finally:
         world.set_owner("q-a2", world.hidden)
         world.set_name("q-a2", QZX_HIDDEN)
+
+
+def focal_resolved_once_per_library(world: World, monkeypatch, path: str) -> None:
+    """``resolve_comparison_peers`` resolves the focal (stored-name match plus
+    R4's member read) once and hands it to both paths: when co-mention comes
+    back empty and the community path answers, it is not resolved again."""
+    if path == "community":
+        _drop_comentions(world)
+    with world.ceiling():
+        with recorded_statements(world) as statements:
+            names, source = world.service.resolve_comparison_peers(
+                world.nb, FOCAL, "compare", top_k=8, candidates=16)
+    assert source == path
+    assert names == (COMENTION_IN_CEILING if path == "comention"
+                     else COMMUNITY_IN_CEILING)
+    assert len(stored_name_resolutions(statements)) == 1, statements
+    assert len(focal_reads(statements)) == 1, statements
 
 
 def _focal_unresolved_events(world: World, focal: str) -> list[dict]:
@@ -746,6 +795,7 @@ SCENARIOS = (
     world_preconditions,
     store_member_read_shape,
     comention_top_k_counts_named_peers,
+    deny_ceiling_is_silent,
     ranking_reads_the_in_ceiling_name,
 )
 #: Each runs once per path: ``comention`` (the world as built) and
@@ -757,6 +807,7 @@ PATH_SCENARIOS = (
     one_batched_member_read,
     chunk_sub_queries_carry_no_hidden_spelling,
     reasoning_trace_carries_no_hidden_spelling,
+    focal_resolved_once_per_library,
     hidden_spelling_focal_is_unresolved,
     focal_carried_in_ceiling_resolves,
     promoted_member_names_its_cluster,

@@ -8,9 +8,10 @@
 编排/重排/事件,持久化读一律走注入的 CommunityQueryService.unified_kg)。
 
 收窄有两道,两道都在「名字被取出来」之前:库维度在 mounted_base_ids,来源维度
-(逐库冻结来源天花板)在 _source_ceiling_kwargs —— 后者由两个 peers 函数各自经
-_ceiling_kwargs 下推给 store,做成 SQL 谓词;同一个入口顺带发那条 source_index_
-fallback 事件(闸在 SQL 里、事件在服务层)。
+(逐库冻结来源天花板)在 _source_ceiling_kwargs —— 两个 peers 函数(以及
+resolve_comparison_peers,两路共用)在入口处各取一次,下推给 store 做成 SQL 谓词;
+天花板是空集(deny)时入口处直接返回空,一条语句、一个事件都不发(_denies)。
+_ceiling_kwargs 顺带发那条 source_index_fallback 事件(闸在 SQL 里、事件在服务层)。
 
 来源闸只回答「这个兄弟簇留不留」,不回答「它叫什么」:存储的 canonical_name 可能是
 天花板外成员(隐藏的 Knowhow 投影 / Memory)的写法,也可能是那个成员已被剪掉后留下
@@ -124,11 +125,22 @@ class CommunityQueryService:
     def community_peers(self, base_notebook_id: str, focal_name: str,
                         question: str, *, top_k: int,
                         candidates: int) -> List[str]:
-        from app.services.retrieval import keyword_score
-        key = _norm(focal_name)
-        if not base_notebook_id or not key:
+        if not base_notebook_id or not _norm(focal_name):
             return []
-        focal = self._ceiling_focal(base_notebook_id, focal_name)
+        ceiling = _source_ceiling_kwargs(base_notebook_id)
+        if _denies(ceiling):
+            return []
+        return self._community_peers_of(
+            base_notebook_id, self._ceiling_focal(base_notebook_id, focal_name, ceiling),
+            focal_name, question, ceiling, top_k=top_k, candidates=candidates,
+        )
+
+    def _community_peers_of(self, base_notebook_id: str, focal: Optional[str],
+                            focal_name: str, question: str, ceiling: dict, *,
+                            top_k: int, candidates: int) -> List[str]:
+        """社区路在焦点解析之后的部分(``focal`` 已过 R4;``ceiling`` 是入口处
+        取的那一份 ``_source_ceiling_kwargs``)。"""
+        from app.services.retrieval import keyword_score
         if not focal:
             self.event_log.emit({
                 "kind": "community_unavailable",
@@ -148,7 +160,7 @@ class CommunityQueryService:
                 "focal": focal_name,
             })
             return []
-        ceiling = self._ceiling_kwargs(base_notebook_id)
+        self._ceiling_kwargs(base_notebook_id, ceiling)
         rows = self.unified_kg.community_member_peers(
             base_notebook_id, community_id, focal, candidates,
             **_peer_read_kwargs(ceiling),
@@ -187,10 +199,22 @@ class CommunityQueryService:
     def sibling_peers(self, notebook_id: str, focal_name: str, *,
                       top_k: int = 8) -> List[Tuple[str, int]]:
         try:
-            focal = self._ceiling_focal(notebook_id, focal_name)
+            ceiling = _source_ceiling_kwargs(notebook_id)
+            if _denies(ceiling):
+                return []
+            focal = self._ceiling_focal(notebook_id, focal_name, ceiling)
+        except Exception:
+            return []
+        return self._sibling_peers_of(notebook_id, focal, ceiling, top_k=top_k)
+
+    def _sibling_peers_of(self, notebook_id: str, focal: Optional[str],
+                          ceiling: dict, *, top_k: int) -> List[Tuple[str, int]]:
+        """共提路在焦点解析之后的部分(``focal`` 已过 R4;``ceiling`` 是入口处
+        取的那一份 ``_source_ceiling_kwargs``)。任何异常 → [](静默 fail-open)。"""
+        try:
             if not focal:
                 return []
-            ceiling = self._ceiling_kwargs(notebook_id)
+            self._ceiling_kwargs(notebook_id, ceiling)
             peers = self.unified_kg.comention_peers(
                 notebook_id, focal, self.sibling_min_bridge,
                 # 天花板在绑时多要一倍,R3 丢掉的簇不白占名额;无天花板 → 照旧 top_k。
@@ -210,19 +234,22 @@ class CommunityQueryService:
         except Exception:
             return []
 
-    def _ceiling_focal(self, notebook_id: str, focal_name: str) -> Optional[str]:
-        """R4:焦点解析。存储名解析(``_resolve_focal``)之外,该库天花板在绑时,
-        解析出的焦点簇还必须有一个**天花板内成员**(同 R3,``_member_in_ceiling``)
-        的名字 ``lower(name)`` 等于焦点归一键;没有 → ``None``,调用方走与今天
-        解析不到时同一条路径(社区路发 ``community_unavailable/focal_unresolved``,
-        共提路返回 [])。存储名可能是天花板外成员的写法,不加这一道,猜中隐藏写法就
-        能解析出焦点并拿到兄弟。
+    def _ceiling_focal(self, notebook_id: str, focal_name: str,
+                       ceiling: dict) -> Optional[str]:
+        """R4:焦点解析。存储名解析(``_resolve_focal``)之外,该库天花板在绑时
+        (``ceiling`` 即入口处的 ``_source_ceiling_kwargs`` 非空——与 SQL 来源闸同一个
+        判据),解析出的焦点簇还必须有一个**天花板内成员**(同 R3,
+        ``_member_in_ceiling``)的名字 ``lower(name)`` 等于焦点归一键;没有 → ``None``,
+        调用方走与今天解析不到时同一条路径(社区路发
+        ``community_unavailable/focal_unresolved``,共提路返回 [])。存储名可能是天花板
+        外成员的写法,不加这一道,猜中隐藏写法就能解析出焦点并拿到兄弟。
 
         成本:天花板在绑且存储名解析成功时多一条语句(``focal_name_members``,只取
         该簇里名字等于焦点键的成员及其自己的 ``source_id``);天花板判定在这里对
-        冻结的天花板集合做,一整库的来源清单不进 SQL。无天花板 → 零额外语句。"""
+        冻结的天花板集合做,一整库的来源清单不进 SQL。无天花板 → 零额外语句。
+        ``resolve_comparison_peers`` 每库只解析一次,两路共用这一个答案。"""
         focal = _resolve_focal(self.unified_kg, notebook_id, focal_name)
-        if not focal or not _ceiling_binds(notebook_id):
+        if not focal or not ceiling:
             return focal
         allowed = _library_ceiling(notebook_id)
         members = self.unified_kg.focal_name_members(
@@ -231,8 +258,9 @@ class CommunityQueryService:
             return focal
         return None
 
-    def _ceiling_kwargs(self, notebook_id: str) -> dict:
-        """``_source_ceiling_kwargs`` 加一条可观测性:闸落在**未回填库**上时发事件。
+    def _ceiling_kwargs(self, notebook_id: str, ceiling: dict) -> dict:
+        """入口处取的 ``_source_ceiling_kwargs``(``ceiling``)加一条可观测性:闸落在
+        **未回填库**上时发事件;原样返回 ``ceiling``。
 
         为什么要这条信号:闸有两支(见 ``_object_support_exists``)。反向索引
         ``knowledge_object_sources`` 已回填的库走窄索引读;没回填的库退回扫
@@ -248,10 +276,9 @@ class CommunityQueryService:
         事件。run 缺席(直调 store 的测试/脚本)时退化为每次调用都问一次,这是
         可观测性的 fail-open 面,不改任何检索结果。
         """
-        kwargs = _source_ceiling_kwargs(notebook_id)
-        if kwargs:
+        if ceiling:
             self._note_source_index_fallback(notebook_id)
-        return kwargs
+        return ceiling
 
     def _note_source_index_fallback(self, notebook_id: str) -> None:
         from app.services.retrieval_run import memoized_retrieval_value
@@ -403,13 +430,27 @@ class CommunityQueryService:
     def resolve_comparison_peers(self, base_notebook_id: str, focal_name: str,
                                  question: str, *, top_k: int,
                                  candidates: int) -> Tuple[List[str], str]:
-        siblings = self.sibling_peers(
-            base_notebook_id, focal_name, top_k=top_k
+        """共提优先、社区回退;两路共用**一次**焦点解析(含 R4 的成员读)与入口处
+        取的那一份天花板 kwargs——回退社区路时不再重解析一遍。
+
+        与分别调 ``sibling_peers`` / ``community_peers`` 的结果、事件逐一相同:
+        焦点为空 → ([], "community"),不发事件;天花板是空集(deny)→ 同上,一条
+        语句都不发;焦点解析不到 → 共提路静默 [],社区路发一条
+        ``focal_unresolved``。焦点解析抛出的异常照旧往外传(过去由社区路那一次
+        解析抛出)。"""
+        if not base_notebook_id or not _norm(focal_name):
+            return [], "community"
+        ceiling = _source_ceiling_kwargs(base_notebook_id)
+        if _denies(ceiling):
+            return [], "community"
+        focal = self._ceiling_focal(base_notebook_id, focal_name, ceiling)
+        siblings = self._sibling_peers_of(
+            base_notebook_id, focal, ceiling, top_k=top_k
         )
         if siblings:
             return [name for name, _claims in siblings], "comention"
-        return self.community_peers(
-            base_notebook_id, focal_name, question,
+        return self._community_peers_of(
+            base_notebook_id, focal, focal_name, question, ceiling,
             top_k=top_k, candidates=candidates,
         ), "community"
 
@@ -461,14 +502,15 @@ def _peer_read_kwargs(ceiling: dict) -> dict:
     return {**ceiling, "with_canonical_id": True} if ceiling else {}
 
 
-def _ceiling_binds(notebook_id: str) -> bool:
-    """这一库这次 run 有没有冻结的来源天花板——与 ``_source_ceiling_kwargs`` 返回
-    非空 kwargs 是同一个判据(``source_ceiling_for(...) is not None``),只是不去
-    物化清单。R4 在焦点解析时(早于 ``_ceiling_kwargs``)用它。"""
-    from app.services.source_scope import current_source_scope
+def _denies(ceiling: dict) -> bool:
+    """``_source_ceiling_kwargs`` 的答案是不是「天花板在绑且为空集」(deny all)。
 
-    scope = current_source_scope()
-    return scope is not None and scope.source_ceiling_for(notebook_id) is not None
+    两个 peers 函数与 ``resolve_comparison_peers`` 在入口处据此直接返回空,一条
+    语句、一个事件都不发:该库一个名字都不出,焦点也就无从谈起(否则 R4 会先把
+    焦点判成未解析,白读三四条语句、多发一条 ``focal_unresolved``)。判据取自
+    ``_source_ceiling_kwargs`` 本身而不是另读一遍 scope:它与 SQL 来源闸是同一个
+    答案,闸那一侧的 None / 空集之分一旦被改坏,这里跟着失守,用例看得见。"""
+    return bool(ceiling) and not ceiling["allowed_source_ids"]
 
 
 def _library_ceiling(notebook_id: str) -> FrozenSet[str]:
