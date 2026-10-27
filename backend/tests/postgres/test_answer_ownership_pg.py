@@ -53,8 +53,6 @@ def test_user_owns_answer_is_conversation_author_and_notebook_reader(world):
     assert sharing.user_owns_answer(world.nocreator_answer, world.bob.id) is False
     assert sharing.user_owns_answer(MISSING, world.alice.id) is False
     assert sharing.user_owns_answer(world.alice_answer, "") is False
-    # answer_owner is still "the NOTEBOOK owner", never authorisation
-    assert sharing.answer_owner(world.bob_answer) == world.alice.id
 
 
 def test_removing_the_member_removes_the_answer_from_them(world):

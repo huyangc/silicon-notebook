@@ -1303,8 +1303,8 @@ class AskStateStore:
         same ``None`` from ONE statement, so a caller cannot tell them apart.
         ``owned_by`` is required on purpose: there is no variant that answers
         without the author check. It is the read behind
-        ``NotebookSharingService.user_owns_answer``; the notebook owner
-        (``SharingStore.answer_owner``) is NOT an answer owner.
+        ``NotebookSharingService.user_owns_answer``; the owner of the
+        answer's notebook is NOT an answer owner.
         """
         with self.database.connect() as db:
             row = db.execute(ANSWER_AUTHOR_PROBE_SQL, (answer_id,)).fetchone()

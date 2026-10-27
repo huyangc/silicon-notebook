@@ -13,7 +13,6 @@
         "all_visible_source_ids",
         "answer_memory_links",
         "answer_memory_source",
-        "answer_owner",
         "append_ask_trace",
         "append_knowhow_rows",
         "approve_promotion_as_reviewer",
@@ -220,7 +219,6 @@
         "source_id_by_hash",
         "source_metadata",
         "source_notebook_id",
-        "source_owner",
         "source_parse_busy",
         "sources_missing_paper_meta",
         "start_ask_stream",
@@ -281,7 +279,7 @@
     "allowed": []
   },
   "facade_protocol_binding_gaps": {},
-  "ports_protocol_method_count": 964,
+  "ports_protocol_method_count": 962,
   "function_length_ceiling": {
     "backend/app/extensions/ask.py::AskCompletedObserverHost.observe_application": 154,
     "backend/app/extensions/parser_chain.py::ParserProviderChainHost._run": 307,

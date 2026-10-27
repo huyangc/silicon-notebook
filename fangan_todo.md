@@ -325,12 +325,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       `docs/superpowers/plans/2026-10-22-notebook-export-import.md`）；将来实现导入时需一并携带：没有状态行的库读作
       种子空间 2，旧部署导出的空间 1 簇会被读歪（v102 / 0083 迁移注释记着同一风险）；板块分区列随板块一起——归档
       目前整个不含 `communities`，要么连同板块一起带，要么接受导入后的第一次重建冷启动重新划分。
-- [ ] **facade `answer_owner` / `source_owner` 去留待拍板**（来源：S2-E，2026-10-23）：两条链
-      （`RepositoryFacade` → `NotebookSharingService` → 两种 adapter 的 `SharingStore`，及
-      `NotebookAccessReadRepository` 的声明）按接收者普查生产零调用，测试只断言 `answer_owner` 的语义。
-      `SharingStore.answer_owner` 的 docstring 写「为冻结兼容面保留」，`ports.py` 注释写「别因为没人用顺手删它」，
-      但 `facade_surface.json` 已不含这两个名字。删则同时去掉协议声明与那一条断言；留则改写两处注释的理由。
-      在此之前两者在组件普查的允许清单里登记为 pending-decision。
 
 ### 整改计划刻意不做、只登记
 

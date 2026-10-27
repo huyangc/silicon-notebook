@@ -1226,9 +1226,6 @@ class RepositoryFacade:
     def user_can_read_notebook(self, notebook_id: str, user_id: str) -> bool:
         return self._runtime.sharing.user_can_read_notebook(notebook_id, user_id)
 
-    def source_owner(self, source_id: str) -> "str | None":
-        return self._runtime.sharing.source_owner(source_id)
-
     def source_notebook_id(
         self,
         source_id: str,
@@ -1239,9 +1236,6 @@ class RepositoryFacade:
         return self._runtime.sharing.source_notebook_id(
             source_id, viewer_id=viewer_id, visible_only=visible_only
         )
-
-    def answer_owner(self, answer_id: str) -> "str | None":
-        return self._runtime.sharing.answer_owner(answer_id)
 
     def delete_notebook_kg(self, notebook_id: str) -> dict:
         """Delete all KG artifacts for a notebook — KnowledgeLifecycleService

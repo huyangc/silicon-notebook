@@ -1109,35 +1109,11 @@ class SharingStore:
             for row in rows
         ]
 
-    def source_owner(self, source_id: str) -> str | None:
-        with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT n.created_by AS owner FROM sources s "
-                "JOIN notebooks n ON n.id=s.notebook_id WHERE s.id=%s",
-                (source_id,),
-            ).fetchone()
-        return row["owner"] if row else None
-
     def conversation_owner(self, conversation_id: str) -> str | None:
         with self.database.connect() as connection:
             row = connection.execute(
                 "SELECT created_by AS owner FROM conversations WHERE id=%s",
                 (conversation_id,),
-            ).fetchone()
-        return row["owner"] if row else None
-
-    def answer_owner(self, answer_id: str) -> str | None:
-        """The NOTEBOOK owner of the notebook this answer belongs to, not the
-        answer's author. Never use it to authorise anything about the answer:
-        that is ``NotebookSharingService.user_owns_answer`` (notebook read
-        access AND the conversation's creator). Kept under this name and
-        meaning for the frozen compatibility surface.
-        """
-        with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT n.created_by AS owner FROM answers a "
-                "JOIN notebooks n ON n.id=a.notebook_id WHERE a.id=%s",
-                (answer_id,),
             ).fetchone()
         return row["owner"] if row else None
 

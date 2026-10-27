@@ -685,17 +685,12 @@ class NotebookAccessReadRepository(Protocol):
 
     def user_can_access_notebook(self, notebook_id: str, user_id: str) -> bool: ...
     def user_can_read_notebook(self, notebook_id: str, user_id: str) -> bool: ...
-    # source_owner: P0-T2 之后已无生产/测试调用者(体内自查改走
-    # source_notebook_id + 能力判定),仅为冻结兼容面保留——它被
-    # facade_surface.json 与 ownership_manifest 登记,删除需要 rebaseline,
-    # 不值得为省一行签名去动冻结面。别因为"没人用"顺手删它。
-    def source_owner(self, source_id: str) -> str | None: ...
     # P0-T2: exposed so callers that must resolve a source's owning notebook
     # BEFORE applying a capability guard (source_routes.py's body-level owner
     # self-checks — a route whose notebook_id is not a URL path segment, so it
     # cannot use a static Depends(require_notebook_capability(...))) can reuse
     # the same predicate the capability factory uses, instead of hand-rolling
-    # `source_owner(source_id) == user.id`.
+    # an owner comparison (`<notebook owner of source> == user.id`).
     # `viewer_id` (E3-1): the Memory owner gate of the source/element read
     # endpoints — a Memory source not created by the viewer answers None, the
     # same as a missing id. `visible_only` (E3-1): the gate of the generic
@@ -710,7 +705,6 @@ class NotebookAccessReadRepository(Protocol):
         viewer_id: str | None = None,
         visible_only: bool = False,
     ) -> str | None: ...
-    def answer_owner(self, answer_id: str) -> str | None: ...
 
 
 class NotebookAccessRepository(NotebookAccessReadRepository, Protocol):

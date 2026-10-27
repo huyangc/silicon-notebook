@@ -63,8 +63,7 @@ def test_access_and_sharing_protocols_still_declare_the_facade_reads():
     hand out the full protocols, whose callers read through them -- so those
     must keep the reads by inheriting the split-off bases."""
     access_reads = {
-        "user_can_access_notebook", "user_can_read_notebook", "source_owner",
-        "source_notebook_id", "answer_owner",
+        "user_can_access_notebook", "user_can_read_notebook", "source_notebook_id",
     }
     share_reads = {"share_state", "notebook_copy_stats", "shared_preview", "shared_by_me"}
     assert ports.NotebookAccessReadRepository in ports.NotebookAccessRepository.__mro__
