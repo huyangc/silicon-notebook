@@ -220,6 +220,10 @@ class ImportReport:
     #: Knowhow tables whose post-publish projection failed (logged; the table
     #: has a manual rebuild).
     projection_failures: tuple[str, ...] = ()
+    #: The post-publish projection was interrupted (Ctrl-C): the notebook is
+    #: imported, the tables not projected are in ``projection_failures``, and
+    #: the caller should stop rather than run what follows.
+    interrupted: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         result = dataclasses.asdict(self)
@@ -862,10 +866,10 @@ class NotebookImportService:
         # Past publish nothing may compensate (the copy's rule): a projection
         # failure is logged and reported, the notebook stays.
         report(ImportProgress(stage="project"))
-        failures = self._project_knowhow(run, checked)
+        failures, interrupted = self._project_knowhow(run, checked)
         result = self._report(
             checked, run, store.written, notebook_id=new_id, name=name, dry_run=False,
-            files=trees.files_written, projection_failures=failures,
+            files=trees.files_written, projection_failures=failures, interrupted=interrupted,
         )
         report(ImportProgress(stage="done"))
         return result
@@ -946,18 +950,28 @@ class NotebookImportService:
         return rows
 
     # ----------------------------------------------------- after publish
-    def _project_knowhow(self, run: NotebookCopyRun, checked: _Preflight) -> tuple[str, ...]:
+    def _project_knowhow(
+        self, run: NotebookCopyRun, checked: _Preflight
+    ) -> tuple[tuple[str, ...], bool]:
         """Project every imported Knowhow table again, now and in order, so its
         structural graph is rebuilt before the re-embedding legs run (they
         must follow it: the projection rewrites the table's edges, and their
         vectors with them). When the archive's Knowhow vectors were kept the
         pass makes no model call (every chunk is already in place); otherwise
-        it embeds nothing (``embed=False``) and the ``chunks`` leg fills them."""
+        it embeds nothing (``embed=False``) and the ``chunks`` leg fills them.
+        Returns the tables that failed and whether the pass was interrupted: a
+        Ctrl-C here comes after publish, where nothing may compensate, so the
+        notebook stays, the tables not yet projected are reported failed (each
+        has a manual rebuild) and the receipt reaches the caller."""
         embed = checked.verdicts["knowhow_embedding"].kept
-        failures = []
-        for table_id in run.khtbl_map.values():
+        failures: list[str] = []
+        tables = list(run.khtbl_map.values())
+        for index, table_id in enumerate(tables):
             try:
                 self._project_table(table_id, embed)
+            except KeyboardInterrupt:
+                _log.warning("notebook import: %s 的 knowhow 投影被中断（笔记本已导入）", run.new_id)
+                return (*failures, *tables[index:]), True
             except Exception as exc:  # noqa: BLE001 -- the published notebook must survive it
                 # Ids and the exception class only: a traceback or message can
                 # carry cell content, database values or private paths.
@@ -967,7 +981,7 @@ class NotebookImportService:
                     run.new_id, table_id, type(exc).__name__,
                 )
                 failures.append(table_id)
-        return tuple(failures)
+        return tuple(failures), False
 
     # ------------------------------------------------------ compensation
     def _compensate(self, notebook_id: str, written: Mapping[str, int], trees: _ImportTrees) -> None:
@@ -1028,7 +1042,7 @@ class NotebookImportService:
     def _report(
         self, checked: _Preflight, run: NotebookCopyRun, written: Mapping[str, int], *,
         notebook_id: str, name: "str | None", dry_run: bool, files: int,
-        projection_failures: tuple[str, ...] = (),
+        projection_failures: tuple[str, ...] = (), interrupted: bool = False,
     ) -> ImportReport:
         return ImportReport(
             notebook_id=notebook_id,
@@ -1065,6 +1079,7 @@ class NotebookImportService:
             kg_notes=checked.kg_notes,
             knowhow_tables=tuple(run.khtbl_map.values()),
             projection_failures=projection_failures,
+            interrupted=interrupted,
         )
 
 

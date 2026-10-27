@@ -38,8 +38,14 @@ and stop at the first failure; the notebooks already imported stay. Exit
 status: 0 every file imported (re-embedding or the scale build may still
 report a problem; the import itself is done); 1 a file was refused or the
 import failed (nothing of that file remains); 2 a usage error, an unknown
-owner or a missing confirmation; 3 the schema refusal. ``--json`` prints
-``{"imported": [...], "failed": [...]}`` in every case.
+owner or a missing confirmation; 3 the schema refusal; 130 interrupted
+(Ctrl-C). An interruption after a notebook is published -- during its Knowhow
+projection or its re-embedding -- keeps that notebook and its receipt, marks
+the re-embedding ``interrupted`` with the commands that finish it, builds no
+scale index and imports no further file; one before publish leaves nothing of
+that file (the import compensates) and the receipts of the files before it are
+still printed. ``--json`` prints ``{"imported": [...], "failed": [...]}`` in
+every case.
 
 The format is ``app.domain.notebook_archive``; docs/operations.md has the
 runbook.
@@ -297,6 +303,12 @@ def _import(options) -> int:
                 current = str(path)
                 try:
                     entry = _import_one(repository, path, owner.id, options)
+                except KeyboardInterrupt:
+                    # Before publish: the service compensated; nothing of this
+                    # file remains. The files before it keep their receipts.
+                    error = "导入被中断（Ctrl-C），本文件未留下任何内容"
+                    failure, status = {"file": current, "error": error}, 130
+                    break
                 except NotebookImportError as exc:
                     failure, status = {"file": current, "error": str(exc)}, 1
                     break
@@ -310,11 +322,16 @@ def _import(options) -> int:
                     failure, status = {"file": current, "error": f"导入失败: {type(exc).__name__}"}, 1
                     break
                 imported.append(entry)
+                if entry["reembed"]["state"] == _INTERRUPTED:
+                    status = 130
+                    break
     except MaintenanceCliError as exc:
         failure, status = {"file": current, "error": str(exc)}, exc.exit_code
     except database_errors as exc:
         failure, status = {"file": current, "error": _describe(exc)}, 1
-    if not options.dry_run and options.rebuild_scale == "auto":
+    if status == 130:
+        _skip_scale_after_interruption(imported)
+    elif not options.dry_run and options.rebuild_scale == "auto":
         _rebuild_scale(settings, imported)
     return _finish_import(options, imported, failure, status)
 
@@ -329,7 +346,9 @@ def _import_one(repository, path: Path, owner_id: str, options) -> dict:
         progress=lambda event: _print_progress(path, event),
     )
     entry = {"file": str(path), "import": report.to_dict()}
-    if options.dry_run:
+    if report.interrupted:
+        entry["reembed"] = _interrupted_reembed(report)
+    elif options.dry_run:
         entry["reembed"] = {"state": "dry_run", "legs": list(report.reembed_legs)}
     elif not report.reembed_legs:
         entry["reembed"] = {"state": "not_needed", "legs": []}
@@ -351,6 +370,10 @@ def _reembed(repository, report) -> dict:
         status = NotebookReembedService(repository).run(
             report.notebook_id, legs=report.reembed_legs
         )
+    except KeyboardInterrupt:
+        # After publish: the notebook stays and its receipt must reach the
+        # operator (a retry would import it twice); the run stops here.
+        return _interrupted_reembed(report)
     except Exception as exc:  # noqa: BLE001 -- the import itself is done
         # The class name only (as the per-file loop; a database error as
         # ``_describe`` puts it): a model service's message -- an OSError's
@@ -366,6 +389,38 @@ def _reembed(repository, report) -> dict:
         "progress": {leg: dataclasses.asdict(p) for leg, p in status.progress.items()},
         "error": status.error,
     }
+
+
+#: The re-embedding state of a notebook whose post-publish work a Ctrl-C cut short.
+_INTERRUPTED = "interrupted"
+
+
+def _interrupted_reembed(report) -> dict:
+    """The re-embedding entry of an interrupted import, with the commands that
+    fill what is still missing (each fills only what has no vector)."""
+    notebook_id = report.notebook_id
+    return {
+        "state": _INTERRUPTED,
+        "legs": list(report.reembed_legs),
+        "resume": [
+            f"scripts/cli.sh batch embed --notebook-id {notebook_id}",
+            f"scripts/cli.sh kg backfill-relations {notebook_id}",
+        ],
+    }
+
+
+def _skip_scale_after_interruption(imported: list[dict]) -> None:
+    """No scale index is built after a Ctrl-C (for any notebook of the run)."""
+    for entry in imported:
+        notebook_id = entry["import"]["notebook_id"]
+        entry["scale"] = {
+            "outcome": "skipped:interrupted",
+            "note": (
+                "scale 索引: 导入被中断，本次未重建；向量补齐后再运行 "
+                f"scripts/build_scale_index.py build --notebook {notebook_id} --full"
+            ),
+            "warnings": [],
+        }
 
 
 #: Re-embedding outcomes after which a scale index may be built: an index built
@@ -414,12 +469,15 @@ def _finish_import(options, imported: list[dict], failure: "dict | None", status
     if failure is not None:
         where = f"{failure['file']}: " if failure["file"] else ""
         print(f"error: {where}{failure['error']}", file=sys.stderr)
+    elif status == 130:
+        print("error: 导入在笔记本发布后被中断（Ctrl-C）；已导入的笔记本保留，后续文件未导入",
+              file=sys.stderr)
     if options.json:
         print(json.dumps(
             {"imported": imported, "failed": [] if failure is None else [failure]},
             ensure_ascii=False, indent=2,
         ))
-    elif options.rebuild_scale == "auto" and not options.dry_run:
+    else:
         for entry in imported:
             scale = entry.get("scale") or {}
             if scale.get("note"):
@@ -457,6 +515,8 @@ def _print_import(entry: dict) -> None:
         print(f"  object types added: {', '.join(report['global_object_types']['added'])}")
     for table in report["projection_failures"]:
         print(f"  warning: knowhow table {table} projection failed", file=sys.stderr)
+    for command in entry["reembed"].get("resume", ()):
+        print(f"  re-embedding interrupted; finish it with: {command}")
 
 
 def main(argv: "list[str] | None" = None) -> int:

@@ -197,6 +197,12 @@ def test_unfinished_sources_fail_and_orphan_attachments_are_dropped_pg(sqlite, p
     cases.check_unfinished_sources_and_orphan_assets(sqlite, SQLITE, pg, out_dir)
 
 
+def test_cli_interruption_keeps_the_receipts_pg(pg, out_dir, capsys, monkeypatch):
+    cases.check_cli_interruption_keeps_receipts(
+        pg, POSTGRES, out_dir, capsys, monkeypatch, confirm=("--confirm-service-stopped",)
+    )
+
+
 def test_cli_reports_every_failure_pg(pg, out_dir, capsys, monkeypatch):
     cases.check_cli_reports_every_failure(
         pg, POSTGRES, out_dir, capsys, monkeypatch, confirm=("--confirm-service-stopped",)

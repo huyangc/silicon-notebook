@@ -1585,6 +1585,107 @@ def _check_cli_page_beat_failures(repo, good: Path, capsys, monkeypatch, *,
         assert_no_residue(repo, before)
 
 
+def check_cli_interruption_keeps_receipts(repo, backend: Backend, tmp: Path, capsys, monkeypatch,
+                                          *, confirm: tuple[str, ...]) -> None:
+    """A Ctrl-C while the second of two files re-embeds -- after it was
+    published -- keeps both receipts (``--json`` and the human report): the
+    second's re-embedding is ``interrupted`` with the commands that finish it,
+    no scale index is built for either, no further file is imported, and the
+    exit status is 130. A Ctrl-C before the second file publishes leaves
+    nothing of it (the import compensates) and the first receipt still prints."""
+    from app.migration.sync import scale_rebuild
+    from app.services.notebook_reembed import NotebookReembedService, ReembedStatus
+    from tests.cli_schema_guest_support import load_script
+
+    notebook_id = seed_world(repo, backend, "full")
+    first = tmp / "cli-first.snbk"
+    export(repo, notebook_id, first)
+    second = tmp / "cli-second.snbk"
+    second.write_bytes(first.read_bytes())
+    third = tmp / "cli-third.snbk"
+    third.write_bytes(first.read_bytes())
+    ensure_importer(repo)
+    built: list = []
+
+    def recording_rebuild(settings, ids):
+        built.append(list(ids))
+        return scale_rebuild.aborted_result(ids, RuntimeError("not built in this test"))
+
+    def run_then_interrupt(self, notebook_id, *, legs):
+        # The first file's re-embedding succeeds (so a scale build would be due
+        # for it); the second is interrupted.
+        calls.append(notebook_id)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return ReembedStatus(run_id="r", notebook_id=notebook_id, state="succeeded",
+                             legs=tuple(legs), progress={}, passes=1, error="")
+
+    def ids_in_database() -> set[str]:
+        with repo._runtime.database.connect() as db:
+            return {r["id"] for r in db.execute("SELECT id FROM notebooks").fetchall()}
+
+    argv = ["import", str(first), str(second), str(third), "--owner", IMPORTER, *confirm]
+    for human in (False, True):
+        calls: list[str] = []
+        with monkeypatch.context() as patched:
+            patched.setattr(NotebookReembedService, "run", run_then_interrupt)
+            patched.setattr(scale_rebuild, "rebuild_after_import", recording_rebuild)
+            if human:
+                from app.core.config import get_settings
+
+                get_settings.cache_clear()
+                status = load_script("notebook_archive").main(argv)
+                get_settings.cache_clear()
+                out = capsys.readouterr()
+            else:
+                status, payload = _cli([*argv, "--json"], capsys)
+        assert status == 130 and len(calls) == 2 and built == []
+        if human:
+            for path in (first, second):
+                assert f"[import] {path} -> nb-" in out.out, out.out
+            assert f"[import] {third}" not in out.out
+            assert "re-embedding interrupted; finish it with: scripts/cli.sh batch embed" in out.out
+            assert "导入在笔记本发布后被中断" in out.err
+            continue
+        assert payload["failed"] == []
+        assert [entry["file"] for entry in payload["imported"]] == [str(first), str(second)]
+        done, cut = payload["imported"]
+        assert done["reembed"]["state"] != "interrupted"
+        assert cut["reembed"]["state"] == "interrupted" and cut["reembed"]["legs"]
+        assert cut["reembed"]["resume"] == [
+            f"scripts/cli.sh batch embed --notebook-id {cut['import']['notebook_id']}",
+            f"scripts/cli.sh kg backfill-relations {cut['import']['notebook_id']}",
+        ]
+        assert {entry["scale"]["outcome"] for entry in payload["imported"]} == {
+            "skipped:interrupted"
+        }
+        assert {e["import"]["notebook_id"] for e in payload["imported"]} <= ids_in_database()
+
+    # Before publish: nothing of the interrupted file remains.
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patched:
+        patched.setattr(type(repo._runtime.sharing_store), "validate_import", interrupt)
+        before = residue(repo)
+        status, payload = _cli(["import", str(first), "--owner", IMPORTER, "--reembed", "skip",
+                                *confirm, "--json"], capsys)
+    assert status == 130 and payload["imported"] == []
+    assert payload["failed"] == [
+        {"file": str(first), "error": "导入被中断（Ctrl-C），本文件未留下任何内容"}
+    ]
+    assert_no_residue(repo, before)
+
+    # During the post-publish projection: the notebook stays, published, and the
+    # report says so -- every table not yet projected listed as a failure.
+    with monkeypatch.context() as patched:
+        patched.setattr(service(repo), "_project_table", interrupt)
+        report = run_import(repo, first)
+    assert report.interrupted and report.knowhow_tables
+    assert set(report.projection_failures) == set(report.knowhow_tables)
+    assert repo.get_notebook(report.notebook_id) is not None
+
+
 def _check_cli_reembed_failure_names_the_class_only(repo, good: Path, capsys, monkeypatch, *,
                                                     confirm: tuple[str, ...]) -> None:
     """A re-embedding run that raises reports the exception's class only: a
