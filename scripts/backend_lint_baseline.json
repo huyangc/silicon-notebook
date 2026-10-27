@@ -837,9 +837,6 @@
   "backend/app/services/kg/search.py": {
     "I001": 1
   },
-  "backend/app/services/kg/source_partition_index.py": {
-    "I001": 1
-  },
   "backend/app/services/kg/viz_index.py": {
     "I001": 1
   },

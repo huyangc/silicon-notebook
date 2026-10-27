@@ -25,6 +25,10 @@ import scipy.sparse as sp
 
 from app.repositories.filesystem import scale_artifact_store as store_module
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
+from app.services.kg import scale_index as scale_index_module
+from app.services.kg import source_partition_index as partition_index_module
+from app.services.kg import viz_index as viz_index_module
+from app.services.kg.scale_artifact_codec import KG_SCALE_ARTIFACT_CODEC
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "repository_v9" / "storage"
 
@@ -38,7 +42,9 @@ class _StorageSettings:
 
 @pytest.fixture
 def store(tmp_path):
-    return ScaleArtifactStore(_StorageSettings(str(tmp_path / "storage")))
+    return ScaleArtifactStore(
+        _StorageSettings(str(tmp_path / "storage")), codec=KG_SCALE_ARTIFACT_CODEC
+    )
 
 
 def _copy_fixture(store, kind: str, notebook_id: str) -> Path:
@@ -200,7 +206,7 @@ def test_save_viz_stages_and_swaps_instead_of_writing_the_live_root(store):
     assert store.load_viz("nb-viz").manifest["version"] == ["first", 2]
 
     seen: list[str] = []
-    real_save = store_module.viz_index_module.save_viz_index
+    real_save = viz_index_module.save_viz_index
 
     def spy(out_dir, **kwargs):
         seen.append(out_dir)
@@ -210,11 +216,11 @@ def test_save_viz_stages_and_swaps_instead_of_writing_the_live_root(store):
         )["version"] == ["first", 2]
         return real_save(out_dir, **kwargs)
 
-    store_module.viz_index_module.save_viz_index = spy
+    viz_index_module.save_viz_index = spy
     try:
         store.save_viz("nb-viz", _viz_payload("second"), claim_token="tok-1")
     finally:
-        store_module.viz_index_module.save_viz_index = real_save
+        viz_index_module.save_viz_index = real_save
 
     assert seen == [f"{live}.tmp-tok-1"], "the write must land in staging"
     assert store.load_viz("nb-viz").manifest["version"] == ["second", 2]
@@ -444,7 +450,7 @@ def test_a_companion_from_another_build_is_refused_at_the_root(store):
     ``validate_partition_root`` and this goes green — the reader admits a
     companion published beside a different main index.
     """
-    from app.services.kg.source_partition_index import SourcePartitionUnavailable
+    from app.domain.kg.source_partition import SourcePartitionUnavailable
 
     _pair(store, "nb-mixed", main_build_id="a" * 32, companion_build_id="b" * 32)
 
@@ -551,7 +557,7 @@ def test_save_full_failure_leaves_previous_artifact_byte_identical(
         raise RuntimeError("injected save failure")
 
     monkeypatch.setattr(
-        store_module.scale_index_module, "save_scale_index", half_write_then_fail)
+        scale_index_module, "save_scale_index", half_write_then_fail)
     # A literal claim_token, standing in for "this operator's retry keeps the
     # same claim" (P1, codex PR#643 R1) — the property this test demonstrates
     # is per-token, not "any subsequent save clears any prior leftover".
@@ -760,3 +766,100 @@ def test_chunk_ann_source_sidecar_rejects_bad_dtype_or_shape(
     np.save(live / filename, bad_value)
 
     assert store.load_scale("nb-malformed") is None
+
+
+_CODEC_FORWARDS = (
+    (scale_index_module, "load_scale_index", ("dir",), {}),
+    (scale_index_module, "save_scale_index", ("dir",), {"node_ids": ["a"]}),
+    (viz_index_module, "load_viz_index", ("dir",), {}),
+    (viz_index_module, "save_viz_index", ("dir",), {"viz_ids": ["a"]}),
+    (partition_index_module, "build_source_partition", ({"r": 1},),
+     {"source_id": "s", "parent_version": 1, "parent_build_id": None,
+      "max_memberships": 9}),
+    (partition_index_module, "save_source_partition", (Path("d"), "partition"), {}),
+    (partition_index_module, "inspect_source_partition_manifest", (Path("r"),),
+     {"source_id": "s", "expected_parent_version": 1,
+      "expected_source_signature": "sig", "expected_parent_build_id": None}),
+    (partition_index_module, "load_source_partition", (Path("r"),),
+     {"source_id": "s", "expected_parent_version": 1,
+      "expected_source_signature": "sig", "expected_parent_build_id": None}),
+    (partition_index_module, "validate_partition_root", (Path("r"), 1, "b" * 32), {}),
+)
+
+
+@pytest.mark.parametrize(
+    ("module", "name", "args", "kwargs"),
+    _CODEC_FORWARDS,
+    ids=[name for _module, name, _args, _kwargs in _CODEC_FORWARDS],
+)
+def test_injected_codec_resolves_module_functions_at_call_time(
+    monkeypatch, module, name, args, kwargs
+):
+    """The store reaches the ``services.kg`` encodings only through the
+    injected codec, and the codec must look each function up on its module AT
+    CALL TIME with the arguments unchanged — that is what keeps every
+    module-level spy (the disk-cache suites' ``load_scale_index`` counter, the
+    partition-read recorders) binding now that the store no longer imports
+    those modules itself.
+
+    Mutation anchor: bind any of the functions once at import time in
+    ``scale_artifact_codec`` (``from ... import load_scale_index``) and the
+    matching case goes red — the patched module attribute is never called.
+    """
+    seen = []
+
+    def spy(*call_args, **call_kwargs):
+        seen.append((call_args, call_kwargs))
+        return "sentinel"
+
+    monkeypatch.setattr(module, name, spy)
+
+    assert getattr(KG_SCALE_ARTIFACT_CODEC, name)(*args, **kwargs) == "sentinel"
+    assert seen == [(args, kwargs)]
+
+
+def test_store_routes_every_codec_call_through_the_injected_codec(tmp_path):
+    """A store composed with a different codec never falls back to the KG
+    modules: what the composer passes is what reads and writes the bytes,
+    while layout and the staging + swap publish stay the store's own."""
+
+    class _RecordingCodec:
+        def __init__(self):
+            self.calls = []
+
+        def load_scale_index(self, directory):
+            self.calls.append(("load_scale_index", directory))
+            return "scale"
+
+        def load_viz_index(self, directory):
+            self.calls.append(("load_viz_index", directory))
+            return "viz"
+
+        def save_scale_index(self, directory, **artifacts):
+            self.calls.append(("save_scale_index", directory))
+            Path(directory).mkdir(parents=True, exist_ok=True)
+            (Path(directory) / "manifest.json").write_text("{}")
+            return {"saved": "scale"}
+
+        def save_viz_index(self, directory, **artifacts):
+            self.calls.append(("save_viz_index", directory))
+            Path(directory).mkdir(parents=True, exist_ok=True)
+            (Path(directory) / "manifest.json").write_text("{}")
+            return {"saved": "viz"}
+
+    codec = _RecordingCodec()
+    store = ScaleArtifactStore(_StorageSettings(str(tmp_path / "storage")), codec=codec)
+
+    assert store.load_scale("nb") == "scale"
+    assert store.load_viz("nb") == "viz"
+    assert store.save_full("nb", {}, claim_token="t1") == {"saved": "scale"}
+    assert store.save_viz("nb", {}, claim_token="t2") == {"saved": "viz"}
+    assert codec.calls == [
+        ("load_scale_index", str(store.scale_dir("nb"))),
+        ("load_viz_index", str(store.viz_dir("nb"))),
+        ("save_scale_index", f"{store.scale_dir('nb')}.tmp-t1"),
+        ("save_viz_index", f"{store.viz_dir('nb')}.tmp-t2"),
+    ]
+    # Published through the store's own swap, not left in staging.
+    assert (Path(store.scale_dir("nb")) / "manifest.json").exists()
+    assert (Path(store.viz_dir("nb")) / "manifest.json").exists()

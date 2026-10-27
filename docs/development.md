@@ -34,9 +34,13 @@ contributor constraints, not a second implementation history.
   values live in `backend/app/domain`; repository ports cannot import services, and the
   static dependency graph stays acyclic. The backend factory and both backend wrappers
   live in `backend/app/services` (`repository_factory.py`, `sqlite_repository.py`,
-  `postgres_repository.py`): services may import repositories, never the reverse, and the
-  remaining repositories→services edges (the filesystem scale artifact store's
-  `services.kg` imports) are debt pinned by `repository_service_import_ceiling`.
+  `postgres_repository.py`): services may import repositories, never the reverse —
+  `repository_service_import_ceiling` is 0 for every backend and also counts literal
+  `import_module`/`__import__` spellings. A repository that needs a service capability
+  declares a protocol and the composer injects it: the filesystem `ScaleArtifactStore`
+  owns layout, manifest probes and the staging swap, and takes the KG file-format codec
+  (`app.services.kg.scale_artifact_codec.KG_SCALE_ARTIFACT_CODEC`) as a required
+  constructor argument.
   Domain routers own endpoint bodies;
   `app/api/routes.py` only composes them. Compatibility facades re-export existing objects
   rather than creating a second implementation.

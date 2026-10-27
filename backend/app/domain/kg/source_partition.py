@@ -1,28 +1,46 @@
-"""Source-partition companion format version and the main↔companion
-generation binding, sunk from app.services.kg.source_partition_index in B3.
+"""Source-partition companion format version, the companion directory key,
+its capability-failure type and the main↔companion generation binding, sunk
+from app.services.kg.source_partition_index.
 
-``SOURCE_PARTITION_FORMAT_VERSION`` moved here first — the one name
+``SOURCE_PARTITION_FORMAT_VERSION`` moved here first (B3) — the one name
 app.repositories (maintenance, both backends) imports directly to compare
 against the persisted manifest's ``format_version`` before trusting a
 companion CSR partition. The actual partition build/save/load I/O stays in
-app.services.kg.source_partition_index (disk-heavy, explicitly out of scope
-for that move — see filesystem/scale_artifact_store.py, which keeps
-importing the I/O functions from the services module unchanged).
-``app.services.kg.source_partition_index`` re-exports both names unchanged
-for existing importers.
+app.services.kg.source_partition_index; filesystem/scale_artifact_store.py
+reaches it only through the codec its composer injects
+(``app.services.kg.scale_artifact_codec``), never by importing services.
 
 ``new_build_id`` / ``build_generation_mismatch`` join it for the same reason
 (P1, codex PR#643 R26): the per-build generation identity is compared against
 persisted manifests by the artifact store, by both maintenance backends' cheap
 status probe, by the offline CLI and by the partition reader, and a domain
 module is the one layer all of them may import.
+
+``SourcePartitionUnavailable`` and ``source_partition_key`` follow for the
+same reason: the artifact store raises/catches the former and lays out each
+companion directory with the latter, and so do the services-side reader and
+the selected-source PPR lane — one definition, importable from every layer.
 """
 from __future__ import annotations
 
+import hashlib
 import secrets
 from typing import Any
 
 SOURCE_PARTITION_FORMAT_VERSION = 2
+
+
+class SourcePartitionUnavailable(RuntimeError):
+    """A capability failure, never permission to use the whole graph."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def source_partition_key(source_id: str) -> str:
+    """The companion directory name of one source (SHA-256 of its id)."""
+    return hashlib.sha256(source_id.encode("utf-8")).hexdigest()
 
 
 def new_build_id() -> str:

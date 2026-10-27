@@ -66,6 +66,7 @@ from app.services.model_status import ModelStatusService
 from app.services.memory_service import MemoryService
 from app.services.memory_retrieval import MemoryRetriever
 from app.services.kg import scheduler as kg_scheduler
+from app.services.kg.scale_artifact_codec import KG_SCALE_ARTIFACT_CODEC
 from app.services.collection_catalog import CollectionCatalogService
 from app.services.collection_enumeration import CollectionEnumerationService
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
@@ -791,7 +792,7 @@ def _build_source_graph_domain(
     primitives = SourceGraphPrimitives()
     enrichment = BaselineProtectedEnrichmentService()
     online_ppr = SourceSubgraphPprService(settings=settings)
-    artifact_store = ScaleArtifactStore(settings)
+    artifact_store = ScaleArtifactStore(settings, codec=KG_SCALE_ARTIFACT_CODEC)
     partitioned_ppr = SourcePartitionedPprService(
         settings=settings,
         artifacts=artifact_store,

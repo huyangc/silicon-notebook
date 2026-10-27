@@ -5,12 +5,16 @@ Owns the on-disk layout ({storage_dir}/kg_index/{nb} and
 version probe), the ScaleIndex/VizIndex load/save delegation and the
 temporary/old/live swap sequence — all WITHOUT format changes.
 
-Load/save delegate to the pure ``kg.scale_index`` / ``kg.viz_index`` modules
-through their module attributes at call time, so frozen module-level
-monkeypatches (the disk-cache suites' ``load_scale_index`` spies) keep
-binding, and artifacts written by earlier deploys keep loading (older-index-
-stays-valid manifests: has_viz / has_chunk_ann / has_relation_ann absent →
-skipped). Path construction keeps the frozen raw ``settings.storage_dir``
+Load/save delegate to the injected ``ScaleArtifactCodec`` (the array
+encodings live beside the KG algorithms in ``app.services.kg``, which a
+repository must not import; the composer passes
+``app.services.kg.scale_artifact_codec.KG_SCALE_ARTIFACT_CODEC``). That codec
+resolves the ``kg.scale_index`` / ``kg.viz_index`` / ``kg.source_partition_index``
+functions through their module attributes at call time, so frozen
+module-level monkeypatches (the disk-cache suites' ``load_scale_index`` spies)
+keep binding, and artifacts written by earlier deploys keep loading
+(older-index-stays-valid manifests: has_viz / has_chunk_ann /
+has_relation_ann absent → skipped). Path construction keeps the frozen raw ``settings.storage_dir``
 semantics (never resolve_path — byte-identical directories).
 
 Locking stays with the caller: ``swap_fold_directory`` only performs the
@@ -34,13 +38,54 @@ import shutil
 import signal
 import threading
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Protocol
 
+from app.domain.kg.source_partition import (
+    SOURCE_PARTITION_FORMAT_VERSION,
+    SourcePartitionUnavailable,
+    source_partition_key,
+)
 from app.repositories.scale_build_lock import ScaleBuildLockLost
-from app.services.kg import scale_index as scale_index_module
-from app.services.kg import viz_index as viz_index_module
 
 ScaleBuildArtifacts = Mapping[str, object]
+
+
+class ScaleArtifactCodec(Protocol):
+    """The artifact file format the store persists, injected by its composer.
+
+    The store owns WHERE artifacts live and HOW they are published (layout,
+    manifest probes, staging + atomic swap); the codec owns WHAT the bytes
+    are. The encodings sit beside the KG algorithms in ``app.services.kg``,
+    which this layer must not import, so the one production implementation
+    (``app.services.kg.scale_artifact_codec.KG_SCALE_ARTIFACT_CODEC``) is
+    passed in rather than imported. The signatures are those of the
+    ``services.kg`` functions the codec forwards to.
+    """
+
+    def load_scale_index(self, directory: str) -> Any: ...
+
+    def save_scale_index(self, directory: str, **artifacts: Any) -> dict: ...
+
+    def load_viz_index(self, directory: str) -> Any: ...
+
+    def save_viz_index(self, directory: str, **artifacts: Any) -> dict: ...
+
+    def build_source_partition(self, raw: Mapping[str, Any], **identity: Any) -> Any: ...
+
+    def save_source_partition(self, directory: Path, partition: Any) -> None: ...
+
+    def inspect_source_partition_manifest(
+        self, root: Path, **expected: Any
+    ) -> tuple[Path, dict]: ...
+
+    def load_source_partition(self, root: Path, **expected: Any) -> Any: ...
+
+    def validate_partition_root(
+        self,
+        root: Path,
+        expected_parent_version: Any,
+        expected_parent_build_id: Any = None,
+    ) -> None: ...
 
 
 class _ManifestAbsent:
@@ -212,8 +257,9 @@ def _published_children(root: Path) -> list[str]:
 
 
 class ScaleArtifactStore:
-    def __init__(self, settings) -> None:
+    def __init__(self, settings, *, codec: ScaleArtifactCodec) -> None:
         self.settings = settings
+        self.codec = codec
 
     # ─────────────────────────────────────────────────────────── layout ──
     def scale_dir(self, notebook_id: str) -> Path:
@@ -373,10 +419,10 @@ class ScaleArtifactStore:
 
     # ──────────────────────────────────────────────────────── load/save ──
     def load_scale(self, notebook_id: str):
-        return scale_index_module.load_scale_index(str(self.scale_dir(notebook_id)))
+        return self.codec.load_scale_index(str(self.scale_dir(notebook_id)))
 
     def load_viz(self, notebook_id: str):
-        return viz_index_module.load_viz_index(str(self.viz_dir(notebook_id)))
+        return self.codec.load_viz_index(str(self.viz_dir(notebook_id)))
 
     def save_viz(
         self,
@@ -409,7 +455,7 @@ class ScaleArtifactStore:
         """
         live = self.viz_dir(notebook_id)
         temporary = self.prepare_staging_directory(live, claim_token)
-        manifest = viz_index_module.save_viz_index(str(temporary), **artifacts)
+        manifest = self.codec.save_viz_index(str(temporary), **artifacts)
         self.swap_staging_directory(live, temporary, verify_held=verify_held)
         return manifest
 
@@ -440,7 +486,7 @@ class ScaleArtifactStore:
         atomicity is not an option.
         """
         temporary = self.prepare_fold_directory(notebook_id, claim_token)
-        manifest = scale_index_module.save_scale_index(str(temporary), **artifacts)
+        manifest = self.codec.save_scale_index(str(temporary), **artifacts)
         # The claim is re-verified here rather than at build entry: the staging
         # above is the hours-long part, and a claim proven fresh before it says
         # nothing about who owns the directory now.
@@ -472,21 +518,13 @@ class ScaleArtifactStore:
         store user) writes ``None`` and the pair falls back to matching on
         ``parent_version`` alone.
         """
-        from app.services.kg.source_partition_index import (
-            SOURCE_PARTITION_FORMAT_VERSION,
-            SourcePartitionUnavailable,
-            build_source_partition,
-            save_source_partition,
-            source_partition_key,
-        )
-
         live = self.source_partition_dir(notebook_id)
         temporary = self.prepare_staging_directory(live, claim_token)
         published = 0
         unavailable = 0
         for source_id in source_ids:
             try:
-                partition = build_source_partition(
+                partition = self.codec.build_source_partition(
                     load_rows(source_id),
                     source_id=source_id,
                     parent_version=parent_version,
@@ -496,7 +534,7 @@ class ScaleArtifactStore:
             except SourcePartitionUnavailable:
                 unavailable += 1
                 continue
-            save_source_partition(
+            self.codec.save_source_partition(
                 temporary / source_partition_key(source_id), partition
             )
             published += 1
@@ -533,13 +571,6 @@ class ScaleArtifactStore:
         max_nnz=None,
     ) -> list:
         """Preflight selected headers, then open only their payloads."""
-        from app.services.kg.source_partition_index import (
-            SourcePartitionUnavailable,
-            inspect_source_partition_manifest,
-            load_source_partition,
-            validate_partition_root,
-        )
-
         root = self.source_partition_dir(notebook_id)
         # The generation this companion must pair with, read ONCE per cold
         # load and threaded through every header/payload gate below (P1,
@@ -551,7 +582,7 @@ class ScaleArtifactStore:
         # of every selected partition payload, so it is noise against the
         # work it gates; the warm-cache path never reaches here at all.
         expected_parent_build_id = self.scale_build_id(notebook_id)
-        validate_partition_root(
+        self.codec.validate_partition_root(
             root, expected_parent_version, expected_parent_build_id
         )
         max_nodes = max_nodes or (
@@ -565,7 +596,7 @@ class ScaleArtifactStore:
             + int(self.settings.source_subgraph_max_cluster_memberships)
         )
         headers = [
-            inspect_source_partition_manifest(
+            self.codec.inspect_source_partition_manifest(
                 root,
                 source_id=source_id,
                 expected_parent_version=expected_parent_version,
@@ -586,7 +617,7 @@ class ScaleArtifactStore:
         ):
             raise SourcePartitionUnavailable("source_partition_union_limit_exceeded")
         return [
-            load_source_partition(
+            self.codec.load_source_partition(
                 root,
                 source_id=source_id,
                 expected_parent_version=expected_parent_version,

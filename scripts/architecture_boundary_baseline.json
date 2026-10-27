@@ -271,7 +271,7 @@
     }
   },
   "repository_service_import_ceiling": {
-    "other": 4,
+    "other": 0,
     "postgres": 0,
     "sqlite": 0
   },

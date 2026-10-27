@@ -29,9 +29,12 @@
   不导入另一 adapter。稳定跨层值放在 `backend/app/domain`，repository ports 不依赖
   services，静态依赖图无环。backend factory 与两个后端 wrapper 都在
   `backend/app/services`（`repository_factory.py`、`sqlite_repository.py`、
-  `postgres_repository.py`）：services 可以依赖 repositories，反过来不行；剩下的
-  repositories→services 边（filesystem scale artifact store 对 `services.kg` 的 import）
-  是由 `repository_service_import_ceiling` 钉住的债务。领域 router 拥有端点实现，`app/api/routes.py` 只做组合；
+  `postgres_repository.py`）：services 可以依赖 repositories，反过来不行——
+  `repository_service_import_ceiling` 对所有后端都是 0，字面量的
+  `import_module`/`__import__` 写法也计入。repository 需要 service 能力时，自己声明
+  protocol、由组合方注入：filesystem `ScaleArtifactStore` 负责目录布局、manifest 探针与
+  staging 换位，KG 文件格式编解码器（`app.services.kg.scale_artifact_codec.KG_SCALE_ARTIFACT_CODEC`）
+  作为必填构造参数传入。领域 router 拥有端点实现，`app/api/routes.py` 只做组合；
   兼容 facade 重导出原对象，不新增第二套实现。
 - extension SDK 保持依赖轻量。只有 `app.bootstrap` 连接 adapter 与
   `backend/app/extensions`；workflow 消费领域 host port，plugin 不导入具体 repository、

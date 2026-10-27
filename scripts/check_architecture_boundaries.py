@@ -297,13 +297,43 @@ def boundary_violations(app_root: Path) -> list[str]:
     return violations
 
 
+def _dynamic_import_target(node: ast.AST) -> str | None:
+    """The literal module name of ``import_module("x")`` / ``__import__("x")``.
+
+    ``importlib.import_module``, a bare ``import_module`` and ``__import__``
+    all count; a non-literal first argument is not resolvable statically and
+    is left to review.
+    """
+    if not isinstance(node, ast.Call) or not node.args:
+        return None
+    func = node.func
+    name = (
+        func.attr
+        if isinstance(func, ast.Attribute)
+        else func.id
+        if isinstance(func, ast.Name)
+        else None
+    )
+    if name not in {"import_module", "__import__"}:
+        return None
+    first = node.args[0]
+    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+        return first.value
+    return None
+
+
 def repository_service_import_counts(app_root: Path) -> dict[str, int]:
     """Count existing adapter-to-service import statements by backend.
 
     This is an intentional debt ceiling rather than a desired dependency: the
     count may fall as ports are extracted, but any new reverse edge is rejected.
     Counting statements (not imported symbols) keeps the baseline stable under
-    harmless changes to a multi-symbol import.
+    harmless changes to a multi-symbol import. A literal dynamic import
+    (``importlib.import_module("app.services...")`` / ``__import__``) counts
+    as one statement too, so the edge cannot be hidden from the ceiling by
+    spelling it at run time. Every ceiling is 0 since the filesystem scale
+    artifact store took its codec by injection: a repository needs a service
+    capability → declare a protocol and let the composer pass it in.
     """
 
     counts = {"sqlite": 0, "postgres": 0, "other": 0}
@@ -324,7 +354,10 @@ def repository_service_import_counts(app_root: Path) -> dict[str, int]:
             elif isinstance(node, ast.ImportFrom):
                 targets = import_from_targets(module, path, node)
             else:
-                continue
+                dynamic = _dynamic_import_target(node)
+                if dynamic is None:
+                    continue
+                targets = {dynamic}
             if any(
                 target == "app.services" or target.startswith("app.services.")
                 for target in targets

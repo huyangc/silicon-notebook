@@ -23,6 +23,7 @@ import pytest
 from app.core.config import Settings
 from app.domain.indexing_pipeline import BUILTIN_INDEXING_PIPELINE_VERSION
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
+from app.services.kg.scale_artifact_codec import KG_SCALE_ARTIFACT_CODEC
 from app.services.scale_artifact_catalog import ScaleArtifactCatalog
 
 
@@ -47,7 +48,7 @@ def _legacy_stale_manifest_admissible(catalog, notebook_id):
 
 def _catalog(tmp_path, *, pipeline_identity=None):
     settings = Settings(storage_dir=str(tmp_path))
-    store = ScaleArtifactStore(settings)
+    store = ScaleArtifactStore(settings, codec=KG_SCALE_ARTIFACT_CODEC)
     return ScaleArtifactCatalog(
         artifacts=store,
         settings=settings,
