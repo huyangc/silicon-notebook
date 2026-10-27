@@ -159,8 +159,8 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       `resolve_focal` 按 `lower(canonical_name) == 键`（同键多簇取成员最多者）；存储名是成员最多的种子第一次见到的写法，
       所以问「QZX」而存储名是「Quiet Zebra Xylophone (QZX)」时焦点解析不到、不出兄弟。要按成员名解析，需要在
       `knowledge_objects` 上按名字精确查（现只有 trigram 索引），先做生产规模的计划测量。同源的口径不一：焦点键在
-      Python 里用 `str.lower()`（Unicode 小写），SQL 一侧（SQLite `lower()`、PostgreSQL `lower(... COLLATE "C")`）只折叠
-      ASCII，所以存储名里有非 ASCII 大写字母（如「Ärger」）时，无论有没有天花板都解析不成焦点；两侧要统一成同一种折叠。
+      Python 里用 `str.lower()`（Unicode 小写），存储名一侧（SQLite `lower()`、PostgreSQL `COLLATE "C"` 列上的 `lower()`）
+      与 R4 的成员写法比较（`_ascii_lower`）只折叠 ASCII，所以存储名里有非 ASCII 大写字母（如「Ärger」）时，无论有没有天花板都解析不成焦点；两侧要统一成同一种折叠。
 
 ### 检索
 
