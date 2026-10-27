@@ -60,15 +60,20 @@
   [调用方台账](./superpowers/plans/2026-08-23-facade-retirement-ledger.md) 逐批进行，
   用 `scripts/audit_facade_callers.py` 复现，并同步 ownership/surface fixture：
   `scripts/generate_repository_contract_fixtures.py --rebaseline-surface`。
-- facade 普查只看 facade。组件层由 `scripts/audit_component_callers.py --check`（contracts
-  泳道）做同口径普查：`backend/app` 下 `api/` 与 facade 层之外每个类的方法与属性（服务、两种
-  adapter 的 store、ports、扩展宿主），只要生产代码不以任何写法引用它的名字（经另一个同类
-  成员转手也不算），就报红，除非 `scripts/component_test_only_allowlist.json` 把它登记为
-  测试观察点（`def` 上注明「测试观察点」）、扩展端口、扫描看不到的运行时引用或待拍板项；
+- facade 普查只看 facade 的公开名字。`scripts/audit_component_callers.py --check`（contracts
+  泳道）普查 `backend/app` 下 `api/` 之外每个类的方法与属性：服务、两种 adapter 的 store、
+  ports、扩展宿主，以及 facade 层本身（`RepositoryFacade`、两个 adapter 子类、facade 被当作
+  交出的协议；`facade_surface.json` 钉住的名字豁免，仍归 facade 普查）。生产代码够不到的成员
+  （经另一个候选成员转手也不算）就是候选，报红，除非 `scripts/component_test_only_allowlist.json`
+  把它登记为测试观察点（`def` 上注明「测试观察点」）、扩展端口、扫描看不到的运行时引用或待拍板项；
   登记了却已不是候选的条目同样报红。不要新增只给测试调用的成员：改测试走生产路径，或者
-  带理由登记。已知两个盲区：普查按名字而不按接收者判定，只被测试调用的成员若与某个生产在用的
-  名字同名（`neighbors`、`snapshot` 等），永远不会被报出；登记成员的方法体按生产调用计，
-  所以登记的观察点调用到的成员会随它一起保持存活。
+  带理由登记。接收者的类型能确定时（`self`、注解、构造点注入、返回注解、属性赋值，规则见脚本
+  docstring），引用按接收者判定，只被测试调用的成员不会再被另一个类的同名在用成员掩护。确定不了
+  接收者的引用（循环变量、`Any`、普通函数的无注解参数、从容器里取出的值、字符串与名字模板、
+  `super()`、带 `__getattr__` 的类）仍按名字计入所有同名成员；报告按原因计数，并列出只靠这类引用
+  存活的成员（`kept_by_name_only`）。经这类接收者写属性的语句不计为该属性的绑定。另外，登记成员的
+  方法体按生产调用计，所以登记的观察点调用到的成员会随它一起保持存活。`--by-name` 可按旧的纯名字
+  口径重跑做对照。
 - 两种 adapter 的 `access_sql.py`、`mount_sql.py` 与 `memory_sql.py` 判据同步维护；
   `memory_sql.py` 是「谁能读 Memory 派生来源」与「哪些 KG 行算派生自 Memory」的共享
   定义点，新读者一律 import（`source_store.hidden_source_ids` 与来源读取闸

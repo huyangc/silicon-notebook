@@ -76,21 +76,30 @@ contributor constraints, not a second implementation history.
   [caller ledger](./superpowers/plans/2026-08-23-facade-retirement-ledger.md), reproduced
   by `scripts/audit_facade_callers.py`; update the ownership/surface fixtures with
   `scripts/generate_repository_contract_fixtures.py --rebaseline-surface`.
-- The facade audit sees only the facade. `scripts/audit_component_callers.py --check`
-  (contracts lane) does the same census for the component layer: every method and
-  property of a class under `backend/app` outside `api/` and the facade layer
-  (services, both adapters' stores, the ports, extension hosts) that no production
-  code references, by any spelling of its name, including through another such
-  member. It fails on such a member unless
+- The facade audit sees only the facade's public names. `scripts/audit_component_callers.py --check`
+  (contracts lane) censuses every method and property of a class under `backend/app`
+  outside `api/` — services, both adapters' stores, the ports, extension hosts and
+  the facade layer itself (`RepositoryFacade`, its adapter subclasses, the protocols
+  it is handed out as; names pinned in `facade_surface.json` are exempt and stay with
+  the facade audit). A member is a candidate when no production code reaches it,
+  including through another candidate. It fails on such a member unless
   `scripts/component_test_only_allowlist.json` registers it as a test observation
   point (the `def` carries a 「测试观察点」 comment), an extension port, a run-time
   reference the scan cannot see, or a pending decision. It also fails on an entry
   that is no longer a candidate. Do not add a member only tests call: rewrite the
-  test through the production path, or register it with a reason. Two blind spots
-  are known: the census matches names, not receivers, so a test-only member whose
-  name some live production code also uses (`neighbors`, `snapshot`, ...) is never
-  reported; and a registered member's body counts as production, so everything a
-  registered observation point calls stays alive with it.
+  test through the production path, or register it with a reason. References are
+  read through their receiver when its type can be pinned (`self`, annotations,
+  constructor injection, return annotations, attribute assignments; the script's
+  docstring lists the rules), so a test-only member no longer hides behind a live
+  member of another class with the same name. A reference whose receiver cannot be
+  pinned (a loop variable, `Any`, an unannotated plain-function parameter, a value
+  out of a container, a string or name template, `super()`, a `__getattr__` class)
+  still counts by name for every member of that name; the report counts these per
+  reason and lists the members kept alive only by them (`kept_by_name_only`). A
+  store through such a receiver is not seen as a binding at all. And a registered
+  member's body counts as production, so everything a registered observation point
+  calls stays alive with it. `--by-name` reruns the old name-only reading for
+  comparison.
 - Keep both adapters' `access_sql.py`, `mount_sql.py` and `memory_sql.py` predicates
   aligned. `memory_sql.py` is the shared definition point of who may read a
   Memory-derived source and of which KG rows count as Memory-derived; new readers import
