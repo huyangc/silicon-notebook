@@ -235,7 +235,7 @@ def test_clear_all_deletes_every_row_in_the_scope_and_nothing_else(
         evidence=[], expected_revision=0, origin="job", actor="",
     )
 
-    deleted = store.clear_all(NOTEBOOK_ID, "")
+    deleted = store.clear_all(NOTEBOOK_ID, [""])
     assert deleted == 2
     assert store.read_block(NOTEBOOK_ID, "", "corpus_shape") is None
     assert store.read_block(NOTEBOOK_ID, "", "key_entities") is None
@@ -511,7 +511,7 @@ def test_a_settle_from_a_superseded_claim_lands_on_nothing(
 ):
     """THE ABA case (Agentic Memory P2, closing the registered R4 residual).
 
-    A member is removed (``clear_job_row``) and re-added while their overlay
+    A member is removed (``clear_job_rows``) and re-added while their overlay
     run is inside its model call; the re-add lets a NEW run claim the chain.
     Under P1's status-only CAS the stale worker's settle matched the
     replacement row — it consumed the new run's snapshot and moved the new
@@ -526,7 +526,7 @@ def test_a_settle_from_a_superseded_claim_lands_on_nothing(
     stale = store.claim(NOTEBOOK_ID, "user-a")
 
     # Removal, re-add, and a fresh claim — all while the stale run is running.
-    store.clear_job_row(NOTEBOOK_ID, "user-a")
+    store.clear_job_rows(NOTEBOOK_ID, ["user-a"])
     store.bump_signal(NOTEBOOK_ID, "user-a", delta=7)
     fresh = store.claim(NOTEBOOK_ID, "user-a")
     assert fresh.token != stale.token
@@ -551,7 +551,7 @@ def test_a_settle_after_a_real_removal_reports_gone(store: AgentProfileStore):
     so the caller's revoked-overlay wipe MUST fire."""
     store.bump_signal(NOTEBOOK_ID, "user-a", delta=2)
     claimed = store.claim(NOTEBOOK_ID, "user-a")
-    store.clear_job_row(NOTEBOOK_ID, "user-a")
+    store.clear_job_rows(NOTEBOOK_ID, ["user-a"])
 
     assert store.settle(
         NOTEBOOK_ID, "user-a", "done",
@@ -575,7 +575,7 @@ def test_a_write_from_a_superseded_claim_changes_no_byte(
     before = store.read_block(NOTEBOOK_ID, "user-a", "retrieval_notes")
 
     stale = store.claim(NOTEBOOK_ID, "user-a")
-    store.clear_job_row(NOTEBOOK_ID, "user-a")
+    store.clear_job_rows(NOTEBOOK_ID, ["user-a"])
     fresh = store.claim(NOTEBOOK_ID, "user-a")
     assert fresh.token != stale.token
 

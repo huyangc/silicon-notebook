@@ -4,7 +4,7 @@ import logging
 import secrets
 import shutil
 from pathlib import Path
-from typing import Callable, TYPE_CHECKING
+from typing import Callable, Iterable, TYPE_CHECKING
 
 from app.models.notebooks import NotebookSummary
 from app.domain.repository import RepositoryCompatibilitySeams
@@ -325,8 +325,9 @@ class NotebookSharingService:
         # for the reason ``remove_member`` gives. A rejoin through a newly
         # minted link between the commit and the cleanup only resets that
         # person's just-started overlay, which is the rejoin contract anyway.
-        for user_id in self._store.clear_share(notebook_id):
-            self._clear_member_profile(notebook_id, user_id)
+        # The cleanup takes the whole set at once: three write transactions
+        # (job rows, blocks, observations) whatever the number of members.
+        self._clear_member_profiles(notebook_id, self._store.clear_share(notebook_id))
 
     def find_notebook_by_share_token(self, token: str) -> "str | None":
         if not token:
@@ -582,7 +583,7 @@ class NotebookSharingService:
         exit, ``MemoryService.leave_notebook`` (``DELETE .../membership``).
         """
         self._store.remove_member(notebook_id, user_id)
-        self._clear_member_profile(notebook_id, user_id)
+        self._clear_member_profiles(notebook_id, [user_id])
 
     def forget_member_state(self, notebook_id: str, user_id: str) -> None:
         """The per-member cleanup ``remove_member`` runs after its row delete,
@@ -591,11 +592,17 @@ class NotebookSharingService:
         Memory count). Deliberately does not touch ``notebook_members``: by
         the time this runs the user may have rejoined, and deleting that new
         row would silently undo their rejoin."""
-        self._clear_member_profile(notebook_id, user_id)
+        self._clear_member_profiles(notebook_id, [user_id])
 
-    def _clear_member_profile(self, notebook_id: str, user_id: str) -> None:
-        """Discard both halves of this member's overlay: the block rows
-        (``clear_all``) AND the job/status row (``clear_job_row``).
+    def _clear_member_profiles(self, notebook_id: str, user_ids: Iterable[str]) -> None:
+        """Discard both halves of these members' overlays: the block rows
+        (``clear_all``) AND the job/status rows (``clear_job_rows``), then
+        their agent observations.
+
+        One implementation for one member and for many (kick-all review
+        2026-10-23): each table is cleared for the whole set in ONE write
+        transaction, so removing every link member costs three transactions,
+        not three per member; ``remove_member`` passes a one-element set.
 
         Agentic Memory P1 (T5 repair round). Clearing only the blocks left a
         stale ``agent_profile_jobs`` row behind — most visibly its
@@ -619,34 +626,37 @@ class NotebookSharingService:
         marker first means any worker still in flight either skips its writes
         (pre-check) or fails its settle and wipes what it wrote (post-guard);
         the block delete below then covers the fully-settled-before-removal
-        case."""
-        if not user_id:
+        case. The order holds for every member of the set at once: all job
+        rows go before any block."""
+        # The ``''`` owner is the shared base layer, never a member.
+        owners = [user_id for user_id in user_ids if user_id]
+        if not owners:
             return
         if self._profiles is not None:
-            self._clear_profile_halves(notebook_id, user_id)
+            self._clear_profile_halves(notebook_id, owners)
         # codex #535 R6 P2:观察行同批清空——它们是这个人自己的 Agent 在本库
         # 留下的使用痕迹,移出后残留会经 GET .../agent-observations 立即复活,
         # 还会喂进重新加入后的第一次覆盖层巡固,破坏「空白起点」契约。座位与
         # profiles 各自独立判 None(旧组合根/替身可能只接了一半)。
         if self._observations is not None:
             try:
-                self._observations.clear_observations(notebook_id, user_id)
+                self._observations.clear_observations(notebook_id, owners)
             except Exception:  # noqa: BLE001 — access change already committed
                 _log.exception(
                     "failed to clear agent observations for notebook %s",
                     notebook_id,
                 )
 
-    def _clear_profile_halves(self, notebook_id: str, user_id: str) -> None:
+    def _clear_profile_halves(self, notebook_id: str, owners: list[str]) -> None:
         try:
-            self._profiles.clear_job_row(notebook_id, user_id)
+            self._profiles.clear_job_rows(notebook_id, owners)
         except Exception:  # noqa: BLE001 — access change already committed
             _log.exception(
                 "failed to clear agent profile job row for notebook %s",
                 notebook_id,
             )
         try:
-            self._profiles.clear_all(notebook_id, user_id)
+            self._profiles.clear_all(notebook_id, owners)
         except Exception:  # noqa: BLE001 — access change already committed
             _log.exception(
                 "failed to clear agent profile overlay for notebook %s",

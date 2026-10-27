@@ -742,7 +742,7 @@ def clear_agent_observations(
         raise user_error(409, _DISABLED_MESSAGE)
     removed = repository().agent_observations.clear_observations(
         notebook_id,
-        user.id,
+        [user.id],
         agent_profile_id=agent_profile_id,
         kind=clean_kind,
     )

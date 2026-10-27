@@ -812,14 +812,33 @@ class SharingStore:
 
         The member delete is ``kick_all_members`` on this same connection —
         the one implementation of "end every link membership" (user ruling
-        2026-10-23). Order is load-bearing under READ COMMITTED: the
-        ``UPDATE`` takes the notebook row lock first, and a join takes
-        ``FOR SHARE`` on that row before inserting (``insert_member_if_live``).
-        A join that locked first commits before this ``UPDATE`` proceeds, so
-        the ``DELETE`` (a later statement, a fresh snapshot) sees and removes
-        its row; a join that arrives later waits for this commit, re-checks
-        the token, finds it gone and inserts nothing."""
+        2026-10-23).
+
+        Lock order and conflict edges (do not paraphrase):
+
+        * The FIRST statement takes ``FOR UPDATE`` on the notebook row. A join
+          takes ``FOR KEY SHARE`` on that row, with the token in its
+          predicate, before inserting (``insert_member_if_live``), and the two
+          modes conflict. A join that locked first commits before this
+          transaction gets its lock, so the ``DELETE`` (a later statement, a
+          fresh READ COMMITTED snapshot) sees and removes its row and returns
+          it; a join that arrives later waits for this commit, re-evaluates
+          its ``WHERE`` against the new row version, finds the token gone and
+          inserts nothing.
+        * ``FOR UPDATE`` here also queues, for this millisecond transaction,
+          behind and ahead of every ``FOR KEY SHARE`` an FK insert on a child
+          of ``notebooks`` takes, and every ordinary ``UPDATE notebooks``.
+          ``set_share_token`` already takes the same lock on the same row, so
+          this adds no new class of edge to the sharing writes.
+        * No deadlock by construction: the lock is the first statement, so
+          this transaction waits only while holding nothing; once it holds
+          the row, its ``UPDATE`` and ``DELETE`` wait on nothing a join could
+          be holding (a join cannot hold a member row of this notebook
+          without first holding ``FOR KEY SHARE`` on the notebook row)."""
         with self.database.write() as connection:
+            connection.execute(
+                "SELECT 1 FROM notebooks WHERE id=%s FOR UPDATE", (notebook_id,)
+            )
             connection.execute(
                 "UPDATE notebooks SET is_shared=0,share_token=NULL,updated_at=%s WHERE id=%s",
                 (self.now(), notebook_id),
@@ -1014,15 +1033,24 @@ class SharingStore:
         ``is_member_on`` 再判一次区分。
 
         ``share_token`` 是加入者手里的那条链接：插入还要求它此刻仍是这本库
-        的有效链接，并对库行取 ``FOR SHARE``。路由先凭 token 解析出库、再开
-        这个写事务，两步之间若取消分享（``clear_share``）在跑，这把行锁与它
-        的 ``UPDATE`` 互斥：取消先拿到锁时，这里等它提交后按新版本重判谓词，
-        token 已作废，一行不插；这里先拿到锁时，取消等本事务提交，之后的
-        ``DELETE`` 看得见这一行、把它一并删掉。没有这把锁，READ COMMITTED
-        下加入可以在取消的 ``DELETE`` 之后提交，把人留在一本已撤链接的库里。"""
+        的有效链接，并对库行取 ``FOR KEY SHARE``。路由先凭 token 解析出库、
+        再开这个写事务，两步之间若取消分享（``clear_share``）在跑，这把锁与
+        它第一句的 ``FOR UPDATE`` 互斥：取消先拿到锁时，这里等它提交后按新
+        版本重判谓词，token 已作废，一行不插；这里先拿到锁时，取消等本事务
+        提交，之后的 ``DELETE`` 看得见这一行、把它一并删掉。没有这把锁，READ
+        COMMITTED 下加入可以在取消的 ``DELETE`` 之后提交，把人留在一本已撤
+        链接的库里。
+
+        ⚠ 锁模式是 ``FOR KEY SHARE``，不是 ``FOR SHARE``（kick-all 评审
+        P2-2）。``FOR KEY SHARE`` 正是几条语句之后那次 INSERT 为外键对同一行
+        要取的锁，所以这句**不新增任何冲突边**：它只与 ``FOR UPDATE``（取消
+        分享、``set_share_token``、删库）冲突，不与普通 ``UPDATE notebooks``
+        （改名、推 ``updated_at``，取的是 ``FOR NO KEY UPDATE``）冲突——加入
+        持锁覆盖整段摘要水合，换成 ``FOR SHARE`` 会让这期间这本库所有普通
+        更新排队（同一论证见 ``group_store._lock_notebook_on``）。"""
         lock = connection.execute(
             "SELECT 1 FROM notebooks WHERE id=%s AND is_shared=1 AND share_token=%s "
-            f"AND {NOTEBOOK_LIVE_SQL} FOR SHARE",
+            f"AND {NOTEBOOK_LIVE_SQL} FOR KEY SHARE",
             (notebook_id, share_token),
         ).fetchone()
         if lock is None:

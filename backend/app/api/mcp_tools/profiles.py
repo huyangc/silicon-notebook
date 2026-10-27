@@ -128,7 +128,7 @@ def register_profile_tools(
                 still_member = True
             if not still_member:
                 repo.agent_observations.clear_observations(
-                    notebook_id, principal.owner_id
+                    notebook_id, [principal.owner_id]
                 )
                 raise AgentToolError(
                     "notebook_unreadable",

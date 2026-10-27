@@ -65,6 +65,7 @@ import { AskModePicker } from "./ask-mode-picker";
 import { proposePromotion } from "./promotion-queue";
 import { PromotionQueueModal } from "./promotion-queue-modal";
 import { InfoModalActions, type InfoModalAction } from "./info-modal-actions";
+import { UNSHARE_LINK_LABEL, unshareLinkConfirmation } from "./unshare-link-confirm";
 import { usePromotionQueue } from "./use-promotion-queue";
 import { useReleaseNotes } from "./use-release-notes";
 import { PromotionTargetModal } from "./promotion-target-modal";
@@ -4597,6 +4598,18 @@ export default function Home() {
     await handleShareLinkCopy(shareModal.share_token, link);
   }
 
+  // 分享弹窗里的「取消链接分享」与总览同一个确认弹窗(unshare-link-confirm.ts):不可撤销,
+  // 先确认再执行。确认层叠在分享弹窗之上(info 层),「保留链接」什么都不做。群组区就摆在
+  // 链接区下面,所以后果句总带上「共享给群组的部分不受影响」。
+  function confirmUnshareFromShareModal() {
+    if (!currentNotebook) return;
+    openInfoModal(unshareLinkConfirmation({
+      notebookName: currentNotebook.name,
+      mentionGroups: true,
+      onConfirm: () => { handleUnshare().catch(reportError); },
+    }));
+  }
+
   // 取消分享:撤销 token 并踢掉只读成员。**弹窗不关**——它同时是「共享给群组」的
   // 界面,而取消链接对群组授权是空操作,关掉整个弹窗会让用户以为群组共享也没了。
   // 只把链接态清空,链接区回到「开启链接分享」。
@@ -4765,19 +4778,11 @@ export default function Home() {
   // 由 readonly 转 copy,旧的只读成员身份还在),按它报数会报出 0 —— 两种偏差都是**少说**,
   // 正是破坏性确认最不该犯的错。改成一句与人数无关、永远成立的话。
   function confirmUnshareFromOverview(item: SharedByMeItem) {
-    const consequences = [
-      "链接立即失效，拿到旧链接的人不能再打开；已通过这条链接加入的只读成员会被一并移除。",
-      "重新开启会生成另一条链接，旧链接不会恢复。",
-      item.group_count > 0 ? "共享给群组的部分不受影响。" : "",
-    ].filter(Boolean);
-    openInfoModal({
-      title: `取消「${item.name}」的链接分享`,
-      message: consequences.join(""),
-      actions: [
-        { label: "保留链接", action: () => {} },
-        { label: "取消链接分享", danger: true, action: () => { handleUnshareFromOverview(item.id).catch(reportError); } },
-      ],
-    }, rootModals.captureActorOwner());
+    openInfoModal(unshareLinkConfirmation({
+      notebookName: item.name,
+      mentionGroups: item.group_count > 0,
+      onConfirm: () => { handleUnshareFromOverview(item.id).catch(reportError); },
+    }), rootModals.captureActorOwner());
   }
 
   // 总览里「取消分享」:撤销 token(踢全员)→ 重拉总览刷新
@@ -6685,8 +6690,8 @@ export default function Home() {
                   {` · ${shareModal.size.sources ?? 0} 来源 · ${shareModal.size.nodes ?? 0} 节点 · ${shareModal.size.edges ?? 0} 边 · ${formatFileSize(shareModal.size.bytes ?? 0)}`}
                 </p>
                 <div className="tag-row">
-                  <button className="sort-button" disabled={shareBusy} onClick={() => handleUnshare().catch(reportError)}>
-                    {shareBusy ? "取消中…" : "取消链接分享"}
+                  <button className="sort-button" disabled={shareBusy} onClick={confirmUnshareFromShareModal}>
+                    {shareBusy ? "取消中…" : UNSHARE_LINK_LABEL}
                   </button>
                 </div>
               </>) : (<>
@@ -6867,7 +6872,7 @@ export default function Home() {
                               className="sort-button danger-text"
                               disabled={shareBusy}
                               onClick={() => confirmUnshareFromOverview(item)}
-                            >{unsharingNotebookId === item.id ? "取消中…" : "取消链接分享"}</button>
+                            >{unsharingNotebookId === item.id ? "取消中…" : UNSHARE_LINK_LABEL}</button>
                           </div>
                         </div>
                       )}

@@ -2293,7 +2293,7 @@ class AgentProfileConsolidationService:
         parsed = parse_overlay_reply(data)
         # codex R1 P1(写前复核): the model call above is a minutes-long window
         # in which the member may have been removed. Removal runs
-        # clear_job_row + clear_all (marker first); a missing job row
+        # clear_job_rows + clear_all (marker first); a missing job row
         # therefore means "revoked" — writing now would recreate private
         # usage-derived blocks with ``expected_revision=0`` and hand them to
         # the member on re-join. Skip every write.
@@ -2562,7 +2562,7 @@ class AgentProfileConsolidationService:
 
         codex R1 P1(双侧护栏的写后一侧): a member removed WHILE their overlay
         consolidation was inside the model call has already had clear_all +
-        clear_job_row run — but this worker's ``expected_revision=0`` writes
+        clear_job_rows run — but this worker's ``expected_revision=0`` writes
         can recreate the blocks afterwards. The pre-write ``job_row`` check in
         ``_consolidate_overlay`` is the cheap early exit; the write transaction
         itself now refuses a superseded claim; and this is the last net, keyed
@@ -2579,7 +2579,7 @@ class AgentProfileConsolidationService:
         serves these rows to a non-member anyway.
         """
         try:
-            self.profiles.clear_all(notebook_id, user_id)
+            self.profiles.clear_all(notebook_id, [user_id])
         except Exception:  # noqa: BLE001
             _log.exception(
                 "failed to wipe a revoked member's overlay for notebook %s",

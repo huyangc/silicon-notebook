@@ -14,10 +14,11 @@ a non-C-collated database still pages in the same order SQLite does.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from psycopg import errors
 
+from app.repositories.owner_batches import owner_id_list
 from app.repositories.postgres._store_utils import (
     TimestampInput,
     iso_timestamp,
@@ -141,17 +142,17 @@ class AgentProfileStore:
         * ``FOR SHARE`` rather than a plain SELECT: this backend's write
           transaction is not the process-wide file lock SQLite's
           ``begin_immediate`` gives, so an unlocked read would let a concurrent
-          ``clear_job_row`` (member removal) commit between the check and the
+          ``clear_job_rows`` (member removal) commit between the check and the
           write. The share lock holds the row until this transaction ends,
           which is what makes the check as atomic here as it is there. This is
           NOT contention-free: ``bump_signal``, ``claim``, ``settle`` and
-          ``clear_job_row`` all write this exact row too, so a concurrent one
+          ``clear_job_rows`` all write this exact row too, so a concurrent one
           of those blocks behind the share lock until this transaction
           commits or rolls back. The cost is bounded, not absent — it is one
           primary-key row and the wait is at most this one short transaction's
           own lifetime, never a scan or a lock escalation.
         * Jobs row first, THEN block rows — one lock order for every write in
-          this store. ``clear_job_row`` and ``clear_all`` each touch only one of
+          this store. ``clear_job_rows`` and ``clear_all`` each touch only one of
           the two tables (and in separate transactions), so no cycle exists
           today among THIS store's own methods; taking them in a fixed order
           is what keeps that true.
@@ -315,13 +316,22 @@ class AgentProfileStore:
             ).fetchone()
         return self._block_row(result)
 
-    def clear_all(self, notebook_id: str, owner_id: str) -> int:
-        """Delete every block row for one (notebook, owner) scope outright.
-        No CAS: a full-scope wipe. Returns the row count deleted."""
+    def clear_all(self, notebook_id: str, owner_ids: Iterable[str]) -> int:
+        """Delete every block row of these (notebook, owner) scopes outright.
+        No CAS: a full-scope wipe. One statement (``= ANY``) whatever the
+        number of owners. Returns the row count deleted."""
+        return self._delete_for_owners("agent_notebook_profile", notebook_id, owner_ids)
+
+    def _delete_for_owners(
+        self, table: str, notebook_id: str, owner_ids: Iterable[str]
+    ) -> int:
+        owners = owner_id_list(owner_ids)
+        if not owners:
+            return 0
         with self.database.write() as connection:
             cursor = connection.execute(
-                "DELETE FROM agent_notebook_profile WHERE notebook_id=%s AND owner_id=%s",
-                (notebook_id, owner_id),
+                f"DELETE FROM {table} WHERE notebook_id=%s AND owner_id=ANY(%s)",
+                (notebook_id, owners),
             )
         return cursor.rowcount
 
@@ -412,7 +422,7 @@ class AgentProfileStore:
         transaction behind one process-wide write lock, so nothing else can
         move while it runs. This backend has no such lock — it runs under
         READ COMMITTED, where each statement takes its own fresh snapshot. If
-        a concurrent ``clear_job_row`` (member removal) COMMITS in the gap
+        a concurrent ``clear_job_rows`` (member removal) COMMITS in the gap
         between the failed ``UPDATE`` above and the survivor ``SELECT``
         below, that ``SELECT`` sees it and reports ``gone`` — which is the
         benign direction: a removal that has genuinely already committed is
@@ -474,13 +484,8 @@ class AgentProfileStore:
             )
         return cursor.rowcount
 
-    def clear_job_row(self, notebook_id: str, owner_id: str) -> int:
-        """Delete this chain's status/threshold row outright — see the port
+    def clear_job_rows(self, notebook_id: str, owner_ids: Iterable[str]) -> int:
+        """Delete these chains' status/threshold rows outright — see the port
         docstring (the job-table counterpart of ``clear_all``). Primary-key
-        delete, at most one row."""
-        with self.database.write() as connection:
-            cursor = connection.execute(
-                "DELETE FROM agent_profile_jobs WHERE notebook_id=%s AND owner_id=%s",
-                (notebook_id, owner_id),
-            )
-        return cursor.rowcount
+        deletes, at most one row per owner, one statement."""
+        return self._delete_for_owners("agent_profile_jobs", notebook_id, owner_ids)

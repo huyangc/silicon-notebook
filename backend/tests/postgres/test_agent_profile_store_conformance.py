@@ -250,7 +250,7 @@ def test_clear_all_deletes_only_the_requested_scope(agent_profile_harness):
         harness.notebook_id, "user-a", "retrieval_notes", value="overlay-a",
         evidence=[], expected_revision=0, origin="job", actor="",
     )
-    deleted = harness.store.clear_all(harness.notebook_id, "")
+    deleted = harness.store.clear_all(harness.notebook_id, [""])
     assert deleted == 1
     assert harness.store.read_block(harness.notebook_id, "", "corpus_shape") is None
     assert harness.store.read_block(harness.notebook_id, "user-a", "retrieval_notes") is not None
@@ -404,7 +404,7 @@ def test_the_claim_generation_is_enforced_on_this_backend_too(
     "why did the CAS not land" re-read has to share the settling transaction,
     which on this backend is a real transaction rather than SQLite's
     process-wide write mutex; and ``write_block``'s generation check takes
-    ``FOR SHARE`` on the job row, without which a concurrent ``clear_job_row``
+    ``FOR SHARE`` on the job row, without which a concurrent ``clear_job_rows``
     could commit between the check and the write (SQLite's
     ``begin_immediate`` makes that impossible for free).
     """
@@ -423,7 +423,7 @@ def test_the_claim_generation_is_enforced_on_this_backend_too(
 
     # Removed, re-added and re-claimed: a byte-identical primary key, a fresh
     # generation.
-    store.clear_job_row(notebook, "user-gen")
+    store.clear_job_rows(notebook, ["user-gen"])
     store.bump_signal(notebook, "user-gen", delta=7)
     fresh = store.claim(notebook, "user-gen")
     assert fresh.token != stale.token
@@ -447,7 +447,7 @@ def test_the_claim_generation_is_enforced_on_this_backend_too(
 
     # And the row really being gone still reports "gone", which is the branch
     # the caller's revoked-overlay wipe keys off.
-    store.clear_job_row(notebook, "user-gen")
+    store.clear_job_rows(notebook, ["user-gen"])
     assert store.settle(
         notebook, "user-gen", "done", consumed=7, claim_token=fresh.token
     ) == AGENT_PROFILE_SETTLE_GONE

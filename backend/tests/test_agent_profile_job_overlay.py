@@ -603,7 +603,7 @@ def test_a_failing_overlay_cleanup_never_blocks_the_access_change():
         copy_stats=lambda _nb: {},
         profiles=SimpleNamespace(
             clear_all=lambda _nb, _uid: (_ for _ in ()).throw(RuntimeError("db down")),
-            clear_job_row=lambda nb, uid: cleared.append((nb, uid)),
+            clear_job_rows=lambda nb, uid: cleared.append((nb, uid)),
         ),
     )
 
@@ -611,11 +611,11 @@ def test_a_failing_overlay_cleanup_never_blocks_the_access_change():
 
     assert removed == [(NOTEBOOK_ID, USER_B)]
     # The job-row clear still ran despite the block-row clear raising.
-    assert cleared == [(NOTEBOOK_ID, USER_B)]
+    assert cleared == [(NOTEBOOK_ID, [USER_B])]
 
 
 def test_a_failing_job_row_cleanup_never_blocks_the_access_change():
-    """The reverse of the previous test: ``clear_job_row`` raising must not
+    """The reverse of the previous test: ``clear_job_rows`` raising must not
     stop membership removal either, and must not prevent ``clear_all`` from
     having already run."""
     removed: list[tuple] = []
@@ -628,14 +628,14 @@ def test_a_failing_job_row_cleanup_never_blocks_the_access_change():
         copy_stats=lambda _nb: {},
         profiles=SimpleNamespace(
             clear_all=lambda nb, uid: cleared.append((nb, uid)),
-            clear_job_row=lambda _nb, _uid: (_ for _ in ()).throw(RuntimeError("db down")),
+            clear_job_rows=lambda _nb, _uid: (_ for _ in ()).throw(RuntimeError("db down")),
         ),
     )
 
     sharing.remove_member(NOTEBOOK_ID, USER_B)
 
     assert removed == [(NOTEBOOK_ID, USER_B)]
-    assert cleared == [(NOTEBOOK_ID, USER_B)]
+    assert cleared == [(NOTEBOOK_ID, [USER_B])]
 
 
 # ------------------------------------------------- P2-T3: late notifications
@@ -1627,7 +1627,7 @@ def _seed_one_ask(harness):
 def test_a_member_removed_during_the_model_call_gets_no_resurrected_blocks(harness):
     """codex R1 P1(写前复核那一侧)。
 
-    移除发生在 LLM 调用期间:clear_all + clear_job_row 都已跑完,worker 拿着
+    移除发生在 LLM 调用期间:clear_all + clear_job_rows 都已跑完,worker 拿着
     模型回复回来。没有写前复核,``expected_revision=0`` 的写入会把私有块整个
     **重建**——被撤销的成员重新加入后看到旧心得而不是白纸。
     """
@@ -1639,8 +1639,8 @@ def test_a_member_removed_during_the_model_call_gets_no_resurrected_blocks(harne
     def reply(_prompt: str) -> str:
         # 模型调用期间成员被移除:与 _clear_member_profile 相同的两步(codex R3
         # P1 之后的顺序——job 行先走,让 worker 的两道护栏可靠触发)
-        profiles.clear_job_row(NOTEBOOK_ID, USER_A)
-        profiles.clear_all(NOTEBOOK_ID, USER_A)
+        profiles.clear_job_rows(NOTEBOOK_ID, [USER_A])
+        profiles.clear_all(NOTEBOOK_ID, [USER_A])
         return _reply(retrieval_notes="复活的心得")
 
     service = _service(harness, client=_Client(reply))
@@ -1670,8 +1670,8 @@ def test_a_removal_between_the_precheck_and_the_writes_is_wiped_after_settle(
 
     def settle_after_removal(notebook_id, owner_id, status, **kwargs):
         # 写入已完成;settle 之前移除路径跑完了两步(job 行先走)
-        profiles.clear_job_row(NOTEBOOK_ID, USER_A)
-        profiles.clear_all(NOTEBOOK_ID, USER_A)
+        profiles.clear_job_rows(NOTEBOOK_ID, [USER_A])
+        profiles.clear_all(NOTEBOOK_ID, [USER_A])
         return original_settle(notebook_id, owner_id, status, **kwargs)
 
     monkeypatch.setattr(profiles, "settle", settle_after_removal)
@@ -1747,7 +1747,7 @@ def test_a_superseded_settle_does_not_requeue(harness, monkeypatch):
     def reply(_prompt: str) -> str:
         # 模拟一次竞态:旧世代还卡在模型调用里的时候,这个成员自己的链路
         # 已经被重新认领、跑完并落终态——留下一份够触发下一轮的 pending_signal。
-        profiles.clear_job_row(NOTEBOOK_ID, USER_A)
+        profiles.clear_job_rows(NOTEBOOK_ID, [USER_A])
         newer = profiles.claim(NOTEBOOK_ID, USER_A)
         profiles.bump_signal(NOTEBOOK_ID, USER_A, delta=3)
         profiles.settle(
@@ -1778,7 +1778,7 @@ def test_removal_deletes_the_job_marker_before_the_blocks(harness):
     calls: list[str] = []
 
     class _Recorder:
-        def clear_job_row(self, nb, uid):
+        def clear_job_rows(self, nb, uid):
             calls.append("job_row")
 
         def clear_all(self, nb, uid):
@@ -1912,16 +1912,16 @@ def test_a_removed_and_readded_member_does_not_lose_the_new_runs_work(
     wipes: list[str] = []
     original_clear_all = profiles.clear_all
 
-    def counting_clear_all(notebook_id, owner_id):
-        wipes.append(owner_id)
-        return original_clear_all(notebook_id, owner_id)
+    def counting_clear_all(notebook_id, owner_ids):
+        wipes.extend(owner_ids)
+        return original_clear_all(notebook_id, owner_ids)
 
     monkeypatch.setattr(profiles, "clear_all", counting_clear_all)
 
     def reply(_prompt: str) -> str:
         # Removed, re-added, and re-claimed while this call is outstanding.
-        profiles.clear_job_row(NOTEBOOK_ID, USER_A)
-        profiles.clear_all(NOTEBOOK_ID, USER_A)
+        profiles.clear_job_rows(NOTEBOOK_ID, [USER_A])
+        profiles.clear_all(NOTEBOOK_ID, [USER_A])
         wipes.clear()                       # only count wipes AFTER the removal
         profiles.bump_signal(NOTEBOOK_ID, USER_A, delta=5)
         fresh = profiles.claim(NOTEBOOK_ID, USER_A)
@@ -1958,16 +1958,16 @@ def test_a_real_removal_still_wipes_the_blocks_it_recreated(harness, monkeypatch
     wipes: list[str] = []
     original_clear_all = profiles.clear_all
 
-    def counting_clear_all(notebook_id, owner_id):
-        wipes.append(owner_id)
-        return original_clear_all(notebook_id, owner_id)
+    def counting_clear_all(notebook_id, owner_ids):
+        wipes.extend(owner_ids)
+        return original_clear_all(notebook_id, owner_ids)
 
     original_settle = profiles.settle
 
     def settle_after_removal(notebook_id, owner_id, status, **kwargs):
         # Removal lands in the microseconds between the writes and the settle,
         # so the pre-write probe cannot have seen it.
-        profiles.clear_job_row(NOTEBOOK_ID, USER_A)
+        profiles.clear_job_rows(NOTEBOOK_ID, [USER_A])
         return original_settle(notebook_id, owner_id, status, **kwargs)
 
     monkeypatch.setattr(profiles, "settle", settle_after_removal)
@@ -1996,9 +1996,9 @@ def test_a_settle_that_itself_fails_still_wipes_conservatively(harness, monkeypa
     wipes: list[str] = []
     original_clear_all = profiles.clear_all
 
-    def counting_clear_all(notebook_id, owner_id):
-        wipes.append(owner_id)
-        return original_clear_all(notebook_id, owner_id)
+    def counting_clear_all(notebook_id, owner_ids):
+        wipes.extend(owner_ids)
+        return original_clear_all(notebook_id, owner_ids)
 
     def broken_settle(*_args, **_kwargs):
         raise RuntimeError("settle 的写入本身失败(抖动/连接错误)")
@@ -2029,7 +2029,7 @@ def test_a_superseded_claim_writes_nothing_and_says_so(harness, monkeypatch):
     stale = profiles.claim(NOTEBOOK_ID, USER_A)
 
     def reply(_prompt: str) -> str:
-        profiles.clear_job_row(NOTEBOOK_ID, USER_A)
+        profiles.clear_job_rows(NOTEBOOK_ID, [USER_A])
         profiles.claim(NOTEBOOK_ID, USER_A)      # a new generation takes over
         return _reply(retrieval_notes="陈旧的心得")
 

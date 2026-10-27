@@ -233,7 +233,7 @@ def test_clear_observations_by_agent_profile_only_removes_that_agent(
         NOTEBOOK_ID, "user-a", "agent-2", text="other-agent", client_request_id="r1",
     )
     removed = harness.store.clear_observations(
-        NOTEBOOK_ID, "user-a", agent_profile_id="agent-1"
+        NOTEBOOK_ID, ["user-a"], agent_profile_id="agent-1"
     )
     assert removed == 1
     remaining = harness.store.recent_observations(NOTEBOOK_ID, "user-a", limit=10)
@@ -252,7 +252,7 @@ def test_clear_observations_without_agent_profile_removes_everything_in_scope(
     harness.store.append_observation(
         NOTEBOOK_ID, "user-b", "agent-1", text="other-owner", client_request_id="r1",
     )
-    removed = harness.store.clear_observations(NOTEBOOK_ID, "user-a")
+    removed = harness.store.clear_observations(NOTEBOOK_ID, ["user-a"])
     assert removed == 2
     assert harness.store.recent_observations(NOTEBOOK_ID, "user-a", limit=10) == []
     # user-b's scope is untouched.
@@ -600,7 +600,7 @@ def test_clear_narrows_by_kind_and_still_clears_both_by_default(harness):
         )
 
     seed()
-    removed = harness.store.clear_observations(NOTEBOOK_ID, "user-a", kind="call")
+    removed = harness.store.clear_observations(NOTEBOOK_ID, ["user-a"], kind="call")
     assert removed == 1
     assert harness.store.list_calls(NOTEBOOK_ID, "user-a", limit=10) == []
     assert len(harness.store.list_observations(NOTEBOOK_ID, "user-a", limit=10)) == 1
@@ -608,7 +608,7 @@ def test_clear_narrows_by_kind_and_still_clears_both_by_default(harness):
     seed()
     # 缺省仍然清两种——成员被移出共享笔记本时走的就是这一条,漏掉调用记账
     # 就等于在他失去访问权的那一刻把行留在库里。
-    removed_all = harness.store.clear_observations(NOTEBOOK_ID, "user-a")
+    removed_all = harness.store.clear_observations(NOTEBOOK_ID, ["user-a"])
     assert removed_all == 3
     assert harness.store.list_calls(NOTEBOOK_ID, "user-a", limit=10) == []
     assert harness.store.list_observations(NOTEBOOK_ID, "user-a", limit=10) == []
@@ -621,7 +621,7 @@ def test_clear_by_kind_and_agent_together_leaves_other_agents_calls(harness):
     )
 
     removed = harness.store.clear_observations(
-        NOTEBOOK_ID, "user-a", agent_profile_id="agent-1", kind="call"
+        NOTEBOOK_ID, ["user-a"], agent_profile_id="agent-1", kind="call"
     )
     assert removed == 1
     remaining = harness.store.list_calls(NOTEBOOK_ID, "user-a", limit=10)
