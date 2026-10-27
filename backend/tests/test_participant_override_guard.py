@@ -998,8 +998,9 @@ _SEAT_FAILSOFT_SITES = (
 #   ``except Exception``(R3/R4 之后共提路拆成两段,各有一个)—— 前者的 try 体是
 #   ``_source_ceiling_kwargs`` + ``_denies`` + ``_ceiling_focal``(``_resolve_focal`` →
 #   store ``resolve_focal``;天花板在绑时再 ``_library_ceiling`` + store
-#   ``focal_name_members``,按页读);后者的 try 体是 ``_ceiling_kwargs``
-#   (``_note_source_index_fallback``)、store ``comention_peers(**_peer_read_kwargs(...))``,
+#   ``comparison_peer_members``,只列焦点簇、按页读);后者的 try 体是
+#   ``_note_ceiling_fallback``(``_note_source_index_fallback``)、store
+#   ``comention_peers(**_peer_read_kwargs(...))``,
 #   以及天花板在绑时的 ``_ceiling_peer_names``(``_library_ceiling`` + store
 #   ``comparison_peer_members``,必要时 ``_scan_peer_members`` 翻页)。这些只读
 #   ``source_scope.current_source_scope()``(及其按 run 记忆的天花板)、``retrieval_run``

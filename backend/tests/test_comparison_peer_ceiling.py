@@ -566,13 +566,12 @@ def test_only_communities_reads_the_two_peer_store_methods():
     两个消费点因此不可能各拿一份口径——绕过 ``communities.py`` 就是新开一条
     未过闸的通道,这条断言会响亮失败。R3 的成员读 ``comparison_peer_members``
     同理:它带回天花板外成员的写法,只有在 ``communities.py`` 的名字出口里按
-    冻结天花板逐行判过才算数,所以同样只许这一个文件读;R4 的焦点成员读
-    ``focal_name_members`` 也一样(天花板判定在 ``_ceiling_focal`` 里)。逐方法
-    统计,任何一个方法多出一个读者(或在 ``communities.py`` 里消失)都会红。
+    冻结天花板逐行判过才算数,所以同样只许这一个文件读(R4 的焦点成员读也走它,
+    天花板判定在 ``_ceiling_focal`` 里)。逐方法统计,任何一个方法多出一个读者
+    (或在 ``communities.py`` 里消失)都会红。
     """
     app_root = Path(__file__).resolve().parents[1] / "app"
-    methods = {"comention_peers", "community_member_peers", "comparison_peer_members",
-               "focal_name_members"}
+    methods = {"comention_peers", "community_member_peers", "comparison_peer_members"}
     readers: dict[str, set[str]] = {method: set() for method in methods}
     for path in app_root.rglob("*.py"):
         if path.parts[-2:] in {("sqlite", "unified_kg_store.py"),

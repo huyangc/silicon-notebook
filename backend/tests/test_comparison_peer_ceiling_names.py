@@ -86,3 +86,29 @@ def test_member_paging_window_is_capped(inside):
         assert name is None and 8 + read < 5000 <= 8 + sum(store.limits)
     else:
         assert name == "Hub" and 8 + read <= inside < 8 + sum(store.limits)
+
+
+@pytest.mark.parametrize("inside", [None, 1500], ids=["no-carrier", "carrier-deep"])
+def test_focal_paging_window_is_capped(inside):
+    """R4's focal pages (``_ceiling_focal``) start at ``_PEER_MEMBER_WINDOW``,
+    double while a full page holds no in-ceiling member spelled as the key, and
+    never grow past ``_PEER_MEMBER_PAGE_MAX``; the loop ends on the page holding
+    the carrier, or on the short page at the end of the cluster."""
+    from app.services import communities
+    from app.services.source_scope import source_scope_context
+
+    store = _HubStore(2000, inside)
+    store.resolve_focal = lambda notebook_id, key: "K-hub"
+    service = communities.CommunityQueryService(
+        notebooks=None, unified_kg=store, event_log=None)
+    with source_scope_context(
+        "nb", None, None, notebook_source_ceilings={"nb": frozenset({"s-in"})},
+    ):
+        focal = service._ceiling_focal("nb", "Hub", {"allowed_source_ids": ["s-in"]})
+    cap = communities._PEER_MEMBER_PAGE_MAX
+    if inside is None:
+        assert focal is None
+        assert store.limits == [8, 16, 32, 64, 128, 256, cap, cap, cap]
+    else:
+        assert focal == "K-hub"
+        assert store.limits == [8, 16, 32, 64, 128, 256, cap, cap]

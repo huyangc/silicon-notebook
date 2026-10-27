@@ -11,7 +11,7 @@
 (逐库冻结来源天花板)在 _source_ceiling_kwargs —— 两个 peers 函数(以及
 resolve_comparison_peers,两路共用)在入口处各取一次,下推给 store 做成 SQL 谓词;
 天花板是空集(deny)时入口处直接返回空,一条语句、一个事件都不发(_denies)。
-_ceiling_kwargs 顺带发那条 source_index_fallback 事件(闸在 SQL 里、事件在服务层)。
+_note_ceiling_fallback 顺带发那条 source_index_fallback 事件(闸在 SQL 里、事件在服务层)。
 
 来源闸只回答「这个兄弟簇留不留」,不回答「它叫什么」:存储的 canonical_name 可能是
 天花板外成员(隐藏的 Knowhow 投影 / Memory)的写法,也可能是那个成员已被剪掉后留下
@@ -160,7 +160,7 @@ class CommunityQueryService:
                 "focal": focal_name,
             })
             return []
-        self._ceiling_kwargs(base_notebook_id, ceiling)
+        self._note_ceiling_fallback(base_notebook_id, ceiling)
         rows = self.unified_kg.community_member_peers(
             base_notebook_id, community_id, focal, candidates,
             **_peer_read_kwargs(ceiling),
@@ -214,7 +214,7 @@ class CommunityQueryService:
         try:
             if not focal:
                 return []
-            self._ceiling_kwargs(notebook_id, ceiling)
+            self._note_ceiling_fallback(notebook_id, ceiling)
             peers = self.unified_kg.comention_peers(
                 notebook_id, focal, self.sibling_min_bridge,
                 # 天花板在绑时多要一倍,R3 丢掉的簇不白占名额;无天花板 → 照旧 top_k。
@@ -239,36 +239,43 @@ class CommunityQueryService:
         """R4:焦点解析。存储名解析(``_resolve_focal``)之外,该库天花板在绑时
         (``ceiling`` 即入口处的 ``_source_ceiling_kwargs`` 非空——与 SQL 来源闸同一个
         判据),解析出的焦点簇还必须有一个**天花板内成员**(同 R3,
-        ``_member_in_ceiling``)的名字 ``lower(name)`` 等于焦点归一键;没有 → ``None``,
-        调用方走与今天解析不到时同一条路径(社区路发
+        ``_member_in_ceiling``)的名字按 ASCII 小写化后等于焦点归一键;没有 →
+        ``None``,调用方走与今天解析不到时同一条路径(社区路发
         ``community_unavailable/focal_unresolved``,共提路返回 [])。存储名可能是天花板
         外成员的写法,不加这一道,猜中隐藏写法就能解析出焦点并拿到兄弟。
 
-        成本:天花板在绑且存储名解析成功时,按页读该簇里名字等于焦点键的成员及其
-        自己的 ``source_id``(``focal_name_members``,与 ``_scan_peer_members`` 同形:
-        首页 ``_PEER_MEMBER_WINDOW`` 行、整页没有天花板内成员才翻倍往后读、页大小
-        封顶 ``_PEER_MEMBER_PAGE_MAX``,遇到第一个天花板内成员所在的页即停)——常见
-        情形一条语句;没有天花板内拼写者时读完整簇的同名成员(fail closed)。天花板
-        判定在这里对冻结的天花板集合做,一整库的来源清单不进 SQL。无天花板 → 零
-        额外语句。``resolve_comparison_peers`` 每库只解析一次,两路共用这一个答案。"""
+        成员读复用 R3 的 ``comparison_peer_members``(只列焦点这一个簇):它按
+        ``(notebook_id, canonical_id, member_object_id)`` 索引的顺序走簇行、对象按
+        主键探查,``LIMIT`` 限住的是**扫过的**成员行,不是「名字对得上的」行——名字
+        比较放在 SQL 里时,没有统计信息的连表谓词让 PostgreSQL 先把整簇连完再排序
+        截断(评审实测首页 LIMIT 8 与不设上限的旧读同为约 3.2 万 buffers)。名字比较
+        在这里做,只折叠 ASCII(``_ascii_lower``),与 SQLite 的 ``lower()``、PG 的
+        ``lower(... COLLATE "C")`` 以及 ``resolve_focal`` 的 ``lower(canonical_name)``
+        同一口径。翻页与 ``_scan_peer_members`` 同形:首页 ``_PEER_MEMBER_WINDOW`` 行,
+        整页没有天花板内拼写者才按扫过的最后一个成员往后翻、页大小翻倍、封顶
+        ``_PEER_MEMBER_PAGE_MAX``,短页即读完——常见情形一条语句;没有天花板内拼写者时
+        读完整簇(fail closed)。天花板判定对冻结的天花板集合做,一整库的来源清单不进
+        SQL。无天花板 → 零额外语句。``resolve_comparison_peers`` 每库只解析一次,两路
+        共用这一个答案。"""
         focal = _resolve_focal(self.unified_kg, notebook_id, focal_name)
         if not focal or not ceiling:
             return focal
         allowed = _library_ceiling(notebook_id)
         key, after, window = _norm(focal_name), "", _PEER_MEMBER_WINDOW
         while True:
-            rows = self.unified_kg.focal_name_members(
-                notebook_id, focal, key, limit=window, after=after)
-            if any(_member_in_ceiling(row, allowed) for row in rows):
+            rows = self.unified_kg.comparison_peer_members(
+                notebook_id, [focal], limit=window, after=after)
+            if any(_member_in_ceiling(row, allowed)
+                   and _ascii_lower(_member_name(row)) == key for row in rows):
                 return focal
             if len(rows) < window:
                 return None
             after = str(rows[-1]["member_object_id"])
             window = min(window * 2, _PEER_MEMBER_PAGE_MAX)
 
-    def _ceiling_kwargs(self, notebook_id: str, ceiling: dict) -> dict:
-        """入口处取的 ``_source_ceiling_kwargs``(``ceiling``)加一条可观测性:闸落在
-        **未回填库**上时发事件;原样返回 ``ceiling``。
+    def _note_ceiling_fallback(self, notebook_id: str, ceiling: dict) -> None:
+        """入口处取的 ``_source_ceiling_kwargs``(``ceiling``)在绑时加一条可观测性:
+        闸落在**未回填库**上时发事件。
 
         为什么要这条信号:闸有两支(见 ``_object_support_exists``)。反向索引
         ``knowledge_object_sources`` 已回填的库走窄索引读;没回填的库退回扫
@@ -286,7 +293,6 @@ class CommunityQueryService:
         """
         if ceiling:
             self._note_source_index_fallback(notebook_id)
-        return ceiling
 
     def _note_source_index_fallback(self, notebook_id: str) -> None:
         from app.services.retrieval_run import memoized_retrieval_value
@@ -438,14 +444,19 @@ class CommunityQueryService:
     def resolve_comparison_peers(self, base_notebook_id: str, focal_name: str,
                                  question: str, *, top_k: int,
                                  candidates: int) -> Tuple[List[str], str]:
-        """共提优先、社区回退;两路共用**一次**焦点解析(含 R4 的成员读)与入口处
-        取的那一份天花板 kwargs——回退社区路时不再重解析一遍。
+        """对比兄弟解析(reasoning 的 ``expand_community`` 与 chunk 模式的
+        ``comparison_peer_names`` 都经这里):共提优先、社区回退,返回
+        ``(names, source)``,``source ∈ {"comention", "community"}``。两路查同一个
+        BASE 库、共用**一次**焦点解析(含 R4 的成员读)与入口处取的那一份天花板
+        kwargs——回退社区路时不再重解析一遍;两路的名字在各自出口过同一道 R3,所以
+        chunk 子查询与 reasoning 轨迹拿到的是同一份名字。
 
         与分别调 ``sibling_peers`` / ``community_peers`` 的结果、事件逐一相同:
         焦点为空 → ([], "community"),不发事件;天花板是空集(deny)→ 同上,一条
         语句都不发;焦点解析不到 → 共提路静默 [],社区路发一条
-        ``focal_unresolved``。焦点解析抛出的异常照旧往外传(过去由社区路那一次
-        解析抛出)。"""
+        ``focal_unresolved``。共提路 fail-open(异常 → [] 后回退社区路);焦点解析
+        与社区路的异常照旧往外传(调用点各有各的处置:``expand_community`` 的
+        try/except、``ask_chunk`` 不兜底)。"""
         if not base_notebook_id or not _norm(focal_name):
             return [], "community"
         ceiling = _source_ceiling_kwargs(base_notebook_id)
@@ -547,6 +558,17 @@ def _member_name(row) -> str:
     return "" if value is None else str(value)
 
 
+_ASCII_LOWER = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _ascii_lower(text: str) -> str:
+    """只把 A–Z 折成 a–z,其余字符原样:与 SQLite 的 ``lower()``、PostgreSQL 的
+    ``lower(... COLLATE "C")`` 同一口径——``resolve_focal`` 的
+    ``lower(canonical_name)`` 就是这样折叠存储名的,R4 判成员写法必须用同一把尺。"""
+    return text.translate(_ASCII_LOWER)
+
+
 def _in_ceiling_name(rows, stored_name: str, allowed: FrozenSet[str]) -> Optional[str]:
     """R3 在一页成员上的判定。只有名字非空的天花板内成员(``_member_in_ceiling``)
     能命名:它们里有人叫存储名 → 存储名;否则第一个这样的成员的名字;这页一个都
@@ -604,26 +626,3 @@ def sibling_peers(queries, notebook_id: str, focal_name: str, *,
     return queries.sibling_peers(
         notebook_id, focal_name, top_k=top_k
     )
-
-
-def resolve_comparison_peers(queries, base_nb: str, focal_name: str, query: str, *,
-                             top_k: int, candidates: int) -> Tuple[List[str], str]:
-    """对比兄弟解析(两处对比调用点共享):共提优先、社区回退。
-
-    返回 (names, source),source ∈ {"comention", "community"}:
-      · 先 sibling_peers(共提兄弟,零 LLM 直接查表);非空 → 用其名单,source="comention"。
-      · 空 → 回退 community_peers(Louvain 社区),source="community",行为与今日逐字一致。
-    两路都查同一个 BASE 库 id(调用方对 mounted_base_ids 逐个传入)→ 口径一致 like-for-like。
-    两路的名字在各自出口过同一道 R3(该库天花板在绑时只用天花板内成员的名字),所以 chunk
-    子查询与 reasoning 轨迹拿到的是同一份名字。
-    sibling_peers 内部 fail-open→[] 时自动回退。**不吞 community_peers 异常**——与既有两调用点
-    保持一致(expand_community 的 try/except、ask_chunk 的无兜底,都仍在各自调用点)。"""
-    siblings = sibling_peers(
-        queries, base_nb, focal_name, top_k=top_k
-    )
-    if siblings:
-        return [name for name, _claims in siblings], "comention"
-    return community_peers(
-        queries, base_nb, focal_name, query,
-        top_k=top_k, candidates=candidates,
-    ), "community"

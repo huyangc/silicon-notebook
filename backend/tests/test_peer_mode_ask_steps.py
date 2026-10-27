@@ -495,11 +495,13 @@ class _FakeUnifiedKg:
     def __init__(self, peers_by_notebook) -> None:
         self._peers = dict(peers_by_notebook)
         self.comention_queries: list = []
+        self._focal_keys: dict = {}
 
     def mounted_base_ids(self, active_notebook_id, *, viewer_id=None):
         return ()
 
     def resolve_focal(self, notebook_id, key):
+        self._focal_keys[f"focal::{notebook_id}"] = key
         return f"focal::{notebook_id}"
 
     def comention_peers(self, notebook_id, focal, min_bridge, top_k, *,
@@ -510,17 +512,14 @@ class _FakeUnifiedKg:
             return [(f"K-{name}", name, 3) for name in names]
         return [(name, 3) for name in names]
 
-    def focal_name_members(self, notebook_id, canonical_id, focal_key, *, limit, after=""):
-        # R4 的焦点成员读:焦点写法属于一个天花板内成员(本文件不测 R4)。
-        return [{"member_object_id": f"ko-{canonical_id}",
-                 "source_id": f"src-{notebook_id}"}]
-
     def comparison_peer_members(self, notebook_id, canonical_ids, *, limit, after=""):
-        # R3 的成员读(``_peer_scope`` 装了逐库天花板,所以名字出口会来读):
-        # 每个兄弟簇恰一个天花板内成员,名字就是存储名——本文件不测改名。
+        # R3 的成员读与 R4 的焦点成员读(``_peer_scope`` 装了逐库天花板,所以两者
+        # 都会来读):每个簇恰一个天花板内成员——兄弟簇的名字就是存储名、焦点簇的
+        # 名字就是焦点键。本文件既不测改名,也不测 R4。
         return [
             {"canonical_id": cid, "member_object_id": f"ko-{cid}",
-             "source_id": f"src-{notebook_id}", "member_name": cid[len("K-"):]}
+             "source_id": f"src-{notebook_id}",
+             "member_name": self._focal_keys.get(cid, cid[len("K-"):])}
             for cid in sorted(canonical_ids)
         ]
 
