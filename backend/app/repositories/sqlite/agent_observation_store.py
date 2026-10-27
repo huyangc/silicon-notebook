@@ -15,11 +15,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Callable, Iterable
 
-from app.repositories.owner_batches import (
-    owner_id_list,
-    sqlite_in_placeholders,
-    sqlite_owner_chunks,
-)
+from app.repositories.owner_batches import owner_id_list
 from app.repositories.ports import (
     AGENT_CALL_RING_MAX,
     AGENT_OBSERVATION_KIND_CALL,
@@ -29,6 +25,7 @@ from app.repositories.ports import (
     project_observation_row,
 )
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.id_binding import bind_ids, member_of
 
 # Absolute-instant ordering, matching the ``conversations`` table's own
 # ``CONVERSATION_ANSWERS_ORDER_DESC`` precedent (``app/repositories/sqlite/
@@ -334,25 +331,20 @@ class AgentObservationStore:
         # from the two that were actually supplied rather than branching on
         # every combination, so "clear this Agent's call rows only" needs no
         # fourth hand-written statement.
-        clauses: list[str] = []
-        narrowing: list[object] = []
+        # One statement whatever the number of owners: the owner set binds
+        # through ``id_binding`` (one parameter) and only filters.
+        bound = bind_ids(owners, sort=True)
+        clauses = ["notebook_id=?", member_of("owner_id", bound)]
+        params: list[object] = [notebook_id, bound.param]
         if profile:
             clauses.append("agent_profile_id=?")
-            narrowing.append(profile)
+            params.append(profile)
         if kind:
             clauses.append("kind=?")
-            narrowing.append(str(kind))
-        deleted = 0
-        # One write transaction whatever the number of owners (chunked IN).
+            params.append(str(kind))
         with self.database.write() as db:
-            for chunk in sqlite_owner_chunks(owners):
-                where = [
-                    "notebook_id=?",
-                    f"owner_id IN ({sqlite_in_placeholders(len(chunk))})",
-                    *clauses,
-                ]
-                deleted += db.execute(
-                    "DELETE FROM agent_observations WHERE " + " AND ".join(where),
-                    (notebook_id, *chunk, *narrowing),
-                ).rowcount
-        return deleted
+            cursor = db.execute(
+                "DELETE FROM agent_observations WHERE " + " AND ".join(clauses),
+                tuple(params),
+            )
+        return cursor.rowcount

@@ -24,6 +24,7 @@ from app.repositories.postgres._store_utils import (
     normalized_clock,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.id_binding import bind_ids, execute_ids, member_of
 from app.repositories.ports import (
     AGENT_CALL_RING_MAX,
     AGENT_OBSERVATION_KIND_CALL,
@@ -350,9 +351,11 @@ class AgentObservationStore:
         profile = str(agent_profile_id or "")
         # Assembled from the narrowings actually supplied, mirroring the
         # SQLite implementation, so no combination needs its own statement.
-        # One statement whatever the number of owners (``= ANY``).
-        clauses = ["notebook_id=%s", "owner_id=ANY(%s)"]
-        params: list[object] = [notebook_id, owners]
+        # One statement whatever the number of owners: the owner set binds
+        # through ``id_binding`` (one parameter, a custom plan).
+        bound = bind_ids(owners)
+        clauses = ["notebook_id=%s", member_of("owner_id", bound)]
+        params: list[object] = [notebook_id, bound.param]
         if profile:
             clauses.append("agent_profile_id=%s")
             params.append(profile)
@@ -360,7 +363,8 @@ class AgentObservationStore:
             clauses.append("kind=%s")
             params.append(str(kind))
         with self.database.write() as connection:
-            cursor = connection.execute(
+            cursor = execute_ids(
+                connection,
                 "DELETE FROM agent_observations WHERE " + " AND ".join(clauses),
                 tuple(params),
             )
