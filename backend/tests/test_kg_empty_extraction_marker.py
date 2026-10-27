@@ -133,7 +133,7 @@ def test_sqlite_pending_count_sql_agrees_with_the_python_predicate(repo):
         for _label, status, message, _expected in CASES
     )
     with repo._runtime.database.connect() as db:
-        counted = kcc._pending_source_count_query(db, notebook.id, visible_only=True)
+        counted = kcc._pending_source_count_query(db, notebook.id)
     assert counted == expected_pending
 
     # 且这个数确实小于「全部来源」——否则上面的相等可能是两边一起没排除任何东西。
@@ -217,14 +217,13 @@ def test_postgres_pending_sql_has_no_literal_percent():
     """
     from app.repositories.postgres import knowledge_counts_cache as pg_cache
 
-    for visible_only in (True, False):
-        sql = pg_cache._pending_sql(visible_only=visible_only)
-        offending = [
-            sql[index : index + 12]
-            for index, char in enumerate(sql)
-            if char == "%" and sql[index + 1 : index + 2] not in {"s", "b", "t"}
-        ]
-        assert not offending, (visible_only, offending)
+    sql = pg_cache._pending_sql()
+    offending = [
+        sql[index : index + 12]
+        for index, char in enumerate(sql)
+        if char == "%" and sql[index + 1 : index + 2] not in {"s", "b", "t"}
+    ]
+    assert not offending, offending
 
 
 def test_postgres_pending_sql_mirrors_the_python_predicate_shape():
@@ -232,7 +231,7 @@ def test_postgres_pending_sql_mirrors_the_python_predicate_shape():
     来满足。判据本身的对错由 SQLite 侧的真库对账保证,这里只钉「PG 侧没漏掉它」。"""
     from app.repositories.postgres import knowledge_counts_cache as pg_cache
 
-    sql = pg_cache._pending_sql(visible_only=True)
+    sql = pg_cache._pending_sql()
     assert "starts_with(" in sql
     assert KG_EMPTY_RUN_MESSAGE_PREFIX in sql
     # 零产出 + 有失败窗口仍算待分析(见 CASES),PG 侧同样要有这道护栏。

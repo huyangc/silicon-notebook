@@ -234,7 +234,7 @@ def _require_postgres_url_for_integration(request) -> None:
 
 @pytest.fixture(autouse=True)
 def _reset_postgres_knowledge_counts_cache():
-    """``knowledge_counts_cache`` 是进程级模块全局(``_MEMO``/``_PENDING``/
+    """``knowledge_counts_cache`` 是进程级模块全局(``_MEMO``/
     ``_VISIBLE_PENDING``/``_CHUNKS``),不随每个测试的隔离 schema 一起清空——两个测试
     即使各自建了互不相干的 schema,只要都用了同一个 ``notebook_id``(本目录下的测试
     偏爱 ``nb-pending`` 这类好记的字面量),后一个测试就可能读到前一个测试留下的

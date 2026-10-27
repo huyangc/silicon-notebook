@@ -30,14 +30,14 @@ existing invalidate hooks cover them for free):
   * ``chunk_count`` — ``COUNT(*) FROM chunks`` (``/scale-index/status`` open path).
     Sound on ``kg_mutation_seq`` because the sole chunk writer
     (``build_chunks_for_source``) and ``delete_source`` (FK cascade) both bump it.
-  * ``pending_source_count`` / ``visible_pending_source_count`` — sibling
-    physical/user-visible "N sources pending KG" correlated counts
-    (``from_row`` on every open, ~2s cold at 48k sources). Sound because a bare
+  * ``visible_pending_source_count`` — the user-visible "N sources pending
+    KG" correlated count (``from_row`` on every open, ~2s cold at 48k
+    sources). Sound because a bare
     source add is element-less (never pending) and every real transition (parse,
     extract, source/KG delete) bumps the seq or hits ``invalidate``.
 R3 T-A3 v4 note: the edge-review-queue's ``total`` field used to be a 5th
 memo here (``review_queue_total`` + a ``carry_review_queue_total`` retag,
-epoch-guarded the same way the two pending-source views are). codex #638 R1
+epoch-guarded the same way the pending-source view is). codex #638 R1
 found that shape produced items/total from two independent seq-gated reads
 that could straddle a KG mutation and disagree about which version they
 described. v4 moved ``total`` into
@@ -75,14 +75,13 @@ from app.repositories.sqlite.memory_sql import (
 # repository->service import edge).
 _DEPRECATED = "deprecated"
 
-# 四个 memo 的键从裸 kg_mutation_seq 扩为 (kg_reset_epoch, kg_mutation_seq)
+# 三个 memo 的键从裸 kg_mutation_seq 扩为 (kg_reset_epoch, kg_mutation_seq)
 # 二元组(batch-3-W1 PR-2,design doc Sec 3.2 表 #9,parity with the
 # PostgreSQL twin's _version_key). NOT the same "epoch" as
 # _INVALIDATION_EPOCH below — that is this module's own process-internal
 # in-flight-write-back race guard, unrelated to the persisted column.
 _MEMO: "OrderedDict[str, Tuple[Tuple[int, int], Dict[Tuple[str, str], int]]]" = OrderedDict()
 # Sibling memos sharing _LOCK / _MAX_NOTEBOOKS / the version gate.
-_PENDING: "OrderedDict[str, Tuple[Tuple[int, int], int]]" = OrderedDict()
 _VISIBLE_PENDING: "OrderedDict[str, Tuple[Tuple[int, int], int]]" = OrderedDict()
 _CHUNKS: "OrderedDict[str, Tuple[Tuple[int, int], int]]" = OrderedDict()
 _LOCK = threading.Lock()
@@ -290,18 +289,14 @@ _ANALYZED_WITHOUT_OBJECTS_EXCLUSION = (
 )
 
 
-def _pending_source_count_query(
-    db: sqlite3.Connection, notebook_id: str, *, visible_only: bool
-) -> int:
-    visible_clause = (
-        "AND s.source_type NOT IN ('memory','knowhow') " if visible_only else ""
-    )
-    # A promotion source (PR-E8) is never an extraction target, so it is never
-    # pending either -- in both counts (the analyze-new count would otherwise
-    # never drain).
+def _pending_source_count_query(db: sqlite3.Connection, notebook_id: str) -> int:
+    # Memory-derived and Knowhow-table synthetic sources are hidden from the
+    # user, so they are never counted. A promotion source (PR-E8) is never an
+    # extraction target, so it is never pending either (the analyze-new count
+    # would otherwise never drain).
     row = db.execute(
         "SELECT COUNT(*) FROM sources s WHERE s.notebook_id = ? "
-        + visible_clause
+        "AND s.source_type NOT IN ('memory','knowhow') "
         + f"AND s.{NOT_PROMOTION_SOURCE_PREDICATE} "
         + "AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id) "
         "AND NOT EXISTS (SELECT 1 FROM knowledge_objects k "
@@ -325,32 +320,6 @@ def _pending_source_count_query(
     return int(row[0])
 
 
-def pending_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
-    """Physical parsed-content count without a complete KG graph.
-
-    A direct/governance graph without extraction history remains complete, but
-    rows left by a failed latest KG run stay pending. Internal scheduling and
-    readiness accounting use this physical count. Memoized on
-    ``(notebook_id, kg_reset_epoch, kg_mutation_seq)``."""
-    version = _version_key(db, notebook_id)
-    with _LOCK:
-        hit = _PENDING.get(notebook_id)
-        if hit is not None and hit[0] == version:
-            _PENDING.move_to_end(notebook_id)
-            return hit[1]
-        invalidation_epoch = _INVALIDATION_EPOCH
-
-    count = _pending_source_count_query(db, notebook_id, visible_only=False)
-
-    with _LOCK:
-        if invalidation_epoch == _INVALIDATION_EPOCH:
-            _PENDING[notebook_id] = (version, count)
-            _PENDING.move_to_end(notebook_id)
-            while len(_PENDING) > _MAX_NOTEBOOKS:
-                _PENDING.popitem(last=False)
-    return count
-
-
 def visible_pending_source_count(
     db: sqlite3.Connection, notebook_id: str
 ) -> int:
@@ -365,7 +334,7 @@ def visible_pending_source_count(
             _VISIBLE_PENDING.move_to_end(notebook_id)
             return hit[1]
         invalidation_epoch = _INVALIDATION_EPOCH
-    count = _pending_source_count_query(db, notebook_id, visible_only=True)
+    count = _pending_source_count_query(db, notebook_id)
     with _LOCK:
         if invalidation_epoch == _INVALIDATION_EPOCH:
             _VISIBLE_PENDING[notebook_id] = (version, count)
@@ -402,8 +371,8 @@ def chunk_count(db: sqlite3.Connection, notebook_id: str) -> int:
 
 
 def warm_all(db: sqlite3.Connection, progress=None) -> int:
-    """Prime the FOUR open-path memos every notebook open/board/status-poll
-    reaches (``type_status_counts`` / both pending-source views /
+    """Prime the THREE open-path memos every notebook open/board/status-poll
+    reaches (``type_status_counts`` / the visible pending-source count /
     ``chunk_count``) for every live notebook, so the first request after a
     fresh process start is served warm instead of paying the cold GROUP BY +
     correlated scans (see module docstring).
@@ -435,7 +404,6 @@ def warm_all(db: sqlite3.Connection, progress=None) -> int:
     for i, notebook_id in enumerate(ids, start=1):
         try:
             shared_type_status_counts(db, notebook_id)
-            pending_source_count(db, notebook_id)
             visible_pending_source_count(db, notebook_id)
             chunk_count(db, notebook_id)
         except sqlite3.Error:
@@ -458,11 +426,9 @@ def invalidate(notebook_id: "Optional[str]" = None) -> None:
         _INVALIDATION_EPOCH += 1
         if notebook_id is None:
             _MEMO.clear()
-            _PENDING.clear()
             _VISIBLE_PENDING.clear()
             _CHUNKS.clear()
         else:
             _MEMO.pop(notebook_id, None)
-            _PENDING.pop(notebook_id, None)
             _VISIBLE_PENDING.pop(notebook_id, None)
             _CHUNKS.pop(notebook_id, None)

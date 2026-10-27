@@ -399,7 +399,7 @@ def test_join_shared_rejects_a_non_live_notebook(repo, lifecycle):
 
 
 def test_warm_all_selection_face(repo, lifecycle, monkeypatch):
-    """`warm_all` 的选取面(SELECT id 那条语句)——用一个记录型替身拦截四个
+    """`warm_all` 的选取面(SELECT id 那条语句)——用一个记录型替身拦截三个
     被暖机函数之一实际会被调用到的 notebook_id 集合,不依赖 total 计数(种子库里
     还有一本 viewer_id 也是可见的,总数不是 1)。"""
     from app.repositories.sqlite import knowledge_counts_cache
