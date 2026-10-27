@@ -2869,6 +2869,8 @@ notebook's group admins included) 「该参考库暂时不可用」; once the si
 删除。」 with no control and re-reads; an unreadable list says 「暂时读不到即将删除的笔记本，请稍后重试」
 (fail-closed, with a retry). Clicking the bell item expands the controls inside the notification popover
 without navigating away; 「返回通知」 returns to the notification list, and closing the popover releases its space.
+Closing it or returning to the notification list keeps in-flight cancellation, export downloads and paged
+transfers running; reopening the detail shows their current state and results.
 Even after notifications are cleared, a 「查看即将删除的笔记本」 entry remains while deletions exist or their
 endpoint is unavailable, preserving access to the controls and retry. Opening such a notebook (a
 stale link, a bookmark) shows the explanation box 「这本笔记本已被删除」 with the same sentence and

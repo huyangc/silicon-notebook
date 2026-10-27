@@ -157,7 +157,7 @@ export function PendingBell(props: {
   userId?: string;
   checkup?: CheckupAlert | null;
   buttonRef?: Ref<HTMLButtonElement>;
-  detail?: { key: number; content: ReactNode; onBack: () => void } | null;
+  detail?: { key: number | null; render: (active: boolean) => ReactNode; onBack: () => void } | null;
   deletionAccess?: { onOpen: () => void; hasNotices: boolean };
   onOpenItem: (item: PendingItem) => void;
   onOpenDone: (d: DoneToast) => void;
@@ -172,8 +172,9 @@ export function PendingBell(props: {
     onBack?.();
   }, [onBack]);
   const detailKey = props.detail?.key;
+  const detailActive = detailKey != null;
   useEffect(() => {
-    if (detailKey !== undefined) setOpen(true);
+    if (detailKey != null) setOpen(true);
   }, [detailKey]);
   // 体检提醒的「已读」「关掉」——按 sig 记(纯内存,同 doneItems 不持久化)。**仍有问题时**
   // sig 变化(问题种类增减)由下面的 !== 比较自动复活;**恢复健康**(checkup=null)则由紧随的
@@ -331,12 +332,14 @@ export function PendingBell(props: {
         <Bell size={18} />
         {badge > 0 && <span className="pending-badge">{badge > 99 ? "99+" : badge}</span>}
       </button>
-      {open && (
-        <div className={`pending-popover${props.detail ? " pending-popover-detail" : ""}`}>
-          {props.detail ? <>
+      {(open || props.detail) && (
+        <div hidden={!open} className={`pending-popover${detailActive ? " pending-popover-detail" : ""}`}>
+          {/* 面板关闭仅隐藏视图；导出下载、分页转移及结果由同一份控件状态继续持有。 */}
+          {props.detail && <div hidden={!detailActive}>
             <button type="button" className="link-button inline-action pending-detail-back" onClick={props.detail.onBack}>返回通知</button>
-            {props.detail.content}
-          </> : <>
+            {props.detail.render(open && detailActive)}
+          </div>}
+          <div hidden={detailActive}>
           {props.deletionAccess?.hasNotices && !view.visibleItems.some((it) => it.type === "notebook_pending_delete") && (
             <button type="button" className="pending-row" onClick={props.deletionAccess.onOpen}>查看即将删除的笔记本</button>
           )}
@@ -405,7 +408,7 @@ export function PendingBell(props: {
               ))}
             </div>
           )}
-          </>}
+          </div>
         </div>
       )}
     </div>

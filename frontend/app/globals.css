@@ -8928,6 +8928,9 @@ button.tag:hover {
 .pending-popover.pending-popover-detail {
   width: min(480px, calc(100vw - 28px));
 }
+.pending-popover[hidden] {
+  display: none;
+}
 .pending-detail-back {
   justify-self: start;
   margin: 4px 8px 10px;
