@@ -525,7 +525,8 @@ class SourceStore:
             # fetch its own copy — SourceDetail needs the raw dict here too
             # (for paper_meta_model), so a shared local avoids a second
             # paper_meta_for_sources round trip for the same source_id.
-            pm = self.paper_meta_for_sources(db, [source_id]).get(source_id)
+            pm = self.paper_meta_for_sources(
+                db, [source_id], notebook_id=row["notebook_id"]).get(source_id)
             summary = self.source_from_row(db, row, paper_meta=pm)
             return SourceDetail(
                 **summary.model_dump(),
@@ -2190,7 +2191,8 @@ class SourceStore:
             # while some object's evidence still cites it.
             kg_extracted = row["id"] in self._promotion_sources_in_graph(db, [row])
         pm = (
-            self.paper_meta_for_sources(db, [row["id"]]).get(row["id"])
+            self.paper_meta_for_sources(
+                db, [row["id"]], notebook_id=row["notebook_id"]).get(row["id"])
             if paper_meta is _UNSET else paper_meta
         )
         # 一次读取喂两个派生字段(告警 + 「已分析但零产出」),不是两次:两者的输入
@@ -2243,7 +2245,9 @@ class SourceStore:
         NOT "one query for the whole page": each of the 4 lookups still runs
         once per IN_CHUNK batch (⌈N/900⌉ batches for N ids), and
         paper_meta_for_sources itself issues 2 statements per batch (meta +
-        authors) — 5 SQL statements per batch in total, not 4.
+        authors; ``paper_meta_for_rows`` groups the page by each row's own
+        notebook first, and a page is one notebook) — 5 SQL statements per
+        batch in total, not 4.
 
         三条是 `source_id IN (...)`;kg_extracted 那条不是,它的驱动集是页内的
         source id 本身,用 `WITH page_sources(source_id) AS (VALUES ...)` 承载
@@ -2262,7 +2266,7 @@ class SourceStore:
         if not rows:
             return []
         source_ids = [r["id"] for r in rows]
-        paper_meta = self.paper_meta_for_sources(db, source_ids)
+        paper_meta = self.paper_meta_for_rows(db, rows)
         element_counts: Dict[str, int] = {}
         kg_extracted_ids: set = set()
         latest_error: Dict[str, str] = {}
@@ -2434,7 +2438,10 @@ class SourceStore:
         """写入/覆盖论文元数据(单写事务):source_paper_meta upsert + source_authors
         整组 delete+insert。meta 形状 = paper_meta.verify_paper_meta 的返回(已接地
         校验);行存在即「已尝试」,is_paper=0 是「已判定非论文」标记(幂等防重调 LLM)。
-        作者行 id 取 source_id 限定的确定性复合键(重抽稳定,无碰撞面)。"""
+        作者行 id 取 source_id 限定的确定性复合键(重抽稳定,无碰撞面)。
+        冲突时 notebook_id 一并写回(作者行本来就整组按它重写):子表 notebook_id
+        与 source 不一致的畸形遗留行重抽一次即被改正,不会被
+        paper_meta_for_sources 的收窄永远藏住;正常行上它与旧值相同。"""
         now = self.now()
         with self.database.write() as db:
             db.execute(
@@ -2444,6 +2451,7 @@ class SourceStore:
                    doi, keywords, raw_json, model, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id) DO UPDATE SET
+                  notebook_id=excluded.notebook_id,
                   is_paper=excluded.is_paper, paper_title=excluded.paper_title,
                   venue=excluded.venue, pub_year=excluded.pub_year, doi=excluded.doi,
                   keywords=excluded.keywords, raw_json=excluded.raw_json,
@@ -2532,18 +2540,49 @@ class SourceStore:
             ],
         )
 
-    def get_paper_meta(self, source_id: str) -> Optional[dict]:
+    def get_paper_meta(self, source_id: str, notebook_id: str) -> Optional[dict]:
+        """``notebook_id`` 是这条 source 自己所在的库(``sources.notebook_id``),
+        不是调用方此刻所在的库;口径见 ``paper_meta_for_sources``。"""
         with self.database.connect() as db:
-            return self.paper_meta_for_sources(db, [source_id]).get(source_id)
+            return self.paper_meta_for_sources(
+                db, [source_id], notebook_id=notebook_id).get(source_id)
+
+    def paper_meta_for_rows(self, db: sqlite3.Connection,
+                            rows: Sequence[sqlite3.Row]) -> Dict[str, dict]:
+        """``paper_meta_for_sources`` 的按行入口:按每行 source 自己的
+        ``notebook_id`` 分组后逐组水合。现有调用方(列表页)一页只有一个库,
+        于是恰好一组、语句数与按 id 直接调用相同;分组只是为了让一页跨库的
+        行也各按各的库收窄,而不是被第一行的库误收窄。"""
+        by_notebook: Dict[str, List[str]] = {}
+        for row in rows:
+            by_notebook.setdefault(row["notebook_id"], []).append(row["id"])
+        hydrated: Dict[str, dict] = {}
+        for notebook_id, ids in by_notebook.items():
+            hydrated.update(
+                self.paper_meta_for_sources(db, ids, notebook_id=notebook_id))
+        return hydrated
 
     def paper_meta_for_sources(self, db: sqlite3.Connection,
-                               source_ids: Sequence[str]) -> Dict[str, dict]:
+                               source_ids: Sequence[str], *,
+                               notebook_id: str) -> Dict[str, dict]:
         """批量水合(IN 分批守 999 变量上限,同 sources_from_rows 惯例)。
-        无 meta 行的源不在返回里。按 source_id 取子表,不校验子表自身的
-        notebook_id。登记在案的残留分歧:list_sources_page 的搜索谓词已改为
-        与 report_source_rows 等报表腿一样按子表 notebook_id 收窄,这条水合腿
-        没有跟着改。见
-        test_source_search_ignores_a_legacy_cross_notebook_child_row。"""
+        无 meta 行的源不在返回里。按 source_id 取子表,并按子表自身的
+        ``notebook_id`` 收窄到 ``notebook_id``(这些 source 自己所在的库)。
+
+        与 list_sources_page 的搜索腿、report_source_rows 家族
+        (``m.notebook_id = s.notebook_id``)和 notebook_analytics 的 is_paper 计数
+        同一口径:子表 notebook_id 与其 source 不一致的畸形遗留行不算这条 source
+        的论文元数据——不显示、不进 paper_meta_status,也不让元数据抽取的幂等
+        探针(get_paper_meta)判成「已有」,于是下一次抽取会重写它,
+        upsert_paper_meta 在冲突时一并改正 notebook_id。见
+        test_source_search_ignores_a_legacy_cross_notebook_child_row。
+
+        计划:收窄写成 ``+notebook_id = ?``。一元 ``+`` 让这一项不参与选索引——
+        不写的话,没有 ANALYZE 统计时(本库的常态)SQLite 会把等值项排在 IN 列表
+        前面,改走 idx_source_paper_meta_nb / idx_source_authors_nb,按库取出全部
+        行再滤 id(3.45 与 3.53 都如此)。写上之后计划与收窄前逐字相同:page 级
+        IN 列表仍由 sqlite_autoindex_source_paper_meta_1 / idx_source_authors_source
+        驱动。见 test_paper_meta_hydration_plan_stays_on_source_id。"""
         meta_rows: Dict[str, sqlite3.Row] = {}
         author_rows: Dict[str, List[sqlite3.Row]] = {}
         ids = list(source_ids)
@@ -2551,12 +2590,14 @@ class SourceStore:
             batch = ids[i:i + self.IN_CHUNK]
             ph = ",".join("?" for _ in batch)
             for row in db.execute(
-                f"SELECT * FROM source_paper_meta WHERE source_id IN ({ph})", batch,
+                f"SELECT * FROM source_paper_meta WHERE source_id IN ({ph}) "
+                "AND +notebook_id = ?", [*batch, notebook_id],
             ).fetchall():
                 meta_rows[row["source_id"]] = row
             for a in db.execute(
                 f"SELECT source_id, position, name, affiliation FROM source_authors "
-                f"WHERE source_id IN ({ph}) ORDER BY source_id, position ASC", batch,
+                f"WHERE source_id IN ({ph}) AND +notebook_id = ? "
+                "ORDER BY source_id, position ASC", [*batch, notebook_id],
             ).fetchall():
                 author_rows.setdefault(a["source_id"], []).append(a)
         return {

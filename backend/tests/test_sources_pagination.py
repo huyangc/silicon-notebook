@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from app.core.config import Settings
 from app.models.ask import SEARCH_HIT_CAP
@@ -209,40 +211,55 @@ def test_source_search_never_leaks_another_notebook(repo, search_notebooks):
     assert _search_ids(repo, other.id, "haystack") == []
 
 
-def test_source_search_ignores_a_legacy_cross_notebook_child_row(repo, search_notebooks):
-    """**这一条是本次改写唯一一处有意的语义变化,不是等价性证明的一部分。**
-
-    当前写者写不出「子表行的 notebook_id ≠ 其 source 的 notebook_id」这种行:
-    PG 侧 ``upsert_paper_meta`` 先做归属校验,两端的深拷贝同时改写 source_id 与
-    notebook_id,全仓没有把 source 移到另一个 notebook 的路径。但早于这些写者的
-    畸形历史行可能存在 —— 仓库对这类行早有明确口径:``report_source_rows`` 家族
-    在 JOIN 上写 ``AND m.notebook_id = s.notebook_id``,``notebook_analytics`` 的
-    is_paper 计数直接按 ``source_paper_meta.notebook_id`` 分组,两处都把畸形行
-    判为「不属于这个库」。
-
-    旧的搜索谓词只按 ``m.source_id = sources.id`` 回连,不看子表自身的
-    notebook_id。新形态把搜索腿并入这套口径 —— 搜索谓词现与
-    ``report_source_rows`` 等报表腿一样,统一按子表自身 ``notebook_id`` 收窄。
-    但同一调用链的水合腿 ``paper_meta_for_sources``(见该函数 docstring)仍只
-    按 ``source_id`` 取子表,不看子表的 notebook_id,是登记在案的残留分歧,不
-    随本次改写统一。
-
-    这条用例只钉住搜索腿:在这类畸形遗留行上,``display_title`` 因水合腿命中
-    而显示得到,却因搜索腿收窄而搜不到 —— 与改动前(搜得到、报表算不到)方向
-    相反。这条用例把这个取舍钉住:它在旧实现上是**红**的。"""
-    nb, other = search_notebooks
-    # 先按正常口径写好,再单独改坏 notebook_id —— 与
-    # tests/test_memory_source_visibility.py 里那条既有的畸形行用例同一手法:
-    # 建模历史脏数据,不削弱写者。
+def _corrupt_child_notebook_ids(repo, other_id):
+    """先按正常口径写好,再单独改坏 notebook_id —— 与
+    tests/test_memory_source_visibility.py 里那条既有的畸形行用例同一手法:
+    建模历史脏数据,不削弱写者。s-ptitle 的 meta 行、s-author 的作者行被改到
+    干扰库;s-author 自己的 meta 行不动。"""
     with repo._write() as db:
         db.execute(
             "UPDATE source_paper_meta SET notebook_id = ? WHERE source_id = ?",
-            (other.id, "s-ptitle"),
+            (other_id, "s-ptitle"),
         )
         db.execute(
             "UPDATE source_authors SET notebook_id = ? WHERE source_id = ?",
-            (other.id, "s-author"),
+            (other_id, "s-author"),
         )
+
+
+def _hydrated_summaries(repo, nb_id, source_id):
+    """水合腿的四个构造点各取一份:list_sources / list_sources_page(批量)、
+    get_source(单条,外部传入 meta)、source_from_row(单条,自取 meta)。"""
+    store = repo._runtime.source_store
+    listed = {s.id: s for s in repo.list_sources(nb_id)}
+    paged = {s.id: s for s in repo.list_sources_page(nb_id, offset=0, limit=200).items}
+    with repo._connect() as db:
+        row = db.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+        single = store.source_from_row(db, row)
+    return [listed[source_id], paged[source_id], repo.get_source(source_id), single]
+
+
+def test_source_search_ignores_a_legacy_cross_notebook_child_row(repo, search_notebooks):
+    """子表行的 notebook_id ≠ 其 source 的 notebook_id 的畸形遗留行,搜索腿与
+    水合腿同一口径:都不算这条 source 的论文元数据。
+
+    当前写者写不出这种行:PG 侧 ``upsert_paper_meta`` 先做归属校验,两端的深拷贝
+    同时改写 source_id 与 notebook_id,全仓没有把 source 移到另一个 notebook 的
+    路径;建表以来唯一的写入调用方传的就是 ``source.notebook_id``。仓库对这类行
+    的口径:``report_source_rows`` 家族在 JOIN 上写
+    ``AND m.notebook_id = s.notebook_id``,``notebook_analytics`` 的 is_paper 计数
+    直接按 ``source_paper_meta.notebook_id`` 分组,``list_sources_page`` 的搜索腿
+    按子表自身 ``notebook_id`` 收窄,水合腿 ``paper_meta_for_sources`` 也按子表
+    自身 ``notebook_id`` 收窄到 source 所在的库。
+
+    于是这类行上搜不到、也显示不出(display_title 回落到 source 自己的 title,
+    authors 为空,paper_meta_status 按「没有行」判),元数据抽取的幂等探针
+    ``get_paper_meta`` 也判「没有」。这条用例在收窄前的水合腿上是**红**的:
+    那时 display_title 因水合腿命中而显示得到,却搜不到。PG 孪生:
+    ``tests/postgres/test_core_store_conformance.py`` 的同名一条。"""
+    nb, other = search_notebooks
+    store = repo._runtime.source_store
+    _corrupt_child_notebook_ids(repo, other.id)
     assert _search_ids(repo, nb.id, "haystack") == []
     assert _search_ids(repo, nb.id, "zeta needleman") == []
     # 畸形行也不会因此泄漏进它被写坏成的那个库(source 本身仍在原库)。
@@ -250,6 +267,163 @@ def test_source_search_ignores_a_legacy_cross_notebook_child_row(repo, search_no
     assert _search_ids(repo, other.id, "zeta needleman") == []
     # 其余腿不受影响:source 行自己的 title/file_name 与本库判定无关。
     assert _search_ids(repo, nb.id, "scanned") == ["s-ptitle"]
+
+    for summary in _hydrated_summaries(repo, nb.id, "s-ptitle"):
+        assert summary.display_title == "Scanned upload"
+        assert summary.authors == []
+        assert summary.paper_meta_status == "missing"
+    assert repo.get_source("s-ptitle").paper_meta is None
+    assert store.get_paper_meta("s-ptitle", nb.id) is None
+
+    # s-author 的 meta 行没被改坏,只有作者行:meta 仍在、作者被收窄掉。
+    for summary in _hydrated_summaries(repo, nb.id, "s-author"):
+        assert summary.display_title == "Unrelated title"
+        assert summary.authors == []
+        assert summary.paper_meta_status == "has_meta"
+    assert repo.get_source("s-author").paper_meta.authors == []
+    assert store.get_paper_meta("s-author", nb.id)["authors"] == []
+
+
+def test_reextraction_heals_a_legacy_cross_notebook_child_row(repo, search_notebooks):
+    """收窄之后,畸形遗留行在幂等探针看来是「没有」,下一次抽取会重写它;
+    ``upsert_paper_meta`` 冲突时一并写回 notebook_id,于是重抽一次就被改正,
+    四个读面重新一致可见。不写回的话,重抽后的行仍挂在错的库上、永远被收窄
+    藏住,每次 run_extraction 都会再判「没有」再花一次模型调用。"""
+    nb, other = search_notebooks
+    store = repo._runtime.source_store
+    _corrupt_child_notebook_ids(repo, other.id)
+    assert store.get_paper_meta("s-ptitle", nb.id) is None
+
+    store.upsert_paper_meta("s-ptitle", nb.id, {
+        "is_paper": True, "paper_title": "Needle in a Haystack", "venue": None,
+        "pub_year": None, "doi": None, "keywords": [], "raw_json": "{}", "model": "m",
+        "authors": [{"position": 0, "name": "Hay Stacker", "affiliation": ""}],
+    })
+
+    with repo._connect() as db:
+        healed = db.execute(
+            "SELECT notebook_id FROM source_paper_meta WHERE source_id = ?", ("s-ptitle",)
+        ).fetchone()["notebook_id"]
+    assert healed == nb.id
+    assert store.get_paper_meta("s-ptitle", nb.id)["paper_title"] == "Needle in a Haystack"
+    for summary in _hydrated_summaries(repo, nb.id, "s-ptitle"):
+        assert summary.display_title == "Needle in a Haystack"
+        assert summary.authors == ["Hay Stacker"]
+        assert summary.paper_meta_status == "has_meta"
+    assert _search_ids(repo, nb.id, "haystack") == ["s-ptitle"]
+
+
+def _unnarrowed_paper_meta_for_sources(store):
+    """收窄前的水合腿,逐字照搬(只按 source_id 取子表)。差分用例的对照组。"""
+    def hydrate(db, source_ids, *, notebook_id):
+        del notebook_id  # 收窄前的形态不看它
+        meta_rows, author_rows = {}, {}
+        ids = list(source_ids)
+        for i in range(0, len(ids), store.IN_CHUNK):
+            batch = ids[i:i + store.IN_CHUNK]
+            ph = ",".join("?" for _ in batch)
+            for row in db.execute(
+                f"SELECT * FROM source_paper_meta WHERE source_id IN ({ph})", batch,
+            ).fetchall():
+                meta_rows[row["source_id"]] = row
+            for a in db.execute(
+                f"SELECT source_id, position, name, affiliation FROM source_authors "
+                f"WHERE source_id IN ({ph}) ORDER BY source_id, position ASC", batch,
+            ).fetchall():
+                author_rows.setdefault(a["source_id"], []).append(a)
+        return {
+            sid: store._paper_meta_dict(row, author_rows.get(sid, []))
+            for sid, row in meta_rows.items()
+        }
+    return hydrate
+
+
+def _hydration_snapshot(repo, nb_id):
+    """所有走水合腿的读面,序列化成一份 JSON 文本(逐字节比较用)。"""
+    store = repo._runtime.source_store
+    ids = [s.id for s in repo.list_sources(nb_id)]
+    payload = {
+        "list_sources": [s.model_dump() for s in repo.list_sources(nb_id)],
+        "list_sources_page": repo.list_sources_page(
+            nb_id, offset=0, limit=200).model_dump(),
+        "get_source": [repo.get_source(sid).model_dump() for sid in ids],
+        "get_paper_meta": {sid: store.get_paper_meta(sid, nb_id) for sid in ids},
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def test_paper_meta_hydration_is_byte_identical_on_well_formed_rows(
+    repo, search_notebooks, monkeypatch
+):
+    """差分:子表 notebook_id 与 source 一致(唯一写得出来的形态)时,收窄后的
+    水合腿与收窄前逐字节相同 —— list_sources / list_sources_page / get_source /
+    get_paper_meta 全部读面。对照组是 ``_unnarrowed_paper_meta_for_sources``。
+    末段在畸形行上再比一次,证明这个差分有区分力(那里两者必须不同)。"""
+    nb, other = search_notebooks
+    store = repo._runtime.source_store
+    narrowed = _hydration_snapshot(repo, nb.id)
+    narrowed_other = _hydration_snapshot(repo, other.id)
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "paper_meta_for_sources",
+                      _unnarrowed_paper_meta_for_sources(store))
+        assert _hydration_snapshot(repo, nb.id) == narrowed
+        assert _hydration_snapshot(repo, other.id) == narrowed_other
+
+    _corrupt_child_notebook_ids(repo, other.id)
+    corrupted = _hydration_snapshot(repo, nb.id)
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "paper_meta_for_sources",
+                      _unnarrowed_paper_meta_for_sources(store))
+        assert _hydration_snapshot(repo, nb.id) != corrupted
+
+
+def test_paper_meta_hydration_plan_stays_on_source_id(repo, search_notebooks):
+    """计划钉:收窄项写成 ``+notebook_id = ?``,两条水合语句的计划仍由 page 级
+    IN 列表经 source_id 索引驱动,与收窄前逐字相同。去掉一元 ``+``,SQLite 在
+    没有 ANALYZE 统计时(本库常态)会改走 idx_source_paper_meta_nb /
+    idx_source_authors_nb、按库取出全部行再滤 id —— 3.45(CI)与 3.53 都如此,
+    这条钉两版都要成立。语句文本用 spy 从真实调用里抓,不手抄。"""
+    nb, _other = search_notebooks
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT * FROM sources WHERE notebook_id = ?", (nb.id,)
+        ).fetchall()
+        captured = []
+        original_execute = db.execute
+
+        def spying_execute(sql, params=()):
+            text = str(sql)
+            if "source_paper_meta" in text or "source_authors" in text:
+                captured.append((text, params))
+            return original_execute(sql, params)
+
+        db.execute = spying_execute
+        try:
+            repo._runtime.source_store.sources_from_rows(db, rows)
+        finally:
+            del db.execute
+
+        assert len(captured) == 2, captured
+        plans = {}
+        for sql, params in captured:
+            assert "+notebook_id = ?" in sql, sql
+            assert params[-1] == nb.id, params
+            table = "source_paper_meta" if "source_paper_meta" in sql else "source_authors"
+            plans[table] = "\n".join(
+                row["detail"] for row in db.execute(f"EXPLAIN QUERY PLAN {sql}", params)
+            )
+
+    assert (
+        "SEARCH source_paper_meta USING INDEX sqlite_autoindex_source_paper_meta_1 "
+        "(source_id=?)" in plans["source_paper_meta"]
+    ), plans
+    assert (
+        "SEARCH source_authors USING INDEX idx_source_authors_source (source_id=?)"
+        in plans["source_authors"]
+    ), plans
+    for plan in plans.values():
+        assert "idx_source_paper_meta_nb" not in plan, plans
+        assert "idx_source_authors_nb" not in plan, plans
 
 
 def test_source_search_empty_query_path_is_unchanged(repo, search_notebooks):

@@ -475,13 +475,13 @@ def test_explicit_retype_to_ineligible_type_clears_stale_paper_meta(
     仍计为论文 → 本测试转红。"""
     sid = settled(doc_type="academic_paper")
     _seed_paper_meta(repo, notebook_id, sid)
-    assert repo._runtime.source_store.get_paper_meta(sid)["is_paper"] is True, "前提:这条源此刻被当论文"
+    assert repo._runtime.source_store.get_paper_meta(sid, notebook_id)["is_paper"] is True, "前提:这条源此刻被当论文"
     assert _author_count(repo, sid) == 1
 
     _upload(repo, notebook_id, doc_type="textbook", doc_type_explicit=True)
 
     assert repo.get_source(sid).doc_type == "textbook"
-    assert repo._runtime.source_store.get_paper_meta(sid) is None, "改成非论文类型后旧论文元数据必须清空"
+    assert repo._runtime.source_store.get_paper_meta(sid, notebook_id) is None, "改成非论文类型后旧论文元数据必须清空"
     assert _author_count(repo, sid) == 0, "作者行也要一并清掉"
 
 
@@ -495,7 +495,7 @@ def test_retype_between_eligible_types_keeps_paper_meta(repo, notebook_id, settl
     _upload(repo, notebook_id, doc_type="academic_paper", doc_type_explicit=True)
 
     assert repo.get_source(sid).doc_type == "academic_paper"
-    meta = repo._runtime.source_store.get_paper_meta(sid)
+    meta = repo._runtime.source_store.get_paper_meta(sid, notebook_id)
     assert meta is not None and meta["is_paper"] is True, "合格→合格不清元数据"
     assert _author_count(repo, sid) == 1
 
@@ -509,7 +509,7 @@ def test_non_explicit_reupload_never_clears_paper_meta(repo, notebook_id, settle
     _upload(repo, notebook_id, doc_type="textbook", doc_type_explicit=False)
 
     assert repo.get_source(sid).doc_type == "academic_paper", "非显式不改类型"
-    assert repo._runtime.source_store.get_paper_meta(sid) is not None, "没 retype 就不该清元数据"
+    assert repo._runtime.source_store.get_paper_meta(sid, notebook_id) is not None, "没 retype 就不该清元数据"
     assert _author_count(repo, sid) == 1
 
 

@@ -80,10 +80,10 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 - [ ] **W3**：大库切换索引管线目前只是按活跃对象数阈值显式禁用（切回内建豁免）；
       「保存索引管线」发布事务的真正重构排到有真实需求时。
 - [ ] **W4**：未回填老库（`source_index_backfilled=0`）的 legacy evidence 分支单语句可撞 30s，
-      前置是既有离线 backfill；来源页签搜索改 UNION 后 `paper_meta_for_sources` 水合腿未跟进同口径。
 - [ ] **SQLite 侧 pending memo 的全局 epoch 有跨库误伤弱点**（PG 打开路径计数缓存的刻意延后项）：
       `sqlite/knowledge_counts_cache.py` 的 `_INVALIDATION_EPOCH` 是进程级单值，任一库的 `invalidate`
       都会让其它库在途的 pending 计数放弃写回、下次冷算。
+      前置是既有离线 backfill。
 
 ---
 

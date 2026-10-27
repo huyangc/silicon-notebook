@@ -1291,7 +1291,7 @@ def test_copy_notebook_carries_paper_metadata(repo):
 
     new_source_id = _rows(repo, "sources", new.id)[0]["id"]
     assert new_source_id != orig_source_id
-    copied_meta = repo._runtime.source_store.get_paper_meta(new_source_id)
+    copied_meta = repo._runtime.source_store.get_paper_meta(new_source_id, new.id)
     assert copied_meta is not None
     assert copied_meta["paper_title"] == "Gate Sizing Under Variability"
     assert copied_meta["venue"] == "DAC"
@@ -1328,7 +1328,7 @@ def test_copy_notebook_carries_paper_metadata(repo):
     assert any(s.id == new_source_id for s in page.items)
 
     # original untouched
-    orig_meta = repo._runtime.source_store.get_paper_meta(orig_source_id)
+    orig_meta = repo._runtime.source_store.get_paper_meta(orig_source_id, src)
     assert orig_meta is not None
     assert orig_meta["paper_title"] == "Gate Sizing Under Variability"
     assert [a["name"] for a in orig_meta["authors"]] == ["Chen Hao", "Li Wei"]
