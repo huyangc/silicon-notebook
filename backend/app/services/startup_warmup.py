@@ -408,8 +408,9 @@ def _sweep_stale_notebook_imports(repo: object) -> None:
         return
     try:
         reaped = int(sweep() or 0)
-    except Exception:  # noqa: BLE001 - recovery must never block startup
-        logger.exception("startup: stale notebook import sweep failed")
+    except Exception as exc:  # noqa: BLE001 - recovery must never block startup
+        # The exception class only: its message can carry database values.
+        logger.error("startup: stale notebook import sweep failed: %s", type(exc).__name__)
         return
     if reaped:
         logger.warning(

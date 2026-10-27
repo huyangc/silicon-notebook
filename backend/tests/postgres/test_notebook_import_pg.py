@@ -101,6 +101,10 @@ def test_tampered_archives_are_refused_and_leave_nothing_pg(pg, out_dir, monkeyp
     cases.check_tampered_archives_are_refused(pg, POSTGRES, out_dir, monkeypatch)
 
 
+def test_failure_logs_carry_ids_and_the_exception_class_only_pg(pg, out_dir, monkeypatch, caplog):
+    cases.check_failure_logs_carry_ids_and_class_only(pg, POSTGRES, out_dir, monkeypatch, caplog)
+
+
 def test_attachment_mimes_and_source_links_a_serving_path_trusts_are_checked_pg(pg, out_dir):
     cases.check_unservable_values_are_refused(pg, POSTGRES, out_dir)
 
