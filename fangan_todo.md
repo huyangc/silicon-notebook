@@ -201,16 +201,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
         查询向量拉向「契约模板」而不是「这道题」，跨语言时尤其伤。待办：先量化契约前缀
         对查询向量的偏移（同一道题的裸问句 vs 带契约版本，比命中集与 top-k 相似度），
         再决定要不要在 embedding 一侧也只取分隔符之前的方向。
-- [ ] **全局元素臂在 run 内复用整条原文召回（未做，只登记）**。全局问答的原文元素检索臂
-      （`chunk_federation.federated_element_candidates`）每条逐库腿都是单库 `_retrieve_elements`，
-      而它先跑一次**完整**的 `_retrieve_chunks`（ANN + 全文 + 回表，召回窗
-      `max(CHUNK_RECALL, 4×上限)`）再回表取元素；同一 run 里语义腿、`search_chunks` 与首轮
-      全空补腿对同一库、同一问法的那次召回并不复用。成本上界：每 run 至多
-      `REASONING_MAX_ELEMENT_SEARCHES`（默认 5）次元素检索 × 8 库 = 最多多出 40 次完整召回
-      （本机 live 库副本实测一次 8 库元素检索中位 1.9 s、p95 2.9 s，最大单库单独一次 1.4 s）。
-      做法候选：按 `(库, query, 天花板摘要, recall)` 在 retrieval run 内记忆 `_retrieve_chunks`
-      的结果，补腿与 `search_chunks` 共用；要先确认记忆不跨越天花板漂移判词翻转
-      （`verify_unbound_read` 会重跑绑定版本）且不放大内存峰值（结果含整库向量矩阵引用）。
 - [ ] **8 库 reasoning 的 `payload_json` 体积观测**。全局作业没有轨迹子表，推理轨迹整份存在
       作业行的单个 JSON 里，`_append_trace` 只靠时间/步数双阈值节流重写。8 个库的 reasoning
       run 轮数与每步 detail 都比单库大，这份 payload 的真实分布没有测过；要先量（p50/p95

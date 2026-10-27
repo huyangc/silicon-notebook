@@ -45,11 +45,41 @@ _RUN_KINDS = frozenset({
     "report_generation",
     "report_planning",
 })
+#: The run kinds that keep a chunk-recall memo (``keep_chunk_recall``): the
+#: ones whose retrieval searches raw elements, the memo's only reader
+#: (reasoning's ``search_elements``, a report's element probes, the plugin
+#: element seam). ``ask_chunk`` never searches elements, so it keeps nothing;
+#: an unknown kind keeps nothing either.
+_CHUNK_RECALL_MEMO_RUN_KINDS = frozenset({
+    "ask_reasoning",
+    "ask_plugin_engine",
+    "report_generation",
+    "report_planning",
+})
+#: How many chunk recalls one run keeps at most, least recently used out
+#: first. The row bound the caller passes (``keep_chunk_recall``) is the
+#: memory bound; this one only stops a run of many EMPTY recalls (each a
+#: zero-row entry) from growing the table without limit.
+CHUNK_RECALL_MEMO_MAX_ENTRIES = 64
 
 
 @dataclass
 class _PendingEmbedding:
     ready: threading.Event
+
+
+@dataclass(frozen=True)
+class ChunkRecallEntry:
+    """One kept chunk recall (``RetrievalRunState.keep_chunk_recall``).
+
+    ``rows`` is whatever light projection the keeper chose (it is only
+    counted here); ``unbound`` marks a recall read WITHOUT its source list
+    (the run's verdict said the ceiling binds nothing), which stays valid only
+    while that verdict does (``forget_unbound_chunk_recalls``)."""
+
+    rows: tuple
+    notebook_id: str
+    unbound: bool
 
 
 class RetrievalRunState:
@@ -88,6 +118,13 @@ class RetrievalRunState:
         self._chunk_fts_open: set[str] = set()
         self._kg_lexical_open: set[str] = set()
         self._peer_unprepared: dict[str, str] = {}
+        # Chunk recalls the raw-element arm may read back (``chunk_recall``),
+        # LRU, bounded by rows and by entries; ``_chunk_recall_rows`` is the
+        # sum of the kept entries' rows, maintained under ``_lock``.
+        self._chunk_recalls: "OrderedDict[Hashable, ChunkRecallEntry]" = OrderedDict()
+        self._chunk_recall_rows = 0
+        self.chunk_recall_hits = 0
+        self.chunk_recall_stores = 0
         self.embedding_requests = 0
         self.embedding_hits = 0
         self.embedding_errors = 0
@@ -250,6 +287,68 @@ class RetrievalRunState:
                 self._chunk_fts_open.add(key)
                 self.chunk_fts_timeouts += 1
 
+    def chunk_fts_open(self, notebook_id: str) -> bool:
+        """Whether the library's FTS circuit is open, WITHOUT counting a skip
+        (``chunk_fts_permitted`` counts one): a recall's memo key reads it,
+        since a recall made after the circuit opened has no lexical half."""
+        with self._lock:
+            return str(notebook_id) in self._chunk_fts_open
+
+    def keeps_chunk_recalls(self) -> bool:
+        """Whether this run keeps a chunk-recall memo at all (by run kind)."""
+        return self.run_kind in _CHUNK_RECALL_MEMO_RUN_KINDS
+
+    def chunk_recall(self, key: Hashable) -> Optional[ChunkRecallEntry]:
+        """The kept recall for ``key`` (refreshed as most recently used), or
+        ``None``. Never waits: a miss is the caller's own recall."""
+        with self._lock:
+            entry = self._chunk_recalls.get(key)
+            if entry is not None:
+                self._chunk_recalls.move_to_end(key)
+            return entry
+
+    def note_chunk_recall_hit(self) -> None:
+        with self._lock:
+            self.chunk_recall_hits += 1
+
+    def keep_chunk_recall(self, key: Hashable, entry: ChunkRecallEntry, *,
+                          max_rows: int) -> None:
+        """Keep ``entry`` under ``key``, then drop least recently used entries
+        until the table holds at most ``max_rows`` rows and
+        ``CHUNK_RECALL_MEMO_MAX_ENTRIES`` entries. An entry larger than
+        ``max_rows`` on its own is not kept at all."""
+        if len(entry.rows) > max_rows:
+            return
+        with self._lock:
+            previous = self._chunk_recalls.pop(key, None)
+            if previous is not None:
+                self._chunk_recall_rows -= len(previous.rows)
+            self._chunk_recalls[key] = entry
+            self._chunk_recall_rows += len(entry.rows)
+            self.chunk_recall_stores += 1
+            while (self._chunk_recall_rows > max_rows
+                   or len(self._chunk_recalls) > CHUNK_RECALL_MEMO_MAX_ENTRIES):
+                _stale, dropped = self._chunk_recalls.popitem(last=False)
+                self._chunk_recall_rows -= len(dropped.rows)
+
+    def forget_chunk_recall(self, key: Hashable, entry: ChunkRecallEntry) -> None:
+        """Drop ``key`` only while it still holds THIS ``entry``: a reader
+        that found its entry stale must not delete the fresh one a concurrent
+        recall has kept under the same key since."""
+        with self._lock:
+            if self._chunk_recalls.get(key) is entry:
+                del self._chunk_recalls[key]
+                self._chunk_recall_rows -= len(entry.rows)
+
+    def forget_unbound_chunk_recalls(self, notebook_id: str) -> None:
+        """Drop every recall of ``notebook_id`` read without its source list:
+        the run's verdict for that library has just flipped to "binds", so no
+        later recall of it reads unbound and none of these may be served."""
+        with self._lock:
+            for key in [key for key, entry in self._chunk_recalls.items()
+                        if entry.unbound and entry.notebook_id == notebook_id]:
+                self._chunk_recall_rows -= len(self._chunk_recalls.pop(key).rows)
+
     def kg_lexical_permitted(self, notebook_id: str) -> bool:
         """Whether this run may issue another ANN-supplement KG lexical read."""
         key = str(notebook_id)
@@ -326,7 +425,10 @@ class RetrievalRunState:
         ``embedding_requests`` counts misses of the run's embedding memo, not
         model requests actually sent: a miss the query-vector hand-over
         (``shared_query_vector``) answers is counted without a request, and
-        Memory recall's own embeds never pass the memo at all."""
+        Memory recall's own embeds never pass the memo at all.
+        ``chunk_recall_hits``/``chunk_recall_stores`` count the chunk recalls
+        the raw-element arm read back from the run's recall memo instead of
+        recalling again, and the recalls kept for it (``chunk_recall_memo``)."""
         with self._lock:
             event = {
                 "kind": "retrieval_run_stats",
@@ -344,6 +446,8 @@ class RetrievalRunState:
                 "chunk_fts_circuit_skips": self.chunk_fts_circuit_skips,
                 "kg_lexical_timeouts": self.kg_lexical_timeouts,
                 "kg_lexical_circuit_skips": self.kg_lexical_circuit_skips,
+                "chunk_recall_hits": self.chunk_recall_hits,
+                "chunk_recall_stores": self.chunk_recall_stores,
             }
             if self.fanout_limit is not None:
                 event["fanout_limit"] = self.fanout_limit
@@ -534,6 +638,7 @@ def retrieval_fanout_slot() -> Iterator[None]:
 
 
 __all__ = [
+    "ChunkRecallEntry",
     "RetrievalRunState",
     "current_retrieval_run",
     "current_viewer_id",

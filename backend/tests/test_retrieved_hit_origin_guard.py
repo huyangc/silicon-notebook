@@ -193,6 +193,18 @@ NAVIGATION_REGISTRY = {
             ("calls", "services/section_retrieval.py", "section_chunks",
              "navigation_filter_enabled"),
         )),
+    # The run's chunk-recall memo rebuilds text-less chunks from what it kept
+    # of ``_retrieve_chunks``' own scored output (navigation already dropped
+    # by every lane's scoring), and serves them only to the element arm, which
+    # drops a navigation page's elements itself.
+    ("services/chunk_recall_memo.py", "_rebuilt", "RetrievedChunk"): (
+        "navigation-filtered", (
+            ("calls", RC, "CandidateRetrievalService._retrieve_chunks", "keep"),
+            ("calls", "services/retrieval.py", "score_chunks", "drop_navigation_rows"),
+            ("calls", RC,
+             "CandidateRetrievalService._retrieve_elements_from_chunks._hydrate_and_rank",
+             "_navigation_element_ids"),
+        )),
     (RC, "CandidateRetrievalService._admitted_report_elements", "RetrievedElement"): (
         "navigation-filtered", (
             ("calls", RC, "CandidateRetrievalService._admitted_report_elements",
