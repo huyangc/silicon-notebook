@@ -150,6 +150,15 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       （定「通用概念」的界）、F3 各子信号分布、F4 窄 / 宽两档各多少组、F5 数量与补上关联的历史、新增计算的耗时与
       RSS。仓库内的演练脚本是 `scripts/kg_findings_rehearsal.py`（与引擎同口径、只读、默认不输出标题与概念名）；
       生产侧用的 `kg_findings_prod_probe.py` 不在仓库内。
+- [ ] **按查看者过滤的邻居读，预算翻倍循环每轮都探测一次预览**（来源：`fangan_done.md` §65 的 T1 复核；既有行为）：
+      `KnowledgeLifecycleService._viewer_scoped_neighbors` 在可见邻居不足 `cap` 时把预算翻倍重读，每一轮都调
+      `_kg_neighbors_unchecked`，从而每轮调一次 `viz_index`；在预览陈旧的大库上，邻居大多被隐藏时每轮都上报一次
+      `stale_refresh`。被拒焦点那条路径已用同一个 `probe` 去重（§65），这个循环还没有。改法：循环内复用第一轮的
+      探测结果。
+- [ ] **对比题的焦点只按存储的簇名解析，可见成员的其它写法解析不到**（来源：`fangan_done.md` §65 R4；既有召回局限）：
+      `resolve_focal` 按 `lower(canonical_name) == 键`（同键多簇取成员最多者）；存储名是成员最多的种子第一次见到的写法，
+      所以问「QZX」而存储名是「Quiet Zebra Xylophone (QZX)」时焦点解析不到、不出兄弟。要按成员名解析，需要在
+      `knowledge_objects` 上按名字精确查（现只有 trigram 索引），先做生产规模的计划测量。
 
 ### 检索
 
