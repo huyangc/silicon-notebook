@@ -76,6 +76,10 @@ def test_vectors_of_the_same_model_land_byte_for_byte(repo, target, out_dir, mon
     cases.check_vectors_kept_byte_for_byte(repo, BACKEND, target, out_dir, monkeypatch)
 
 
+def test_knowhow_objects_end_with_vectors_after_the_reembed_legs(repo, target, out_dir, monkeypatch):
+    cases.check_knowhow_objects_end_with_vectors(repo, BACKEND, target, out_dir, monkeypatch)
+
+
 def test_vectors_of_another_model_are_dropped_and_questions_embedded_again(
     repo, target, out_dir, monkeypatch
 ):
@@ -238,11 +242,11 @@ def test_cluster_seed_ids_are_reminted_from_the_new_objects(repo, out_dir):
     cases.check_cluster_seeds_are_reminted(repo, BACKEND, out_dir)
 
 
-def test_reembed_legs_follow_the_verdicts_and_always_cover_knowhow_relations():
+def test_reembed_legs_follow_the_verdicts_and_always_cover_knowhow_objects_and_relations():
     """PR3 handoff: a workload not kept needs its leg when there are rows of that
-    kind; a notebook with a Knowhow table always needs ``kg_relations`` (the
-    post-publish projection rewrites its edges, deleting their vectors), even when
-    every vector was kept."""
+    kind; a notebook with a Knowhow table always needs ``kg_objects`` and
+    ``kg_relations`` (the post-publish projection rebuilds its objects and edges,
+    which carry no vector afterwards), even when every vector was kept."""
     from pathlib import Path as _Path
 
     from app.services.notebook_copy_writer import NotebookCopyRun
@@ -258,7 +262,8 @@ def test_reembed_legs_follow_the_verdicts_and_always_cover_knowhow_relations():
     run = NotebookCopyRun("nb-old", "n", "u", "nb-new", "now", 10, _Path("/tmp/x"))
     rows = {"chunks": 3, "source_elements": 2, "knowledge_objects": 2, "knowledge_relations": 1}
     assert reembed_legs(verdicts(), run, rows) == ()
-    assert reembed_legs(verdicts(), run, {**rows, "knowhow_tables": 1}) == ("kg_relations",)
+    assert reembed_legs(verdicts(), run, {**rows, "knowhow_tables": 1}) == (
+        "kg_objects", "kg_relations")
     assert reembed_legs(verdicts("chunk_embedding", "relation_embedding"), run, rows) == (
         "chunks", "kg_relations")
     assert reembed_legs(verdicts("source_element_embedding"), run, {"chunks": 1}) == ()
