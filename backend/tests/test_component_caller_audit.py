@@ -233,28 +233,59 @@ def _synthetic(source: str, monkeypatch):
     """Load ``source`` as an app module and return what the census needs to
     read it: its members, the receiver-aware production references and the
     by-name ones (the S2-D reading)."""
+    return _synthetic_files([("app", source)], monkeypatch)
+
+
+def _synthetic_files(sources, monkeypatch):
+    """``_synthetic`` over several modules: ``(package, source)`` pairs, all
+    named ``<package>._census_fixture_<tag>`` with one shared tag (so
+    ``app.repositories.sqlite`` / ``app.repositories.postgres`` give adapter
+    twins; a package used twice adds ``_<i>``).  ``MOD<i>`` in a source stands for the i-th module's name; every
+    file is indexed before any reference is read, as ``prepare`` does.
+    Members are keyed ``<i>:Class.name`` past the first module."""
     import types as _types
     import uuid
 
-    name = f"app._census_fixture_{uuid.uuid4().hex[:12]}"
-    rel = f"backend/{name.replace('.', '/')}.py"
-    module = _types.ModuleType(name)
-    module.__file__ = str(ROOT / rel)
-    monkeypatch.setitem(sys.modules, name, module)
-    exec(compile(source, rel, "exec"), module.__dict__)
-    tree = ast.parse(source)
+    tag = uuid.uuid4().hex[:12]
+    packages = [package for package, _ in sources]
+    names = [
+        f"{package}._census_fixture_{tag}" + (f"_{i}" if packages.count(package) > 1 else "")
+        for i, package in enumerate(packages)
+    ]
+    loaded = []
+    for name, (_package, source) in zip(names, sources):
+        for i, other in enumerate(names):
+            source = source.replace(f"MOD{i}", other)
+        rel = f"backend/{name.replace('.', '/')}.py"
+        module = _types.ModuleType(name)
+        module.__file__ = str(ROOT / rel)
+        monkeypatch.setitem(sys.modules, name, module)
+        exec(compile(source, rel, "exec"), module.__dict__)
+        loaded.append((rel, ast.parse(source)))
     by_key: dict = {}
     order: list = []
-    audit.members_of_tree(rel, tree, by_key, order)
+    for rel, tree in loaded:
+        audit.members_of_tree(rel, tree, by_key, order)
     members = [by_key[k] for k in order]
     index = audit.ReceiverIndex(members)
-    index.contexts[rel] = audit.FileContext(index, rel, tree)
-    keys = {(m.qualname, m.name): m.key for m in members}
-    collector = audit._RefCollector(rel, keys, context=index.contexts[rel])
-    collector.visit(tree)
-    by_name = audit._RefCollector(rel, keys, receivers=False)
-    by_name.visit(tree)
-    return {m.qualname + "." + m.name: m for m in members}, collector.refs, by_name.refs
+    for rel, tree in loaded:
+        index.contexts[rel] = audit.FileContext(index, rel, tree)
+    refs: list = []
+    by_name_refs: list = []
+    for rel, tree in loaded:
+        keys = {(m.qualname, m.name): m.key for m in members if m.rel == rel}
+        collector = audit._RefCollector(rel, keys, context=index.contexts[rel])
+        collector.visit(tree)
+        refs.extend(collector.refs)
+        by_name = audit._RefCollector(rel, keys, receivers=False)
+        by_name.visit(tree)
+        by_name_refs.extend(by_name.refs)
+    rels = [rel for rel, _ in loaded]
+    labelled = {
+        (m.qualname + "." + m.name if m.rel == rels[0] else f"{rels.index(m.rel)}:{m.qualname}.{m.name}"): m
+        for m in members
+    }
+    return labelled, refs, by_name_refs
 
 
 def _test_ref(member) -> "audit.Ref":
@@ -432,6 +463,324 @@ class Impl:
     assert unregistered[port.key].bucket == "test-only"  # the test's by-name reference
     registered = _classify(list(members.values()), refs + extra, tests, kept={impl.key})
     assert registered[port.key].bucket == "keep"
+
+
+TWO_FETCHES = '''
+class Store:
+    def fetch(self):
+        return 1
+
+
+class Cache:
+    def fetch(self):
+        return 2
+'''
+
+
+def _fetch_refs(refs):
+    return [r for r in refs if r.name == "fetch"]
+
+
+def _buckets(members, refs, *test_only_names):
+    tests = [_test_ref(members[name]) for name in test_only_names]
+    verdicts = _classify(list(members.values()), refs, tests)
+    return {name: verdicts[m.key].bucket for name, m in members.items()}
+
+
+HOLDER = TWO_FETCHES + '''
+
+class Holder:
+    def __init__(self) -> None:
+        self.store = None
+
+    def run(self):
+        return self.store.fetch()
+
+
+def main():
+    return Holder().run()
+'''
+
+
+def test_a_receiver_pinned_to_nothing_but_none_counts_by_name(monkeypatch):
+    """Every binding of ``self.store`` the census sees is ``None``; the
+    object it holds when read arrives some way the census does not read as
+    a binding (``setattr`` on another object). Pinned to the empty set, the
+    read used to reach no member at all."""
+    members, refs, _ = _synthetic(
+        HOLDER + '''
+
+def wire(holder: Holder) -> None:
+    setattr(holder, "store", Store())
+''',
+        monkeypatch,
+    )
+    assert [(r.targets, r.fallback) for r in _fetch_refs(refs)] == [(None, "receiver type empty")]
+    buckets = _buckets(members, refs, "Store.fetch", "Cache.fetch")
+    assert buckets["Store.fetch"] == buckets["Cache.fetch"] == "keep"
+
+
+def test_a_store_through_an_untyped_receiver_makes_the_attribute_unknown(monkeypatch):
+    """``holder.store = Store()`` with ``holder`` unannotated may be a store
+    to ``Holder.store``: the census cannot tell, so ``self.store`` is not
+    pinned to its visible bindings (``Cache``) but counts by name."""
+    members, refs, _ = _synthetic(
+        HOLDER.replace("self.store = None", "self.store = Cache()") + '''
+
+def wire(holder):
+    holder.store = Store()
+''',
+        monkeypatch,
+    )
+    assert [(r.targets, r.fallback) for r in _fetch_refs(refs)] == [(None, "receiver type unknown")]
+    assert _buckets(members, refs, "Store.fetch")["Store.fetch"] == "keep"
+
+
+MODULE_STORE_REGISTRY = TWO_FETCHES + '''
+
+CURRENT = None
+'''
+MODULE_STORE_USER = '''
+import MOD0 as registry
+
+
+def install() -> None:
+    registry.CURRENT = registry.Store()
+
+
+def use() -> int:
+    return registry.CURRENT.fetch()
+'''
+
+
+def test_a_store_into_a_module_global_types_it(monkeypatch):
+    """``registry.CURRENT = Store()`` from another module: the census holds
+    the ``None`` placeholder the module was loaded with, and the store is
+    what the global holds when production reads it."""
+    members, refs, _ = _synthetic_files(
+        [("app", MODULE_STORE_REGISTRY), ("app", MODULE_STORE_USER)], monkeypatch
+    )
+    assert [r.targets for r in _fetch_refs(refs)] == [frozenset({members["Store.fetch"].key})]
+    buckets = _buckets(members, refs, "Cache.fetch")
+    assert buckets["Store.fetch"] == "keep"
+    assert buckets["Cache.fetch"] == "test-only"
+
+
+def test_a_module_global_stored_through_an_untyped_receiver_is_unknown(monkeypatch):
+    members, refs, _ = _synthetic_files(
+        [
+            ("app", MODULE_STORE_REGISTRY),
+            ("app", MODULE_STORE_USER + "\n\ndef swap(target):\n    target.CURRENT = target.Cache()\n"),
+        ],
+        monkeypatch,
+    )
+    assert [(r.targets, r.fallback) for r in _fetch_refs(refs)] == [(None, "receiver type unknown")]
+    assert _buckets(members, refs, "Cache.fetch")["Cache.fetch"] == "keep"
+
+
+def test_a_module_global_rebound_from_a_function_is_unknown(monkeypatch):
+    members, refs, _ = _synthetic_files(
+        [
+            ("app", MODULE_STORE_REGISTRY + '''
+
+def swap() -> None:
+    global CURRENT
+    CURRENT = Cache()
+'''),
+            ("app", MODULE_STORE_USER),
+        ],
+        monkeypatch,
+    )
+    assert [(r.targets, r.fallback) for r in _fetch_refs(refs)] == [(None, "receiver type unknown")]
+    assert _buckets(members, refs, "Cache.fetch")["Cache.fetch"] == "keep"
+
+
+INJECTED = TWO_FETCHES + '''
+
+class Service:
+    def __init__(self, store):
+        self.store = store
+
+    def run(self):
+        return self.store.fetch()
+
+
+def build() -> Service:
+    return Service(Store())
+
+
+def main():
+    return build().run()
+'''
+
+
+@pytest.mark.parametrize(
+    "construction",
+    [
+        pytest.param("Factory = Service\n\n\ndef other():\n    return Factory(Cache())\n", id="alias"),
+        pytest.param(
+            "import functools\n\n\ndef other():\n    return functools.partial(Service, Cache())()\n",
+            id="partial",
+        ),
+        pytest.param(
+            'MAKERS = {"service": Service}\n\n\ndef other():\n    return MAKERS["service"](Cache())\n',
+            id="registry",
+        ),
+        pytest.param("def other(service: Service):\n    return type(service)(Cache())\n", id="type-of"),
+        pytest.param("def other(service: Service):\n    return service.__class__(Cache())\n", id="dunder-class"),
+        pytest.param("def register(cls):\n    return cls\n\n\n@register\nclass Sub(Service):\n    pass\n", id="decorator"),
+    ],
+)
+def test_a_class_constructed_other_than_by_its_name_leaves_its_parameters_unknown(
+    monkeypatch, construction
+):
+    """``Service(Store())`` is the one call spelled ``Service``. Built any
+    other way, the class may receive a ``Cache`` the census never sees, so
+    its unannotated ``store`` parameter stays unknown and ``fetch`` counts
+    by name (with only the spelled call, it reaches ``Store.fetch`` alone:
+    ``test_a_construction_site_types_an_injected_attribute``)."""
+    members, refs, _ = _synthetic(INJECTED + "\n\n" + construction, monkeypatch)
+    assert [(r.targets, r.fallback) for r in _fetch_refs(refs)] == [(None, "receiver type unknown")]
+    assert _buckets(members, refs, "Cache.fetch")["Cache.fetch"] == "keep"
+
+
+def test_passing_positions_do_not_count_as_constructions(monkeypatch):
+    """Naming the class where its object is not handed on -- an annotation,
+    ``isinstance``, a class attribute, an ``except`` -- keeps the spelled
+    calls the only constructions."""
+    members, refs, _ = _synthetic(
+        INJECTED
+        + '''
+
+class Other(Exception):
+    pass
+
+
+def check(value: "Service | None", items: list[Service]) -> bool:
+    typed: Service = value
+    try:
+        return isinstance(typed, (Service, Store)) and Service.run is not None
+    except Other:
+        return False
+''',
+        monkeypatch,
+    )
+    assert [r.targets for r in _fetch_refs(refs)] == [frozenset({members["Store.fetch"].key})]
+    assert _buckets(members, refs, "Cache.fetch")["Cache.fetch"] == "test-only"
+
+
+def test_a_base_typed_receiver_reaches_every_subclass_override(monkeypatch):
+    members, refs, _ = _synthetic(
+        '''
+class Base:
+    def fetch(self):
+        return 1
+
+
+class Child(Base):
+    def fetch(self):
+        return 2
+
+
+class Other:
+    def fetch(self):
+        return 3
+
+
+def use(base: Base) -> int:
+    return base.fetch()
+''',
+        monkeypatch,
+    )
+    buckets = _buckets(members, refs, "Child.fetch", "Other.fetch")
+    assert buckets["Base.fetch"] == buckets["Child.fetch"] == "keep"
+    assert buckets["Other.fetch"] == "test-only"
+
+
+def test_an_adapter_class_reaches_its_twin_in_the_other_adapter(monkeypatch):
+    """``repositories/sqlite/x.py::C.m`` and ``repositories/postgres/x.py::C.m``
+    are one member as far as callers go: production holds one adapter or the
+    other, and code typed against one is the code path of both."""
+    store = '''
+class Store:
+    def fetch(self):
+        return 1
+
+    def unused(self):
+        return 0
+'''
+    members, refs, _ = _synthetic_files(
+        [
+            ("app.repositories.sqlite", store + "\n\ndef use() -> int:\n    return Store().fetch()\n"),
+            ("app.repositories.postgres", store),
+            ("app", "class Cache:\n    def fetch(self):\n        return 2\n"),
+        ],
+        monkeypatch,
+    )
+    buckets = _buckets(members, refs, "1:Store.fetch", "2:Cache.fetch")
+    assert buckets["Store.fetch"] == buckets["1:Store.fetch"] == "keep"
+    assert buckets["2:Cache.fetch"] == "test-only"
+    assert buckets["1:Store.unused"] == "unreferenced"
+
+
+def test_a_class_with_getattr_counts_by_name(monkeypatch):
+    members, refs, _ = _synthetic(
+        TWO_FETCHES
+        + '''
+
+class Proxy:
+    def __getattr__(self, name):
+        return getattr(Store(), name)
+
+
+def use(proxy: Proxy) -> int:
+    return proxy.fetch()
+''',
+        monkeypatch,
+    )
+    assert [(r.targets, r.fallback) for r in _fetch_refs(refs)] == [(None, "__getattr__")]
+    buckets = _buckets(members, refs, "Store.fetch", "Cache.fetch")
+    assert buckets["Store.fetch"] == buckets["Cache.fetch"] == "keep"
+
+
+def test_a_data_attribute_of_the_pinned_type_reaches_no_member(monkeypatch):
+    members, refs, _ = _synthetic(
+        TWO_FETCHES
+        + '''
+
+class Settings:
+    def __init__(self) -> None:
+        self.fetch = 0
+
+
+def use(settings: Settings) -> int:
+    return settings.fetch
+''',
+        monkeypatch,
+    )
+    # The store in ``__init__`` and the read: both resolve to the instance
+    # attribute, not to a method of that name elsewhere.
+    assert [r.targets for r in _fetch_refs(refs)] == [frozenset(), frozenset()]
+    buckets = _buckets(members, refs, "Store.fetch")
+    assert buckets["Store.fetch"] == buckets["Cache.fetch"] == "test-only"
+
+
+def test_a_return_annotation_types_the_call(monkeypatch):
+    members, refs, _ = _synthetic(
+        TWO_FETCHES
+        + '''
+
+def make() -> Store:
+    return Store()
+
+
+def use() -> int:
+    return make().fetch()
+''',
+        monkeypatch,
+    )
+    assert [r.targets for r in _fetch_refs(refs)] == [frozenset({members["Store.fetch"].key})]
+    assert _buckets(members, refs, "Cache.fetch")["Cache.fetch"] == "test-only"
 
 
 def test_the_fixture_generator_is_scanned_for_calls_but_not_for_strings():

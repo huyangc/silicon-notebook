@@ -58,22 +58,30 @@ Methodology (read before trusting a row)
    resolves to a data attribute reaches no member.  ``FileContext`` pins a
    type from: ``self`` / ``cls`` of a method; an annotated parameter, local
    or attribute (``Optional``, unions, ``X | None``, string annotations, a
-   ``TYPE_CHECKING`` import); an ``__init__`` parameter, from every
-   production construction of the class (widening its annotation, so a
-   partial fake handed in as a Protocol counts); ``x = Class(...)``; a call
-   whose function or method has a return annotation (also in a module the
-   census does not load, read from its source); ``self.attr`` assignments in
-   the class's methods and ``<typed receiver>.attr`` stores anywhere in
-   production; class-body annotations and dataclass fields; module globals.
+   ``TYPE_CHECKING`` import); an ``__init__`` parameter, from the production
+   calls spelled with the class's name (widening its annotation, so a
+   partial fake handed in as a Protocol counts) -- unannotated, it is
+   unknown when the class can be constructed any other way (its class
+   object handed on as a value: an alias, ``functools.partial``, a registry,
+   ``default_factory``; ``type(obj)(...)``; a registering class decorator);
+   ``x = Class(...)``; a call whose function or method has a return
+   annotation (also in a module the census does not load, read from its
+   source); ``self.attr`` assignments in the class's methods and
+   ``<typed receiver>.attr`` stores anywhere in production; class-body
+   annotations and dataclass fields; module globals, widened by every
+   ``<module>.name = value`` store (unknown when the module rebinds the name
+   under ``global``).
 
    Everything else counts by name, for every member of that name, and is
    reported under ``summary.references.by_name_reasons``: a receiver whose
    type cannot be pinned (a loop variable, ``Any``, an unannotated parameter
-   of a plain function, a value read from a container, a subscript); a store
-   through a receiver whose type cannot be pinned (it is not seen as a
-   binding of the attribute at all -- the blind spot left by this reading);
-   ``super()``; a class with ``__getattr__``; a name the pinned type does not
-   have; a string constant or a name template.  ``kept_by_name_only`` lists
+   of a plain function, a value read from a container, a subscript); a
+   receiver pinned to nothing but ``None``; ``super()``; a class with
+   ``__getattr__``; a name the pinned type does not have; a string constant
+   or a name template.  A store ``<receiver>.attr = value`` through a
+   receiver whose type cannot be pinned may bind ``attr`` on any class or
+   module, so reads of ``attr`` through any pinned receiver count by name
+   too (the attribute's type is unknown).  ``kept_by_name_only`` lists
    the members whose every live production reference is one of these: the
    residual same-name blind spot.  ``METADATA_FILES`` (the generated
    ownership manifest and the audit/guard scripts) name members as data and
@@ -217,6 +225,10 @@ RECEIVER_REGISTERING_DECORATORS = frozenset(
     }
 )
 PROPERTY_ACCESSOR_SUFFIXES = (".setter", ".getter", ".deleter")
+# Class decorators that return the class they are given without constructing
+# it or handing it on (matched on the last dotted segment); any other one may
+# register the class somewhere that constructs it.
+HARMLESS_CLASS_DECORATORS = frozenset({"dataclass", "final", "total_ordering", "runtime_checkable"})
 NAME_BUILDER_CALLS = frozenset({"getattr", "hasattr", "setattr", "delattr"})
 NAME_BUILDER_ATTR_CALLS = frozenset({"attrgetter", "methodcaller"})
 DOTTED_PATH_RE = re.compile(r"^[A-Za-z_][\w]*(?:[.:][A-Za-z_][\w]*)+$")
@@ -773,6 +785,10 @@ class FileContext:
         self.classes: dict[str, ast.ClassDef] = {}
         self.class_quals: dict[int, str] = {}
         self._handled: set[int] = set()
+        # Loads of a class name in a position that does not hand the class
+        # object on: a call's function, an attribute's value, an annotation,
+        # a base, an ``isinstance`` / ``issubclass`` / ``except`` type.
+        self.passive: set[int] = set()
         self._expr_memo: dict[int, "Types"] = {}
         self._lookup_memo: dict[tuple[int, str], "Types"] = {}
         self._busy: set[object] = set()
@@ -837,22 +853,32 @@ class FileContext:
         kind = type(node)
         # Fast paths for the node types that dominate every file.
         if kind is ast.Name:
-            if type(node.ctx) is not ast.Load and id(node) not in self._handled:
-                self._bind(scope, node.id, ("unknown",))
+            if type(node.ctx) is not ast.Load:
+                if id(node) not in self._handled:
+                    self._bind(scope, node.id, ("unknown",))
+            elif node.id in self.index.class_names:
+                self.index.class_loads.setdefault(node.id, []).append((self, scope, node))
             return
         if kind is ast.Constant or kind is ast.Load or kind is ast.Store:
             return
         if kind is ast.Attribute:
-            if type(node.ctx) is not ast.Load and id(node) not in self._handled:
-                owner = self._self_class(scope, node.value)
-                if owner is not None:
-                    self._self_store(owner, node.attr, scope, ("unknown",))
+            if type(node.ctx) is not ast.Load:
+                if id(node) not in self._handled:
+                    owner = self._self_class(scope, node.value)
+                    if owner is not None:
+                        self._self_store(owner, node.attr, scope, ("unknown",))
+            elif node.attr in self.index.class_names:
+                self.index.class_loads.setdefault(node.attr, []).append((self, scope, node))
+            self.passive.add(id(node.value))
             self._walk(node.value, scope, qual)
             return
         if kind is ast.Call:
             callee = _dotted(node.func).rsplit(".", 1)[-1]
             if callee:
                 self.index.calls.setdefault(callee, []).append((self, scope, node))
+            self.passive.add(id(node.func))
+            if callee in ("isinstance", "issubclass") and len(node.args) >= 2:
+                self._mark_passive(node.args[1])
             if callee in ("setattr", "__setattr__") and len(node.args) >= 2:
                 owner = self._self_class(scope, node.args[0])
                 literal = node.args[1]
@@ -866,6 +892,8 @@ class FileContext:
             for decorator in node.decorator_list:
                 self._walk(decorator, scope, qual)
             if isinstance(node, ast.ClassDef):
+                for base in node.bases:
+                    self._mark_passive(base)
                 for base in node.bases + node.keywords:
                     self._walk(base, scope, qual)
                 child_qual = ""
@@ -896,6 +924,7 @@ class FileContext:
                     self._handled.add(id(target))
             self._record_external_stores(node, node.targets, scope, ("expr", node.value))
         elif isinstance(node, ast.AnnAssign):
+            self._mark_passive(node.annotation)
             self.stmt_scope[id(node)] = scope
             if isinstance(node.target, ast.Name):
                 self._bind(scope, node.target.id, ("ann", node.annotation))
@@ -929,14 +958,21 @@ class FileContext:
                     outer = self.parents.get(id(outer))
                 if outer is not None:
                     self._bind(outer, name, ("unknown",))
-        elif isinstance(node, ast.ExceptHandler) and node.name:
-            self._bind(scope, node.name, ("unknown",))
+        elif isinstance(node, ast.ExceptHandler):
+            if node.type is not None:
+                self._mark_passive(node.type)
+            if node.name:
+                self._bind(scope, node.name, ("unknown",))
         elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
             self._bind(scope, node.name, ("unknown",))
         elif isinstance(node, ast.MatchMapping) and node.rest:
             self._bind(scope, node.rest, ("unknown",))
         for child in ast.iter_child_nodes(node):
             self._walk(child, scope, qual)
+
+    def _mark_passive(self, node: ast.AST) -> None:
+        for sub in ast.walk(node):
+            self.passive.add(id(sub))
 
     def _record_external_stores(
         self, stmt: ast.AST, targets: list[ast.AST], scope: ast.AST, binding: tuple
@@ -1219,6 +1255,11 @@ class ReceiverIndex:
                 if isinstance(value, type) and value.__module__ == module_name:
                     classes[id(value)] = value
         self.classes = list(classes.values())
+        self.class_names = {cls.__name__ for cls in self.classes}
+        # Every production load of an app class's name, by that name, for
+        # telling whether a class is constructed only where it is spelled.
+        self.class_loads: dict[str, list[tuple]] = {}
+        self._escapes: dict[int, bool] = {}
         self.contexts: dict[str, FileContext] = {}
         self.external_stores: dict[str, list[tuple]] = {}
         self._subclasses: dict[int, list[type]] = {}
@@ -1310,11 +1351,18 @@ class ReceiverIndex:
     ) -> "list[Types] | None":
         """Per construction site, the type of what it passes for ``__init__``
         parameter ``param`` (its argument, else the default; None when a site
-        omits a required one): every production call that constructs the
-        class or a subclass inheriting its ``__init__``.  None when a
-        subclass defines its own ``__init__`` (it may pass anything to
-        ``super().__init__``), when a call passes ``*args`` / ``**kwargs``,
-        or when no construction site is found."""
+        omits a required one).  The sites are the production calls spelled
+        with the name of the class or of a subclass inheriting its
+        ``__init__`` (``Class(...)``, ``mod.Class(...)``, ``cls(...)``), so
+        the answer is None -- the parameter is unknown -- whenever the class
+        can be constructed any other way: its class object is handed on as a
+        value (an alias, ``functools.partial(Class, ...)``, a registry entry,
+        ``default_factory=Class``), it is constructed as ``type(obj)(...)`` /
+        ``obj.__class__(...)`` from an instance, or a class decorator (other
+        than ``dataclass`` / ``final`` / ``total_ordering``) receives it.
+        Also None when a subclass defines its own ``__init__`` (it may pass
+        anything to ``super().__init__``), when a call passes ``*args`` /
+        ``**kwargs``, or when no construction site is found."""
         cls = ctx._class_object(class_node)
         if cls is None:
             return None
@@ -1338,6 +1386,8 @@ class ReceiverIndex:
         if any("__init__" in vars(sub) for sub in subclasses):
             return None
         family = {id(cls)} | {id(sub) for sub in subclasses}
+        if any(self.constructed_unspelled(klass) for klass in [cls] + subclasses):
+            return None
         args = func.args
         positional = [a.arg for a in list(args.posonlyargs) + list(args.args)][1:]
         defaults: dict[str, ast.AST] = {}
@@ -1379,6 +1429,50 @@ class ReceiverIndex:
             else:
                 parts.append(None)
         return parts
+
+    def constructed_unspelled(self, cls: type) -> bool:
+        """Whether production may construct ``cls`` (this class exactly)
+        other than by a call spelled with its name: see
+        ``constructor_argument_types``."""
+        if id(cls) not in self._escapes:
+            self._escapes[id(cls)] = self._constructed_unspelled(cls)
+        return self._escapes[id(cls)]
+
+    def _constructed_unspelled(self, cls: type) -> bool:
+        ctx = self.context_for_module(cls.__module__)
+        node = ctx.classes.get(cls.__qualname__) if ctx is not None else None
+        if node is not None and any(
+            _dotted(d).rsplit(".", 1)[-1] not in HARMLESS_CLASS_DECORATORS
+            for d in node.decorator_list
+        ):
+            return True
+        for load_ctx, scope, load in self.class_loads.get(cls.__name__, []):
+            if id(load) in load_ctx.passive:
+                continue
+            loaded = load_ctx.expr_types(load, scope)
+            # Spelled like the class but not resolved: it may be the class.
+            if loaded is None or any(t.kind == "cls" and t.obj is cls for t in loaded):
+                return True
+        for callee in ("type", "__class__"):
+            for call_ctx, scope, call in self.calls.get(callee, []):
+                inner = call.func
+                if callee == "type":
+                    if not (
+                        isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Name)
+                        and inner.func.id == "type"
+                        and len(inner.args) == 1
+                    ):
+                        continue
+                    instance = inner.args[0]
+                else:
+                    if not (isinstance(inner, ast.Attribute) and inner.attr == "__class__"):
+                        continue
+                    instance = inner.value
+                held = call_ctx.expr_types(instance, scope)
+                if held and any(t.kind == "inst" and t.obj is cls for t in held):
+                    return True
+        return False
 
     # -- class facts ------------------------------------------------------
     def subclasses(self, cls: type) -> list[type]:
@@ -1447,6 +1541,11 @@ class ReceiverIndex:
         reaches, or (None, why) when it has to count by name."""
         if types_ is None:
             return None, "receiver type unknown"
+        if not types_:
+            # Pinned to nothing but ``None``: every binding the census saw is
+            # ``None``, so the value it holds when read came from somewhere
+            # the census did not see.
+            return None, "receiver type empty"
         keys: set[str] = set()
         for t in types_:
             if t.kind == "mod":
@@ -1556,7 +1655,10 @@ class ReceiverIndex:
     def instance_attribute_types(self, cls: type, name: str) -> object:
         """Types of ``obj.name`` from the bindings above across the class, its
         bases and its subclasses, plus stores through a receiver typed as one
-        of them anywhere in production; _MISSING when nothing binds it."""
+        of them anywhere in production; _MISSING when nothing binds it.
+        Unknown when production stores ``<receiver>.name`` through a receiver
+        whose type cannot be pinned: that store may be one of this class's
+        bindings."""
         related = [k for k in cls.__mro__ if _is_app_object(k)] + self.subclasses(cls)
         infos: list[tuple] = []
         for klass in related:
@@ -1565,17 +1667,51 @@ class ReceiverIndex:
         for ctx, scope, receiver, binding in self.external_stores.get(name, []):
             receiver_types = ctx.expr_types(receiver, scope)
             if receiver_types is None:
-                continue
+                return None
             if any(t.kind == "inst" and id(t.obj) in related_ids for t in receiver_types):
                 infos.append((ctx, scope, binding))
         if not infos:
             return _MISSING
         return _union(ctx.binding_types(scope, binding) for ctx, scope, binding in infos)
 
+    def module_attribute_types(self, module: types.ModuleType, name: str) -> "Types":
+        """Types of ``module.name``: the value the census holds, widened by
+        every ``<module>.name = value`` store in production (the census runs
+        before anything rebinds the global, so the value it holds may be a
+        ``None`` placeholder).  Unknown when the module rebinds the name
+        from a function (``global name``), when a store of ``.name`` goes
+        through a receiver whose type cannot be pinned, or when nothing binds
+        it."""
+        key = (id(module), name)
+        if key in self._attr_memo:
+            return self._attr_memo[key]
+        if key in self._busy:
+            return None
+        self._busy.add(key)
+        try:
+            result = self._module_attribute_types(module, name)
+        finally:
+            self._busy.discard(key)
+        self._attr_memo[key] = result
+        return result
+
+    def _module_attribute_types(self, module: types.ModuleType, name: str) -> "Types":
+        own = self.context_for_module(getattr(module, "__name__", None))
+        if own is not None and name in own.module_globals:
+            return None
+        value = getattr(module, name, _MISSING)
+        parts: list[Types] = [] if value is _MISSING else [_value_types(value)]
+        for ctx, scope, receiver, binding in self.external_stores.get(name, []):
+            receiver_types = ctx.expr_types(receiver, scope)
+            if receiver_types is None:
+                return None
+            if any(r.kind == "mod" and r.obj is module for r in receiver_types):
+                parts.append(ctx.binding_types(scope, binding))
+        return _union(parts) if parts else None
+
     def attribute_types(self, t: TypeRef, name: str) -> "Types":
         if t.kind == "mod":
-            value = getattr(t.obj, name, _MISSING)
-            return None if value is _MISSING else _value_types(value)
+            return self.module_attribute_types(t.obj, name)
         if t.kind in ("func", "sfunc"):
             return None
         cls = t.obj
