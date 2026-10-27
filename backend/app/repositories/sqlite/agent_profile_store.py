@@ -15,11 +15,7 @@ import json
 import sqlite3
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from app.repositories.owner_batches import (
-    owner_id_list,
-    sqlite_in_placeholders,
-    sqlite_owner_chunks,
-)
+from app.repositories.owner_batches import owner_id_list
 from app.repositories.ports import (
     AGENT_PROFILE_JOB_TERMINAL_STATUSES,
     AGENT_PROFILE_RESTART_FAILURE_MESSAGE,
@@ -33,6 +29,7 @@ from app.repositories.ports import (
     append_profile_history as _append_history,
 )
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.id_binding import bind_ids, member_of
 
 
 def _loads_list(raw: object) -> list:
@@ -328,25 +325,26 @@ class AgentProfileStore:
     def clear_all(self, notebook_id: str, owner_ids: Iterable[str]) -> int:
         """Delete every block row of these (notebook, owner) scopes outright —
         "start this chain's understanding over", not a per-block clear. No
-        CAS: this is a full-scope wipe. One write transaction whatever the
-        number of owners (chunked ``IN``). Returns the row count deleted."""
+        CAS: this is a full-scope wipe. One statement whatever the number of
+        owners (``id_binding``: one JSON parameter). Returns the row count
+        deleted."""
         return self._delete_for_owners("agent_notebook_profile", notebook_id, owner_ids)
 
     def _delete_for_owners(
         self, table: str, notebook_id: str, owner_ids: Iterable[str]
     ) -> int:
+        # The owner set is as large as the link-member list being removed,
+        # so it binds through ``id_binding`` (one parameter, never a growing
+        # placeholder list); ``notebook_id`` drives, the set only filters.
         owners = owner_id_list(owner_ids)
         if not owners:
             return 0
-        deleted = 0
+        bound = bind_ids(owners, sort=True)
         with self.database.write() as db:
-            for chunk in sqlite_owner_chunks(owners):
-                deleted += db.execute(
-                    f"DELETE FROM {table} WHERE notebook_id=? "
-                    f"AND owner_id IN ({sqlite_in_placeholders(len(chunk))})",
-                    (notebook_id, *chunk),
-                ).rowcount
-        return deleted
+            return db.execute(
+                f"DELETE FROM {table} WHERE notebook_id=? AND {member_of('owner_id', bound)}",
+                (notebook_id, bound.param),
+            ).rowcount
 
     # ------------------------------------------------------------------- jobs
     def job_row(self, notebook_id: str, owner_id: str) -> dict | None:

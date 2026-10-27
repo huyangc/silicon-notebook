@@ -27,6 +27,7 @@ from app.repositories.postgres._store_utils import (
     normalized_clock,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.id_binding import bind_ids, execute_ids, member_of
 from app.repositories.ports import (
     AGENT_PROFILE_JOB_TERMINAL_STATUSES,
     AGENT_PROFILE_RESTART_FAILURE_MESSAGE,
@@ -318,20 +319,25 @@ class AgentProfileStore:
 
     def clear_all(self, notebook_id: str, owner_ids: Iterable[str]) -> int:
         """Delete every block row of these (notebook, owner) scopes outright.
-        No CAS: a full-scope wipe. One statement (``= ANY``) whatever the
-        number of owners. Returns the row count deleted."""
+        No CAS: a full-scope wipe. One statement whatever the number of
+        owners (``id_binding``: one parameter). Returns the row count
+        deleted."""
         return self._delete_for_owners("agent_notebook_profile", notebook_id, owner_ids)
 
     def _delete_for_owners(
         self, table: str, notebook_id: str, owner_ids: Iterable[str]
     ) -> int:
+        # The owner set is as large as the link-member list being removed,
+        # so it binds through ``id_binding`` (one parameter, a custom plan).
         owners = owner_id_list(owner_ids)
         if not owners:
             return 0
+        bound = bind_ids(owners)
         with self.database.write() as connection:
-            cursor = connection.execute(
-                f"DELETE FROM {table} WHERE notebook_id=%s AND owner_id=ANY(%s)",
-                (notebook_id, owners),
+            cursor = execute_ids(
+                connection,
+                f"DELETE FROM {table} WHERE notebook_id=%s AND {member_of('owner_id', bound)}",
+                (notebook_id, bound.param),
             )
         return cursor.rowcount
 
