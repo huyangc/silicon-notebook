@@ -8,7 +8,6 @@ from typing import Any, Iterable, List, Optional
 from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 from app.core.config import Settings
 from app.domain.repository import remap_json_ids as _remap_json_ids
-from app.domain.retrieval import ChunkRetrievalPlan
 from app.domain.extensions import (
     AskCompletedObserverHostPort,
     ElementEnricherHostPort,
