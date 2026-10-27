@@ -599,9 +599,9 @@ class SourceStore:
             ).fetchone()
             if row is None:
                 raise KeyError(source_id)
-            paper_meta = self.paper_meta_for_sources(connection, [source_id]).get(
-                source_id
-            )
+            paper_meta = self.paper_meta_for_sources(
+                connection, [source_id], notebook_id=row["notebook_id"]
+            ).get(source_id)
             summary = self.source_from_row(
                 connection, row, paper_meta=paper_meta
             )
@@ -2001,7 +2001,9 @@ class SourceStore:
                 connection, [row]
             )
         meta = (
-            self.paper_meta_for_sources(connection, [source_id]).get(source_id)
+            self.paper_meta_for_sources(
+                connection, [source_id], notebook_id=row["notebook_id"]
+            ).get(source_id)
             if paper_meta is _UNSET
             else paper_meta
         )
@@ -2048,7 +2050,7 @@ class SourceStore:
         if not rows:
             return []
         source_ids = [row["id"] for row in rows]
-        paper_meta = self.paper_meta_for_sources(connection, source_ids)
+        paper_meta = self.paper_meta_for_rows(connection, rows)
         element_counts: dict[str, int] = {}
         kg_extracted_ids: set[str] = set()
         latest_error: dict[str, str] = {}
@@ -2225,6 +2227,11 @@ class SourceStore:
                 "raw_json,model,created_at,updated_at) "
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON CONFLICT(source_id) DO UPDATE SET "
+                # notebook_id 已由上面的归属校验确认是这条 source 的库;冲突时一并
+                # 写回,畸形遗留行(子表 notebook_id 与 source 不一致)重抽一次即
+                # 被改正,而不会被 paper_meta_for_sources 的收窄永远藏住。正常行
+                # 上它与旧值相同。作者行本来就整组按这个 notebook_id 重写。
+                "notebook_id=excluded.notebook_id,"
                 "is_paper=excluded.is_paper,paper_title=excluded.paper_title,"
                 "venue=excluded.venue,pub_year=excluded.pub_year,doi=excluded.doi,"
                 "keywords=excluded.keywords,raw_json=excluded.raw_json,model=excluded.model,"
@@ -2315,18 +2322,52 @@ class SourceStore:
             ],
         )
 
-    def get_paper_meta(self, source_id: str) -> dict | None:
+    def get_paper_meta(self, source_id: str, notebook_id: str) -> dict | None:
+        """``notebook_id`` 是这条 source 自己所在的库(``sources.notebook_id``),
+        不是调用方此刻所在的库;口径见 ``paper_meta_for_sources``。"""
         with self.database.connect() as connection:
-            return self.paper_meta_for_sources(connection, [source_id]).get(source_id)
+            return self.paper_meta_for_sources(
+                connection, [source_id], notebook_id=notebook_id
+            ).get(source_id)
+
+    def paper_meta_for_rows(
+        self, connection, rows: Sequence[Mapping[str, Any]]
+    ) -> dict[str, dict]:
+        """``paper_meta_for_sources`` 的按行入口:按每行 source 自己的
+        ``notebook_id`` 分组后逐组水合。现有调用方(列表页)一页只有一个库,
+        于是恰好一组、语句数与按 id 直接调用相同;分组只是为了让一页跨库的
+        行也各按各的库收窄,而不是被第一行的库误收窄。"""
+        by_notebook: dict[str, list[str]] = {}
+        for row in rows:
+            by_notebook.setdefault(row["notebook_id"], []).append(row["id"])
+        hydrated: dict[str, dict] = {}
+        for notebook_id, ids in by_notebook.items():
+            hydrated.update(
+                self.paper_meta_for_sources(connection, ids, notebook_id=notebook_id)
+            )
+        return hydrated
 
     def paper_meta_for_sources(
-        self, connection, source_ids: Sequence[str]
+        self, connection, source_ids: Sequence[str], *, notebook_id: str
     ) -> dict[str, dict]:
-        """按 source_id 批量取 source_paper_meta/source_authors,不校验子表自身
-        的 notebook_id。登记在案的残留分歧:list_sources_page 的搜索谓词已改为
-        与 report_source_rows 等报表腿一样按子表 notebook_id 收窄,这条水合腿
-        没有跟着改。见
-        test_source_search_ignores_a_legacy_cross_notebook_child_row。"""
+        """按 source_id 批量取 source_paper_meta/source_authors,并按子表自身的
+        ``notebook_id`` 收窄到 ``notebook_id``(这些 source 自己所在的库)。
+
+        与 list_sources_page 的搜索腿、report_source_rows 家族
+        (``m.notebook_id=s.notebook_id``)和 notebook_analytics 的 is_paper 计数
+        同一口径:子表行的 notebook_id 与其 source 不一致的畸形遗留行不算这条
+        source 的论文元数据——不显示、不进 paper_meta_status,也不让元数据抽取
+        的幂等探针(get_paper_meta)判成「已有」,于是下一次抽取会重写它,
+        upsert_paper_meta 在冲突时一并改正 notebook_id。当前写者写不出这种行
+        (见 list_sources_page 搜索腿注释第 2 条的写者清单)。见
+        test_source_search_ignores_a_legacy_cross_notebook_child_row。
+
+        计划:``notebook_id=%s`` 只作过滤,大库上 custom 与 generic 计划都仍由
+        page 级 IN 列表经 pk_source_paper_meta / idx_source_authors_source 驱动,
+        与收窄前同一条索引(按 4.9 万源 / 3.9 万 meta / 21 万作者行的规模实测)。
+        只有库小到「按库取全部行」比 IN 探针还便宜时,custom 计划才会改走
+        idx_source_*_nb —— 取的行数以那个小库的大小为界。见
+        test_paper_meta_hydration_plan_stays_on_source_id。"""
         meta_rows: dict[str, Mapping[str, Any]] = {}
         author_rows: dict[str, list[Mapping[str, Any]]] = {}
         ids = list(source_ids)
@@ -2334,14 +2375,16 @@ class SourceStore:
             batch = ids[offset : offset + self.IN_CHUNK]
             marker = placeholders(batch)
             for row in connection.execute(
-                f"SELECT * FROM source_paper_meta WHERE source_id IN ({marker})", batch
+                f"SELECT * FROM source_paper_meta WHERE source_id IN ({marker}) "
+                "AND notebook_id=%s",
+                [*batch, notebook_id],
             ).fetchall():
                 meta_rows[row["source_id"]] = row
             for row in connection.execute(
                 "SELECT source_id,position,name,affiliation FROM source_authors "
-                f"WHERE source_id IN ({marker}) "
+                f"WHERE source_id IN ({marker}) AND notebook_id=%s "
                 "ORDER BY source_id COLLATE \"C\",position",
-                batch,
+                [*batch, notebook_id],
             ).fetchall():
                 author_rows.setdefault(row["source_id"], []).append(row)
         return {

@@ -161,7 +161,7 @@ def test_ensure_stores_verified_meta(repo, notebook_id, service):
     assert status == "stored"
     assert fake.calls == 1
     assert ("chat", "paper_metadata") in repo.recording_model_provider.calls
-    meta = repo._runtime.source_store.get_paper_meta("src-1")
+    meta = repo._runtime.source_store.get_paper_meta("src-1", notebook_id)
     assert meta is not None
     assert meta["is_paper"] is True
     assert meta["paper_title"] == "Gate Sizing Under Variability"
@@ -206,7 +206,7 @@ def test_not_paper_marker_prevents_retry(repo, notebook_id, service):
     status = service.ensure_paper_metadata(source)
 
     assert status == "not_paper"
-    meta = repo._runtime.source_store.get_paper_meta("src-1")
+    meta = repo._runtime.source_store.get_paper_meta("src-1", notebook_id)
     assert meta is not None
     assert meta["is_paper"] is False
 
@@ -230,7 +230,7 @@ def test_no_llm_returns_no_llm_without_row(repo, notebook_id, service):
     status = service.ensure_paper_metadata(source)
 
     assert status == "no_llm"
-    assert repo._runtime.source_store.get_paper_meta("src-1") is None
+    assert repo._runtime.source_store.get_paper_meta("src-1", notebook_id) is None
     assert fake.calls == 0
 
 
@@ -243,7 +243,7 @@ def test_memory_source_gated(repo, notebook_id, service):
 
     assert status == "skipped"
     assert fake.calls == 0
-    assert repo._runtime.source_store.get_paper_meta("src-1") is None
+    assert repo._runtime.source_store.get_paper_meta("src-1", notebook_id) is None
 
 
 def test_knowhow_source_gated(repo, notebook_id, service):
@@ -257,7 +257,7 @@ def test_knowhow_source_gated(repo, notebook_id, service):
 
     assert status == "skipped"
     assert fake.calls == 0
-    assert repo._runtime.source_store.get_paper_meta("src-1") is None
+    assert repo._runtime.source_store.get_paper_meta("src-1", notebook_id) is None
 
 
 def test_textbook_doc_type_gated(repo, notebook_id, service):
@@ -295,7 +295,7 @@ def test_llm_exception_is_swallowed(repo, notebook_id, service):
     status = service.ensure_paper_metadata(source)
 
     assert status == "failed"
-    assert repo._runtime.source_store.get_paper_meta("src-1") is None
+    assert repo._runtime.source_store.get_paper_meta("src-1", notebook_id) is None
 
 
 def test_setup_phase_exception_is_swallowed(repo, notebook_id, service, monkeypatch):
@@ -338,7 +338,7 @@ def test_ensure_non_object_json_fails_without_row(repo, notebook_id, service):
     status = service.ensure_paper_metadata(source)
 
     assert status == "failed"
-    assert repo._runtime.source_store.get_paper_meta("src-1") is None
+    assert repo._runtime.source_store.get_paper_meta("src-1", notebook_id) is None
     assert fake.calls == 1
 
 
@@ -351,11 +351,11 @@ def test_ensure_malformed_classification_can_retry_through_scheduler(
     source = _insert_source(repo, notebook_id, "src-1")
 
     assert service.ensure_paper_metadata(source, client=client) == "failed"
-    assert service.sources.get_paper_meta(source.id) is None
+    assert service.sources.get_paper_meta(source.id, notebook_id) is None
 
     raw.payload = PAYLOAD
     assert service.ensure_paper_metadata(source, client=client) == "stored"
-    assert service.sources.get_paper_meta(source.id)["is_paper"] is True
+    assert service.sources.get_paper_meta(source.id, notebook_id)["is_paper"] is True
     assert raw.calls == 2
 
 
@@ -367,7 +367,7 @@ def test_ensure_missing_classification_can_retry_through_scheduler(
     source = _insert_source(repo, notebook_id, "src-1")
 
     assert service.ensure_paper_metadata(source, client=client) == "failed"
-    assert service.sources.get_paper_meta(source.id) is None
+    assert service.sources.get_paper_meta(source.id, notebook_id) is None
     raw.payload = PAYLOAD
     assert service.ensure_paper_metadata(source, client=client) == "stored"
     assert raw.calls == 2
@@ -386,7 +386,7 @@ def test_ensure_boolean_classification_and_normalised_spellings_are_idempotent(
     assert service.ensure_paper_metadata(source, client=client) == (
         "stored" if expected else "not_paper"
     )
-    assert service.sources.get_paper_meta(source.id)["is_paper"] is expected
+    assert service.sources.get_paper_meta(source.id, notebook_id)["is_paper"] is expected
     assert service.ensure_paper_metadata(source, client=client) == "skipped"
     assert raw.calls == 1
 
@@ -401,7 +401,7 @@ def test_ensure_single_element_array_json_is_unwrapped(repo, notebook_id, servic
     status = service.ensure_paper_metadata(source)
 
     assert status == "stored"
-    meta = repo._runtime.source_store.get_paper_meta("src-1")
+    meta = repo._runtime.source_store.get_paper_meta("src-1", notebook_id)
     assert meta is not None
     assert meta["paper_title"] == "Gate Sizing Under Variability"
 
@@ -421,7 +421,7 @@ def test_run_extraction_catch_up(repo, notebook_id, monkeypatch):
     bind_chat_client(repo, "paper_metadata", fake)
     source_id = "src-1"
     _insert_source(repo, notebook_id, source_id)
-    assert repo._runtime.source_store.get_paper_meta(source_id) is None
+    assert repo._runtime.source_store.get_paper_meta(source_id, notebook_id) is None
 
     monkeypatch.setattr(
         kg_ingest, "extract_graph",
@@ -435,7 +435,7 @@ def test_run_extraction_catch_up(repo, notebook_id, monkeypatch):
 
     repo._run_extraction(source_id)
 
-    meta = repo._runtime.source_store.get_paper_meta(source_id)
+    meta = repo._runtime.source_store.get_paper_meta(source_id, notebook_id)
     assert meta is not None
     assert meta["is_paper"] is True
     # 唯一一次 chat_json 调用来自 paper-meta;KG 抽取路径被 stub 绕开,没有

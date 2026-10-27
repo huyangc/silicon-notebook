@@ -5265,39 +5265,65 @@ def test_source_search_never_leaks_another_notebook(core_stores: CoreStores):
     assert _search_ids(core_stores, other_id, "haystack") == []
 
 
-def test_source_search_ignores_a_legacy_cross_notebook_child_row(
-    core_stores: CoreStores,
-):
-    """**本次改写唯一一处有意的语义变化,不属于等价性证明。**
-
-    当前写者写不出「子表行的 notebook_id ≠ 其 source 的 notebook_id」这种行
-    (``upsert_paper_meta`` 先 ``SELECT id FROM sources WHERE id=%s AND
-    notebook_id=%s FOR KEY SHARE`` 做归属校验;深拷贝同时改写两个字段;全仓无
-    source 换库路径),但早于这些写者的畸形历史行可能存在。仓库对这类行早有
-    口径:``report_source_rows`` 家族在 JOIN 上写
-    ``AND m.notebook_id=s.notebook_id``(见本文件
-    ``test_report_source_rows_*`` 里那条同款畸形行用例),``notebook_analytics``
-    的 is_paper 计数直接按 ``source_paper_meta.notebook_id`` 分组。新形态把
-    搜索腿并入这套口径 —— 搜索谓词现与 ``report_source_rows`` 等报表腿一样,
-    统一按子表自身 ``notebook_id`` 收窄。但同一调用链的水合腿
-    ``paper_meta_for_sources``(见该函数 docstring)仍只按 ``source_id`` 取
-    子表,不看子表的 notebook_id,是登记在案的残留分歧,不随本次改写统一。
-
-    这条用例只钉住搜索腿:在这类畸形遗留行上,``display_title`` 因水合腿命中
-    而显示得到,却因搜索腿收窄而搜不到 —— 与改动前(搜得到、报表算不到)方向
-    相反。这条用例在旧实现上是**红**的 —— 那正是它存在的意义。SQLite 孪生:
-    ``tests/test_sources_pagination.py`` 的同名一条。"""
-    notebook_id, other_id = _seed_search_fixture(core_stores)
+def _corrupt_search_child_notebook_ids(stores: CoreStores, other_id: str) -> None:
+    """建模历史脏数据,不削弱写者:s-ptitle 的 meta 行、s-author 的作者行被改到
+    干扰库;s-author 自己的 meta 行不动。SQLite 孪生:
+    ``tests/test_sources_pagination.py`` 的 ``_corrupt_child_notebook_ids``。"""
     _write_sql(
-        core_stores,
+        stores,
         "UPDATE source_paper_meta SET notebook_id=%s WHERE source_id=%s",
         (other_id, "s-ptitle"),
     )
     _write_sql(
-        core_stores,
+        stores,
         "UPDATE source_authors SET notebook_id=%s WHERE source_id=%s",
         (other_id, "s-author"),
     )
+
+
+def _hydrated_search_summaries(
+    stores: CoreStores, notebook_id: str, source_id: str
+) -> list:
+    """水合腿的四个构造点各取一份:list_sources / list_sources_page(批量)、
+    get_source(单条,外部传入 meta)、source_from_row(单条,自取 meta)。"""
+    listed = {s.id: s for s in stores.sources.list_sources(notebook_id)}
+    paged = {
+        s.id: s for s in stores.sources.list_sources_page(
+            notebook_id, offset=0, limit=200
+        ).items
+    }
+    with stores.database.connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM sources WHERE id=%s", (source_id,)
+        ).fetchone()
+        single = stores.sources.source_from_row(connection, row)
+    return [
+        listed[source_id], paged[source_id], stores.sources.get_source(source_id), single
+    ]
+
+
+def test_source_search_ignores_a_legacy_cross_notebook_child_row(
+    core_stores: CoreStores,
+):
+    """子表行的 notebook_id ≠ 其 source 的 notebook_id 的畸形遗留行,搜索腿与
+    水合腿同一口径:都不算这条 source 的论文元数据。
+
+    当前写者写不出这种行(``upsert_paper_meta`` 先 ``SELECT id FROM sources
+    WHERE id=%s AND notebook_id=%s FOR KEY SHARE`` 做归属校验;深拷贝同时改写两个
+    字段;全仓无 source 换库路径;建表以来唯一的写入调用方传的就是
+    ``source.notebook_id``)。仓库对这类行的口径:``report_source_rows`` 家族在
+    JOIN 上写 ``AND m.notebook_id=s.notebook_id``(见本文件
+    ``test_report_source_rows_*`` 里那条同款畸形行用例),``notebook_analytics``
+    的 is_paper 计数直接按 ``source_paper_meta.notebook_id`` 分组,搜索腿按子表
+    自身 ``notebook_id`` 收窄,水合腿 ``paper_meta_for_sources`` 也按子表自身
+    ``notebook_id`` 收窄到 source 所在的库。
+
+    于是这类行上搜不到、也显示不出(display_title 回落到 source 自己的 title,
+    authors 为空,paper_meta_status 按「没有行」判),元数据抽取的幂等探针
+    ``get_paper_meta`` 也判「没有」。这条用例在收窄前的水合腿上是**红**的。
+    SQLite 孪生:``tests/test_sources_pagination.py`` 的同名一条。"""
+    notebook_id, other_id = _seed_search_fixture(core_stores)
+    _corrupt_search_child_notebook_ids(core_stores, other_id)
     assert _search_ids(core_stores, notebook_id, "haystack") == []
     assert _search_ids(core_stores, notebook_id, "zeta needleman") == []
     # 也不会泄漏进它被写坏成的那个库(source 行本身仍在原库)。
@@ -5305,6 +5331,232 @@ def test_source_search_ignores_a_legacy_cross_notebook_child_row(
     assert _search_ids(core_stores, other_id, "zeta needleman") == []
     # 其余腿不受影响。
     assert _search_ids(core_stores, notebook_id, "scanned") == ["s-ptitle"]
+
+    for summary in _hydrated_search_summaries(core_stores, notebook_id, "s-ptitle"):
+        assert summary.display_title == "Scanned upload"
+        assert summary.authors == []
+        assert summary.paper_meta_status == "missing"
+    assert core_stores.sources.get_source("s-ptitle").paper_meta is None
+    assert core_stores.sources.get_paper_meta("s-ptitle", notebook_id) is None
+
+    # s-author 的 meta 行没被改坏,只有作者行:meta 仍在、作者被收窄掉。
+    for summary in _hydrated_search_summaries(core_stores, notebook_id, "s-author"):
+        assert summary.display_title == "Unrelated title"
+        assert summary.authors == []
+        assert summary.paper_meta_status == "has_meta"
+    assert core_stores.sources.get_source("s-author").paper_meta.authors == []
+    assert core_stores.sources.get_paper_meta("s-author", notebook_id)["authors"] == []
+
+
+def test_reextraction_heals_a_legacy_cross_notebook_child_row(core_stores: CoreStores):
+    """收窄之后,畸形遗留行在幂等探针看来是「没有」,下一次抽取会重写它;
+    ``upsert_paper_meta`` 冲突时一并写回 notebook_id(上面的归属校验已确认它是
+    source 的库),于是重抽一次就被改正,四个读面重新一致可见。SQLite 孪生:
+    ``tests/test_sources_pagination.py`` 的同名一条。"""
+    notebook_id, other_id = _seed_search_fixture(core_stores)
+    _corrupt_search_child_notebook_ids(core_stores, other_id)
+    assert core_stores.sources.get_paper_meta("s-ptitle", notebook_id) is None
+
+    core_stores.sources.upsert_paper_meta("s-ptitle", notebook_id, {
+        "is_paper": True, "paper_title": "Needle in a Haystack", "venue": None,
+        "pub_year": None, "doi": None, "keywords": [], "raw_json": {}, "model": "m",
+        "authors": [{"position": 0, "name": "Hay Stacker", "affiliation": ""}],
+    })
+
+    healed = _fetch_one(
+        core_stores,
+        "SELECT notebook_id FROM source_paper_meta WHERE source_id=%s",
+        ("s-ptitle",),
+    )["notebook_id"]
+    assert healed == notebook_id
+    meta = core_stores.sources.get_paper_meta("s-ptitle", notebook_id)
+    assert meta["paper_title"] == "Needle in a Haystack"
+    for summary in _hydrated_search_summaries(core_stores, notebook_id, "s-ptitle"):
+        assert summary.display_title == "Needle in a Haystack"
+        assert summary.authors == ["Hay Stacker"]
+        assert summary.paper_meta_status == "has_meta"
+    assert _search_ids(core_stores, notebook_id, "haystack") == ["s-ptitle"]
+
+
+def _unnarrowed_paper_meta_for_sources(store):
+    """收窄前的水合腿,逐字照搬(只按 source_id 取子表)。差分用例的对照组。"""
+    from app.repositories.postgres._store_utils import placeholders
+
+    def hydrate(connection, source_ids, *, notebook_id):
+        del notebook_id  # 收窄前的形态不看它
+        meta_rows: dict = {}
+        author_rows: dict = {}
+        ids = list(source_ids)
+        for offset in range(0, len(ids), store.IN_CHUNK):
+            batch = ids[offset : offset + store.IN_CHUNK]
+            marker = placeholders(batch)
+            for row in connection.execute(
+                f"SELECT * FROM source_paper_meta WHERE source_id IN ({marker})", batch
+            ).fetchall():
+                meta_rows[row["source_id"]] = row
+            for row in connection.execute(
+                "SELECT source_id,position,name,affiliation FROM source_authors "
+                f"WHERE source_id IN ({marker}) "
+                "ORDER BY source_id COLLATE \"C\",position",
+                batch,
+            ).fetchall():
+                author_rows.setdefault(row["source_id"], []).append(row)
+        return {
+            source_id: store._paper_meta_dict(row, author_rows.get(source_id, []))
+            for source_id, row in meta_rows.items()
+        }
+
+    return hydrate
+
+
+def _hydration_snapshot(stores: CoreStores, notebook_id: str) -> str:
+    """所有走水合腿的读面,序列化成一份 JSON 文本(逐字节比较用)。"""
+    import json
+
+    ids = [s.id for s in stores.sources.list_sources(notebook_id)]
+    payload = {
+        "list_sources": [s.model_dump() for s in stores.sources.list_sources(notebook_id)],
+        "list_sources_page": stores.sources.list_sources_page(
+            notebook_id, offset=0, limit=200
+        ).model_dump(),
+        "get_source": [stores.sources.get_source(sid).model_dump() for sid in ids],
+        "get_paper_meta": {
+            sid: stores.sources.get_paper_meta(sid, notebook_id) for sid in ids
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def test_paper_meta_hydration_is_byte_identical_on_well_formed_rows(
+    core_stores: CoreStores, monkeypatch
+):
+    """差分:子表 notebook_id 与 source 一致(唯一写得出来的形态)时,收窄后的
+    水合腿与收窄前逐字节相同 —— list_sources / list_sources_page / get_source /
+    get_paper_meta 全部读面。末段在畸形行上再比一次,证明差分有区分力。
+    SQLite 孪生:``tests/test_sources_pagination.py`` 的同名一条。"""
+    notebook_id, other_id = _seed_search_fixture(core_stores)
+    store = core_stores.sources
+    narrowed = _hydration_snapshot(core_stores, notebook_id)
+    narrowed_other = _hydration_snapshot(core_stores, other_id)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            store, "paper_meta_for_sources", _unnarrowed_paper_meta_for_sources(store)
+        )
+        assert _hydration_snapshot(core_stores, notebook_id) == narrowed
+        assert _hydration_snapshot(core_stores, other_id) == narrowed_other
+
+    _corrupt_search_child_notebook_ids(core_stores, other_id)
+    corrupted = _hydration_snapshot(core_stores, notebook_id)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            store, "paper_meta_for_sources", _unnarrowed_paper_meta_for_sources(store)
+        )
+        assert _hydration_snapshot(core_stores, notebook_id) != corrupted
+
+
+def test_paper_meta_hydration_plan_stays_on_source_id(core_stores: CoreStores):
+    """计划钉:收窄项 ``notebook_id=%s`` 只作过滤,两条水合语句在一个大库上仍由
+    page 级 IN 列表经 pk_source_paper_meta / idx_source_authors_source 驱动 ——
+    默认(custom)计划与 generic 计划都如此,与收窄前同一条索引。不加任何
+    planner 开关:目标库 6000 条 source、每条一行 meta 加四行作者,另一库 1500
+    条,ANALYZE 之后取一页 50 个 id。库很小的时候 planner 可能改走
+    idx_source_*_nb(按库取全部行再滤 id),那是它在小库上按代价做的正确选择,
+    不在这条钉的范围里。语句文本用 spy 从真实调用里抓。SQLite 孪生:
+    ``tests/test_sources_pagination.py`` 的同名一条。"""
+    from app.repositories.postgres._store_utils import normalize_timestamp
+
+    owner = core_stores.identity.create_user("p00123777", "password-31")
+    target = core_stores.notebooks.create_row(NotebookCreate(name="Plan big"), owner.id)
+    noise = core_stores.notebooks.create_row(NotebookCreate(name="Plan noise"), owner.id)
+    now = normalize_timestamp(NOW)
+    with core_stores.database.write() as connection:
+        connection.execute("SET LOCAL statement_timeout = '0'")
+        for notebook_id, prefix, count in ((target, "pm-big", 6000), (noise, "pm-noise", 1500)):
+            connection.execute(
+                "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
+                "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,"
+                "updated_at) SELECT %s||'-'||lpad(g::text,5,'0'), %s, 'Doc '||g, 'pdf', "
+                "'extracted','extracted','d.pdf','uploads/d.pdf',1,'h'||g,'','',%s,%s "
+                "FROM generate_series(0,%s) g",
+                (prefix, notebook_id, now, now, count - 1),
+            )
+            connection.execute(
+                "INSERT INTO source_paper_meta(source_id,notebook_id,is_paper,paper_title,"
+                "created_at,updated_at) SELECT %s||'-'||lpad(g::text,5,'0'), %s, 1, "
+                "'Paper '||g, %s, %s FROM generate_series(0,%s) g",
+                (prefix, notebook_id, now, now, count - 1),
+            )
+            connection.execute(
+                "INSERT INTO source_authors(id,source_id,notebook_id,position,name,"
+                "created_at) SELECT %s||'-'||lpad(g::text,5,'0')||':auth:'||"
+                "lpad(p::text,3,'0'), %s||'-'||lpad(g::text,5,'0'), %s, p, 'Author '||p, "
+                "%s FROM generate_series(0,%s) g, generate_series(0,3) p",
+                (prefix, prefix, notebook_id, now, count - 1),
+            )
+        for table in ("sources", "source_paper_meta", "source_authors"):
+            connection.execute(f"ANALYZE {table}")
+
+    with core_stores.database.connect() as connection:
+        rows = connection.execute(
+            "SELECT * FROM sources WHERE notebook_id=%s "
+            "ORDER BY created_at,id COLLATE \"C\" LIMIT 50",
+            (target,),
+        ).fetchall()
+        captured: list[tuple[str, object]] = []
+        original_execute = connection.execute
+
+        def spying_execute(sql, params=None, **kwargs):
+            text = str(sql)
+            if "source_paper_meta" in text or "source_authors" in text:
+                captured.append((text, params))
+            return original_execute(sql, params, **kwargs)
+
+        connection.execute = spying_execute
+        try:
+            hydrated = core_stores.sources.sources_from_rows(connection, rows)
+        finally:
+            del connection.execute
+        assert len(hydrated) == 50 and all(s.authors for s in hydrated)
+
+        assert len(captured) == 2, captured
+        plans: dict[str, list[str]] = {}
+        for sql, params in captured:
+            assert "AND notebook_id=%s" in sql, sql
+            assert list(params)[-1] == target, params
+            table = "source_paper_meta" if "source_paper_meta" in sql else "source_authors"
+            custom = "\n".join(
+                str(row["QUERY PLAN"]) for row in connection.execute(
+                    f"EXPLAIN (COSTS OFF) {sql}", params
+                ).fetchall()
+            )
+            connection.execute("SET LOCAL plan_cache_mode = force_generic_plan")
+            numbered = sql
+            for index in range(1, len(params) + 1):
+                numbered = numbered.replace("%s", f"${index}", 1)
+            connection.execute(f"PREPARE pmn_plan_pin AS {numbered}")
+            literals = ",".join("'" + str(value).replace("'", "''") + "'" for value in params)
+            generic = "\n".join(
+                str(row["QUERY PLAN"]) for row in connection.execute(
+                    f"EXPLAIN (COSTS OFF) EXECUTE pmn_plan_pin({literals})"
+                ).fetchall()
+            )
+            connection.execute("DEALLOCATE pmn_plan_pin")
+            connection.execute("RESET plan_cache_mode")
+            plans[table] = [custom, generic]
+
+    expected = {
+        "source_paper_meta": "pk_source_paper_meta",
+        "source_authors": "idx_source_authors_source",
+    }
+    for table, index_name in expected.items():
+        for plan in plans[table]:
+            assert f"Index Scan on {index_name}" in plan or (
+                f"Index Scan using {index_name}" in plan
+            ), plans
+            assert "Seq Scan" not in plan, plans
+            assert "idx_source_paper_meta_nb" not in plan, plans
+            assert "idx_source_authors_nb" not in plan, plans
+            assert "Filter: (notebook_id = " in plan, plans
 
 
 def test_source_search_empty_query_path_is_unchanged(core_stores: CoreStores):

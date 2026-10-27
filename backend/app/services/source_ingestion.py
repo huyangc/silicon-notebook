@@ -3323,7 +3323,7 @@ class SourceIngestionService:
         # uncaught exception here would abort that call chain before KG
         # extraction ever runs.
         try:
-            if not force and self.sources.get_paper_meta(source.id) is not None:
+            if not force and self.sources.get_paper_meta(source.id, source.notebook_id) is not None:
                 return "skipped"
             client = client or self.model_clients.chat("paper_metadata")
             if not getattr(client, "configured", False):
