@@ -74,6 +74,12 @@ ABG_LONG = "Alpha Beta Gamma (ABG)"
 MIXED = "Mixed Widget"
 GHOST = "Ghost Widget"
 HIDDEN_ONLY = "Hidden Widget"
+# A non-ASCII case variant: the visible member is ``Ärger Widget``, the hidden
+# one (and the stored name) ``ärger widget`` -- equal only under a Unicode
+# lowercase, which neither SQLite's ``lower()`` nor PostgreSQL's
+# ``lower(... COLLATE "C")`` applies.
+ARGER = "Ärger Widget"
+ARGER_STORED = "ärger widget"
 
 #: Never in anything a ceiling-bound asker receives (case-insensitive scan):
 #: the hidden spelling, its merge seed, and its one distinctive word.
@@ -101,6 +107,7 @@ OPEN_OBJECTS = (
     ("a-a", ABG, "open"),
     ("a-b", ABG_LONG, "open"),
     ("p-b", PGW, "open"),
+    ("u-b", ARGER, "open"),
 )
 HIDDEN_OBJECTS = (
     ("q-a1", QZX_HIDDEN, "hidden"),
@@ -111,6 +118,7 @@ HIDDEN_OBJECTS = (
     # owned by the hidden source, evidence citing the visible one
     ("g-a", GHOST, "open"),
     ("h-a", HIDDEN_ONLY, "hidden"),
+    ("u-a", ARGER_STORED, "hidden"),
 )
 
 # Expected names, in each path's own order.
@@ -154,6 +162,10 @@ class World:
     def owner(self, suffix: str) -> Any:
         return self.rows("SELECT source_id FROM knowledge_objects WHERE id={ph}",
                          (self.oid(suffix),))[0]["source_id"]
+
+    def arger_id(self) -> str:
+        """The canonical id the merge mints for the Ärger pair."""
+        return self.repo.cluster_map(self.nb)[self.oid("u-b")]
 
     def rows(self, sql: str, params: tuple = ()) -> list:
         with self.repo._write() as db:
@@ -264,6 +276,21 @@ def build_world(repo, *, postgres: bool) -> World:
             stored_name(world, canonical_id), centrality, generation))
     world.execute(member_sql, (
         FOCAL_ID, world.nb, 0, world.community, FOCAL, 0.5, generation))
+    # The Ärger cluster lives apart from FOCAL's peers: one co-mention pair and
+    # one community, both with Mixed, so it changes none of FOCAL's answers.
+    arger = world.arger_id()
+    world.execute(
+        "UPDATE concept_clusters SET canonical_name={ph} "
+        "WHERE notebook_id={ph} AND canonical_id={ph}", (ARGER_STORED, world.nb, arger))
+    first, second = sorted((arger, "K-mixedwidget"))
+    world.execute(
+        "INSERT INTO concept_comentions "
+        "(notebook_id, canonical_a, canonical_b, bridge_claims) "
+        "VALUES ({ph},{ph},{ph},{ph})", (world.nb, first, second, 3))
+    for canonical_id, name, centrality in ((arger, ARGER_STORED, 0.5),
+                                           ("K-mixedwidget", MIXED, 0.4)):
+        world.execute(member_sql, (
+            canonical_id, world.nb, 0, "cm-2", name, centrality, generation))
     return world
 
 
@@ -349,6 +376,12 @@ def focal_reads(statements) -> list[str]:
     return [sql for sql, _params in statements if "lower(" in sql and "payload" in sql]
 
 
+def focal_read_limits(statements) -> list[Any]:
+    """The page size bound to each R4 focal read (its last parameter)."""
+    return [params[-1] for sql, params in statements
+            if "lower(" in sql and "payload" in sql]
+
+
 def stored_name_resolutions(statements) -> list[str]:
     """``resolve_focal`` statements (the stored-name match)."""
     return [sql for sql, _params in statements if "lower(canonical_name)" in sql]
@@ -371,8 +404,10 @@ def world_preconditions(world: World, monkeypatch) -> None:
         (("p-b", "p-a00"), "K-pagedgammawidget"),
         (("a-a", "a-c"), "K-alphabetagamma"),
         (("f-focal",), FOCAL_ID),
+        (("u-a", "u-b"), world.arger_id()),
     ):
         assert {cluster_of[world.oid(suffix)] for suffix in members} == {canonical_id}
+    assert stored_name(world, world.arger_id()) == ARGER_STORED
     # The stored names R3 has to deal with.
     assert stored_name(world, "K-quietzebraxylophone") == QZX_HIDDEN
     assert stored_name(world, "K-pagedgammawidget") == PGW_HIDDEN
@@ -420,15 +455,30 @@ def store_member_read_shape(world: World, monkeypatch) -> None:
         with_canonical_id=True,
     ) == [("K-ghostwidget", GHOST, 10), ("K-quietzebraxylophone", QZX_HIDDEN, 9)]
     assert unified.comention_peers(world.nb, FOCAL_ID, 1, 1) == [(GHOST, 10)]
-    # R4's focal read: only the members whose name is the key, own source_id.
+    # R4's focal read: one page of the members whose name is the key, each with
+    # its own source_id, keyset over member id.
     hidden = unified.focal_name_members(
-        world.nb, "K-quietzebraxylophone", QZX_HIDDEN.lower())
+        world.nb, "K-quietzebraxylophone", QZX_HIDDEN.lower(), limit=8)
     assert [(r["member_object_id"], r["source_id"]) for r in hidden] == [
         (oid("q-a2"), world.hidden)]  # q-a1 is deprecated above
-    carried = unified.focal_name_members(world.nb, "K-alphabetagamma", ABG_LONG.lower())
+    carried = unified.focal_name_members(
+        world.nb, "K-alphabetagamma", ABG_LONG.lower(), limit=8)
     assert [(r["member_object_id"], r["source_id"]) for r in carried] == [
         (oid("a-b"), world.open), (oid("a-c"), world.hidden)]
-    assert unified.focal_name_members(world.nb, "K-alphabetagamma", "nope") == []
+    assert unified.focal_name_members(
+        world.nb, "K-alphabetagamma", "nope", limit=8) == []
+    first = unified.focal_name_members(
+        world.nb, "K-pagedgammawidget", PGW_HIDDEN.lower(), limit=8)
+    assert [r["member_object_id"] for r in first] == [
+        oid(f"p-a{index:02d}") for index in range(8)]
+    rest = unified.focal_name_members(
+        world.nb, "K-pagedgammawidget", PGW_HIDDEN.lower(), limit=16,
+        after=oid("p-a07"))
+    assert [r["member_object_id"] for r in rest] == [oid("p-a08")]
+    # ASCII-only lowering on both backends (the key is the Unicode lowercase).
+    arger = unified.focal_name_members(
+        world.nb, world.arger_id(), ARGER_STORED, limit=8)
+    assert [r["member_object_id"] for r in arger] == [oid("u-a")]
     with_ids = unified.community_member_peers(
         world.nb, world.community, FOCAL_ID, 2, allowed_source_ids=[world.open],
         with_canonical_id=True)
@@ -623,6 +673,45 @@ def focal_resolved_once_per_library(world: World, monkeypatch, path: str) -> Non
     assert len(focal_reads(statements)) == 1, statements
 
 
+def focal_reads_are_bounded_pages(world: World, monkeypatch, path: str) -> None:
+    """R4 reads the focal's key-spelled members a bounded page at a time. PGW's
+    stored name is the hidden spelling of its nine hidden members: the first
+    page (8) is all hidden, the next page (16, after the cursor) holds the rest;
+    with no in-ceiling carrier the focal is unresolved. Once the visible ``p-b``
+    is spelled the same way it is found on that second page and the focal
+    resolves -- the read stops there."""
+    if path == "community":
+        _drop_comentions(world)
+    with world.ceiling():
+        with recorded_statements(world) as unresolved:
+            assert _names(world, path, focal=PGW_HIDDEN) == []
+    assert focal_read_limits(unresolved) == [8, 16]
+    world.set_name("p-b", PGW_HIDDEN)
+    try:
+        with world.ceiling():
+            with recorded_statements(world) as resolved:
+                names = _names(world, path, focal=PGW_HIDDEN)
+        assert names == ([FOCAL] if path == "comention"
+                         else [MIXED, ABG_LONG, FOCAL, QZX])
+        assert focal_read_limits(resolved) == [8, 16]
+    finally:
+        world.set_name("p-b", PGW)
+
+
+def non_ascii_case_variant_focal(world: World, monkeypatch, path: str) -> None:
+    """Both backends give one answer for a non-ASCII case variant. The key of
+    ``Ärger Widget`` is ``ärger widget`` (Unicode lowercase), which is also the
+    stored name, so the stored-name match resolves it -- but the lowering in
+    SQL is ASCII-only on both backends, so the visible ``Ärger Widget`` is not
+    spelled as the key and only the hidden ``ärger widget`` is: under a ceiling
+    the focal is unresolved; without one it resolves as before."""
+    if path == "community":
+        _drop_comentions(world)
+    with world.ceiling():
+        assert _names(world, path, focal=ARGER) == []
+    assert _names(world, path, focal=ARGER) == [MIXED]
+
+
 def _focal_unresolved_events(world: World, focal: str) -> list[dict]:
     return [event for event in world.events
             if event == {"kind": "community_unavailable", "notebook_id": world.nb,
@@ -808,6 +897,8 @@ PATH_SCENARIOS = (
     chunk_sub_queries_carry_no_hidden_spelling,
     reasoning_trace_carries_no_hidden_spelling,
     focal_resolved_once_per_library,
+    focal_reads_are_bounded_pages,
+    non_ascii_case_variant_focal,
     hidden_spelling_focal_is_unresolved,
     focal_carried_in_ceiling_resolves,
     promoted_member_names_its_cluster,
