@@ -3440,8 +3440,10 @@ class KnowledgeStore:
     ) -> int:
         """Drop this source's stale ``concept_clusters`` membership rows
         (SQLite parity — see that adapter's docstring for why the surviving,
-        about-to-be-reinserted ids must be spared and why this has to run
-        BEFORE ``delete_objects_by_source``)."""
+        about-to-be-reinserted ids must be spared, why this has to run
+        BEFORE ``delete_objects_by_source``, and why every cluster that lost a
+        member here loses its fused ``canonical_description`` in the same
+        transaction)."""
         keep = set(keep_object_ids)
         stale = [
             row["id"]
@@ -3452,14 +3454,26 @@ class KnowledgeStore:
             if row["id"] not in keep
         ]
         deleted = 0
+        touched: set = set()
         for offset in range(0, len(stale), _DELETE_OBJECT_BATCH_SIZE):
             batch = stale[offset : offset + _DELETE_OBJECT_BATCH_SIZE]
-            cursor = connection.execute(
+            rows = connection.execute(
                 "DELETE FROM concept_clusters "
-                "WHERE notebook_id = %s AND member_object_id = ANY(%s)",
+                "WHERE notebook_id = %s AND member_object_id = ANY(%s) "
+                "RETURNING canonical_id",
                 (notebook_id, batch),
+            ).fetchall()
+            deleted += len(rows)
+            touched.update(str(row["canonical_id"]) for row in rows)
+        if touched:
+            clusters = bind_ids(sorted(touched))
+            execute_ids(
+                connection,
+                "UPDATE concept_clusters SET canonical_description = '' "
+                f"WHERE notebook_id = %s AND {member_of('canonical_id', clusters)} "
+                "AND canonical_description <> ''",
+                (notebook_id, clusters.param),
             )
-            deleted += int(getattr(cursor, "rowcount", 0) or 0)
         return deleted
 
     @staticmethod
