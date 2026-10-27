@@ -1263,10 +1263,16 @@ class _KnnCountingConnection:
     def __init__(self, connection):
         self._connection = connection
         self.knn_statements = 0
+        self.similarity_statements = 0
+        self.ilike_only_statements = 0
 
     def execute(self, statement, params=None, **options):
         if "OPERATOR(public.<->)" in statement:
             self.knn_statements += 1
+        if "OPERATOR(public.%%)" in statement:
+            self.similarity_statements += 1
+        elif " ILIKE " in statement:
+            self.ilike_only_statements += 1
         return (self._connection.execute(statement, params, **options)
                 if params is not None else self._connection.execute(statement))
 
@@ -1280,7 +1286,7 @@ def test_knn_full_page_and_top_up_both_equal_the_legacy_statement(search_harness
 
     per_term_limit=3 with four `%`-reachable rows → the KNN page is FULL and
     phase 2 never runs for "thermal"; "grid" has fewer matches than the limit →
-    its page is SHORT and phase 2 replaces it wholesale.  Probing both terms in
+    its page is SHORT and phase 2 merges only ILIKE hits. Probing both terms in
     one call also exercises the term_rank remap of the top-up rows.
     """
     from app.repositories.postgres.search import (
@@ -1302,6 +1308,7 @@ def test_knn_full_page_and_top_up_both_equal_the_legacy_statement(search_harness
                 counting, KNN_NOTEBOOK, terms, per_term_limit=3
             )
             assert counting.knn_statements == 0, "legacy 调用不得发出 KNN SQL"
+            assert counting.similarity_statements == 1
             routing_stats = {}
             knn = knowledge_candidate_rows_for_terms(
                 counting, KNN_NOTEBOOK, terms, per_term_limit=3, allow_knn=True,
@@ -1310,6 +1317,10 @@ def test_knn_full_page_and_top_up_both_equal_the_legacy_statement(search_harness
             assert counting.knn_statements == 1, (
                 "hinted 调用必须真的经 KNN 语句取数——否则上面的等价断言全是空转"
             )
+            assert counting.similarity_statements == 2, (
+                "短页不得在完成 KNN 后再执行一次 % 查询"
+            )
+            assert counting.ilike_only_statements == 1
             # The ILIKE-only staircase row is invisible to `%`: a wide limit
             # forces the short-page top-up, whose output must again be exactly
             # the legacy rows — including ko-knn-04.
@@ -1359,6 +1370,61 @@ def test_knn_full_page_and_top_up_both_equal_the_legacy_statement(search_harness
     similarities = [row["candidate_similarity"] for row in legacy_wide
                     if int(row["term_rank"]) == 0]
     assert len(similarities) == len(set(similarities))
+
+
+@pytest.mark.postgres_integration
+@pytest.mark.parametrize("per_term_limit", [8, 20])
+def test_short_knn_reuse_preserves_ties_and_zero_similarity_hits(
+    search_harness, per_term_limit,
+):
+    from app.repositories.postgres.search import (
+        _knn_candidate_rows_for_terms,
+        reset_knn_index_cache,
+    )
+
+    _seed_knn_staircase(search_harness)
+    with search_harness.database.write() as connection:
+        search_harness.knowledge.insert_object_chunk(connection, [
+            (
+                object_id, KNN_NOTEBOOK, "claim", "approved",
+                json.dumps({"name": "thermal"}), "[]", "source-search-a", NOW, NOW,
+            )
+            for object_id in ("ko-knn-tie-z", "ko-knn-tie-a")
+        ])
+    _create_knn_index(search_harness)
+    terms = ["appendix", "thermal"]
+    try:
+        with search_harness.database.connect() as connection:
+            # One stable snapshot for the result-equivalence comparison.
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            raw_knn = _knn_candidate_rows_for_terms(
+                connection, KNN_NOTEBOOK, terms, per_term_limit,
+            )
+            assert not [row for row in raw_knn if row["term_rank"] == 0]
+            assert 0 < len(raw_knn) < per_term_limit
+            legacy = knowledge_candidate_rows_for_terms(
+                connection, KNN_NOTEBOOK, terms, per_term_limit,
+            )
+            counting = _KnnCountingConnection(connection)
+            reused = knowledge_candidate_rows_for_terms(
+                counting, KNN_NOTEBOOK, terms, per_term_limit, allow_knn=True,
+            )
+            assert counting.knn_statements == 1
+            assert counting.similarity_statements == 1
+            assert counting.ilike_only_statements == 1
+    finally:
+        reset_knn_index_cache()
+
+    assert _candidate_tuples(reused) == _candidate_tuples(legacy)
+    assert [row["candidate_id"] for row in reused if row["term_rank"] == 0] == [
+        "ko-knn-04",
+    ]
+    thermal_ids = [row["candidate_id"] for row in reused if row["term_rank"] == 1]
+    assert thermal_ids[:3] == ["ko-knn-00", "ko-knn-tie-a", "ko-knn-tie-z"]
+    assert set(thermal_ids) == {
+        *(object_id for object_id, _name in KNN_STAIRCASE),
+        "ko-knn-tie-a", "ko-knn-tie-z",
+    }
 
 
 @pytest.mark.postgres_integration

@@ -1967,6 +1967,35 @@ manifest 的事件进入明确的 `unknown` 桶，不能误判为小库。时间
 窗口覆盖，可用 `--max-input-mb N` 设置解码字节上限；若 `log_scan` 显示 matched 大于 retained，
 应调高 `--max-events`。命中字节或记录上限都会明确报告 `truncated:true`。
 
+### KG 词法补充的总预算与熔断
+
+`POSTGRES_KG_LEXICAL_TIMEOUT_SECONDS` 默认 5 秒，属于部署高级调优（数值护栏见产品/API
+参考「KG 词法补充预算」）；设为 `0` 恢复无预算基线。服务只在整库 KG ANN 已返回非空候选后
+启用，且有效类型范围必须覆盖四种基础 KG 类型。来源或类型收窄、ANN 为空或缺失、大库仅词法兜底、关系端点探针以及精确定位均不读取、也不
+打开这道熔断。SQLite 不启用此 PostgreSQL 优化。
+
+全部词法 SQL 阶段共享一个单调递减的 deadline，后续阶段不重新获得完整预算。每条物理语句
+在 savepoint 内只使用剩余预算，不放宽调用方已有的更严格超时；取消时只回滚本探针并恢复
+连接设置。已完成候选阶段携带名称，在内存中有界评分，因此后续超时不需要再发水化查询，也
+不丢弃已取得的命中。未完成的数据库语句不返回部分行。
+
+首次预算耗尽会为当前 retrieval run 的该库打开独立 KG 补充熔断，之后符合条件的调用保留
+ANN、跳过词法 SQL，已经在飞的调用允许安全收束。这道熔断与 chunk FTS 独立，并随本轮结束。
+它限制的是补充数据库等待，不包括向量化、ANN 准备、连接池获取或整个问答耗时。有界的内存
+评分和事务清理可能在 SQL deadline 后完成，不承诺整次调用的严格墙钟上限。
+
+`stage=kg_lexical` 的 `ask_stage` 叶子事件记录 `ok`、`timeout`、`skipped_circuit_open` 或
+`failed_open`、耗时、命中数和配置预算，不记录查询正文或候选身份。`retrieval_run_stats`
+新增 `kg_lexical_timeouts`、`kg_lexical_circuit_skips`。现有
+`scripts/diag_retrieval_latency.py --since 24` 按状态分开统计实际执行与跳过的耗时分布，
+KG 熔断计数与 chunk FTS 分开汇总。
+run 的超时计数按每库首次打开熔断计数，不是每个并发超时调用都加一；实际预算耗尽的调用数
+应统计叶子的 `timeout` 事件。
+
+上线后应比较可比问题的候选阶段/整题耗时、超时和跳过次数，以及代表性的标识符、引号短语、
+中文术语回答。词法耗时下降或出现零毫秒跳过，不代表召回质量不变。若遗漏仅靠词法取得的
+证据，应设零回滚，或在已验证的护栏内增加预算，不通过削减词项/候选配额掩盖影响。
+
 ### KG 词法自适应路由（`POSTGRES_LEXICAL_KNN_ENABLED`）
 
 生产逐词项 plan 已证明，全局 GiST 不能一把梭覆盖所有词项。在抓到的 33 词查询中，26 个 CJK
@@ -1981,7 +2010,14 @@ Latin 词仍适合 GiST KNN（此前 910 万行实测 7.4s → 123ms）。
   `<->` ordered KNN，走 notebook-scoped 拆分 trigram arm；
 - 短、非 CJK 词项只有在未按来源收窄、库规模达到 `POSTGRES_LEXICAL_KNN_MIN_ROWS`、且精确
   GiST 形状可用时才进入 KNN；
-- KNN 页取不满时，用同一拆分路径结果整体替换，保住仅 ILIKE 命中的结果。
+- KNN 正常完成但页取不满时，复用已取得的全部 `%` 命中，只补查独立有界的 literal-ILIKE
+  arm；并集去重后仍按 `similarity DESC, id COLLATE "C"` 取 top-k，保住仅 ILIKE 命中的
+  结果，同时避免第二次 `%` 扫描。满页 KNN 与来源/viewer 限定的 legacy 路由不变。
+
+短页结果等价性以稳定数据快照为前提：未达到配额的页已取尽 `%` 命中。并发写入可能使两条
+语句之间的候选变化；复用会保留初次相似度读取，和既有满页 KNN 一样，不改变事务隔离级别，
+也不改变下游权限检查与水化。短页复用本身不减少召回词项或候选配额；上文独立配置的补充
+预算耗尽时，返回的已完成候选可能减少。
 
 拆分路径把 `% OR ILIKE` 变为两个分别排序/截断的 arm，union 去重后再按原来的
 `similarity DESC, id COLLATE "C"` 取 top-k。每个输入各取 top-k 一定覆盖二者 union 的 top-k，
@@ -2010,6 +2046,11 @@ CREATE INDEX CONCURRENTLY idx_knowledge_objects_name_knn_gist ON knowledge_objec
 KNN 词项、直接 legacy 词项与短页回退词项，且不记录 query 文本或对象 id。对于上述生产形态，
 CJK/长词应进入 `direct_legacy_terms`，KNN 耗时只剩短 Latin 探针，`kg_lexical_ms` 不应再跟着旧的
 25–30s GiST phase 走。
+
+短页复用后，`kg_lexical_short_fallback_ms` 记录仅 ILIKE 补查的耗时；
+`kg_lexical_legacy_ms` 仍包含这段时间，不能再次相加。验收时应在可比负载下比较整个
+`kg_lexical_ms` 与候选阶段延迟，不能只看回退耗时：初次 KNN 成本仍在，ILIKE 本身慢时也仍会
+拖长补查。
 
 ## 用 MinerU 解析 PDF
 

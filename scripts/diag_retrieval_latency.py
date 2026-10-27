@@ -197,6 +197,8 @@ def build_report(
     leaf_status: dict[str, Counter[str]] = defaultdict(Counter)
     component_latency: dict[tuple[str, str, str], Samples] = defaultdict(Samples)
     lexical_routes: dict[str, Counter[str]] = defaultdict(Counter)
+    kg_leaf_latency: dict[tuple[str, str], Samples] = defaultdict(Samples)
+    kg_leaf_hits: Counter[tuple[str, str]] = Counter()
     run_stats: dict[str, Counter[str]] = defaultdict(Counter)
     relevant = 0
 
@@ -221,6 +223,8 @@ def build_report(
                 "fanout_wait_ms",
                 "chunk_fts_timeouts",
                 "chunk_fts_circuit_skips",
+                "kg_lexical_timeouts",
+                "kg_lexical_circuit_skips",
             ):
                 value = _finite_number(event.get(field_name))
                 if value is not None:
@@ -232,6 +236,13 @@ def build_report(
         bucket = _bucket_label(
             event.get("notebook_id"), indexed_chunks, medium_chunks, large_chunks
         )
+        if event.get("stage") == "kg_lexical":
+            relevant += 1
+            key = (bucket, _safe_status(event.get("status")))
+            kg_leaf_latency[key].add(event.get("latency_ms"))
+            hits = _finite_number(event.get("hits"))
+            if hits is not None and hits >= 0 and hits.is_integer():
+                kg_leaf_hits[key] += int(hits)
         if site == "chunk_fts":
             relevant += 1
             leaf_latency[bucket].add(event.get("chunk_fts_ms", event.get("latency_ms")))
@@ -270,6 +281,15 @@ def build_report(
         )
         lines.append(f"  {bucket:<28} {_format_samples(leaf_latency[bucket])}  {statuses}")
 
+    lines.append("\n[KG lexical supplement by indexed size and status]")
+    if not kg_leaf_latency:
+        lines.append("  (no stage=kg_lexical events)")
+    for (bucket, status), samples in sorted(kg_leaf_latency.items()):
+        lines.append(
+            f"  {bucket:<28} status={status:<20} {_format_samples(samples)} "
+            f"hits={kg_leaf_hits[(bucket, status)]}"
+        )
+
     lines.append("\n[retrieval components by indexed size]")
     if not component_latency:
         lines.append("  (no component timing events)")
@@ -306,6 +326,8 @@ def build_report(
             f"{run_kind:<20} runs={stats['runs']} "
             f"fts_timeouts={stats['chunk_fts_timeouts']} "
             f"circuit_skips={stats['chunk_fts_circuit_skips']} "
+            f"kg_lexical_timeouts={stats['kg_lexical_timeouts']} "
+            f"kg_lexical_circuit_skips={stats['kg_lexical_circuit_skips']} "
             f"fanout_waits={stats['fanout_waits']} "
             f"fanout_wait_ms={stats['fanout_wait_ms']} "
             f"embed_requests={stats['embedding_requests']} "
@@ -320,6 +342,7 @@ def build_report(
         "  - manifest n_chunks excludes sources added after its watermark.",
         "  - leaf size buckets combine Ask/report traffic; run totals remain separated by run kind.",
         "  - (global) marks a global Ask run's totals; its leaf events are bucketed by the library each leg searched.",
+        "  - run kg_lexical_timeouts counts per-library circuit openings; leaf timeout n counts expired calls.",
     ])
     return "\n".join(lines) + "\n"
 

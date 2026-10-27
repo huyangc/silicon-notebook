@@ -19,6 +19,10 @@ from app.repositories.postgres.access_sql import (
     read_access_params,
 )
 from app.repositories.postgres.id_binding import bind_ids, execute_bound, member_of
+from app.repositories.postgres.lexical_budget import (
+    KnowledgeLexicalBudget,
+    KnowledgeLexicalBudgetExpired,
+)
 from app.repositories.postgres.memory_sql import (
     memory_derived_in_notebook,
     memory_viewer_filter,
@@ -365,6 +369,7 @@ def _knn_candidate_rows_for_terms(
     per_term_limit: int,
     *,
     term_ranks: list[int] | None = None,
+    include_name: bool = False,
 ):
     """Phase 1: one KNN LATERAL per term, `%` arm only, early-stopping."""
     if term_ranks is None:
@@ -373,14 +378,16 @@ def _knn_candidate_rows_for_terms(
         raise ValueError("term_ranks must align with terms")
     ranked_terms = list(zip(term_ranks, terms, strict=True))
     term_values = ",".join("(%s,%s)" for _ in ranked_terms)
+    outer_name = ",candidate.candidate_name" if include_name else ""
+    inner_name = f",{PAYLOAD_NAME_EXPRESSION} AS candidate_name" if include_name else ""
     statement = (
         f"WITH lexical_terms(term_rank,term) AS (VALUES {term_values}) "
         "SELECT candidate.candidate_id,lexical_terms.term_rank,"
-        "candidate.candidate_similarity FROM lexical_terms "
+        f"candidate.candidate_similarity{outer_name} FROM lexical_terms "
         "CROSS JOIN LATERAL ("
         "SELECT id AS candidate_id,"
         f"public.similarity({PAYLOAD_NAME_EXPRESSION},lexical_terms.term) "
-        "AS candidate_similarity FROM knowledge_objects "
+        f"AS candidate_similarity{inner_name} FROM knowledge_objects "
         "WHERE notebook_id=%s AND status!='deprecated' "
         f"AND {PAYLOAD_NAME_EXPRESSION} OPERATOR(public.%%) lexical_terms.term "
         f"ORDER BY {PAYLOAD_NAME_EXPRESSION} OPERATOR(public.<->) "
@@ -397,15 +404,57 @@ def _knn_candidate_rows_for_terms(
     return connection.execute(statement, params).fetchall()
 
 
+def _knowledge_ilike_rows_for_terms(
+    connection,
+    notebook_id: str,
+    ranked_terms: list[tuple[int, str]],
+    per_term_limit: int,
+    *,
+    include_name: bool = False,
+):
+    """Top up completed short KNN pages without repeating their `%` scan.
+
+    Only the unscoped KNN path calls this helper. Its notebook/lifecycle
+    predicates match that path; source/viewer-scoped reads stay on legacy.
+    """
+    term_values = ",".join("(%s,%s,%s)" for _ in ranked_terms)
+    outer_name = ",candidate.candidate_name" if include_name else ""
+    inner_name = f",{PAYLOAD_NAME_EXPRESSION} AS candidate_name" if include_name else ""
+    statement = (
+        f"WITH lexical_terms(term_rank,term,like_pattern) AS (VALUES {term_values}) "
+        "SELECT candidate.candidate_id,lexical_terms.term_rank,"
+        f"candidate.candidate_similarity{outer_name} FROM lexical_terms "
+        "CROSS JOIN LATERAL ("
+        "SELECT id AS candidate_id,"
+        f"public.similarity({PAYLOAD_NAME_EXPRESSION},lexical_terms.term) "
+        f"AS candidate_similarity{inner_name} FROM knowledge_objects "
+        "WHERE notebook_id=%s AND status!='deprecated' "
+        f"AND {PAYLOAD_NAME_EXPRESSION} ILIKE lexical_terms.like_pattern "
+        f"ESCAPE '{LIKE_ESCAPE_CHARACTER}' "
+        "ORDER BY candidate_similarity DESC,id COLLATE \"C\" LIMIT %s"
+        ") AS candidate ORDER BY lexical_terms.term_rank,"
+        "candidate.candidate_similarity DESC,candidate.candidate_id COLLATE \"C\""
+    )
+    params = [
+        value for rank, term in ranked_terms
+        for value in (rank, term, like_contains_pattern(term))
+    ]
+    params.extend((notebook_id, int(per_term_limit)))
+    return connection.execute(statement, params).fetchall()
+
+
 def _knowledge_rows_via_knn(
     connection,
     notebook_id: str,
     ranked_terms: list[tuple[int, str]],
     per_term_limit: int,
     routing_stats: dict[str, int | float] | None = None,
+    *,
+    budget: KnowledgeLexicalBudget | None = None,
 ):
     """Two-phase KNN probe returning the legacy row shape and ordering."""
     started = perf_counter() if routing_stats is not None else 0.0
+    name_options = {"include_name": True} if budget is not None else {}
     try:
         knn_rows = _knn_candidate_rows_for_terms(
             connection,
@@ -413,7 +462,10 @@ def _knowledge_rows_via_knn(
             [term for _rank, term in ranked_terms],
             per_term_limit,
             term_ranks=[rank for rank, _term in ranked_terms],
+            **name_options,
         )
+    except KnowledgeLexicalBudgetExpired:
+        return []
     finally:
         if routing_stats is not None:
             routing_stats["knn_seconds"] = perf_counter() - started
@@ -429,30 +481,25 @@ def _knowledge_rows_via_knn(
         return knn_rows
     if routing_stats is not None:
         routing_stats["knn_short_fallback_term_count"] = len(short_ranks)
-    # Phase 2: the short terms rerun the split legacy arms and their rows are
-    # replaced wholesale — that output is exactly what the flag-off path
-    # produces for them, so no merge policy has to be invented.
-    #
-    # No COST guarantee rides on this: a short `%` page says nothing about the
-    # ILIKE arm's cardinality (a term like "test" can have a near-empty `%` arm
-    # yet six-figure ILIKE matches), so phase 2 simply costs whatever the
-    # flag-off path always cost for that term.  The overhead of the wasted KNN
-    # statement is bounded by an index scan of the `%` condition, and each
-    # phase runs under its own statement timeout — worst case the probe's wall
-    # clock doubles; it never exceeds legacy by more than the KNN scan itself.
+    # A normally completed SHORT page exhausted its `%` matches. Reuse those
+    # rows and query only ILIKE, then apply the legacy union/dedup/top-k order.
+    # Full pages keep their existing KNN membership, including tie jitter.
+    # Equivalence is for a stable snapshot: as with full KNN pages, concurrent
+    # writes do not trigger a second similarity read to refresh candidates.
+    # ILIKE still needs its own bounded probe: a short `%` page says nothing
+    # about its cardinality. Both statements retain the pool statement timeout.
     term_by_rank = dict(ranked_terms)
     started = perf_counter() if routing_stats is not None else 0.0
     try:
-        legacy_rows = _candidate_rows_for_terms(
+        ilike_rows = _knowledge_ilike_rows_for_terms(
             connection,
-            table="knowledge_objects",
-            id_column="id",
-            text_expression=PAYLOAD_NAME_EXPRESSION,
-            notebook_id=notebook_id,
-            ranked_terms=[(rank, term_by_rank[rank]) for rank in short_ranks],
-            per_term_limit=per_term_limit,
-            live_only=True,
+            notebook_id,
+            [(rank, term_by_rank[rank]) for rank in short_ranks],
+            per_term_limit,
+            **name_options,
         )
+    except KnowledgeLexicalBudgetExpired:
+        ilike_rows = []
     finally:
         if routing_stats is not None:
             routing_stats["knn_short_fallback_seconds"] = perf_counter() - started
@@ -460,7 +507,16 @@ def _knowledge_rows_via_knn(
     merged = [
         row for row in knn_rows if int(row["term_rank"]) not in short_rank_set
     ]
-    merged.extend(legacy_rows)
+    short_rows = {rank: {} for rank in short_ranks}
+    for row in [*knn_rows, *ilike_rows]:
+        rank = int(row["term_rank"])
+        if rank in short_rows:
+            short_rows[rank][row["candidate_id"]] = row
+    for rows in short_rows.values():
+        merged.extend(sorted(rows.values(), key=lambda row: (
+            -float(row["candidate_similarity"] or 0.0),
+            str(row["candidate_id"]),
+        ))[:int(per_term_limit)])
     # Restore the single-statement output ordering across both phases.
     merged.sort(key=lambda row: (
         int(row["term_rank"]),
@@ -484,6 +540,7 @@ def _candidate_rows_for_terms(
     allowed_source_ids: list[str] | None = None,
     authoritative_source_filter: bool = False,
     viewer_id: str | None = None,
+    include_name: bool = False,
 ):
     """Run bounded indexed candidate probes per term in one PostgreSQL query.
 
@@ -506,6 +563,8 @@ def _candidate_rows_for_terms(
         ) from None
     if live_only and not target.live_predicate:
         raise ValueError("PostgreSQL lexical target has no lifecycle predicate")
+    if include_name and target.table != "knowledge_objects":
+        raise ValueError("name projection is only available for knowledge objects")
 
     table_sql = sql.Identifier(target.table).as_string()
     id_sql = sql.Identifier(target.id_column).as_string()
@@ -595,20 +654,23 @@ def _candidate_rows_for_terms(
     # of their union. UNION removes rows admitted by both predicates before the
     # final legacy ordering and quota are applied.
     scope_sql = " AND ".join(scope_predicates)
+    outer_name = ",candidate.candidate_name" if include_name else ""
+    union_name = ",arm_candidates.candidate_name" if include_name else ""
+    inner_name = f",{target.text_expression} AS candidate_name" if include_name else ""
     similarity_sql = (
         f"public.similarity({target.text_expression},lexical_terms.term)"
     )
     selection_sql = (
         f"SELECT {id_sql} AS candidate_id,{similarity_sql} "
-        f"AS candidate_similarity FROM {table_sql} "
+        f"AS candidate_similarity{inner_name} FROM {table_sql} "
     )
     order_sql = f"candidate_similarity DESC,{id_sql} COLLATE \"C\""
     statement = (
         f"WITH lexical_terms(term_rank,term,like_pattern) AS (VALUES {term_values}) "
         "SELECT candidate.candidate_id,lexical_terms.term_rank,"
-        "candidate.candidate_similarity FROM lexical_terms "
+        f"candidate.candidate_similarity{outer_name} FROM lexical_terms "
         "CROSS JOIN LATERAL ("
-        "SELECT arm_candidates.candidate_id,arm_candidates.candidate_similarity "
+        f"SELECT arm_candidates.candidate_id,arm_candidates.candidate_similarity{union_name} "
         "FROM (("
         f"{selection_sql}WHERE {scope_sql} AND "
         f"{target.text_expression} OPERATOR(public.%%) lexical_terms.term "
@@ -642,6 +704,7 @@ def knowledge_candidate_rows_for_terms(
     knn_max_term_chars: int | None = None,
     routing_stats: dict[str, int | float] | None = None,
     viewer_id: str | None = None,
+    budget: KnowledgeLexicalBudget | None = None,
 ):
     # `allow_knn` is a hint, not a command: it engages only when the run is
     # unscoped (the source-scoped statement carries an EXISTS predicate the KNN
@@ -651,6 +714,7 @@ def knowledge_candidate_rows_for_terms(
     # (`memory_viewer_filter`) rides the legacy arms' scope predicates, so a
     # viewer read never takes the KNN shape either.
     ranked_terms = list(enumerate(terms))
+    name_options = {"include_name": True} if budget is not None else {}
     knn_terms = [
         (rank, term) for rank, term in ranked_terms
         if not has_cjk(term)
@@ -683,6 +747,7 @@ def knowledge_candidate_rows_for_terms(
             knn_terms,
             per_term_limit,
             routing_stats,
+            **({"budget": budget} if budget is not None else {}),
         )
         knn_ranks = {rank for rank, _term in knn_terms}
         legacy_terms = [
@@ -701,7 +766,10 @@ def knowledge_candidate_rows_for_terms(
                     ranked_terms=legacy_terms,
                     per_term_limit=per_term_limit,
                     live_only=True,
+                    **name_options,
                 )
+            except KnowledgeLexicalBudgetExpired:
+                legacy_rows = []
             finally:
                 if routing_stats is not None:
                     routing_stats["legacy_seconds"] = perf_counter() - started
@@ -726,7 +794,10 @@ def knowledge_candidate_rows_for_terms(
             allowed_source_ids=allowed_source_ids,
             authoritative_source_filter=authoritative_source_filter,
             viewer_id=viewer_id,
+            **name_options,
         )
+    except KnowledgeLexicalBudgetExpired:
+        return []
     finally:
         if routing_stats is not None:
             routing_stats["legacy_seconds"] = perf_counter() - started

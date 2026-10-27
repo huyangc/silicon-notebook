@@ -1944,6 +1944,15 @@ class Settings(BaseSettings):
         le=10,
         validation_alias="POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS",
     )
+    # Only a supplementary KG lexical read with usable ANN candidates spends
+    # this budget. Zero restores unbudgeted recall; the adapter never widens
+    # a stricter caller/pool statement timeout.
+    postgres_kg_lexical_timeout_seconds: float = Field(
+        5.0,
+        ge=0,
+        le=30,
+        validation_alias="POSTGRES_KG_LEXICAL_TIMEOUT_SECONDS",
+    )
     postgres_lock_timeout_seconds: int = Field(
         5,
         validation_alias="POSTGRES_LOCK_TIMEOUT_SECONDS",

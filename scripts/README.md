@@ -538,7 +538,9 @@ python3 scripts/diag_retrieval_latency.py --since 24
 scale manifest 的 `n_chunks` 把 `chunk_fts_ms`、ANN/KNN/索引加载、KG 词法等分段聚合成
 P50/P95/max；KG 词法会进一步拆分 GiST KNN、复合 GIN 与短页 fallback 耗时，并汇总各路由
 词项数；`retrieval_run_stats` 另按 Ask / 报告 planning / 报告 generation 汇总 FTS
-timeout 与熔断跳过次数。它只读日志和 manifest，不打开数据库，不输出 notebook id、问题、
+timeout 与熔断跳过次数；KG 词法补充另按状态分开统计实际执行与熔断跳过的耗时，按 run kind
+汇总 `kg_lexical_timeouts` / `kg_lexical_circuit_skips`，不会把跳过的零毫秒混进实际查询分布。
+它只读日志和 manifest，不打开数据库，不输出 notebook id、问题、
 来源、正文、SQL 或错误文本。自定义存储目录时显式传
 `--index-root /path/to/storage/kg_index`。manifest 规模不含水位后的 delta；缺 manifest 的
 事件保留在 `unknown` 桶，不能误当成小库。时间窗口默认先读最新文件并完整解码所有可能落入
