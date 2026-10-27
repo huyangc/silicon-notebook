@@ -2,6 +2,12 @@
 
 更新日期：2026-10-23（第二节「隐藏成员名字经 canonical id 暴露」已处理并移入 `fangan_done.md` §65：摸排确认
 直接读者面不越界，只修了经挂载读与来源天花板下的取名；同日早些时候，图谱分析「问题清单」特性已全部合入并记入 `fangan_done.md` §64，本文件相应补登：
+更新日期：2026-10-28（「宽 except 吞掉 `RetrievalControlError`」已修，移入 `fangan_done.md`；按当日 master
+逐条核实改写：第一节「PG 打开路径计数缓存的刻意延后项」去掉已过时的 H4/H5 半句、只留 SQLite 全局 epoch，
+「旧索引退役债」写明 `idx_chunks_source` 不能照同一口径下线，第二节 `page.tsx` 行数与首轮播种残余 ① 行号、
+第四节大文件行数与 owner-view 豁免行号更新，`globals.css` 一条按 10-19 裁决 14「不拆」移入「产品与守卫
+裁决」组；第二节「Ask / Deep Report」补登「单库请求级收窄：勾了任何挂载库即算非空」。此前 2026-10-23：
+图谱分析「问题清单」特性已全部合入并记入 `fangan_done.md` §64，本文件相应补登：
 第二节「知识图谱」新增三条（换描述模型或提示词后没有重写概念描述的路径、隐藏成员名字经 canonical id 暴露、
 问题清单阈值待生产演练复核），第四节「其它残余」新增两条（Uvicorn 访问日志里其它路由的查询串、`.snbk`
 归档不带种子空间与板块分区列），`communities.title` / `summary` / `findings` 一条补记 v102 / 0083 增列时
@@ -63,14 +69,21 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 - [ ] **W2**：双代窗口时长无硬上界告警；`rebuild_canonical_relations` / `mention_bridge` 若仍是
       DELETE+INSERT 需并入代际协议；「翻转后 finish 前崩溃 ⇒ 下次全量重算 + 状态计数陈旧」
       是已知格。
-- [ ] **旧索引退役债**：`idx_chunks_source`、`idx_clusters_nb_canonical`、0043 / 0007 原形索引
-      均已被新索引前缀覆盖，登记为可回退的写放大冗余，尚未下线。
+- [ ] **旧索引退役债**：`idx_clusters_nb_canonical`、0043 / 0007 原形索引均已被新索引前缀覆盖，
+      登记为可回退的写放大冗余，尚未下线。`idx_chunks_source` 不能照这个口径直接下线：SQLite 侧
+      没有 `idx_chunks_source_ordinal`（`sqlite/migrations.py` 记了刻意不建的理由），它是 `chunks`
+      上唯一的 `source_id` 索引，且被 `source_subgraph_projection.py:363`、`:556` 的
+      `INDEXED BY idx_chunks_source` 硬绑定，多条 SQLite 计划钉（如 `test_source_subgraph.py`、
+      `test_section_outline_ports.py`、`test_sqlite_id_binding.py`）断言计划走它；PostgreSQL 侧已被
+      0039 的 `idx_chunks_source_ordinal` 覆盖，0039 头注释写明可 `DROP INDEX CONCURRENTLY`，PG 计划钉
+      只断言不出现它。只下线 PG 一侧要单独评估。
 - [ ] **W3**：大库切换索引管线目前只是按活跃对象数阈值显式禁用（切回内建豁免）；
       「保存索引管线」发布事务的真正重构排到有真实需求时。
 - [ ] **W4**：未回填老库（`source_index_backfilled=0`）的 legacy evidence 分支单语句可撞 30s，
       前置是既有离线 backfill；来源页签搜索改 UNION 后 `paper_meta_for_sources` 水合腿未跟进同口径。
-- [ ] **PG 打开路径计数缓存的刻意延后项**：checkup H4/H5 缺向量 anti-join COUNT 仍是 30s TTL memo；
-      SQLite 侧 pending memo 的全局 epoch 有跨库误伤弱点。
+- [ ] **SQLite 侧 pending memo 的全局 epoch 有跨库误伤弱点**（PG 打开路径计数缓存的刻意延后项）：
+      `sqlite/knowledge_counts_cache.py` 的 `_INVALIDATION_EPOCH` 是进程级单值，任一库的 `invalidate`
+      都会让其它库在途的 pending 计数放弃写回、下次冷算。
 
 ---
 
@@ -78,8 +91,8 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 
 ### 架构与清理
 
-- [ ] **前端 `page.tsx` 继续减负（阶段 5 三片已交付后的后续）**：三片合入后 `frontend/app/page.tsx`
-      约 8000 行，剩余大块为问答区、知识库浏览器与工作区壳；按同一纪律（零行为变化、守卫重指向、
+- [ ] **前端 `page.tsx` 继续减负（阶段 5 三片已交付后的后续）**：三片合入时 `frontend/app/page.tsx`
+      约 8000 行，此后回涨到 8789 行（2026-10-28 master），剩余大块为问答区、知识库浏览器与工作区壳；按同一纪律（零行为变化、守卫重指向、
       组件测试）再分片，有需要时立项。
 
 ### Ask / Deep Report
@@ -92,7 +105,7 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 - [ ] **首轮原文播种的人工抽问验收未做**：`docs/superpowers/specs/2026-09-07-reasoning-chunk-parity-keyword-arm-design_zh.md`
       「验收」一节给出的人工抽问（点名子部件 / 周期性 / 方向三句式 + 一句对比题，无图库与有图库各跑一遍）未做。
 - [ ] **首轮播种脱钩的已知残余（2026-09-29 评审登记，不修代码）**：
-      ① `source_graph_activation.py` 约 419-424 行的 kg_source 邻居段 relevance 恒为 1.0，
+      ① `source_graph_activation.py:430-437` 的 kg_source 邻居段 relevance 恒为 1.0，
       既不是 PPR 归一分也不是绝对融合分，按量纲判道会落进检索道——只在选中来源图
       激活（selected-source graph）放量时出现；② 同一条选中来源图激活路径的
       `chunk_seeds` 把 PPR 归一分与播种绝对分混在一起当种子权重（同样只在放量时出现）；
@@ -119,6 +132,18 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       条目的 `adopted` 计数看采纳率（`adopted` 只在条目真正送达且模型那一轮点名了该动作时
       递增），需要生产上跑够量才谈得上。觉得每 reflect 轮重复注入的 token 不划算的部署把
       注入闸设回 false 即逐字回到「只蒸馏不注入」。
+- [ ] **单库请求级收窄的空范围判据：勾了任何挂载库即算非空**（来源：PR #922 评审存疑，当时判为既有
+      同形、不在该 PR 范围；2026-10-28 按 master 核实仍成立）。`backend/app/api/ask_routes.py` 的
+      `_scope_is_empty`（Ask 与报告入口经 `_require_non_empty_scope` 共用，409「当前检索范围为空」）对
+      本地维度按真实证据宇宙判（`local_universe_non_empty`：可见来源，或 `local_evidence_available` 的
+      chunk / 可用 KG / 本人已确认 Memory），对参考库维度却只看 `bool(resolved_base_scope.notebook_ids)`
+      ——勾了就算有。而 `ask_available` 的参考库那一半（`notebook_catalog._base_evidence_available`）按
+      证据判：带可用图谱，或在联邦 chunk 通道上界内有可见原文。于是本地全部取消勾选、只留一个既无可用
+      图谱又无可见 chunk（或排在 `CHUNK_FEDERATION_MAX_PARTICIPANTS` 之外、或联邦通道关闭）的参考库时，
+      请求照样放行，检索宇宙为空，用户拿到无证据回答而不是 409；不收窄时同一状态会被 `ask_available`
+      拦下。全局问答的准入已按冻结天花板逐库判非空（PR #924）。要改成逐库按证据判，参考库维度就得为
+      勾选的库补一次 `_base_evidence_available` 同口径的探测（目前零查询），并决定报告入口是否同改
+      （报告入口刻意不走 `ask_available`）；是可见行为变化，改前先问用户。
 
 ### 知识图谱
 
@@ -356,6 +381,9 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 - [ ] **SQLite 后端退役：不做**（用户 2026-10-19 裁决）。SQLite 长期保留，支持离线、单机与测试；
       PostgreSQL 仍是规范定义。2026-07-22 的退役计划（`docs/superpowers/plans/2026-07-22-postgresql-sqlite-retirement.md`）
       从未执行，状态头已标「已放弃」。双后端义务与能力对等矩阵见 `architecture.md` 2.2.2 节。
+- [ ] **`frontend/app/globals.css` 拆分：不拆**（用户 2026-10-19 裁决 14）。现为 15420 行（2026-10-28
+      master）。前端测试、守卫与脚本里有 24 个文件按文件名读 `globals.css`，拆分要同步改这些读取点，属于
+      独立的一次搬家；裁决之前它登记在下面的「结构」组。
 
 **性能**（理由来自整改程序的性能设计稿与分片评审；重开前一律先差分测量）
 
@@ -402,11 +430,9 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 
 **结构**（零行为变化的拆分；有需要时立项，每项先补表征测试）
 
-- [ ] **≥ 150 行的函数共 182 个**（`backend/app` 全量，含嵌套函数），`ask_service.py` 7468 行、
-      `knowledge_lifecycle.py` 7442 行两个大文件。函数天花板守卫只盯基线里登记的 24 个函数，新出现的长
+- [ ] **≥ 150 行的函数共 182 个**（`backend/app` 全量，含嵌套函数），`ask_service.py` 9155 行、
+      `knowledge_lifecycle.py` 8519 行两个大文件（2026-10-28 master）。函数天花板守卫只盯基线里登记的 24 个函数，新出现的长
       函数不会被自动纳入。没有统一拆分计划，按触碰到的模块逐个处理。
-- [ ] **`frontend/app/globals.css` 约 1.4 万行（14178 行）未拆分**。前端测试、守卫与脚本里有 21 个文件
-      按文件名读 `globals.css`，拆分要同步改这些读取点，属于独立的一次搬家。
 - [ ] **仓储层反向 import services 仍有 4 条**（基线 `repository_service_import_ceiling`：other 4、
       postgres 0、sqlite 0；守卫只拦增长）。原 7 条里的 ①–③（backend factory 与 PostgreSQL wrapper）
       已上移到 services，见 `fangan_done.md` §61。剩下的全在
@@ -422,14 +448,9 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       构造 `ScaleArtifactStore(settings)`。所以需另行设计，并先测量加载耗时。
 - [ ] **owner-view 守卫的两张豁免表**：`frontend/tests/guards/owner-view-no-reflatten-guard.test.mjs` 的
       `GRANDFATHERED_DESTRUCTURE_HOOKS`（`askSession`、`sourceLibrary` 两段先于守卫存在的整体解构，
-      `frontend/app/page.tsx` 约 2157 / 856 行）与 `PRE_EXISTING_SINGLE_USE_ALLOWLIST`（约 801 / 857 行
-      两条单次属性提取）。清掉它们要改 `page.tsx`，并入第二节「前端 `page.tsx` 继续减负」一起做。
-- [ ] **宽 `except Exception` 吞掉 `RetrievalControlError` 待排查**：
-      `backend/app/services/reasoning_retrieval.py` 的 `_collect_kg_gap`（约 8446 行，探
-      `weak_support_relations`）与 `_action_consult_memory`（约 8182 行）只放行 `AskCancelled`，参与集
-      身份复核失败等 `RetrievalControlError` 会被记成一条 skip 步后继续，而同文件多数同类站点都先
-      `except RetrievalControlError` 照抛。`weak_support_relations` 会不会触达参与集座位尚未核实；
-      先排查，成立再改为照抛（这是可见行为变化，要配用例）。
+      `frontend/app/page.tsx` 的 `} = askSession` 在 2252 行、`} = sourceLibrary` 在 891 行；同一豁免也
+      放过 1130 行的 `const { untrackSources } = sourceLibrary`）与 `PRE_EXISTING_SINGLE_USE_ALLOWLIST`
+      （836 / 892 行两条单次属性提取；行号为 2026-10-28 master）。清掉它们要改 `page.tsx`，并入第二节「前端 `page.tsx` 继续减负」一起做。
 
 ---
 
