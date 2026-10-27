@@ -10,14 +10,29 @@
 收窄有两道,两道都在「名字被取出来」之前:库维度在 mounted_base_ids,来源维度
 (逐库冻结来源天花板)在 _source_ceiling_kwargs —— 后者由两个 peers 函数各自经
 _ceiling_kwargs 下推给 store,做成 SQL 谓词;同一个入口顺带发那条 source_index_
-fallback 事件(闸在 SQL 里、事件在服务层)。"""
+fallback 事件(闸在 SQL 里、事件在服务层)。
+
+来源闸只回答「这个兄弟簇留不留」,不回答「它叫什么」:存储的 canonical_name 可能是
+天花板外成员(隐藏的 Knowhow 投影 / Memory)的写法,也可能是那个成员已被剪掉后留下
+的陈旧名字。所以天花板在绑时,名字再过一道 R3(_ceiling_peer_names):名字只取自
+自己的 source_id 在该库天花板内的成员,一个都没有的簇丢弃。共提与社区两路在同一处
+出口、按同一规则改名,改名发生在名字被用于任何事情(社区重排、去重、top_k、返回、
+事件)之前;无天花板时一条语句都不多发。"""
 from __future__ import annotations
-from typing import List, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 # PEER mode: the participant-set predicate. This module is reader #5 on the
 # participant override's frozen whitelist (see ``mounted_base_ids``).
 from app.services.retrieval_participants import federated_ask_active
 from app.services.retrieval_run import current_viewer_id
+
+# R3 成员读的首窗口:一次调用里所有兄弟簇各读 member-id 序的前这么多个活成员,
+# 一条批量语句;只有整窗都在天花板外的簇才单独往后翻页(窗口翻倍)。与
+# ``kg_viewer_scope._FIRST_MEMBER_WINDOW`` 同值同理(那边是「第一个可见成员」)。
+# 它不是结果的截断:翻页一直走到找到天花板内成员或读完整簇为止。它只决定「哪些
+# 天花板内成员算作已读到」——存储名由已读到的天花板内成员携带时保留存储名,两种
+# 答案都只来自天花板内成员。
+_PEER_MEMBER_WINDOW = 8
 
 
 class CommunityQueryService:
@@ -64,7 +79,8 @@ class CommunityQueryService:
 
         这里只答**库维度**。逐库冻结来源天花板在绑时,一本仍在这份清单里的库
         还可能有「只由天花板之外的来源(典型是隐藏 Memory / Knowhow 投影)支撑」
-        的实体——**来源级闸在名字出口**,见 ``_source_ceiling_kwargs`` 与
+        的实体,或者名字是天花板外成员写法的实体——**来源级闸与 R3 改名都在
+        名字出口**,见 ``_source_ceiling_kwargs``、``_ceiling_peer_names`` 与
         ``sibling_peers`` / ``community_peers``;不在这里,也不在两个调用点。
         """
         from app.services.retrieval_participants import (
@@ -115,10 +131,23 @@ class CommunityQueryService:
                 "focal": focal_name,
             })
             return []
+        ceiling = self._ceiling_kwargs(base_notebook_id)
         rows = self.unified_kg.community_member_peers(
             base_notebook_id, community_id, focal, candidates,
-            **self._ceiling_kwargs(base_notebook_id),
+            **_peer_read_kwargs(ceiling),
         )
+        if ceiling:
+            # R3:先改名(或丢弃),再重排 / 去重 / 截 top_k —— 排序键
+            # ``keyword_score`` 读的也必须是天花板内成员的名字。
+            named = self._ceiling_peer_names(base_notebook_id, [
+                (str(row["canonical_id"]), row["canonical_name"] or "")
+                for row in rows
+            ])
+            rows = [
+                {"canonical_name": named[str(row["canonical_id"])],
+                 "centrality": row["centrality"]}
+                for row in rows if str(row["canonical_id"]) in named
+            ]
         ranked = sorted(
             rows,
             key=lambda row: (
@@ -146,10 +175,21 @@ class CommunityQueryService:
             )
             if not focal:
                 return []
-            return self.unified_kg.comention_peers(
+            ceiling = self._ceiling_kwargs(notebook_id)
+            peers = self.unified_kg.comention_peers(
                 notebook_id, focal, self.sibling_min_bridge, top_k,
-                **self._ceiling_kwargs(notebook_id),
+                **_peer_read_kwargs(ceiling),
             )
+            if not ceiling:
+                return peers
+            # R3:与社区路同一个出口。成员读失败时落进下面的 except,返回 []
+            # (一个名字都不出),由调用方回退社区路。
+            named = self._ceiling_peer_names(
+                notebook_id, [(cid, name) for cid, name, _claims in peers])
+            return [
+                (named[cid], claims)
+                for cid, _name, claims in peers if named.get(cid)
+            ]
         except Exception:
             return []
 
@@ -196,6 +236,73 @@ class CommunityQueryService:
         memoized_retrieval_value(
             ("comparison_peer_source_index_fallback", str(notebook_id)), _probe,
         )
+
+    def _ceiling_peer_names(
+        self, notebook_id: str, peers: Sequence[Tuple[str, str]],
+    ) -> Dict[str, str]:
+        """R3:天花板在绑时,经来源闸留下的兄弟簇各自该叫什么。
+
+        ``peers`` 是 ``(canonical_id, 存储的 canonical_name)``;返回
+        ``canonical_id -> 名字``,没有天花板内成员的簇**不在**返回里(丢弃)。
+
+        规则:按 member-id 序读该簇的活成员(已发布代、对象未 deprecated),
+        「天花板内成员」= 自己的 ``knowledge_objects.source_id`` 在该库冻结
+        天花板里的成员(不看 evidence:来源闸已经按 evidence 判过「留不留」,
+        名字要的是「这个写法属于谁」)。读到的天花板内成员(读到第一个天花板内
+        成员所在的那一页为止)里有人的名字与存储名逐字相同 → 存储名;否则 →
+        第一个天花板内成员的名字;一个都没有 → 丢弃。存储名因此只在它确实是
+        某个天花板内成员的写法时才出去——既挡住天花板外成员的写法,也挡住
+        携带它的成员已被剪掉后留下的陈旧名字。
+
+        成本:**一条**批量语句读本次调用全部兄弟簇的首窗口
+        (``_PEER_MEMBER_WINDOW`` 个成员,``comparison_peer_members``),不随兄弟数
+        增长;只有首窗口整窗都在天花板外的簇才单独往后翻页
+        (``_scan_peer_members``,同 ``KgViewerScope._first_visible_members`` /
+        ``_scan_members``)。天花板集合取自本 run 冻结的那一份
+        (``library_source_ceiling``,按 run 记忆,不复制、不排序)。无天花板时
+        调用方根本不进这里。
+        """
+        stored: Dict[str, str] = {}
+        for canonical_id, name in peers:
+            stored.setdefault(str(canonical_id), name or "")
+        if not stored:
+            return {}
+        allowed = _library_ceiling(notebook_id)
+        members: Dict[str, list] = {cid: [] for cid in stored}
+        for row in self.unified_kg.comparison_peer_members(
+            notebook_id, list(stored), limit=_PEER_MEMBER_WINDOW,
+        ):
+            members.setdefault(str(row["canonical_id"]), []).append(row)
+        named: Dict[str, str] = {}
+        for canonical_id, stored_name in stored.items():
+            page = members.get(canonical_id, [])
+            name = _in_ceiling_name(page, stored_name, allowed)
+            if name is None and len(page) >= _PEER_MEMBER_WINDOW:
+                name = self._scan_peer_members(
+                    notebook_id, canonical_id, stored_name, allowed,
+                    after=str(page[-1]["member_object_id"]),
+                    window=2 * _PEER_MEMBER_WINDOW,
+                )
+            if name is not None:
+                named[canonical_id] = name
+        return named
+
+    def _scan_peer_members(
+        self, notebook_id: str, canonical_id: str, stored_name: str,
+        allowed: FrozenSet[str], *, after: str, window: int,
+    ) -> Optional[str]:
+        """R3 的单簇翻页:keyset 游标 ``after`` 之后,每页 ``window`` 个成员、
+        整页都在天花板外就翻倍再读。终止:每个满页都把游标严格前移,短页即
+        读完;读完仍没有天花板内成员 → ``None``(丢弃,fail closed)。"""
+        while True:
+            rows = self.unified_kg.comparison_peer_members(
+                notebook_id, [canonical_id], limit=window, after=after,
+            )
+            name = _in_ceiling_name(rows, stored_name, allowed)
+            if name is not None or len(rows) < window:
+                return name
+            after = str(rows[-1]["member_object_id"])
+            window *= 2
 
     def comparison_peer_names(self, base_notebook_ids, focal_name: str,
                               question: str, *, top_k: int, candidates: int,
@@ -281,10 +388,14 @@ def _source_ceiling_kwargs(notebook_id: str) -> dict:
     扩展、reasoning 的 ``expand_community``)问的是同一个问题,闸放在名字的唯一
     出口才自然保证它们拿到同一份裁剪结果。
 
+    这道闸只决定兄弟簇**留不留**;留下的簇**叫什么**由同一出口的 R3 决定
+    (``CommunityQueryService._ceiling_peer_names``):kwargs 非空即天花板在绑,
+    两个 peers 函数据此多要 canonical id、再按天花板内成员改名。
+
     ``None`` 与空集是两个不同的答案,必须按 ``is None`` 分(见
     ``ActiveSourceScope.source_ceiling_for``):
       · 没有天花板 → ``{}``,store 一个参数都不多收,SQL 与今天逐字相同、
-        不多发任何查询——这是「零行为变化」的落点;
+        不多发任何查询——这是「零行为变化」的落点(R3 也不跑);
       · 有天花板 → ``allowed_source_ids=<清单>``,空集即 deny all(该库一个
         名字都不出),store 侧对空清单直接返回 []。
     """
@@ -301,6 +412,42 @@ def _source_ceiling_kwargs(notebook_id: str) -> dict:
     # ``_sorted_library_ceiling`` answers ``frozenset()`` for a library the
     # library dimension excludes; ``mounted_base_ids`` never hands one here.
     return {"allowed_source_ids": list(_sorted_library_ceiling(scope, notebook_id) or ())}
+
+
+def _peer_read_kwargs(ceiling: dict) -> dict:
+    """两个兄弟读的 store kwargs:无天花板 → ``{}``(语句与结果逐字不变);
+    有天花板 → 闸清单 + ``with_canonical_id``(R3 按 canonical id 读成员)。"""
+    return {**ceiling, "with_canonical_id": True} if ceiling else {}
+
+
+def _library_ceiling(notebook_id: str) -> FrozenSet[str]:
+    """R3 判成员用的天花板集合:与 ``_source_ceiling_kwargs`` 交给 SQL 闸的是
+    同一份(``library_source_ceiling``,本 run 内按库记忆,per-library 天花板原样
+    返回、不复制)。只在 ``_ceiling_kwargs`` 非空时被调;万一 scope 已不在,按
+    空集判(一个名字都不出,fail closed)。"""
+    from app.services.source_scope import current_source_scope, library_source_ceiling
+
+    scope = current_source_scope()
+    ceiling = None if scope is None else library_source_ceiling(scope, notebook_id)
+    return frozenset() if ceiling is None else ceiling
+
+
+def _member_name(row) -> str:
+    value = row["member_name"]
+    return "" if value is None else str(value)
+
+
+def _in_ceiling_name(rows, stored_name: str, allowed: FrozenSet[str]) -> Optional[str]:
+    """R3 在一页成员上的判定:这页的天花板内成员(自己的 ``source_id`` 在
+    ``allowed`` 里)里有人叫存储名 → 存储名;否则第一个天花板内成员的名字;
+    这页一个天花板内成员都没有 → ``None``(由调用方决定翻页还是丢弃)。"""
+    inside = [
+        _member_name(row) for row in rows
+        if row["source_id"] is not None and str(row["source_id"]) in allowed
+    ]
+    if not inside:
+        return None
+    return stored_name if stored_name in inside else inside[0]
 
 
 def _norm(s: str) -> str:
@@ -336,7 +483,9 @@ def sibling_peers(queries, notebook_id: str, focal_name: str, *,
     notebook_id 语义:本原语 notebook 无关——查哪个库的 concept_comentions 由调用方决定。
     resolve_comparison_peers 传的是与 community_peers **同一个 BASE 库 id**(调用方对
     mounted_base_ids 的结果逐个传入),使共提/社区两路口径一致、prefer/fallback 是 like-for-like;
-    未来其它调用方可指向活动库自身。返回 [(canonical_name, bridge_claims), ...] 降序。
+    未来其它调用方可指向活动库自身。返回 [(name, bridge_claims), ...] 降序:无天花板时
+    name 是存储的 canonical_name;该库天花板在绑时 name 按 R3 取自天花板内成员、没有
+    天花板内成员的对端丢弃(``CommunityQueryService._ceiling_peer_names``,社区路同一规则)。
     任何异常 / 焦点解析不到 / 无共提数据 → [](静默,不 emit;由调用方回退社区路径兜底文案)。"""
     return queries.sibling_peers(
         notebook_id, focal_name, top_k=top_k
@@ -351,6 +500,8 @@ def resolve_comparison_peers(queries, base_nb: str, focal_name: str, query: str,
       · 先 sibling_peers(共提兄弟,零 LLM 直接查表);非空 → 用其名单,source="comention"。
       · 空 → 回退 community_peers(Louvain 社区),source="community",行为与今日逐字一致。
     两路都查同一个 BASE 库 id(调用方对 mounted_base_ids 逐个传入)→ 口径一致 like-for-like。
+    两路的名字在各自出口过同一道 R3(该库天花板在绑时只用天花板内成员的名字),所以 chunk
+    子查询与 reasoning 轨迹拿到的是同一份名字。
     sibling_peers 内部 fail-open→[] 时自动回退。**不吞 community_peers 异常**——与既有两调用点
     保持一致(expand_community 的 try/except、ask_chunk 的无兜底,都仍在各自调用点)。"""
     siblings = sibling_peers(
