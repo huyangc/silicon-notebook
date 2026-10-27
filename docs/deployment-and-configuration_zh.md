@@ -1159,8 +1159,7 @@ RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF 排序，替代关键词+语义�
 RETRIEVAL_RRF_K              # RRF 的 k（默认 60）
 KG_QUERY_REFINE_ENABLED      # 答题前做问题感知证据精炼（默认 true）
 QUERY_REFINE_MAX_CHARS       # 喂给精炼的证据最大字符数（默认 4000）
-RELATION_RETRIEVAL_ENABLED   # 图/推理种子的关系向量检索（默认 false，按需开启待评测）
-RELATION_SEED_TOP_N          # 开启时喂入图种子的关系/节点命中数（默认 8）
+RELATION_RETRIEVAL_ENABLED   # 启动预热时一并打开并校验规模索引的关系 ANN（默认 false，按需开启待评测）；关系命中不会融进图种子（这条路径已不存在，RELATION_SEED_TOP_N 也已下线），chunk overlay 的关系检索不受它门控
 KG_CANONICAL_FOLD_ENABLED    # 检索时折叠同 canonical 的碎片化 KG 节点（默认 false）
 KG_ABOUT_DOWNWEIGHT_ENABLED  # 关系检索里对弱 about 边降权排序（默认 false）
 KNOWHOW_KG_NODE_RETRIEVAL_ENABLED # Knowhow 格子对象进入 reasoning/graph 节点检索（默认 true；false 只关闭直接节点路径，不影响格子 chunk 检索）
