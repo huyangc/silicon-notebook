@@ -86,6 +86,10 @@ def test_vectors_of_the_same_model_land_byte_for_byte_pg(sqlite, pg, out_dir, mo
     cases.check_vectors_kept_byte_for_byte(sqlite, SQLITE, pg, out_dir, monkeypatch)
 
 
+def test_knowhow_objects_end_with_vectors_after_the_reembed_legs_pg(sqlite, pg, out_dir, monkeypatch):
+    cases.check_knowhow_objects_end_with_vectors(sqlite, SQLITE, pg, out_dir, monkeypatch)
+
+
 def test_vectors_of_another_model_are_dropped_and_questions_embedded_again_pg(
     pg, out_dir, monkeypatch
 ):

@@ -1046,8 +1046,13 @@ def reembed_legs(
     a workload whose vectors were not kept, or whose rows were dropped for a
     wrong length, needs its leg when the notebook has rows of that kind
     (``knowhow_embedding`` is the Knowhow half of ``chunks``). A notebook with a
-    Knowhow table always needs ``kg_relations``: the post-publish projection
-    rewrites the table's edges, and their vectors are deleted with them."""
+    Knowhow table always needs ``kg_objects`` and ``kg_relations``: the
+    post-publish projection tears down and rebuilds the table's objects and
+    edges, which carry no vector afterwards (a Knowhow-projected object is
+    never copied). Its chunks need nothing more: their ids follow the row ids,
+    the writer lands them under those ids, and the projection keeps (or, when
+    the vectors were kept, re-embeds in place) what it finds; when Knowhow
+    vectors were not kept, ``chunks`` is already named."""
 
     def missing(workload: str) -> bool:
         return not verdicts[workload].kept or bool(
@@ -1063,7 +1068,9 @@ def reembed_legs(
         legs.add(LEG_CHUNKS)
     if written.get("source_elements", 0) and missing("source_element_embedding"):
         legs.add(LEG_ELEMENTS)
-    if written.get("knowledge_objects", 0) and missing("knowledge_object_embedding"):
+    if (written.get("knowledge_objects", 0) and missing("knowledge_object_embedding")) or (
+        written.get("knowhow_tables", 0)
+    ):
         legs.add(LEG_KG_OBJECTS)
     if (written.get("knowledge_relations", 0) and missing("relation_embedding")) or (
         written.get("knowhow_tables", 0)

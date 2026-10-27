@@ -565,6 +565,63 @@ def check_vectors_of_another_model(src, src_backend, dst, tmp, monkeypatch) -> N
         assert marked == 0
 
 
+def _without_vectors(repo, notebook_id: str) -> dict[str, list[dict]]:
+    """Knowledge objects (with their source's type, status and payload) and
+    non-blank chunks of ``notebook_id`` that have no vector."""
+    ph = placeholder(repo)
+    with repo._runtime.database.connect() as db:
+        objects = [dict(r) for r in db.execute(
+            "SELECT o.id, o.status, o.payload, s.source_type FROM knowledge_objects o "
+            "LEFT JOIN sources s ON s.id = o.source_id "
+            f"WHERE o.notebook_id = {ph} AND NOT EXISTS "
+            "(SELECT 1 FROM knowledge_embeddings e WHERE e.object_id = o.id)", (notebook_id,),
+        ).fetchall()]
+        chunks = [dict(r) for r in db.execute(
+            f"SELECT c.id FROM chunks c WHERE c.notebook_id = {ph} AND c.text <> '' "
+            "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id = c.id)",
+            (notebook_id,),
+        ).fetchall()]
+    return {"knowledge_objects": objects, "chunks": chunks}
+
+
+def _embeddable(row: dict) -> bool:
+    """What the object leg embeds: not deprecated, with a name to embed."""
+    payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+    return row["status"] != "deprecated" and bool(str(payload.get("name") or "").strip())
+
+
+def check_knowhow_objects_end_with_vectors(src, src_backend, dst, tmp, monkeypatch) -> None:
+    """A Knowhow table's knowledge objects are rebuilt by the post-publish
+    projection, and the rebuilt objects carry no vector -- so the report names the
+    ``kg_objects`` leg even though the archive's object vectors were kept (same
+    model here). Once the legs the report names have run, no knowledge object
+    lacks a vector (but the two the world seeds as never embeddable: a blank
+    name, a deprecated object), and no chunk."""
+    from app.services.embedding import FakeEmbedder
+    from app.services.notebook_reembed import LEG_KG_OBJECTS, NotebookReembedService
+    from tests.model_testkit import bind_embedding_client
+
+    notebook_id = seed_world(src, src_backend, "full")
+    path = tmp / "knowhow-objects.snbk"
+    export(src, notebook_id, path)
+    target_models(dst, monkeypatch)
+    report = run_import(dst, path)
+    assert report.vectors["knowledge_object_embedding"].kept
+    assert report.rows.get("knowhow_tables", 0) > 0
+    after_projection = _without_vectors(dst, report.notebook_id)["knowledge_objects"]
+    assert any(row["source_type"] == "knowhow" for row in after_projection), after_projection
+    assert LEG_KG_OBJECTS in report.reembed_legs, report.reembed_legs
+    bind_embedding_client(dst, FakeEmbedder(dim=DIM), workload_ids=[
+        "chunk_embedding", "source_element_embedding", "knowledge_object_embedding",
+        "relation_embedding", "knowhow_embedding",
+    ])
+    status = NotebookReembedService(dst).run(report.notebook_id, legs=report.reembed_legs)
+    left = _without_vectors(dst, report.notebook_id)
+    assert left["chunks"] == [], (left, status)
+    assert [row for row in left["knowledge_objects"] if _embeddable(row)] == [], (left, status)
+    assert len(left["knowledge_objects"]) == 2, left
+
+
 def check_vectors_kept_byte_for_byte(src, src_backend, dst, tmp, monkeypatch) -> None:
     """Same models: every vector of the three bound workloads lands unchanged, the
     two unbound workloads (relations, Knowhow chunks) are dropped, and questions
@@ -594,7 +651,9 @@ def check_vectors_kept_byte_for_byte(src, src_backend, dst, tmp, monkeypatch) ->
             }
             expected = {translate.ids[r[key]]: decode_value(r["vector"]) for r in original[table]}
             assert stored == expected and stored, table
-    assert report.reembed_legs == ("chunks", "kg_relations")
+    # Kept object vectors, but the Knowhow tables' objects are rebuilt without
+    # one: the object leg is named all the same.
+    assert report.reembed_legs == ("chunks", "kg_objects", "kg_relations")
     assert report.dropped == {
         "chunk_embeddings.knowhow_embedding": 4, "relation_embeddings.relation_embedding": 2,
     }
@@ -995,7 +1054,7 @@ def check_post_publish_order(repo, backend, tmp, monkeypatch) -> None:
     assert {e for e in events if e.startswith("project:")} == {
         f"project:{t}" for t in report.knowhow_tables
     }
-    assert "kg_relations" in report.reembed_legs
+    assert {"kg_objects", "kg_relations"} <= set(report.reembed_legs)
     bind_embedders(repo)
     status = NotebookReembedService(repo).run(report.notebook_id, legs=report.reembed_legs)
     assert status.progress["kg_relations"].state == "done", status
