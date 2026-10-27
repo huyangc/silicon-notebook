@@ -255,6 +255,9 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "_candidate_rows_for_terms": VIEWER_READER,
         "mention_claim_rows": BUILD_READER,
         "_knn_candidate_rows_for_terms": CEILING_BOUNDED,
+        # Short-page top-up is reachable only through that same unscoped,
+        # viewer-free KNN branch; scoped/viewer reads retain the legacy arm.
+        "_knowledge_ilike_rows_for_terms": CEILING_BOUNDED,
     },
     "*/knowledge_counts_cache.py": {
         "_TYPE_STATUS_HALVES_SQL": COUNT_CACHE,

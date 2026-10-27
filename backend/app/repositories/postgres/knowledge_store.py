@@ -55,6 +55,7 @@ from app.repositories.postgres.id_binding import (
     member_of,
     not_member_of,
 )
+from app.repositories.postgres.lexical_budget import KnowledgeLexicalBudget
 from app.repositories.postgres.source_store import NOT_PROMOTION_SOURCE_PREDICATE
 from app.repositories.postgres.memory_sql import (
     memory_derived_in_notebook,
@@ -206,6 +207,7 @@ def _lexical_candidate_union(
     knn_max_term_chars: int | None = None,
     routing_stats: dict[str, int | float] | None = None,
     viewer_id: str | None = None,
+    budget: KnowledgeLexicalBudget | None = None,
 ) -> list[dict]:
     """Build the PostgreSQL equivalent of SQLite's bounded FTS OR query.
 
@@ -237,6 +239,8 @@ def _lexical_candidate_union(
         producer_options["routing_stats"] = routing_stats
     if viewer_id is not None:
         producer_options["viewer_id"] = viewer_id
+    if budget is not None:
+        producer_options["budget"] = budget
     if allowed_source_ids is None:
         candidates = candidate_rows_for_terms(
             db, notebook_id, terms, per_term_limit, **producer_options
@@ -283,7 +287,14 @@ def _lexical_candidate_union(
         if not progressed:
             break
 
-    rows = candidate_documents(db, ids)
+    if budget is None:
+        rows = candidate_documents(db, ids)
+    else:
+        # Budgeted candidate statements carry the bounded name projection.
+        # Completed phases can therefore survive a later timeout without an
+        # unbudgeted hydration query or a second read of mutable names.
+        names = {row["candidate_id"]: row["candidate_name"] for row in candidates}
+        rows = [{"id": candidate_id, text_field: names[candidate_id]} for candidate_id in ids]
     output = []
     for row in rows:
         text = row[text_field] or ""
@@ -899,6 +910,7 @@ class KnowledgeStore:
     # 能力声明(镜像 SQLite 侧的 False):这个适配器的 fts_search 能兑现 KNN
     # 访问路径提示,所以服务层的规模判定值得跑。
     lexical_knn_capable = True
+    lexical_budget_capable = True
 
     def __init__(self, database: PostgresDatabase, seams) -> None:
         self.database = database
@@ -3925,6 +3937,7 @@ class KnowledgeStore:
         knn_max_term_chars: int | None = None,
         routing_stats: dict[str, int | float] | None = None,
         viewer_id: str | None = None,
+        time_budget_seconds: float | None = None,
     ) -> List[Dict]:
         """Return deterministic lexical knowledge hits from trigram candidates.
 
@@ -3934,23 +3947,36 @@ class KnowledgeStore:
         Memory-derived object.  The filter sits in the candidate probes, so
         excluded objects take no candidate slot (``memory_viewer_filter``)."""
         needle = (q or "").strip()
-        return _lexical_candidate_union(
-            db,
-            notebook_id,
-            needle,
-            k,
-            candidate_rows_for_terms=knowledge_candidate_rows_for_terms,
-            candidate_documents=knowledge_candidate_documents,
-            output_id="object_id",
-            text_field="name",
-            allowed_source_ids=allowed_source_ids,
-            corpus_langs=corpus_langs,
-            allow_knn=allow_knn,
-            authoritative_source_filter=authoritative_source_filter,
-            knn_max_term_chars=knn_max_term_chars,
-            routing_stats=routing_stats,
-            viewer_id=viewer_id,
-        )
+
+        def retrieve(connection, budget=None):
+            return _lexical_candidate_union(
+                connection,
+                notebook_id,
+                needle,
+                k,
+                candidate_rows_for_terms=knowledge_candidate_rows_for_terms,
+                candidate_documents=knowledge_candidate_documents,
+                output_id="object_id",
+                text_field="name",
+                allowed_source_ids=allowed_source_ids,
+                corpus_langs=corpus_langs,
+                allow_knn=allow_knn,
+                authoritative_source_filter=authoritative_source_filter,
+                knn_max_term_chars=knn_max_term_chars,
+                routing_stats=routing_stats,
+                viewer_id=viewer_id,
+                **({"budget": budget} if budget is not None else {}),
+            )
+
+        if time_budget_seconds is None:
+            return retrieve(db)
+        budget = KnowledgeLexicalBudget(db, time_budget_seconds)
+        try:
+            with budget:
+                return retrieve(budget, budget)
+        finally:
+            if routing_stats is not None:
+                routing_stats["budget_exhausted"] = int(budget.exhausted)
 
     def chunk_fts_search(
         self, db, notebook_id: str, q: str, k: int = 30, *,

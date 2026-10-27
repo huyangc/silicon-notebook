@@ -86,6 +86,7 @@ class RetrievalRunState:
         self._query_vectors: (
             "OrderedDict[tuple[int, str], tuple[Any, Any, str]]") = OrderedDict()
         self._chunk_fts_open: set[str] = set()
+        self._kg_lexical_open: set[str] = set()
         self._peer_unprepared: dict[str, str] = {}
         self.embedding_requests = 0
         self.embedding_hits = 0
@@ -95,6 +96,8 @@ class RetrievalRunState:
         self.fanout_wait_ms = 0
         self.chunk_fts_timeouts = 0
         self.chunk_fts_circuit_skips = 0
+        self.kg_lexical_timeouts = 0
+        self.kg_lexical_circuit_skips = 0
 
     def peek_embedding(self, key: Hashable):
         """Read a completed query embedding without waiting or submitting work."""
@@ -247,6 +250,23 @@ class RetrievalRunState:
                 self._chunk_fts_open.add(key)
                 self.chunk_fts_timeouts += 1
 
+    def kg_lexical_permitted(self, notebook_id: str) -> bool:
+        """Whether this run may issue another ANN-supplement KG lexical read."""
+        key = str(notebook_id)
+        with self._lock:
+            if key not in self._kg_lexical_open:
+                return True
+            self.kg_lexical_circuit_skips += 1
+            return False
+
+    def note_kg_lexical_timeout(self, notebook_id: str) -> None:
+        """Open only the KG supplement circuit for this notebook and run."""
+        key = str(notebook_id)
+        with self._lock:
+            if key not in self._kg_lexical_open:
+                self._kg_lexical_open.add(key)
+                self.kg_lexical_timeouts += 1
+
     def note_peer_unprepared(self, notebook_id: str, reason: str) -> None:
         """Remember that the passage lane could not prepare this library.
 
@@ -322,6 +342,8 @@ class RetrievalRunState:
                 "fanout_wait_ms": self.fanout_wait_ms,
                 "chunk_fts_timeouts": self.chunk_fts_timeouts,
                 "chunk_fts_circuit_skips": self.chunk_fts_circuit_skips,
+                "kg_lexical_timeouts": self.kg_lexical_timeouts,
+                "kg_lexical_circuit_skips": self.kg_lexical_circuit_skips,
             }
             if self.fanout_limit is not None:
                 event["fanout_limit"] = self.fanout_limit

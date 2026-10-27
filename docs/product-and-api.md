@@ -3806,6 +3806,27 @@ whole segment; see "Extraction" above.
 
 - **Search concurrency cap:** notebook full-text search — both `GET /notebooks/{notebook_id}/search` and the MCP `search` tool — share one process-wide cap on concurrent searches across the whole backend process (default 4; deployment-tunable via `SEARCH_CONCURRENCY_LIMIT`), not per notebook, per user, or per entry point. A 5th (or later) concurrent search request waits rather than being rejected, and that wait has no timeout: a search is never narrowed or denied because of contention, only delayed until a slot frees up.
 
+**KG lexical supplement budget (PostgreSQL).** Only a whole-notebook KG candidate call
+that has already obtained nonempty ANN candidates limits its optional lexical supplement
+with `POSTGRES_KG_LEXICAL_TIMEOUT_SECONDS` (default `5.0` seconds; finite range `0..30`,
+with `0` disabling this budget and circuit). One monotonic deadline is shared by lexical
+database phases across KNN, short-page ILIKE top-up and direct legacy probes, rather than
+renewed per statement; it never widens a stricter caller statement timeout. On expiry, completed
+candidate phases remain available, including their names for bounded in-memory lexical
+scoring, while an unfinished phase contributes no partial rows. The caller transaction
+and its prior timeout remain usable. The first expiry opens an independent notebook-local
+KG supplement circuit for the remainder of that retrieval run; later qualifying calls
+keep ANN and skip the lexical supplement. Already-running sibling calls may settle.
+Truly source-restricted or type-narrowed reads (not covering all four core KG types),
+empty/unavailable ANN, large-library lexical-only fallback,
+relation endpoint probes and exact phrase/identifier lookup neither consult nor open this
+circuit. SQLite accepts the optional adapter argument without enabling this PostgreSQL
+budget. This bounds supplemental waiting, not total Ask latency, and can reduce lexical
+recall; `0` restores the unbudgeted quality baseline. No user query or quoted constraint is
+shortened. Bounded in-memory scoring and transaction cleanup may finish after the SQL
+deadline; this is not a strict wall-clock cap on the whole lexical call. Content-free leaf
+statuses and per-run timeout/skip counts disclose degradation.
+
 ## Retrieval modes (Ask)
 
 `POST /ask` dispatches on `mode`; `backend/app/services/ask_modes.py` owns the registry, and a request that omits `mode` runs `chunk` (compatibility clients are not routed into `reasoning`'s intent gate). Both modes use the [shared participant-set retrieval contract](#search-semantics-and-federation).

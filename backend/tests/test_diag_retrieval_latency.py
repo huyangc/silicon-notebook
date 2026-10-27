@@ -19,6 +19,36 @@ sys.modules[_SPEC.name] = diag
 _SPEC.loader.exec_module(diag)
 
 
+def test_kg_budget_report_separates_executed_leaves_from_circuit_skips():
+    records = [
+        {
+            "kind": "ask_stage", "stage": "kg_lexical", "site": "kg_ann_fts",
+            "notebook_id": "private-library", "status": status,
+            "latency_ms": elapsed, "hits": hits,
+            "query": "private question", "source_id": "private-source",
+        }
+        for status, elapsed, hits in (
+            ("ok", 20, 5), ("timeout", 5001, 2), ("skipped_circuit_open", 0, 0),
+        )
+    ]
+    records.append({
+        "kind": "retrieval_run_stats", "run_kind": "ask_reasoning",
+        "kg_lexical_timeouts": 1, "kg_lexical_circuit_skips": 1,
+    })
+    report = diag.build_report(records, {"private-library": 900_000})
+    leaf_section = report.split("[KG lexical supplement by indexed size and status]")[1]
+    leaf_section = leaf_section.split("[retrieval components by indexed size]")[0]
+    rows = [line for line in leaf_section.splitlines() if "status=" in line]
+    assert len(rows) == 3
+    assert any("status=ok" in row and "20.0" in row and "hits=5" in row for row in rows)
+    assert any("status=timeout" in row and "5001.0" in row and "hits=2" in row for row in rows)
+    assert any("status=skipped_circuit_open" in row and "0.0" in row for row in rows)
+    assert "kg_lexical_timeouts=1 kg_lexical_circuit_skips=1" in report
+    assert all(secret not in report for secret in (
+        "private-library", "private question", "private-source",
+    ))
+
+
 def test_report_groups_leaf_and_components_without_rendering_ids():
     secret_notebook = "nb-sensitive-id"
     records = [

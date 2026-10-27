@@ -126,6 +126,7 @@ _KG_LEXICAL_ROUTING_STAT_KEYS = (
     "knn_seconds",
     "legacy_seconds",
     "knn_short_fallback_seconds",
+    "budget_exhausted",
 )
 
 # 邻居展开(`_retrieve_neighbors`)的行读取放大系数。`REASONING_NEIGHBOR_EXPAND_LIMIT`
@@ -2071,6 +2072,7 @@ class CandidateRetrievalService(_RetrievalState):
         allow_knn: bool = False,
         authoritative_source_filter: bool = False,
         routing_stats: dict[str, int | float] | None = None,
+        supplemental: bool = False,
     ) -> list[dict]:
         """Fail-open bounded lexical object recall shared by KG and relations.
 
@@ -2091,31 +2093,76 @@ class CandidateRetrievalService(_RetrievalState):
         打开连接之前用 `_lexical_knn_allowed` 算好传进来(与 `corpus_langs`
         同一形态、同一理由)。
         """
+        # The only opt-in is the whole-notebook path that already returned
+        # usable ANN candidates. A lexical-only fallback cannot share its
+        # circuit: switching it off could remove the only candidate producer.
+        budget_seconds = 0.0
+        if (
+            supplemental
+            and site == "kg_ann_fts"
+            and allowed_source_ids is None
+            and getattr(self.knowledge, "lexical_budget_capable", False)
+        ):
+            budget_seconds = self.settings.postgres_kg_lexical_timeout_seconds
         probe_stats: dict[str, int | float] | None = (
-            {} if routing_stats is not None else None
+            {} if routing_stats is not None or budget_seconds else None
+        )
+        run = current_retrieval_run() if budget_seconds else None
+        event = {
+            "kind": "ask_stage", "stage": "kg_lexical", "site": site,
+            "notebook_id": notebook_id,
+            "budget_ms": round(budget_seconds * 1000),
+        }
+        if run is not None and not run.kg_lexical_permitted(notebook_id):
+            self.event_log.emit({
+                **event, "status": "skipped_circuit_open", "latency_ms": 0,
+                "hits": 0,
+            })
+            return []
+        started = time.perf_counter()
+        budget_options = (
+            {"time_budget_seconds": budget_seconds} if budget_seconds else {}
         )
         try:
             if allowed_source_ids is None:
-                return self.knowledge.fts_search(
+                hits = self.knowledge.fts_search(
                     db, notebook_id, query, k=recall, corpus_langs=corpus_langs,
                     allow_knn=allow_knn,
                     knn_max_term_chars=(
                         self.settings.postgres_lexical_knn_max_term_chars
                     ),
                     routing_stats=probe_stats,
+                    **budget_options,
                 )
-            return self.knowledge.fts_search(
-                db, notebook_id, query, k=recall,
-                allowed_source_ids=allowed_source_ids,
-                corpus_langs=corpus_langs,
-                authoritative_source_filter=authoritative_source_filter,
-                knn_max_term_chars=(
-                    self.settings.postgres_lexical_knn_max_term_chars
-                ),
-                routing_stats=probe_stats,
-            )
+            else:
+                hits = self.knowledge.fts_search(
+                    db, notebook_id, query, k=recall,
+                    allowed_source_ids=allowed_source_ids,
+                    corpus_langs=corpus_langs,
+                    authoritative_source_filter=authoritative_source_filter,
+                    knn_max_term_chars=(
+                        self.settings.postgres_lexical_knn_max_term_chars
+                    ),
+                    routing_stats=probe_stats,
+                )
+            if budget_seconds:
+                exhausted = bool(probe_stats.get("budget_exhausted", 0))
+                if exhausted and run is not None:
+                    run.note_kg_lexical_timeout(notebook_id)
+                self.event_log.emit({
+                    **event, "status": "timeout" if exhausted else "ok",
+                    "latency_ms": round((time.perf_counter() - started) * 1000),
+                    "hits": len(hits),
+                })
+            return hits
         except Exception as exc:  # noqa: BLE001 — lexical failure keeps ANN usable
             self.event_log.emit(_lexical_failure_event(notebook_id, site, exc))
+            if budget_seconds:
+                self.event_log.emit({
+                    **event, "status": "failed_open",
+                    "latency_ms": round((time.perf_counter() - started) * 1000),
+                    "hits": 0,
+                })
             return []
         finally:
             if routing_stats is not None and probe_stats is not None:
@@ -2713,6 +2760,12 @@ class CandidateRetrievalService(_RetrievalState):
                         query,
                         self.settings.chunk_recall,
                         site="kg_ann_fts",
+                        # ANN spans all KG types. A narrowed type request
+                        # may have no usable ANN hit even when this raw pool
+                        # is nonempty, so its lexical producer stays primary.
+                        supplemental=(
+                            bool(ann_sims) and set(_KG_TYPES).issubset(type_list)
+                        ),
                         corpus_langs=corpus_langs,
                         allow_knn=allow_knn,
                         routing_stats=kg_lexical_routing_stats,

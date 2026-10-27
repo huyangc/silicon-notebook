@@ -2551,6 +2551,45 @@ impose a decoded-byte cap when operator latency matters more than complete windo
 raise `--max-events` if `log_scan` reports more matched than retained records. Any byte or record
 cap reached is disclosed as `truncated:true`.
 
+### KG lexical supplement deadline and circuit
+
+`POSTGRES_KG_LEXICAL_TIMEOUT_SECONDS` defaults to 5 seconds and is advanced deployment
+tuning (numeric rails: the product/API reference, "KG lexical supplement budget"). Set it
+to `0` to restore the unbudgeted baseline. The service opts in only after a whole-notebook
+KG ANN call returned nonempty candidates and its effective type scope includes all four
+core KG types. A source- or type-restricted read, empty/missing ANN,
+large-library lexical-only fallback, relation endpoint probe or exact lookup does not
+consult or trip this circuit. SQLite does not enable this PostgreSQL optimization.
+
+One monotonic deadline is shared by all lexical SQL phases; no phase receives a fresh
+budget. Each physical statement uses only the remaining allowance and a savepoint, and
+never raises an existing stricter caller timeout. Cancellation rolls back just that probe
+and restores the connection setting. Completed candidate phases carry names into bounded
+in-memory scoring, so a later timeout does not require another hydration query or discard
+already acquired hits. An unfinished database statement returns no partial rows.
+
+The first budget expiry opens a separate per-library KG supplement circuit for the current
+retrieval run. Later qualifying calls retain ANN and skip lexical SQL; concurrently running
+calls may settle. This circuit is independent of chunk FTS and ends with the run. It bounds
+supplemental database waiting, not embedding, ANN preparation, pool acquisition or whole Ask
+time. Bounded in-memory scoring and transaction cleanup may finish after the SQL deadline;
+there is no strict whole-call wall-clock guarantee.
+
+`ask_stage` leaf events with `stage=kg_lexical` report `ok`, `timeout`,
+`skipped_circuit_open` or `failed_open`, elapsed time, hit count and configured budget,
+without query text or candidate identities. `retrieval_run_stats` adds
+`kg_lexical_timeouts` and `kg_lexical_circuit_skips`. The existing
+`scripts/diag_retrieval_latency.py --since 24` report separates executed and skipped leaf
+distributions by status and totals KG circuit counters independently of chunk FTS.
+The run's timeout counter counts first circuit openings per library, not every timed-out
+sibling call; count leaf `timeout` events for the number of calls that exhausted a budget.
+
+After rollout, compare like-for-like whole candidate/Ask latency, timeout and skip counts,
+and representative identifier, quoted-phrase and Chinese-term answers. A lower lexical
+latency or zero-ms skip is not proof of unchanged recall. If lexical-only evidence is being
+missed, use the zero-budget rollback or increase the budget within its validated rails;
+do not change term/candidate quotas to conceal the effect.
+
 ### Adaptive KG lexical routing (`POSTGRES_LEXICAL_KNN_ENABLED`)
 
 Production per-term plans show that one global GiST strategy is not uniformly fast. In the
@@ -2568,7 +2607,17 @@ term:
   bypasses `<->` ordered KNN and uses notebook-scoped split trigram arms;
 - a short non-CJK term may use GiST KNN only when the run is unscoped, the notebook meets
   `POSTGRES_LEXICAL_KNN_MIN_ROWS`, and the exact GiST shape is available;
-- a short KNN page is replaced by the same split-path result so ILIKE-only hits are kept.
+- a normally completed short KNN page reuses all of its `%` matches and probes only
+  the independently bounded literal-ILIKE arm. The union is deduplicated and takes the
+  same `similarity DESC, id COLLATE "C"` top-k, keeping ILIKE-only hits without a second
+  `%` scan. Full KNN pages and source/viewer-scoped legacy routes are unchanged.
+
+Short-page equivalence is defined on a stable data snapshot: a page below its quota has
+exhausted the `%` matches. Concurrent writes can change candidates between statements;
+reuse keeps the initial similarity read, as full KNN pages already do, without changing
+transaction isolation or downstream authorization/hydration checks. This optimization
+itself does not reduce recall terms/candidate quotas; the separately configured supplement
+deadline above may return fewer completed candidates on expiry.
 
 The split path turns `% OR ILIKE` into two independently ordered/limited arms, unions and
 deduplicates them, then reapplies the same `similarity DESC, id COLLATE "C"` top-k. Taking the
@@ -2604,6 +2653,11 @@ terms, and short-page fallback terms without recording query text or object ids.
 production shape above, CJK/long terms should move to `direct_legacy_terms`, KNN time should
 collapse to short Latin probes, and total `kg_lexical_ms` should no longer track the former
 25–30s GiST phase.
+
+For short-page reuse, `kg_lexical_short_fallback_ms` measures the ILIKE-only probe;
+`kg_lexical_legacy_ms` still includes that interval, so do not add them together. Compare
+whole `kg_lexical_ms` and candidate-stage latency on matched workloads, not only fallback
+time: the initial KNN cost remains, and a slow ILIKE arm can still dominate the top-up.
 
 ## PDF parsing with MinerU
 
