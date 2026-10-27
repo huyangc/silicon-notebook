@@ -317,11 +317,6 @@
       "reason": "断言端口已被记录包装的观察点"
     },
     {
-      "member": "backend/app/services/repository_facade.py::RepositoryFacade.answer_owner",
-      "category": "pending-decision",
-      "reason": "整条 answer_owner 链(facade → NotebookSharingService → SharingStore,及 NotebookAccessReadRepository 声明)生产零调用;SharingStore 的 docstring 写明「为冻结兼容面保留」,但 facade_surface.json 已不含它。去留是 facade 退役取舍,待拍板(S2-E)"
-    },
-    {
       "member": "backend/app/services/repository_facade.py::RepositoryFacade.rebuild_notebook_kg",
       "category": "test-observation",
       "reason": "S2 批 B 裁决保留:facade 这层的索引流水线写闸(require_indexing_pipeline_write)是被测对象"
@@ -330,11 +325,6 @@
       "member": "backend/app/services/repository_facade.py::RepositoryFacade.relink_notebook_kg",
       "category": "test-observation",
       "reason": "S2 批 B 裁决保留:facade 这层的索引流水线写闸(require_indexing_pipeline_write)是被测对象"
-    },
-    {
-      "member": "backend/app/services/repository_facade.py::RepositoryFacade.source_owner",
-      "category": "pending-decision",
-      "reason": "整条 source_owner 链生产零调用;ports.py 注释明令「别因为没人用顺手删它」(理由是冻结兼容面,但 facade_surface.json 已不含它)。去留是 facade 退役取舍,待拍板(S2-E)"
     },
     {
       "member": "backend/app/services/repository_runtime.py::RepositoryRuntime.set_auto_index_checked",

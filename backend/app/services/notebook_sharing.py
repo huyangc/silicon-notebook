@@ -524,7 +524,7 @@ class NotebookSharingService:
         creator to compare) is nobody's, so it is not owned either. Unknown ids,
         other members' answers and creatorless answers are indistinguishable
         (one statement, then ``False``). The NOTEBOOK owner does not own other
-        members' answers (``answer_owner`` is not authorisation). A deployment
+        members' answers. A deployment
         admin reading answers through the admin activity log is audit access
         and does not come through here.
         """
@@ -731,9 +731,6 @@ class NotebookSharingService:
         return notebook
 
     # -------------------------------------------------------------- ownership
-    def source_owner(self, source_id: str) -> "str | None":
-        return self._store.source_owner(source_id)
-
     def source_notebook_id(
         self,
         source_id: str,
@@ -748,5 +745,3 @@ class NotebookSharingService:
     def conversation_owner(self, conversation_id: str) -> "str | None":
         return self._store.conversation_owner(conversation_id)
 
-    def answer_owner(self, answer_id: str) -> "str | None":
-        return self._store.answer_owner(answer_id)
