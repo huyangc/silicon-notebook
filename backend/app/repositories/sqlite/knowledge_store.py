@@ -1610,7 +1610,7 @@ class KnowledgeStore:
             if row is not None:
                 notebook_id = row["notebook_id"]
         if notebook_id:
-            # pending_source_count depends on the latest run status, while its
+            # visible_pending_source_count depends on the latest run status, while its
             # version key is the KG mutation sequence. A status-only terminal
             # update therefore needs an explicit post-commit invalidation.
             from app.repositories.sqlite import knowledge_counts_cache

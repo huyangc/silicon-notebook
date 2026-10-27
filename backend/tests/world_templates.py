@@ -153,11 +153,9 @@ PROCESS_CACHE_INVENTORY: dict[str, str] = {
     # Count memos keyed by notebook id + (kg_reset_epoch, kg_mutation_seq).
     # Two copies of one world share both, so a stale entry would be served.
     "app.repositories.sqlite.knowledge_counts_cache:_MEMO": IDENTITY_RESET,
-    "app.repositories.sqlite.knowledge_counts_cache:_PENDING": IDENTITY_RESET,
     "app.repositories.sqlite.knowledge_counts_cache:_VISIBLE_PENDING": IDENTITY_RESET,
     "app.repositories.sqlite.knowledge_counts_cache:_CHUNKS": IDENTITY_RESET,
     "app.repositories.postgres.knowledge_counts_cache:_MEMO": IDENTITY_RESET,
-    "app.repositories.postgres.knowledge_counts_cache:_PENDING": IDENTITY_RESET,
     "app.repositories.postgres.knowledge_counts_cache:_VISIBLE_PENDING": IDENTITY_RESET,
     "app.repositories.postgres.knowledge_counts_cache:_CHUNKS": IDENTITY_RESET,
     "app.repositories.postgres.knowledge_counts_cache:_EPOCHS": IDENTITY_RESET,
@@ -244,11 +242,9 @@ RESET_ONLY = "reset only (PostgreSQL state cannot belong to a SQLite template)"
 
 _RESTORE_POLICY: dict[str, str] = {
     "app.repositories.sqlite.knowledge_counts_cache:_MEMO": VERSION_GATED,
-    "app.repositories.sqlite.knowledge_counts_cache:_PENDING": VERSION_GATED,
     "app.repositories.sqlite.knowledge_counts_cache:_VISIBLE_PENDING": VERSION_GATED,
     "app.repositories.sqlite.knowledge_counts_cache:_CHUNKS": VERSION_GATED,
     "app.repositories.postgres.knowledge_counts_cache:_MEMO": RESET_ONLY,
-    "app.repositories.postgres.knowledge_counts_cache:_PENDING": RESET_ONLY,
     "app.repositories.postgres.knowledge_counts_cache:_VISIBLE_PENDING": RESET_ONLY,
     "app.repositories.postgres.knowledge_counts_cache:_CHUNKS": RESET_ONLY,
     "app.repositories.postgres.knowledge_counts_cache:_EPOCHS": RESET_ONLY,

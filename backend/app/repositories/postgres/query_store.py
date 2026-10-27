@@ -292,7 +292,7 @@ class QueryStore:
 
     def warm_open_path_caches(self, progress=None) -> int:
         # 委托给 knowledge_counts_cache.warm_all——它现在是 type_status_counts /
-        # pending 两个变体 / chunk_count 四个 memo 共享的 warm 实现(镜像 sqlite
+        # 可见 pending / chunk_count 三个 memo 共享的 warm 实现(镜像 sqlite
         # query_store.warm_open_path_caches),不再由本方法自己拼 warm 循环。
         from app.repositories.postgres import knowledge_counts_cache
 

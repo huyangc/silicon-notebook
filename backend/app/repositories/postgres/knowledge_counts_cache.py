@@ -21,7 +21,7 @@ invalidate 时推进,外部无关 notebook 的 ingestion 不再牵连它;仍保�
 刻意差异(比 sqlite 版严格一点):sqlite 的 ``type_status_counts`` 写回不做 epoch 检查
 (它只有一个 ``_MEMO`` 消费者形态历史更早,当时判断该窗口足够窄可以不设防;且 sqlite
 侧 pending memo 用的是全局单值 epoch,没有 per-notebook 隔离)。PG 这里从
-``type_status_counts`` 到 ``chunk_count`` 到两个 pending 视图,四个 memo 统一套上
+``type_status_counts`` 到 ``chunk_count`` 到可见 pending 视图,三个 memo 统一套上
 per-notebook epoch 守卫——原因是 PG 面对的大库冷查询窗口(几秒级)比 sqlite 场景长得多,
 全局 epoch 在这个窗口内被无关库的高频 ingestion 持续作废的概率显著更高,窄窗口下可以
 不设防的假设在这里不成立,所以选择更精细的隔离而不是复用 sqlite 的从简版本。
@@ -64,10 +64,9 @@ _DEPRECATED = "deprecated"
 
 _LOCK = threading.Lock()
 _MAX_NOTEBOOKS = 512  # bounded LRU;每 notebook 的值都很小(int,或 types×statuses 的小字典)
-# 四个 memo 的键从裸 kg_mutation_seq 扩为 (kg_reset_epoch, kg_mutation_seq)
+# 三个 memo 的键从裸 kg_mutation_seq 扩为 (kg_reset_epoch, kg_mutation_seq)
 # 二元组(batch-3-W1 PR-2,design doc Sec 3.2 表 #9)——见 _version_key。
 _MEMO: "OrderedDict[str, Tuple[Tuple[int, int], Dict[Tuple[str, str], int]]]" = OrderedDict()
-_PENDING: "OrderedDict[str, Tuple[Tuple[int, int], int]]" = OrderedDict()
 _VISIBLE_PENDING: "OrderedDict[str, Tuple[Tuple[int, int], int]]" = OrderedDict()
 _CHUNKS: "OrderedDict[str, Tuple[Tuple[int, int], int]]" = OrderedDict()
 
@@ -89,7 +88,7 @@ _EPOCHS: "OrderedDict[str, int]" = OrderedDict()
 
 
 def _version_key(db: Any, notebook_id: str) -> Tuple[int, int]:
-    """``(kg_reset_epoch, kg_mutation_seq)`` — the four memos' version tag
+    """``(kg_reset_epoch, kg_mutation_seq)`` — the three memos' version tag
     (batch-3-W1 PR-2, design doc Sec 3.2 table #9). NOT the same "epoch" as
     ``_epoch_of`` / ``_GLOBAL_EPOCH`` / ``_EPOCHS`` below: those are this
     module's OWN process-internal in-flight-write-back race guard (best-
@@ -126,7 +125,7 @@ def _seq_gated(
     *,
     version: "Optional[Tuple[int, int]]" = None,
 ) -> Any:
-    """四个 memo(``_MEMO`` / ``_CHUNKS`` / ``_PENDING`` / ``_VISIBLE_PENDING``)
+    """三个 memo(``_MEMO`` / ``_CHUNKS`` / ``_VISIBLE_PENDING``)
     共享的 version-gated 读写骨架:命中同 ``(kg_reset_epoch, kg_mutation_seq)``
     直接返回(batch-3-W1 PR-2 把键从裸 ``kg_mutation_seq`` 扩为这个二元组——见
     ``_version_key`` 的命名区分注记,别与本函数下面的 invalidation ``_epoch_of``
@@ -331,14 +330,14 @@ def chunk_count(db: Any, notebook_id: str) -> int:
 
 
 def warm_all(db: Any, progress=None) -> int:
-    """Prime the FOUR open-path memos every notebook open/board/status-poll
-    reaches (``type_status_counts`` / both pending-source views /
+    """Prime the THREE open-path memos every notebook open/board/status-poll
+    reaches (``type_status_counts`` / the visible pending-source count /
     ``chunk_count``) for every live notebook, so the first request after a
     fresh process start is served warm instead of paying the cold GROUP BY +
     correlated scans (see module docstring; sqlite 镜像见
     ``sqlite/knowledge_counts_cache.warm_all``)。
 
-    The edge-review-queue's true total is NOT one of these four — it lives in
+    The edge-review-queue's true total is NOT one of these three — it lives in
     ``app.services.review_queue_memo.ReviewQueueMemo`` (runtime-owned, next to
     the ranking it is counted alongside; see that module's docstring), not in
     this module at all (R3 T-A3 v4 removed the module-global ``review_queue_
@@ -362,7 +361,6 @@ def warm_all(db: Any, progress=None) -> int:
     for i, notebook_id in enumerate(ids, start=1):
         try:
             shared_type_status_counts(db, notebook_id)
-            pending_source_count(db, notebook_id)
             visible_pending_source_count(db, notebook_id)
             chunk_count(db, notebook_id)
         except Error:
@@ -374,7 +372,7 @@ def warm_all(db: Any, progress=None) -> int:
     return total
 
 
-def _pending_sql(*, visible_only: bool) -> str:
+def _pending_sql() -> str:
     """构造 pending 计数的整条 SQL。
 
     抽成函数是为了让它能被**不需要活 PostgreSQL** 的守卫扫一遍:psycopg 把查询里的
@@ -384,7 +382,7 @@ def _pending_sql(*, visible_only: bool) -> str:
     ``backend/tests/test_kg_empty_extraction_marker.py``。
     """
     # 判据与 postgres QueryStore 原 _pending_source_count 逐字一致(用 ordinal 排序:
-    # postgres 无 rowid)。visible_only 排除 memory/knowhow 隐藏合成源。
+    # postgres 无 rowid)。memory/knowhow 隐藏合成源一律不计。
     #
     # 不要把 latest KG run 的标量子查询放进 knowledge_objects 的 EXISTS 里。
     # PostgreSQL 可能把它下沉到 KO 侧，使每条 KO 都重复读 status/error：
@@ -394,9 +392,6 @@ def _pending_sql(*, visible_only: bool) -> str:
     # 双端同构的变体见 postgres/source_store.py 的 sources_from_rows：那边把驱动集
     # 换成页内 source id 的 VALUES CTE,同一条 latest-run 标量子查询绑在 CTE 的
     # source_id 上而不是 knowledge_objects 行上。
-    visible_clause = (
-        "AND s.source_type NOT IN ('memory','knowhow') " if visible_only else ""
-    )
     return (
         "SELECT COUNT(*) AS c FROM sources s "
         "JOIN LATERAL (SELECT 1 AS found FROM source_elements e "
@@ -407,9 +402,9 @@ def _pending_sql(*, visible_only: bool) -> str:
         "LEFT JOIN LATERAL (SELECT 1 AS found FROM knowledge_objects k "
         "WHERE k.source_id=s.id AND k.source_id!='' LIMIT 1) source_kg ON TRUE "
         "WHERE s.notebook_id=%s "
-        + visible_clause
+        "AND s.source_type NOT IN ('memory','knowhow') "
         # A promotion source (PR-E8) is never an extraction target, so it is
-        # never pending either -- in both counts.
+        # never pending either.
         + f"AND s.{NOT_PROMOTION_SOURCE_PREDICATE} "
         + "AND (source_kg.found IS NULL "
         "OR COALESCE(latest_kg.status,'completed')!='completed' "
@@ -437,27 +432,9 @@ def _pending_sql(*, visible_only: bool) -> str:
     )
 
 
-def _pending_query(db: Any, notebook_id: str, *, visible_only: bool) -> int:
-    row = db.execute(
-        _pending_sql(visible_only=visible_only), (notebook_id,)
-    ).fetchone()
+def _pending_query(db: Any, notebook_id: str) -> int:
+    row = db.execute(_pending_sql(), (notebook_id,)).fetchone()
     return int(row["c"])
-
-
-def _cached(
-    memo, db: Any, notebook_id: str, *, visible_only: bool,
-    version: "Optional[Tuple[int, int]]" = None,
-) -> int:
-    return _seq_gated(
-        memo, db, notebook_id,
-        lambda: _pending_query(db, notebook_id, visible_only=visible_only),
-        version=version,
-    )
-
-
-def pending_source_count(db: Any, notebook_id: str) -> int:
-    """物理「已解析、无完整 KG」源数(全集),memoized on ``(notebook_id, kg_mutation_seq)``。"""
-    return _cached(_PENDING, db, notebook_id, visible_only=False)
 
 
 def visible_pending_source_count(
@@ -465,8 +442,11 @@ def visible_pending_source_count(
 ) -> int:
     """用户可见的「已解析、无完整 KG」源数(排除 memory/knowhow 合成源),checkup H6 用。
     memoized on ``(notebook_id, kg_mutation_seq)``;``version`` 同 ``_seq_gated``。"""
-    return _cached(
-        _VISIBLE_PENDING, db, notebook_id, visible_only=True, version=version)
+    return _seq_gated(
+        _VISIBLE_PENDING, db, notebook_id,
+        lambda: _pending_query(db, notebook_id),
+        version=version,
+    )
 
 
 def invalidate(notebook_id: Optional[str] = None) -> None:
@@ -485,7 +465,7 @@ def invalidate(notebook_id: Optional[str] = None) -> None:
     覆盖,否则「写已落但 seq bump 未提交」那个边缘窗口对新 memo 依旧成立(seq gate
     本身仍是正确性权威,只是这一处 best-effort 安全阀会漏了它)。
 
-    (``_REVIEW_QUEUE_TOTAL`` 曾经是这四个之外的第 5 个 memo,R3 T-A3 v4 整体撤除——
+    (``_REVIEW_QUEUE_TOTAL`` 曾经是这三个之外的另一个 memo,R3 T-A3 v4 整体撤除——
     队列总量现在随排名一起存在 ``ReviewQueueMemo`` 里,那个 memo 有自己独立的
     ``invalidate()``,不受这里管辖。)"""
     global _GLOBAL_EPOCH
@@ -493,7 +473,6 @@ def invalidate(notebook_id: Optional[str] = None) -> None:
         if notebook_id is None:
             _GLOBAL_EPOCH += 1
             _MEMO.clear()
-            _PENDING.clear()
             _VISIBLE_PENDING.clear()
             _CHUNKS.clear()
             _EPOCHS.clear()
@@ -507,7 +486,6 @@ def invalidate(notebook_id: Optional[str] = None) -> None:
                 # (见模块 docstring 与 `_EPOCHS` 声明处的完整场景)。
                 _GLOBAL_EPOCH += 1
             _MEMO.pop(notebook_id, None)
-            _PENDING.pop(notebook_id, None)
             _VISIBLE_PENDING.pop(notebook_id, None)
             _CHUNKS.pop(notebook_id, None)
 
@@ -521,7 +499,6 @@ __all__ = [
     "object_type_total",
     "chunk_count",
     "warm_all",
-    "pending_source_count",
     "visible_pending_source_count",
     "invalidate",
 ]

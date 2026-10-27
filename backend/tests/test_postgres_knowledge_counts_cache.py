@@ -89,23 +89,11 @@ def test_postgres_h6_visible_count_is_seq_gated_memo():
     assert db.query_calls == 3  # invalidate 后重查
 
 
-def test_postgres_pending_and_visible_are_independent_memos():
-    """全集 pending 与 visible 各自独立 memo(共享 seq gate),互不串缓存。"""
-    kcc.invalidate()
-    db = _FakeDB(seq=1)
-    kcc.pending_source_count(db, "nb-y")
-    kcc.visible_pending_source_count(db, "nb-y")
-    assert db.query_calls == 2  # 两个独立计数各查一次
-    kcc.pending_source_count(db, "nb-y")
-    kcc.visible_pending_source_count(db, "nb-y")
-    assert db.query_calls == 2  # 同 seq → 都命中缓存
-
-
 def test_pending_query_is_source_driven_and_reads_latest_run_once():
     """Regression: never evaluate latest-run state once per knowledge object."""
     db = _FakeDB(seq=1)
 
-    assert kcc._pending_query(db, "nb-shape", visible_only=True) == 42
+    assert kcc._pending_query(db, "nb-shape") == 42
 
     sql = db.pending_sql[-1]
     assert sql.count("LATERAL") == 3
@@ -115,14 +103,6 @@ def test_pending_query_is_source_driven_and_reads_latest_run_once():
     assert "source_kg.found IS NULL" in sql
     assert "s.source_type NOT IN ('memory','knowhow')" in sql
     assert "NOT EXISTS(SELECT 1 FROM knowledge_objects" not in sql
-
-
-def test_physical_pending_query_keeps_hidden_sources():
-    db = _FakeDB(seq=1)
-
-    assert kcc._pending_query(db, "nb-shape", visible_only=False) == 42
-
-    assert "s.source_type NOT IN" not in db.pending_sql[-1]
 
 
 def test_type_status_counts_is_seq_gated_memo():
@@ -259,17 +239,15 @@ def test_invalidate_none_clears_every_memo():
     kcc.invalidate()
     db = _FakeDB(seq=1, chunk_count=7)
     kcc.type_status_counts(db, "nb-all")
-    kcc.pending_source_count(db, "nb-all")
     kcc.visible_pending_source_count(db, "nb-all")
     kcc.chunk_count(db, "nb-all")
-    # 四个 memo 全部非空(populate 成功,后面的清空断言才有意义)。
-    assert kcc._MEMO and kcc._PENDING and kcc._VISIBLE_PENDING
+    # 三个 memo 全部非空(populate 成功,后面的清空断言才有意义)。
+    assert kcc._MEMO and kcc._VISIBLE_PENDING
     assert kcc._CHUNKS
 
     kcc.invalidate()  # 全局清空形态(notebook_id=None)
 
     assert kcc._MEMO == {}
-    assert kcc._PENDING == {}
     assert kcc._VISIBLE_PENDING == {}
     assert kcc._CHUNKS == {}
 

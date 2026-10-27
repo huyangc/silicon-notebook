@@ -153,8 +153,8 @@ def test_pending_query_preserves_latest_run_and_visibility_semantics(postgres_da
         _insert_source(connection, "hidden-knowhow", source_type="knowhow")
 
     with postgres_database.connect() as connection:
-        assert kcc._pending_query(connection, "nb-pending", visible_only=False) == 6
-        assert kcc._pending_query(connection, "nb-pending", visible_only=True) == 4
+        # The two hidden synthetic sources above are pending too, but never counted.
+        assert kcc._pending_query(connection, "nb-pending") == 4
 
 
 def test_type_counts_and_chunk_count_are_seq_gated_against_real_postgres(
