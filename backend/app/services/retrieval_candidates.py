@@ -458,8 +458,8 @@ class _RetrievalState:
         .total_chunk_count`` 收口)。
 
         与 ``/scale-index/status`` 开库路径同一份 memo:冷起一次覆盖扫描,warm 就
-        是一次主键 seq 读。裸 ``chunks.count_row`` 在 chunk 通道上是每子查询一次
-        整库 COUNT——一次问答会被 ``_retrieve_chunks_multi`` 放大到最多 8 次。"""
+        是一次主键 seq 读。绕过 memo 直接数 ``chunks`` 表,在 chunk 通道上是每子查询
+        一次整库 COUNT——一次问答会被 ``_retrieve_chunks_multi`` 放大到最多 8 次。"""
         return self.scale_runtime.projections.total_chunk_count(notebook_id)
 
     def maybe_auto_index(self, notebook_id: str) -> None:
@@ -4211,8 +4211,8 @@ class CandidateRetrievalService(_RetrievalState):
         数——它是触发这次降级的那把守卫读到的同一个数,和事件里的 ``threshold``
         成对解释「为什么降级」。调用方一律走 seq-gated memo 取真实计数
         (``notebook_chunk_count`` → ``knowledge_counts_cache.chunk_count``),
-        不得传 -1 之类的占位值(那会让排查者以为计数探针坏了),也不得为省一次
-        COUNT 而在热路径上裸调 ``chunks.count_row``。
+        不得传 -1 之类的占位值(那会让排查者以为计数探针坏了),也不得在热路径上
+        绕过 memo 直接对 ``chunks`` 表做整库 COUNT。
 
         ``source_restricted`` 是**路由**问题(这次运行真被收窄了吗),由
         ``_retrieve_chunks_baseline`` 现探一次后传下来,不得由

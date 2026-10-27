@@ -40,10 +40,11 @@ def test_cache_transfer_preserves_object_identity(repo):
     assert runtime.knowledge_lifecycle.unified_cache is repo._runtime.retrieval_snapshots.unified_cache
 
 
-def test_facade_vector_cache_setter_updates_all_consumers(repo):
+def test_replacing_the_snapshot_vector_cache_reaches_the_mutation_coordinator(repo):
+    """The coordinator reads the vector cache through the snapshot cache
+    instead of holding the object it was wired with."""
     replacement = VectorCache(max_entries=3)
     repo._runtime.retrieval_snapshots.vector_cache = replacement
-    assert repo._runtime.retrieval_snapshots.vector_cache is replacement
     assert repo._runtime.kg_mutations.vector_cache is replacement
 
 
@@ -82,7 +83,7 @@ def test_knowledge_query_invalidates_replaced_notebook_language_map(repo):
     assert notebook_id not in replacement
 
 
-def test_facade_unified_cache_setter_updates_all_consumers(repo):
+def test_runtime_unified_cache_setter_updates_all_consumers(repo):
     replacement: dict = {}
     repo._runtime.set_unified_cache(replacement)
     assert repo._runtime.retrieval_snapshots.unified_cache is replacement

@@ -3398,8 +3398,7 @@ class KnowledgeStore:
 
         ``clear_source_graph_state`` advances ``after_id`` after deleting each
         page, so online delete/reparse never materializes all matching ids or
-        rescans a previously visited key range. The compatibility list API
-        above uses the same cursor while retaining its complete-list contract.
+        rescans a previously visited key range.
         """
         page_limit = max(1, min(int(limit), _DELETE_OBJECT_BATCH_SIZE))
         if self.source_index_backfilled(db, notebook_id):

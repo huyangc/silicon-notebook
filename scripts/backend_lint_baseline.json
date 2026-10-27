@@ -1088,7 +1088,7 @@
     "I001": 1
   },
   "backend/app/services/sqlite_repository.py": {
-    "F401": 20,
+    "F401": 19,
     "I001": 1
   },
   "backend/app/services/structured_retrieval.py": {
