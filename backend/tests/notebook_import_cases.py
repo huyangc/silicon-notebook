@@ -796,6 +796,44 @@ def check_tampered_archives_are_refused(repo, backend: Backend, tmp: Path, monke
     assert_refused(repo, good, "单行上限")
 
 
+def check_unservable_values_are_refused(repo, backend, tmp) -> None:
+    """Values a serving path trusts because this deployment only ever persists
+    them in one shape: an attachment whose MIME type is not one of the image
+    types the asset routes serve inline (HTML, SVG -- with its ``.bin`` file
+    carried), and a source link that is not an http(s) URL, each refuse the
+    whole file in the preflight; nothing remains."""
+    notebook_id = seed_world(repo, backend, "full")
+    good = tmp / "served.snbk"
+    export(repo, notebook_id, good)
+    assets = archive_cases.archive_rows(good)["notebook_assets"]
+    assert assets
+    first = assets[0]["id"]
+    for mime in ("text/html", "image/svg+xml", "IMAGE/PNG"):
+        path = tmp / f"asset-{mime.replace('/', '-').replace('+', '-')}.snbk"
+        rebuild(
+            good, path,
+            rows=lambda table, rows, mime=mime: [
+                {**r, "mime": mime} if r["id"] == first else r for r in rows
+            ] if table == "notebook_assets" else rows,
+            files=lambda carried: {
+                **carried, f"files/assets/{first}.bin": b"<script>alert(document.domain)</script>",
+            },
+        )
+        assert_refused(repo, path, "MIME 类型不在允许的图片类型之内")
+    for url in ("javascript:alert(1)", "file:///etc/passwd", "https://"):
+        path = tmp / f"url-{len(url)}.snbk"
+        rebuild(good, path, rows=lambda table, rows, url=url: [
+            {**rows[0], "source_url": url}, *rows[1:]
+        ] if table == "sources" else rows)
+        assert_refused(repo, path, "来源链接不是 http")
+    # The shapes this deployment does persist still import.
+    fine = tmp / "served-fine.snbk"
+    rebuild(good, fine, rows=lambda table, rows: [
+        {**rows[0], "source_url": "HTTPS://example.org/paper.pdf"}, *rows[1:]
+    ] if table == "sources" else rows)
+    run_import(repo, fine)
+
+
 def check_dangling_ids_inside_json_are_cleared(repo, backend, tmp) -> None:
     """An id inside stored JSON naming no row of the archive is cleared and counted;
     the import still succeeds and no cleared id names a row of the target."""
