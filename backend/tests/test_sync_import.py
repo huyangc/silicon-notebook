@@ -4374,7 +4374,7 @@ def test_import_advances_kg_mutation_seq_past_a_crafted_version_alias(
     # Warm the cache under the crafted (pre-import) version: one node.
     warm = target["repo"].unified_graph(notebook_id, level="concept")
     assert len(warm["nodes"]) == 1
-    assert (notebook_id, "concept") in target["repo"]._unified_cache
+    assert (notebook_id, "concept") in target["repo"]._runtime.retrieval_snapshots.unified_cache
 
     report2 = _import(target, second)
     assert report2.error == ""

@@ -36,14 +36,14 @@ def _star(repo):
 
 def test_neighbors_lazy_matches_db(repo):
     nb = _star(repo)
-    full = repo._unified_graph_full(nb.id, "object")
+    full = repo._runtime.knowledge_lifecycle._unified_graph_full(nb.id, "object")
     # 真·折叠 canonical id:取度数最高的折叠节点(MOSFET 概念,连 gain+bias)
     deg = {}
     for e in full["edges"]:
         deg[e["source_object_id"]] = deg.get(e["source_object_id"], 0) + 1
         deg[e["target_object_id"]] = deg.get(e["target_object_id"], 0) + 1
     hub_id = max(deg, key=deg.get)
-    db_res = repo._kg_neighbors_db(nb.id, hub_id, 50)
+    db_res = repo._runtime.knowledge_lifecycle._kg_neighbors_db(nb.id, hub_id, 50)
     viz_res = repo.kg_neighbors(nb.id, hub_id, 50)
     db_ids = {n["id"] for n in db_res["nodes"]}
     viz_ids = {n["id"] for n in viz_res["nodes"]}
@@ -65,6 +65,6 @@ def test_scale_index_isolation(repo):
 def test_empty_notebook_falls_back(repo):
     nb = repo.create_notebook(NotebookCreate(name="empty"))
     # 空库:_viz_index None,unified_graph 走全量派生(不报错,空结果)
-    assert repo._viz_index(nb.id) is None
+    assert repo._runtime.scale_artifacts.viz_index(nb.id) is None
     g = repo.unified_graph(nb.id, level="object", limit=2)
     assert g["nodes"] == [] and g["total_nodes"] == 0

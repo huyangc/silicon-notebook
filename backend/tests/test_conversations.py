@@ -457,19 +457,19 @@ def test_list_conversations_used_reasoning_last_turn(repo):
     assert used_reasoning(cid) is False
 
     # 2) 追加一条推理轮（带非空 reasoning_trace）→ 最后一轮推理 → True
-    repo._save_answer(
+    repo._runtime.ask_component._save_answer(
         nb.id, "q2",
         AskResponse(conclusion="c", conversation_id=cid,
                     reasoning_trace=[TraceStep(step_type="answer", summary="s")]),
-        conversation_id=cid,
+        conversation_id=cid, user_id=repo.current_user().id
     )
     assert used_reasoning(cid) is True
 
     # 3) 再追加一条快速轮 → 最后一轮又变快速 → False（证明看的是"最后一轮"而非"任意一轮"）
-    repo._save_answer(
+    repo._runtime.ask_component._save_answer(
         nb.id, "q3",
         AskResponse(conclusion="c", conversation_id=cid),
-        conversation_id=cid,
+        conversation_id=cid, user_id=repo.current_user().id
     )
     assert used_reasoning(cid) is False
 
@@ -480,11 +480,11 @@ def test_list_conversations_used_reasoning_last_turn(repo):
             "VALUES (?,?,?,?,?,?)",
             ("conv-r", nb.id, "r", repo.current_user().id, "t", "t"),
         )
-    repo._save_answer(
+    repo._runtime.ask_component._save_answer(
         nb.id, "qr",
         AskResponse(conclusion="c", conversation_id="conv-r",
                     reasoning_trace=[TraceStep(step_type="answer", summary="s")]),
-        conversation_id="conv-r",
+        conversation_id="conv-r", user_id=repo.current_user().id
     )
     assert used_reasoning("conv-r") is True
 
@@ -516,11 +516,11 @@ def test_get_conversation_used_reasoning_reflects_last_turn(repo):
     r = repo.ask(nb.id, AskRequest(question="q1"))
     cid = r.conversation_id
     assert repo.get_conversation(cid).used_reasoning is False   # 末轮快速
-    repo._save_answer(
+    repo._runtime.ask_component._save_answer(
         nb.id, "q2",
         AskResponse(conclusion="c", conversation_id=cid,
                     reasoning_trace=[TraceStep(step_type="answer", summary="s")]),
-        conversation_id=cid,
+        conversation_id=cid, user_id=repo.current_user().id
     )
     assert repo.get_conversation(cid).used_reasoning is True    # 末轮推理
 

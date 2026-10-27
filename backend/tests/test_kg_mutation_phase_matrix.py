@@ -235,9 +235,9 @@ def test_runtime_coordinator_shares_facade_cache_objects(repo):
     no replacement caches are allocated (Task 17 transfers ownership later)."""
     coordinator = repo._runtime.kg_mutations
     assert coordinator.unified_store is repo._runtime.unified_kg
-    assert coordinator.unified_cache is repo._unified_cache
-    assert coordinator.vector_cache is repo._vector_cache
-    assert coordinator.auto_index_checked is repo._auto_index_checked
+    assert coordinator.snapshots is repo._runtime.retrieval_snapshots
+    assert coordinator.vector_cache is repo._runtime.retrieval_snapshots.vector_cache
+    assert coordinator.auto_index_checked is repo._runtime.scale_artifacts.auto_index_checked
     assert coordinator.notebook_languages is repo._notebook_langs_cache
 
 
@@ -549,7 +549,7 @@ def test_approve_promotion_bumps_inside_the_transaction_then_embeds(
     base = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base.id)
     repo.replace_notebook_bases(personal.id, [base.id], "user-local")
-    object_id = repo._test_insert_object(
+    object_id = repo._runtime.knowledge_query.insert_test_object(
         personal.id, "claim", {"name": "promotion phase"}
     )
     candidate = repo.propose_promotion(personal.id, object_id)
@@ -900,7 +900,7 @@ def test_migration_and_fixture_writes_bypass_the_coordinator(repo, monkeypatch):
     notebook = repo.create_notebook(NotebookCreate(name="fixture writes"))
     events = []
     _spy_coordinator(repo, monkeypatch, events)
-    repo._test_insert_object(notebook.id, "claim", {"name": "fixture row"})
+    repo._runtime.knowledge_query.insert_test_object(notebook.id, "claim", {"name": "fixture row"})
     assert events == []
 
 

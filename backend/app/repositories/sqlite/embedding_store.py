@@ -297,15 +297,3 @@ class EmbeddingStore:
             (bound.param,),
         ).fetchall()
 
-    @staticmethod
-    def embedded_object_ids(db, notebook_id: str) -> set:
-        """object_ids that already hold a knowledge-payload vector (Task 26:
-        the backfill "have" probe, moved verbatim from the facade)."""
-        return {
-            row["object_id"]
-            for row in db.execute(
-                "SELECT object_id FROM knowledge_embeddings "
-                "WHERE notebook_id = ? AND vector IS NOT NULL",
-                (notebook_id,),
-            ).fetchall()
-        }

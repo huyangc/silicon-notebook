@@ -393,7 +393,7 @@ def test_e_citation_enrichment_e2e_with_real_projected_element(client, edited_en
         object_id="o1", object_type="claim", payload={}, evidence=[evidence], tier="personal",
     )
 
-    citations = repo._citations_from([hit], {element_id}, "KG evidence", notebook_id=nb)
+    citations = repo._runtime.evidence_context_component.citations_from([hit], {element_id}, "KG evidence", notebook_id=nb)
 
     assert len(citations) == 1
     assert citations[0].knowhow is not None

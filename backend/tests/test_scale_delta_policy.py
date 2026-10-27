@@ -79,7 +79,7 @@ def test_default_delta_not_semantically_searched(repo, monkeypatch):
     # semantic match. With delta OFF, cB must NOT appear (it's not in ANN core and
     # the delta brute-force is skipped). FTS can't surface it (no lexical hit).
     qv = repo._embed_query("zeta")
-    out = repo._retrieve_chunks_ann(nb.id, "zeta", qv, idx, recall=10)
+    out = repo.retrieval.candidates._retrieve_chunks_ann(nb.id, "zeta", qv, idx, recall=10)
     assert out is not None
     scored = out[0]
     got = {c.chunk_id for c in scored}
@@ -94,7 +94,7 @@ def test_optin_delta_included(repo, monkeypatch):
     idx = repo._scale_index(nb.id, allow_stale=True)
     assert idx is not None and getattr(idx, "chunk_ann_labels", None)
     qv = repo._embed_query("zeta")
-    out = repo._retrieve_chunks_ann(nb.id, "zeta", qv, idx, recall=10)
+    out = repo.retrieval.candidates._retrieve_chunks_ann(nb.id, "zeta", qv, idx, recall=10)
     assert out is not None
     scored = out[0]
     got = {c.chunk_id for c in scored}
@@ -109,10 +109,10 @@ def test_auto_fold_enqueues_when_indexed(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "scale_auto_fold_on_add", True)
     nb = _build_indexed_nb_with_delta(repo)  # already has a scale index
     assert repo._scale_index(nb.id, allow_stale=True) is not None
-    assert nb.id not in repo._scale_idle_queue
-    repo._maybe_enqueue_scale_fold(nb.id)
-    assert nb.id in repo._scale_idle_queue
-    assert repo._scale_idle_queue[nb.id][0] == "fold"
+    assert nb.id not in repo._runtime.scale_artifacts.idle_queue
+    repo._runtime.scale_artifacts.maybe_enqueue_fold(nb.id)
+    assert nb.id in repo._runtime.scale_artifacts.idle_queue
+    assert repo._runtime.scale_artifacts.idle_queue[nb.id][0] == "fold"
 
 
 def test_auto_fold_no_index_does_not_enqueue(repo, monkeypatch):
@@ -123,8 +123,8 @@ def test_auto_fold_no_index_does_not_enqueue(repo, monkeypatch):
     repo.rebuild_unified_kg(nb.id)
     # NO scale index built → must NOT auto-build / enqueue
     assert repo._scale_index(nb.id, allow_stale=True) is None
-    repo._maybe_enqueue_scale_fold(nb.id)
-    assert nb.id not in repo._scale_idle_queue
+    repo._runtime.scale_artifacts.maybe_enqueue_fold(nb.id)
+    assert nb.id not in repo._runtime.scale_artifacts.idle_queue
 
 
 def test_auto_fold_disabled_does_not_enqueue(repo, monkeypatch):
@@ -132,8 +132,8 @@ def test_auto_fold_disabled_does_not_enqueue(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "scale_auto_fold_on_add", False)
     nb = _build_indexed_nb_with_delta(repo)  # has index + delta
     assert repo._scale_index(nb.id, allow_stale=True) is not None
-    repo._maybe_enqueue_scale_fold(nb.id)
-    assert nb.id not in repo._scale_idle_queue
+    repo._runtime.scale_artifacts.maybe_enqueue_fold(nb.id)
+    assert nb.id not in repo._runtime.scale_artifacts.idle_queue
 
 
 # ── Test 4: status exposes pending-unindexed ──────────────────────────────────

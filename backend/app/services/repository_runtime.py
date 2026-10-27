@@ -1517,11 +1517,15 @@ class RepositoryRuntime:
         self.models.close()
         self.database.close()
 
+    # 测试观察点（替换缝）：用例换掉统一图缓存时，快照缓存与生命周期服务
+    # 持有的同一个对象一起换。
     def set_unified_cache(self, value: dict) -> None:
         self.retrieval_snapshots.unified_cache = value
         if self.knowledge_lifecycle is not None:
             self.knowledge_lifecycle.unified_cache = value
 
+    # 测试观察点（替换缝）：用例换掉自动建索引的已查集合时，规模运行时与
+    # KG 变更协调器持有的同一个对象一起换。
     def set_auto_index_checked(self, value: set) -> None:
         if self.scale_artifacts is None:
             raise RuntimeError("scale runtime is not wired")

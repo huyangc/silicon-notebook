@@ -56,7 +56,7 @@ def _seed_chunks_and_kg(repo):
 
 def test_mix_retrieve_merges_vector_and_kg_source_chunks(repo):
     nb = _seed_chunks_and_kg(repo)
-    cand, block, id_map, kg_hits, _ppr_n = repo._mix_retrieve(nb.id, "cascode", "", ["cascode"])
+    cand, block, id_map, kg_hits, _ppr_n = repo.retrieval.candidates._mix_retrieve(nb.id, "cascode", "", ["cascode"])
     ids = {c.chunk_id for c in cand}
     assert "ck-kg" in ids                       # KG 源 chunk 进了候选池
     assert isinstance(block, str) and isinstance(id_map, dict)
@@ -66,7 +66,7 @@ def test_mix_retrieve_merges_vector_and_kg_source_chunks(repo):
 
 def test_mix_retrieve_handles_multiple_vector_subqueries(repo):
     nb = _seed_chunks_and_kg(repo)
-    cand, _block, _id_map, _kg_hits, _ppr_n = repo._mix_retrieve(
+    cand, _block, _id_map, _kg_hits, _ppr_n = repo.retrieval.candidates._mix_retrieve(
         nb.id, "cascode", "", ["cascode", "output resistance"])
     assert cand
     assert all(isinstance(c, RetrievedChunk) for c in cand)
@@ -178,8 +178,8 @@ def test_chunk_answer_context_budget_override(repo):
     chunks = [RetrievedChunk(chunk_id=f"c{i}", source_id="s", source_title="D",
                              section_path="1", text=str(i) * 500, relevance=0.5)
               for i in range(10)]
-    _, idmap_small = repo._chunk_answer_context(chunks, budget_chars=100)
-    _, idmap_big = repo._chunk_answer_context(chunks, budget_chars=10**9)
+    _, idmap_small = repo._runtime.evidence_context_component.chunk_context(chunks, notebook_id="", budget_chars=100)
+    _, idmap_big = repo._runtime.evidence_context_component.chunk_context(chunks, notebook_id="", budget_chars=10**9)
     assert len(idmap_big) == 10
     assert len(idmap_small) < 10
 
@@ -192,7 +192,7 @@ def test_answer_mix_resolves_chunk_and_kg_anchors(repo):
     kg_id_map = {"k1001": {"object_id": "obj-a", "object_type": "concept",
                            "name": "Cascode", "snippet": "", "definition": "",
                            "source_title": "", "location_label": "", "tier": "personal"}}
-    answer, grounded, anchors = repo._answer_mix("q", chunks, kg_block, kg_id_map, "")
+    answer, grounded, anchors = repo._runtime.ask_component._answer_mix("q", chunks, kg_block, kg_id_map, "")
     keys = {a.key for a in anchors}
     assert "k1" in keys and "k1001" in keys
     types = {a.object_type for a in anchors}
@@ -239,7 +239,7 @@ def test_answer_mix_caps_chunks_below_kg_key_base(repo):
     kg_id_map = {"k1001": {"object_id": "obj-a", "object_type": "concept",
                            "name": "Cascode", "snippet": "", "definition": "",
                            "source_title": "", "location_label": "", "tier": "personal"}}
-    _, _, anchors = repo._answer_mix("q", chunks, kg_block, kg_id_map, "")
+    _, _, anchors = repo._runtime.ask_component._answer_mix("q", chunks, kg_block, kg_id_map, "")
     # k1001 仍解析为 KG concept(未被 chunk 覆盖)
     kg_anchor = [a for a in anchors if a.key == "k1001"]
     assert kg_anchor and kg_anchor[0].object_type == "concept"

@@ -14,7 +14,7 @@ def repo(tmp_path, monkeypatch):
 
 def test_node_context_reads_payload_steps(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    pid = repo._test_insert_object(nb.id, "procedure", {
+    pid = repo._runtime.knowledge_query.insert_test_object(nb.id, "procedure", {
         "name": "Foundation Flow", "section_path": "1 > Flow",
         "steps": [{"name": "import", "element_id": "E0", "quote": "import"},
                   {"name": "floorplan", "element_id": "E1", "quote": "floorplan"}]})
@@ -24,7 +24,7 @@ def test_node_context_reads_payload_steps(repo):
 
 def test_node_context_legacy_procedure_fallback(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    pid = repo._test_insert_object(nb.id, "procedure",
+    pid = repo._runtime.knowledge_query.insert_test_object(nb.id, "procedure",
                                    {"name": "old step", "section_path": "1 > X"})  # no steps[]
     ctx = repo.node_context(nb.id, pid)
     assert isinstance(ctx["steps"], list)
@@ -37,11 +37,11 @@ def test_node_context_legacy_fallback_only_returns_same_section_siblings(repo):
     appear, whether the bound is applied in SQL (section known) or in Python
     (LIMIT fallback) — output for the common case is unchanged."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    pid = repo._test_insert_object(nb.id, "procedure",
+    pid = repo._runtime.knowledge_query.insert_test_object(nb.id, "procedure",
                                    {"name": "step A", "section_path": "1 > X"})
-    repo._test_insert_object(nb.id, "procedure",
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "procedure",
                              {"name": "step B", "section_path": "1 > X"})   # same section
-    repo._test_insert_object(nb.id, "procedure",
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "procedure",
                              {"name": "step C", "section_path": "2 > Y"})   # different section
     ctx = repo.node_context(nb.id, pid)
     names = {s["name"] for s in ctx["steps"]}
@@ -69,9 +69,9 @@ def test_legacy_fallback_under_a_source_ceiling_keeps_only_supported_siblings(re
     """PR-A·A1:兄弟过程只留至少有一条天花板内证据来源的;无证据的兄弟归因不到
     来源,同样丢掉。section 为空时走 keyset 翻页那条路(见下一条用例)。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    pid = repo._test_insert_object(nb.id, "procedure", {"name": "in", "section_path": section})
-    out = repo._test_insert_object(nb.id, "procedure", {"name": "out", "section_path": section})
-    repo._test_insert_object(nb.id, "procedure", {"name": "bare", "section_path": section})
+    pid = repo._runtime.knowledge_query.insert_test_object(nb.id, "procedure", {"name": "in", "section_path": section})
+    out = repo._runtime.knowledge_query.insert_test_object(nb.id, "procedure", {"name": "out", "section_path": section})
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "procedure", {"name": "bare", "section_path": section})
     _set_evidence(repo, pid, ["s-in"])
     _set_evidence(repo, out, ["s-out"])
     assert {s["name"] for s in repo.node_context(nb.id, pid)["steps"]} == {"in", "out", "bare"}
@@ -99,9 +99,9 @@ def test_legacy_fallback_ceiling_pages_past_out_of_ceiling_siblings(repo, monkey
                        (f"ko-crowd-{i:03d}", nb.id, json.dumps({"name": f"crowd {i}"}), out_ev, now, now))
             db.execute("INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) VALUES (?,?,?)",
                        (f"ko-crowd-{i:03d}", "s-out", nb.id))
-    pid = repo._test_insert_object(nb.id, "procedure", {"name": "in"})
+    pid = repo._runtime.knowledge_query.insert_test_object(nb.id, "procedure", {"name": "in"})
     _set_evidence(repo, pid, ["s-in"])
-    sib = repo._test_insert_object(nb.id, "procedure", {"name": "in sibling"})
+    sib = repo._runtime.knowledge_query.insert_test_object(nb.id, "procedure", {"name": "in sibling"})
     _set_evidence(repo, sib, ["s-in"])
     assert sorted(s["name"] for s in repo.node_context(
         nb.id, pid, allowed_source_ids=["s-in"])["steps"]) == ["in", "in sibling"]
@@ -119,7 +119,7 @@ def test_payload_steps_without_a_live_element_are_attributed_to_the_object_sourc
     的 binder 产出的)。该来源在天花板内 → 名字与 quote 都保留(不把合法文字置空);
     在外、或对象没有来源 → 整条步骤丢掉,名字也不返回。缺省时逐值不变。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    pid = repo._test_insert_object(nb.id, "procedure", {
+    pid = repo._runtime.knowledge_query.insert_test_object(nb.id, "procedure", {
         "name": "Flow", "section_path": "1 > Flow",
         "steps": [{"name": "import", "element_id": "E0", "quote": "import q"},
                   {"name": "floorplan", "quote": "floorplan q"}]}, source_id=object_source)

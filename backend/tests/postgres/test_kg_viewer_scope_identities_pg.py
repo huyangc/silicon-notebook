@@ -140,7 +140,7 @@ def test_pg_a_raw_object_is_judged_on_its_own_source_whatever_its_status(repo, m
 
 
 def _legacy(repo, nb, name, section, source_id, evidence):
-    oid = repo._test_insert_object(
+    oid = repo._runtime.knowledge_query.insert_test_object(
         nb, "procedure", {"name": name, "section_path": section}, source_id=source_id)
     raw = json.dumps(evidence)
     with repo._runtime.database.write() as db:

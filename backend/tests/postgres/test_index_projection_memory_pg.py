@@ -93,10 +93,10 @@ def test_viz_artifact_has_no_memory_object_name_or_memory_only_edge(repo):
     nb_id, canon = seeded["notebook_id"], seeded["canonical"]
 
     manifest = repo._runtime.scale_artifacts.build_viz(nb_id)
-    idx = repo._viz_index(nb_id)
+    idx = repo._runtime.scale_artifacts.viz_index(nb_id)
 
     assert not set(SECRET_NAMES) & set(idx.viz_names)
-    blob = _artifact_bytes(repo._viz_index_dir(nb_id)).lower()
+    blob = _artifact_bytes(str(repo._runtime.scale_artifact_store.viz_dir(nb_id))).lower()
     for secret in SECRET_NAMES:
         assert secret.lower().encode() not in blob
     for object_id in seeded["memory_object_ids"]:
@@ -116,7 +116,7 @@ def test_viz_artifact_has_no_memory_object_name_or_memory_only_edge(repo):
 def test_the_relation_read_excludes_memory_relations_between_visible_nodes(repo):
     seeded = seed_shared_notebook_with_memory(repo)
     ids = seeded["canonical"]
-    lite = repo._derive_object_graph_lite(seeded["notebook_id"])
+    lite = repo._runtime.scale_builder._derive_object_graph_lite(seeded["notebook_id"])
     pairs = {
         (e["source_object_id"], e["target_object_id"], e["edge_type"])
         for e in lite["edges"]
@@ -173,10 +173,10 @@ def test_a_viz_built_before_the_isolation_is_stale_after_it(repo):
     seeded = seed_shared_notebook_with_memory(repo)
     nb_id = seeded["notebook_id"]
     repo._runtime.scale_artifacts.build_viz(nb_id)
-    assert repo._viz_index_probe(nb_id)["viz_stale"] is False
-    make_it_look_pre_isolation(repo._viz_index_dir(nb_id))
-    repo._viz_idx_cache.pop(nb_id, None)
-    assert repo._viz_index_probe(nb_id)["viz_stale"] is True
+    assert repo._runtime.scale_artifacts.viz_probe(nb_id)["viz_stale"] is False
+    make_it_look_pre_isolation(str(repo._runtime.scale_artifact_store.viz_dir(nb_id)))
+    repo._runtime.scale_artifacts.viz_cache.pop(nb_id, None)
+    assert repo._runtime.scale_artifacts.viz_probe(nb_id)["viz_stale"] is True
 
 
 def test_scale_index_holds_no_memory_object_relation_edge_or_source(repo):
@@ -260,7 +260,7 @@ def test_fold_refuses_an_index_that_was_built_over_memory_sources(repo, monkeypa
     )
     with open(path, "w") as handle:
         json.dump(manifest, handle)
-    repo._scale_idx_cache.pop(nb_id, None)
+    repo._runtime.scale_artifacts.scale_cache.pop(nb_id, None)
     before = manifest["build_id"]
 
     events = []
@@ -283,10 +283,10 @@ def _build_the_way_the_previous_release_did(repo, seeded):
     with repo._write() as db:
         db.execute("UPDATE sources SET source_type='md' WHERE id='src-memory'")
     repo._runtime.scale_artifacts.build_viz(nb_id)
-    make_it_look_pre_isolation(repo._viz_index_dir(nb_id))
+    make_it_look_pre_isolation(str(repo._runtime.scale_artifact_store.viz_dir(nb_id)))
     with repo._write() as db:
         db.execute("UPDATE sources SET source_type='memory' WHERE id='src-memory'")
-    repo._viz_idx_cache.pop(nb_id, None)
+    repo._runtime.scale_artifacts.viz_cache.pop(nb_id, None)
     old = repo._runtime.scale_artifacts.artifacts.load_viz(nb_id)
     assert set(SECRET_NAMES) <= set(old.viz_names)
     assert "memory_isolation" not in old.manifest
@@ -298,8 +298,8 @@ def test_a_large_notebook_does_not_serve_a_viz_built_before_the_isolation(repo, 
     _build_the_way_the_previous_release_did(repo, seeded)
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
 
-    assert repo._viz_index(nb_id) is None
-    probe = repo._viz_index_probe(nb_id)
+    assert repo._runtime.scale_artifacts.viz_index(nb_id) is None
+    probe = repo._runtime.scale_artifacts.viz_probe(nb_id)
     assert (probe["viz_indexed"], probe["viz_nodes"], probe["viz_edges"]) == (False, 0, 0)
     graph = repo.unified_graph(nb_id, "object", 10)
     assert graph["nodes"] == [] and graph["viz_unavailable"] is True
@@ -310,7 +310,7 @@ def test_a_small_notebook_rebuilds_a_viz_built_before_the_isolation_on_the_spot(
     nb_id = seeded["notebook_id"]
     _build_the_way_the_previous_release_did(repo, seeded)
 
-    idx = repo._viz_index(nb_id)
+    idx = repo._runtime.scale_artifacts.viz_index(nb_id)
     assert idx is not None
     assert not set(SECRET_NAMES) & set(idx.viz_names)
     assert not set(seeded["memory_object_ids"]) & set(idx.viz_ids)
@@ -322,11 +322,11 @@ def test_viz_does_not_fold_a_shared_object_into_a_cluster_that_holds_memory(repo
     nb_id, ids = seeded["notebook_id"], seeded["objects"]
     mix_a_shared_object_into_a_memory_cluster(repo, seeded)
     repo._runtime.scale_artifacts.build_viz(nb_id)
-    idx = repo._viz_index(nb_id)
+    idx = repo._runtime.scale_artifacts.viz_index(nb_id)
     assert not any("secret" in str(v).lower()
                    for v in list(idx.viz_ids) + list(idx.viz_names))
     assert ids["left"] in idx.viz_ids
-    assert b"secret" not in _artifact_bytes(repo._viz_index_dir(nb_id)).lower()
+    assert b"secret" not in _artifact_bytes(str(repo._runtime.scale_artifact_store.viz_dir(nb_id))).lower()
 
 
 def test_a_memory_vector_takes_no_synonym_neighbour_slot(repo, monkeypatch):
@@ -477,7 +477,7 @@ def test_a_relation_without_a_source_is_kept_in_a_notebook_holding_memory(repo):
             ("kr-no-source", nb_id, ids["bias"], ids["right"], "depends_on",
              "[]", "2026-09-29T00:00:00", "pending"),
         )
-    lite = repo._derive_object_graph_lite(nb_id)
+    lite = repo._runtime.scale_builder._derive_object_graph_lite(nb_id)
     assert (canon["bias"], canon["right"], "depends_on") in {
         (e["source_object_id"], e["target_object_id"], e["edge_type"])
         for e in lite["edges"]

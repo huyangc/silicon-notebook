@@ -651,7 +651,7 @@
     "I001": 1
   },
   "backend/app/repositories/sqlite/maintenance.py": {
-    "I001": 2
+    "I001": 1
   },
   "backend/app/repositories/sqlite/memory_store.py": {
     "I001": 1

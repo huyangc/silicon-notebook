@@ -46,7 +46,7 @@ def _seed_source_with_elements(repo, texts):
 
 def test_chunk_and_embed_writes_chunks_and_vectors(repo):
     nb, sid = _seed_source_with_elements(repo, ["x"*300, "y"*300, "z"*300])
-    repo._chunk_and_embed_source(sid)
+    repo._runtime.source_chunking.chunk_and_embed_source(sid)
     with repo._connect() as db:
         nchunks = db.execute("SELECT COUNT(*) c FROM chunks WHERE source_id=?", (sid,)).fetchone()["c"]
         nemb = db.execute("SELECT COUNT(*) c FROM chunk_embeddings WHERE notebook_id=?", (nb.id,)).fetchone()["c"]
@@ -59,7 +59,7 @@ def test_chunk_and_embed_writes_chunks_and_vectors(repo):
 
 def test_chunk_matrix_loads(repo):
     nb, sid = _seed_source_with_elements(repo, ["alpha "*60, "beta "*60])
-    repo._chunk_and_embed_source(sid)
+    repo._runtime.source_chunking.chunk_and_embed_source(sid)
     with repo._connect() as db:
         ids, mat = repo._vector_matrix(db, nb.id, "chunk_embeddings", "chunk_id")
     assert len(ids) >= 1 and mat.shape[0] == len(ids)
@@ -67,8 +67,8 @@ def test_chunk_matrix_loads(repo):
 
 def test_build_chunks_idempotent(repo):
     nb, sid = _seed_source_with_elements(repo, ["x"*300, "y"*300])
-    repo._chunk_and_embed_source(sid)
-    repo._chunk_and_embed_source(sid)            # second run must not duplicate
+    repo._runtime.source_chunking.chunk_and_embed_source(sid)
+    repo._runtime.source_chunking.chunk_and_embed_source(sid)            # second run must not duplicate
     with repo._connect() as db:
         n = db.execute("SELECT COUNT(*) c FROM chunks WHERE source_id=?", (sid,)).fetchone()["c"]
         ne = db.execute("SELECT COUNT(*) c FROM chunk_embeddings WHERE notebook_id=?", (nb.id,)).fetchone()["c"]

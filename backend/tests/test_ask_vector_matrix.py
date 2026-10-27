@@ -37,13 +37,13 @@ def test_gather_elements_without_vectors_skips_load(repo):
     # with_vectors=False must not populate the 'vector' field (avoids json.loads)
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     with repo._connect() as db:
-        els = repo._gather_elements(db, nb.id, with_vectors=False)
+        els = repo.retrieval.candidates._gather_elements(db, nb.id, with_vectors=False)
     assert all(e["vector"] is None for e in els)
 
 
 def test_vector_matrix_builds_from_embeddings(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    oid = repo._test_insert_object(nb.id, "concept", {"name": "MOSFET"})
+    oid = repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": "MOSFET"})
     repo._embed_objects_batch(nb.id, [{"_oid": oid, "payload": {"name": "MOSFET"}}])
     with repo._connect() as db:
         ids, mat = repo.retrieval.candidates._vector_matrix(db, nb.id, "knowledge_embeddings", "object_id")
@@ -105,7 +105,7 @@ def test_ask_matrix_path_returns_matching_object(repo):
     # P4-5: ask_fast retired; verify vector-matrix path via _retrieve_scored directly.
     bind_chat_client(repo, "ask_answer", _FakeLLM())
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    oid = repo._test_insert_object(nb.id, "claim", {"name": "Engram improves perplexity"})
+    oid = repo._runtime.knowledge_query.insert_test_object(nb.id, "claim", {"name": "Engram improves perplexity"})
     repo._embed_objects_batch(nb.id, [{"_oid": oid, "payload": {"name": "Engram improves perplexity"}}])
     hits = repo.retrieval.candidates._retrieve_scored(nb.id, "does engram improve perplexity")
     assert any("Engram" in (h.payload.get("name") or "") for h in hits)
@@ -114,12 +114,12 @@ def test_ask_matrix_path_returns_matching_object(repo):
 def test_ask_does_not_backfill_missing_knowledge_embeddings(repo, monkeypatch):
     bind_chat_client(repo, "ask_answer", _FakeLLM())
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo._test_insert_object(nb.id, "claim", {"name": "Channel loss depends on equalization"})
+    repo._runtime.knowledge_query.insert_test_object(nb.id, "claim", {"name": "Channel loss depends on equalization"})
 
     def fail_backfill(*args, **kwargs):
         raise AssertionError("ask() must not synchronously backfill knowledge embeddings")
 
-    monkeypatch.setattr(repo._runtime.source_embedding, "backfill_knowledge_embeddings", fail_backfill)
+    monkeypatch.setattr(repo._runtime.source_embedding, "embed_objects_batch", fail_backfill)
     resp = repo.ask(nb.id, AskRequest(question="channel loss equalization"))
     assert resp.conversation_id
     assert resp.answer_id
@@ -132,7 +132,7 @@ def test_ask_does_not_load_all_source_elements_for_citation_validation(repo, mon
     # graph ask engine, which also inherited it, has since been retired in turn).
     bind_chat_client(repo, "ask_answer", _FakeLLM())
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    oid = repo._test_insert_object(nb.id, "claim", {"name": "Finite cable bandwidth attenuates high frequencies"})
+    oid = repo._runtime.knowledge_query.insert_test_object(nb.id, "claim", {"name": "Finite cable bandwidth attenuates high frequencies"})
     repo._embed_objects_batch(nb.id, [{"_oid": oid, "payload": {"name": "Finite cable bandwidth attenuates high frequencies"}}])
     hits = repo.retrieval.candidates._retrieve_scored(nb.id, "why does cable bandwidth matter")
     assert any("bandwidth" in (h.payload.get("name") or "").lower() for h in hits)
@@ -172,7 +172,7 @@ def test_stream_seed_reps_pass_b_mixed_json_and_blob_matches_all_json_oracle(rep
     for oid, name, vec, mode in specs:
         _seed_concept_with_vector(repo, nb.id, oid, name, vec, now, mode)
 
-    reps_mixed, members_mixed, _ = repo._stream_seed_reps(
+    reps_mixed, members_mixed, _ = repo._runtime.knowledge_lifecycle._stream_seed_reps(
         nb.id, "concept", concept_seed_version=1, run_id="r1", compute_reps=True)
 
     # Oracle: identical concepts/vectors, all stored as legacy JSON text.
@@ -180,7 +180,7 @@ def test_stream_seed_reps_pass_b_mixed_json_and_blob_matches_all_json_oracle(rep
     nb2 = repo.create_notebook(NotebookCreate(name="nb2"))
     for oid, name, vec, _mode in specs:
         _seed_concept_with_vector(repo, nb2.id, f"{oid}-o", name, vec, now, "json")
-    reps_oracle, members_oracle, _ = repo._stream_seed_reps(
+    reps_oracle, members_oracle, _ = repo._runtime.knowledge_lifecycle._stream_seed_reps(
         nb2.id, "concept", concept_seed_version=1, run_id="r2", compute_reps=True)
 
     assert set(reps_mixed.keys()) == set(reps_oracle.keys()) == {"widget", "gadget assembly"}
@@ -201,7 +201,7 @@ def test_stream_seed_reps_pass_b_skips_wrong_dim_blob_row(repo):
     _seed_concept_with_vector(repo, nb.id, "ko-good", "widget", good_vec, now, "blob")
     _seed_concept_with_vector(repo, nb.id, "ko-bad", "gadget", bad_vec, now, "blob")
 
-    reps, members, _ = repo._stream_seed_reps(
+    reps, members, _ = repo._runtime.knowledge_lifecycle._stream_seed_reps(
         nb.id, "concept", concept_seed_version=1, run_id="r1", compute_reps=True)
 
     assert "widget" in reps  # good vector produced a rep

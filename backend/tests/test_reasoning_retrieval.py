@@ -332,7 +332,7 @@ def test_retrieve_neighbors_follows_edges(rrepo):
     nb = _seed_two_nodes(rrepo)
     claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
                  if h.object_type == "claim")
-    expansion = rrepo._retrieve_neighbors(nb.id, claim.object_id)
+    expansion = rrepo.retrieval.candidates.retrieve_neighbors(nb.id, claim.object_id)
     assert expansion.truncated is False
     neigh = expansion.hits
     assert any(n.object_type == "procedure" for n in neigh)
@@ -344,7 +344,7 @@ def test_retrieve_neighbors_edge_type_filter(rrepo):
     nb = _seed_two_nodes(rrepo)
     claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
                  if h.object_type == "claim")
-    assert rrepo._retrieve_neighbors(
+    assert rrepo.retrieval.candidates.retrieve_neighbors(
         nb.id, claim.object_id, edge_type="nonexistent").hits == []
 
 
@@ -369,7 +369,7 @@ def test_retrieve_neighbors_bounds_each_direction_and_reports_truncation(rrepo):
     """病态枢纽节点的邻居展开必须按上限有界,并如实报告被截断。"""
     nb, hub = _seed_hub(rrepo, fan_out=4)
     rrepo.settings.reasoning_neighbor_expand_limit = 2
-    expansion = rrepo._retrieve_neighbors(nb.id, hub)
+    expansion = rrepo.retrieval.candidates.retrieve_neighbors(nb.id, hub)
     assert expansion.truncated is True
     assert len(expansion.hits) == 2
 
@@ -378,7 +378,7 @@ def test_retrieve_neighbors_at_exactly_the_limit_is_not_truncated(rrepo):
     """恰好 limit 条邻居不算截断——哨兵行(limit+1)存在就是为了区分这两种。"""
     nb, hub = _seed_hub(rrepo, fan_out=2)
     rrepo.settings.reasoning_neighbor_expand_limit = 2
-    expansion = rrepo._retrieve_neighbors(nb.id, hub)
+    expansion = rrepo.retrieval.candidates.retrieve_neighbors(nb.id, hub)
     assert expansion.truncated is False
     assert len(expansion.hits) == 2
 
@@ -422,7 +422,7 @@ def test_expand_path_pushes_the_bound_into_the_store_query(rrepo, monkeypatch):
         return rows
 
     monkeypatch.setattr(knowledge, "neighbor_ids", spy)
-    expansion = rrepo._retrieve_neighbors(nb.id, hub)
+    expansion = rrepo.retrieval.candidates.retrieve_neighbors(nb.id, hub)
 
     assert [endpoint for endpoint, *_ in calls] == [
         "source_object_id", "target_object_id"]
@@ -498,7 +498,7 @@ def test_duplicate_and_unqueryable_relations_do_not_eat_the_neighbour_budget(
         ("rel-07", 3, "defines"),
     ])
     rrepo.settings.reasoning_neighbor_expand_limit = 3
-    expansion = rrepo._retrieve_neighbors(nb.id, hub)
+    expansion = rrepo.retrieval.candidates.retrieve_neighbors(nb.id, hub)
 
     names = sorted(hit.payload["name"] for hit in expansion.hits)
     assert names == ["邻居0", "邻居1", "邻居2"]   # 取满 3 个唯一邻居
@@ -523,7 +523,7 @@ def test_unusable_neighbours_do_not_eat_the_bounded_read_window(rrepo):
         deprecated=(0, 1, 2),
     )
     rrepo.settings.reasoning_neighbor_expand_limit = 2
-    expansion = rrepo._retrieve_neighbors(nb.id, hub)
+    expansion = rrepo.retrieval.candidates.retrieve_neighbors(nb.id, hub)
 
     names = [hit.payload["name"] for hit in expansion.hits]
     assert names == ["邻居3"]          # 事后过滤的实现在这里拿到 0 个
@@ -619,7 +619,7 @@ def test_answer_reasoning_passes_reasoning_timeout_and_retries(rrepo):
     rrepo.settings.reasoning_max_retries = 2
     llm = _AnswerRecordingLLM()
     bind_chat_client(rrepo, "ask_answer", llm)
-    rrepo._answer_reasoning(nb.id, "问题", [], [], "")
+    rrepo._runtime.ask_component._answer_reasoning(nb.id, "问题", [], [], "")
     assert llm.calls, "_answer_reasoning must call chat_json"
     assert llm.calls[0].get("timeout") == 88
     assert llm.calls[0].get("max_retries") == 2
@@ -634,7 +634,7 @@ def test_refine_context_passes_reasoning_kwargs(rrepo):
     rrepo.settings.kg_query_refine_enabled = True
     llm = _AnswerRecordingLLM()
     # Call _refine_context directly with a non-empty context block.
-    rrepo._refine_context("问题", "k1: RTL到GDSII流程概述", llm)
+    rrepo._runtime.ask_component._refine_context("问题", "k1: RTL到GDSII流程概述", llm)
     assert llm.calls, "_refine_context must call chat_json"
     assert llm.calls[0].get("timeout") == 77
     assert llm.calls[0].get("max_retries") == 3
@@ -914,7 +914,7 @@ def test_run_follow_chain_rejects_start_outside_current_candidates(rrepo, monkey
 
 def test_answer_reasoning_renders_citable_hops_and_uncited_inference(rrepo):
     nb, ids = _seed_follow_chain(rrepo)
-    chain_result = rrepo._follow_chain(
+    chain_result = rrepo.retrieval.graph.follow_chain(
         nb.id, ids["Premise A"], edge_type="derived_from")
     assert chain_result.inferences
 
@@ -938,7 +938,7 @@ def test_answer_reasoning_renders_citable_hops_and_uncited_inference(rrepo):
     llm = _ChainAnswerLLM()
     bind_chat_client(rrepo, "ask_answer", llm)
     rrepo.settings.kg_query_refine_enabled = False
-    answer, grounded, anchors, _counts = rrepo._answer_reasoning(
+    answer, grounded, anchors, _counts = rrepo._runtime.ask_component._answer_reasoning(
         nb.id, "derive", chain_result.nodes, [], "",
         chains=chain_result.inferences)
     assert grounded is True
@@ -965,9 +965,9 @@ def test_grouped_answer_markers_fail_closed_when_any_key_is_unknown(rrepo, openi
             "name": "B --derived_from--> C",
         },
     }
-    anchors = rrepo._parse_answer_anchors("premises " + opening + "k2001" + separator + "k2002" + closing, id_map)
+    anchors = rrepo._runtime.evidence_context_component.parse_anchors("premises " + opening + "k2001" + separator + "k2002" + closing, id_map)
     assert [a.key for a in anchors] == ["k2001", "k2002"]
-    assert rrepo._parse_answer_anchors("mixed " + opening + "k2001" + separator + "k9999" + closing, id_map) == []
+    assert rrepo._runtime.evidence_context_component.parse_anchors("mixed " + opening + "k2001" + separator + "k9999" + closing, id_map) == []
 
 
 def test_run_dedups_expand_and_respects_step_cap(rrepo):
@@ -3642,7 +3642,7 @@ def _seed_notebook_without_kg(repo, texts=("布局布线阶段先全局布局再
                 "location_label,text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
                 (f"el-{sid}-{index:04d}", sid, "paragraph", f"p{index}", text,
                  "{}", now))
-    repo._chunk_and_embed_source(sid)
+    repo._runtime.source_chunking.chunk_and_embed_source(sid)
     return nb
 
 

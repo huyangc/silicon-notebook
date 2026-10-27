@@ -655,10 +655,10 @@ def check_stale_relation_ann_label(world, monkeypatch) -> None:
         candidates, "_relation_ann_candidates",
         lambda *_a, **_k: {by_source["src-mb"]: 0.99, by_source["src-s"]: 0.5},
     )
-    unscoped = world.repo._retrieve_relations_scored(world.nb, B_PRIVATE)
+    unscoped = world.repo.retrieval.candidates._retrieve_relations_scored(world.nb, B_PRIVATE)
     assert by_source["src-mb"] in {hit.relation_id for hit in unscoped}  # control
     with source_scope_context(world.nb, ceiling_for_a(world)):
-        hits = world.repo._retrieve_relations_scored(world.nb, B_PRIVATE)
+        hits = world.repo.retrieval.candidates._retrieve_relations_scored(world.nb, B_PRIVATE)
         kept = filter_retrieval_items(world.nb, "relation", hits)
     assert by_source["src-mb"] not in {hit.relation_id for hit in kept}
 

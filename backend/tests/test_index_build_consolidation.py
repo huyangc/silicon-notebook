@@ -153,41 +153,32 @@ def test_index_status_mixed_pending_is_visible_but_job_total_is_physical(repo):
 def test_cancel_dequeues_queued(repo):
     nb = repo.create_notebook(NotebookCreate(name="q"))
     # 手动放入空闲队列(镜像 trigger_scale_index_rebuild(when=idle) 的效果)
-    with repo._scale_building_lock:
-        repo._scale_idle_queue[nb.id] = ("auto", "2026-01-01T00:00:00.000000+00:00")
+    with repo._runtime.scale_artifacts.building_lock:
+        repo._runtime.scale_artifacts.idle_queue[nb.id] = ("auto", "2026-01-01T00:00:00.000000+00:00")
     assert repo.scale_index_status(nb.id)["state"] == "queued"
     out = repo.cancel_scale_index(nb.id)
     assert out["cancelled"] is True
-    assert nb.id not in repo._scale_idle_queue
+    assert nb.id not in repo._runtime.scale_artifacts.idle_queue
     assert repo.scale_index_status(nb.id)["state"] != "queued"
 
 
 def test_cancel_building_refuses(repo):
     nb = repo.create_notebook(NotebookCreate(name="b"))
-    with repo._scale_building_lock:
-        repo._scale_building.add(nb.id)
+    with repo._runtime.scale_artifacts.building_lock:
+        repo._runtime.scale_artifacts.building.add(nb.id)
     try:
         out = repo.cancel_scale_index(nb.id)
         assert out["cancelled"] is False
         assert out["reason"] == "building_not_interruptible"
     finally:
-        with repo._scale_building_lock:
-            repo._scale_building.discard(nb.id)
+        with repo._runtime.scale_artifacts.building_lock:
+            repo._runtime.scale_artifacts.building.discard(nb.id)
 
 
 def test_cancel_noop_idempotent(repo):
     nb = repo.create_notebook(NotebookCreate(name="x"))
     out = repo.cancel_scale_index(nb.id)   # 无队列项、未在建
     assert out["cancelled"] is False
-
-
-def test_dequeue_returns_bool(repo):
-    nb = repo.create_notebook(NotebookCreate(name="d"))
-    assert repo._dequeue_scale_idle(nb.id) is False   # 不存在
-    with repo._scale_building_lock:
-        repo._scale_idle_queue[nb.id] = ("auto", "2026-01-01T00:00:00.000000+00:00")
-    assert repo._dequeue_scale_idle(nb.id) is True     # 移除
-    assert repo._dequeue_scale_idle(nb.id) is False    # 再移除幂等
 
 
 def _tiny_indexed_nb(repo):
@@ -225,7 +216,7 @@ def test_status_last_built_at_absent_manifest_safe(repo):
     manifest.pop("built_at", None)        # 模拟旧索引
     with open(mpath, "w") as fh:
         json.dump(manifest, fh)
-    repo._scale_idx_cache.pop(nb.id, None)  # 清进程缓存强制重读
+    repo._runtime.scale_artifacts.scale_cache.pop(nb.id, None)  # 清进程缓存强制重读
     st = repo.scale_index_status(nb.id)
     assert st.get("last_built_at", "") == ""   # 缺键→空,不报错
 

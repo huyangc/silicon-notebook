@@ -46,7 +46,7 @@ def test_retry_recovers_on_second_attempt(repo):
     def synth():
         calls.append(1)
         return ("real [k1]", True, []) if len(calls) == 2 else ("", False, [])
-    ans, g, anc, ok = repo._answer_with_retry(synth, "m")
+    ans, g, anc, ok = repo._runtime.ask_component._answer_with_retry(synth, "m")
     assert ok is True and ans == "real [k1]" and len(calls) == 2
 
 
@@ -58,7 +58,7 @@ def test_retry_all_empty_returns_not_ok_and_notes_error(repo):
     sink: list = []
     tok = _ASK_MODEL_ERRORS.set(sink)
     try:
-        ans, g, anc, ok = repo._answer_with_retry(synth, "m")
+        ans, g, anc, ok = repo._runtime.ask_component._answer_with_retry(synth, "m")
     finally:
         _ASK_MODEL_ERRORS.reset(tok)
     assert ok is False and ans == "" and len(calls) == 2       # 重试一次后仍空
@@ -76,7 +76,7 @@ def test_retry_recovers_after_exception(repo):
         if len(calls) == 1:
             raise RuntimeError("upstream 503")
         return ("recovered [k1]", True, [])
-    ans, g, anc, ok = repo._answer_with_retry(synth, "m")
+    ans, g, anc, ok = repo._runtime.ask_component._answer_with_retry(synth, "m")
     assert ok is True and ans == "recovered [k1]" and len(calls) == 2
 
 
@@ -155,7 +155,7 @@ def _sink_scope(repo, synth):
     sink: list = []
     tok = _ASK_MODEL_ERRORS.set(sink)
     try:
-        return repo._answer_with_retry(synth, "m"), sink
+        return repo._runtime.ask_component._answer_with_retry(synth, "m"), sink
     finally:
         _ASK_MODEL_ERRORS.reset(tok)
 
@@ -236,7 +236,7 @@ def test_earlier_alarms_from_other_workloads_survive(repo):
                   {"stage": "embedding", "message": "upstream_error"}]
     tok = _ASK_MODEL_ERRORS.set(sink)
     try:
-        _ans, _g, _anc, ok = repo._answer_with_retry(synth, "m")
+        _ans, _g, _anc, ok = repo._runtime.ask_component._answer_with_retry(synth, "m")
     finally:
         _ASK_MODEL_ERRORS.reset(tok)
 
@@ -252,7 +252,7 @@ def test_cancellation_propagates_and_touches_nothing(repo):
     tok = _ASK_MODEL_ERRORS.set(sink)
     try:
         with pytest.raises(AskCancelled):
-            repo._answer_with_retry(lambda: (_ for _ in ()).throw(AskCancelled()), "m")
+            repo._runtime.ask_component._answer_with_retry(lambda: (_ for _ in ()).throw(AskCancelled()), "m")
     finally:
         _ASK_MODEL_ERRORS.reset(tok)
 
@@ -271,7 +271,7 @@ def test_without_a_response_sink_the_helper_is_unchanged(repo):
         return ("完整答案 [k1]", True, [])
 
     assert _ASK_MODEL_ERRORS.get() is None
-    ans, _g, _anc, ok = repo._answer_with_retry(synth, "m")
+    ans, _g, _anc, ok = repo._runtime.ask_component._answer_with_retry(synth, "m")
     assert ok is True and ans == "完整答案 [k1]"
 
 
@@ -294,7 +294,7 @@ def test_an_alarm_raised_inside_synth_by_another_workload_survives(repo):
     sink: list = []
     tok = _ASK_MODEL_ERRORS.set(sink)
     try:
-        _ans, _g, _anc, ok = repo._answer_with_retry(synth, "m")
+        _ans, _g, _anc, ok = repo._runtime.ask_component._answer_with_retry(synth, "m")
     finally:
         _ASK_MODEL_ERRORS.reset(tok)
 
@@ -320,7 +320,7 @@ def test_a_recovered_retry_still_drops_only_its_own_answer_alarm(repo):
     sink: list = []
     tok = _ASK_MODEL_ERRORS.set(sink)
     try:
-        _ans, _g, _anc, ok = repo._answer_with_retry(synth, "m")
+        _ans, _g, _anc, ok = repo._runtime.ask_component._answer_with_retry(synth, "m")
     finally:
         _ASK_MODEL_ERRORS.reset(tok)
 

@@ -163,7 +163,7 @@ def _seed_graph_with_isolated_objects(repo) -> tuple:
          "edge_type": "defines", "evidence": []},
     ])
     isolated = [
-        repo._test_insert_object(nb.id, "concept", {"name": f"Lonely {i}"})
+        repo._runtime.knowledge_query.insert_test_object(nb.id, "concept", {"name": f"Lonely {i}"})
         for i in range(4)
     ]
     return nb.id, isolated
@@ -325,7 +325,7 @@ def test_review_queue_rows_filters_cross_notebook_endpoints(repo):
     SQL predicate made it."""
     nb_id, _ = _seed_graph_with_isolated_objects(repo)
     other = repo.create_notebook(NotebookCreate(name="other"))
-    stranger = repo._test_insert_object(other.id, "concept", {"name": "Stranger"})
+    stranger = repo._runtime.knowledge_query.insert_test_object(other.id, "concept", {"name": "Stranger"})
     with repo._write() as db:
         db.execute(
             "UPDATE knowledge_relations SET target_object_id=? "
@@ -531,10 +531,10 @@ def test_promotion_merge_uses_matched_row_evidence(repo):
 
     # Two same-type base objects: a decoy that must NOT be merged into, and the
     # real match. Distinct evidence tells them apart in the assertion.
-    decoy = repo._test_insert_object(base.id, "claim", {"name": "Unrelated claim."})
+    decoy = repo._runtime.knowledge_query.insert_test_object(base.id, "claim", {"name": "Unrelated claim."})
     _set_evidence(repo, decoy, [{"source_id": "s-decoy", "element_id": "e-decoy",
                                  "quoted_span": "decoy"}])
-    existing = repo._test_insert_object(
+    existing = repo._runtime.knowledge_query.insert_test_object(
         base.id, "claim", {"name": "Cascode raises output resistance."})
     base_evidence = [
         {"source_id": "s-base", "element_id": "e-base", "quoted_span": "base span"},
@@ -542,7 +542,7 @@ def test_promotion_merge_uses_matched_row_evidence(repo):
     ]
     _set_evidence(repo, existing, base_evidence)
 
-    oid = repo._test_insert_object(
+    oid = repo._runtime.knowledge_query.insert_test_object(
         nb.id, "claim", {"name": "cascode raises output resistance",
                          "section_path": "1"})
     src_evidence = [
@@ -573,8 +573,8 @@ def test_base_dedup_evidence_reads_the_requested_row(repo):
 
     base = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base.id)
-    a = repo._test_insert_object(base.id, "claim", {"name": "A"})
-    b = repo._test_insert_object(base.id, "claim", {"name": "B"})
+    a = repo._runtime.knowledge_query.insert_test_object(base.id, "claim", {"name": "A"})
+    b = repo._runtime.knowledge_query.insert_test_object(base.id, "claim", {"name": "B"})
     _set_evidence(repo, a, [{"source_id": "sa"}])
     _set_evidence(repo, b, [{"source_id": "sb"}])
     with repo._connect() as db:

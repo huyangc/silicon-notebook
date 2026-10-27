@@ -329,11 +329,10 @@ def the_promotion_source_is_never_a_pipeline_target(world: World) -> None:
     with runtime.database.connect() as db:
         build_rows = runtime.knowledge.source_build_state_page(
             db, world.base, None, "", 100)
-        pending = runtime.queries.pending_kg_source_count(db, world.base)
         visible_pending = runtime.queries.visible_pending_kg_source_count(db, world.base)
         missing_chunks = runtime.queries.sources_missing_chunks(db, world.base)
     assert world.promotion_source not in {str(row["id"]) for row in build_rows}
-    assert (pending, visible_pending) == (0, 0)
+    assert visible_pending == 0
     assert world.promotion_source not in missing_chunks
     targets = repo.maintenance.kg_target_source_rows_page(world.base)
     assert world.promotion_source not in {row["source_id"] for row in targets}
@@ -429,7 +428,7 @@ def the_answer_context_reads_the_entry_as_the_librarys_own(world: World) -> None
             "source_id", "source_title", "element_id", "element_type",
             "location_label", "quoted_span", "confidence")})],
     )
-    _block, id_map = world.repo._answer_context(world.base, [hit])
+    _block, id_map = world.repo._runtime.evidence_context_component.knowledge_context(world.base, [hit])
     (value,) = id_map.values()
     assert value["source_id"] == world.promotion_source
     assert value["element_id"] == entry["element_id"]

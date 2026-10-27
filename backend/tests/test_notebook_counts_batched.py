@@ -25,13 +25,14 @@ def _seed_notebook_with_knowledge(repo, name, type_counts: dict):
     nb = repo.create_notebook(NotebookCreate(name=name))
     for object_type, n in type_counts.items():
         for i in range(n):
-            repo._test_insert_object(nb.id, object_type, {"name": f"{object_type}-{i}"})
+            repo._runtime.knowledge_query.insert_test_object(nb.id, object_type, {"name": f"{object_type}-{i}"})
     return nb
 
 
 def _oracle_notebook_summary(repo, notebook_id):
     """Knowledge-count oracle: the 6 per-type counts via 6 separate
-    _count_knowledge calls (the C5 batched-GROUP-BY equivalence target).
+    ``count_knowledge`` calls over USABLE_STATUSES (the C5 batched-GROUP-BY
+    equivalence target).
 
     NOTE: the ``sources`` field here uses the generic unfiltered
     ``_count(db, "sources", ...)`` helper, which counts ALL rows including
@@ -43,14 +44,14 @@ def _oracle_notebook_summary(repo, notebook_id):
     with repo._connect() as db:
         row = db.execute("SELECT * FROM notebooks WHERE id=?", (notebook_id,)).fetchone()
         counts = {
-            "sources": repo._count(db, "sources", "notebook_id", row["id"]),
+            "sources": repo._runtime.notebook_summaries.count(db, "sources", "notebook_id", row["id"]),
             "memories": 0,
-            "rules": repo._count_knowledge(db, row["id"], "rule"),
-            "cases": repo._count_knowledge(db, row["id"], "case"),
-            "checklist_items": repo._count_knowledge(db, row["id"], "checklist"),
-            "methods": repo._count_knowledge(db, row["id"], "method"),
-            "risks": repo._count_knowledge(db, row["id"], "risk"),
-            "glossary": repo._count_knowledge(db, row["id"], "glossary"),
+            "rules": repo._runtime.knowledge.count_knowledge(db, row["id"], "rule", USABLE_STATUSES),
+            "cases": repo._runtime.knowledge.count_knowledge(db, row["id"], "case", USABLE_STATUSES),
+            "checklist_items": repo._runtime.knowledge.count_knowledge(db, row["id"], "checklist", USABLE_STATUSES),
+            "methods": repo._runtime.knowledge.count_knowledge(db, row["id"], "method", USABLE_STATUSES),
+            "risks": repo._runtime.knowledge.count_knowledge(db, row["id"], "risk", USABLE_STATUSES),
+            "glossary": repo._runtime.knowledge.count_knowledge(db, row["id"], "glossary", USABLE_STATUSES),
         }
     return counts
 
@@ -81,9 +82,9 @@ def test_notebook_counts_zero_type_defaults_to_zero(repo):
 
 def test_notebook_counts_respects_usable_statuses(repo):
     """Only USABLE_STATUSES objects count — a deprecated object must not be
-    counted, matching the old per-type _count_knowledge filter."""
+    counted, matching the old per-type count_knowledge filter."""
     nb = repo.create_notebook(NotebookCreate(name="kb-status"))
-    oid = repo._test_insert_object(nb.id, "rule", {"name": "will be deprecated"})
+    oid = repo._runtime.knowledge_query.insert_test_object(nb.id, "rule", {"name": "will be deprecated"})
     with repo._write() as db:
         db.execute("UPDATE knowledge_objects SET status='deprecated' WHERE id=?", (oid,))
     summary = repo.get_notebook(nb.id)

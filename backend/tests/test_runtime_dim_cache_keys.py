@@ -67,12 +67,12 @@ def _seed_embeddings(repo, nb_id: str, n: int = 3, dim: int = 32):
 def test_vector_matrix_version_includes_runtime_dim(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="b"))
     with repo._connect() as db:
-        v0 = repo._vector_matrix_version(db, nb.id, "knowledge_embeddings")
-        v0_again = repo._vector_matrix_version(db, nb.id, "knowledge_embeddings")
+        v0 = repo.retrieval.candidates._vector_matrix_version(db, nb.id, "knowledge_embeddings")
+        v0_again = repo.retrieval.candidates._vector_matrix_version(db, nb.id, "knowledge_embeddings")
     assert v0 == v0_again, "同配置同数据下版本必须稳定(不虚失效)"
     _switch_runtime_dim(repo, monkeypatch, 16)
     with repo._connect() as db:
-        v1 = repo._vector_matrix_version(db, nb.id, "knowledge_embeddings")
+        v1 = repo.retrieval.candidates._vector_matrix_version(db, nb.id, "knowledge_embeddings")
     assert v1 != v0, "runtime_dim 变化必须改变矩阵缓存版本"
 
 
@@ -100,13 +100,13 @@ def test_vector_matrix_warm_peek_stays_in_sync(repo, monkeypatch):
     _seed_embeddings(repo, nb.id, n=2, dim=32)
     with repo._connect() as db:
         repo._vector_matrix(db, nb.id, "knowledge_embeddings", "object_id")
-        assert repo._vector_matrix_warm(db, nb.id, "knowledge_embeddings") is True
+        assert repo.retrieval.candidates._vector_matrix_warm(db, nb.id, "knowledge_embeddings") is True
     _switch_runtime_dim(repo, monkeypatch, 16)
     with repo._connect() as db:
-        assert repo._vector_matrix_warm(db, nb.id, "knowledge_embeddings") is False, (
+        assert repo.retrieval.candidates._vector_matrix_warm(db, nb.id, "knowledge_embeddings") is False, (
             "切维后旧维矩阵不得判暖")
         repo._vector_matrix(db, nb.id, "knowledge_embeddings", "object_id")
-        assert repo._vector_matrix_warm(db, nb.id, "knowledge_embeddings") is True
+        assert repo.retrieval.candidates._vector_matrix_warm(db, nb.id, "knowledge_embeddings") is True
 
 
 # ── 2. _ppr_graph ────────────────────────────────────────────────────────────
@@ -122,11 +122,11 @@ def test_ppr_graph_version_includes_runtime_dim(repo, monkeypatch):
         return real(*a, **k)
 
     monkeypatch.setattr(ppr_mod, "build_ppr_graph", _spy)
-    repo._ppr_graph(nb.id)
-    repo._ppr_graph(nb.id)
+    repo.retrieval.graph._ppr_graph(nb.id)
+    repo.retrieval.graph._ppr_graph(nb.id)
     assert calls["n"] == 1, "同配置第二次调用必须命中缓存(控制组)"
     _switch_runtime_dim(repo, monkeypatch, 16)
-    repo._ppr_graph(nb.id)
+    repo.retrieval.graph._ppr_graph(nb.id)
     assert calls["n"] == 2, "runtime_dim 变化必须使 PPR 图缓存失效重建"
 
 
@@ -134,10 +134,10 @@ def test_ppr_graph_version_includes_runtime_dim(repo, monkeypatch):
 
 def test_probe_scale_settings_tail_includes_runtime_dim(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="b"))
-    tail0 = repo._probe_scale_version_signal(nb.id)[2]
-    assert tail0 == repo._probe_scale_version_signal(nb.id)[2]
+    tail0 = repo._runtime.index_projections.version_signal(nb.id)[2]
+    assert tail0 == repo._runtime.index_projections.version_signal(nb.id)[2]
     _switch_runtime_dim(repo, monkeypatch, 16)
-    tail1 = repo._probe_scale_version_signal(nb.id)[2]
+    tail1 = repo._runtime.index_projections.version_signal(nb.id)[2]
     assert tail1 != tail0, "settings_tail 必须包含 runtime_dim(scale 索引 stale 判定)"
 
 
@@ -156,24 +156,24 @@ def test_scale_index_version_changes_with_runtime_dim(repo, monkeypatch):
 
 def test_cluster_input_version_changes_with_runtime_dim(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="b"))
-    v0 = repo._cluster_input_version(nb.id)
-    assert v0 == repo._cluster_input_version(nb.id)
+    v0 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
+    assert v0 == repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     _switch_runtime_dim(repo, monkeypatch, 16)
-    v1 = repo._cluster_input_version(nb.id)
+    v1 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     assert v1 != v0, "rebuild 版本闸对 runtime_dim 变化不能跳过重聚"
 
 
 def test_runtime_dim_zero_roundtrip_restores_versions(repo, monkeypatch):
     """切回原值 = 版本键回到原值(键是纯函数,不掺时间戳——PR#132 教训)。"""
     nb = repo.create_notebook(NotebookCreate(name="b"))
-    v0 = repo._cluster_input_version(nb.id)
+    v0 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     with repo._connect() as db:
-        m0 = repo._vector_matrix_version(db, nb.id, "knowledge_embeddings")
+        m0 = repo.retrieval.candidates._vector_matrix_version(db, nb.id, "knowledge_embeddings")
     _switch_runtime_dim(repo, monkeypatch, 16)
     _switch_runtime_dim(repo, monkeypatch, 0)
-    assert repo._cluster_input_version(nb.id) == v0
+    assert repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id) == v0
     with repo._connect() as db:
-        assert repo._vector_matrix_version(db, nb.id, "knowledge_embeddings") == m0
+        assert repo.retrieval.candidates._vector_matrix_version(db, nb.id, "knowledge_embeddings") == m0
 
 
 # ── 5. cross-process kg_mutation_seq advance (codex #772 r18 P2) ────────────
@@ -202,9 +202,9 @@ def test_vector_matrix_version_changes_when_kg_mutation_seq_advances_underneath(
     _seed_embeddings(repo, nb.id, n=2, dim=32)
 
     with repo._connect() as db:
-        v0 = repo._vector_matrix_version(db, nb.id, "knowledge_embeddings")
+        v0 = repo.retrieval.candidates._vector_matrix_version(db, nb.id, "knowledge_embeddings")
         repo._vector_matrix(db, nb.id, "knowledge_embeddings", "object_id")
-        assert repo._vector_matrix_warm(db, nb.id, "knowledge_embeddings") is True
+        assert repo.retrieval.candidates._vector_matrix_warm(db, nb.id, "knowledge_embeddings") is True
 
     # A cross-process importer's own transaction, on its own connection —
     # bumps unified_kg_state.kg_mutation_seq WITHOUT touching
@@ -219,10 +219,10 @@ def test_vector_matrix_version_changes_when_kg_mutation_seq_advances_underneath(
         )
 
     with repo._connect() as db:
-        v1 = repo._vector_matrix_version(db, nb.id, "knowledge_embeddings")
+        v1 = repo.retrieval.candidates._vector_matrix_version(db, nb.id, "knowledge_embeddings")
         assert v1 != v0, (
             "cross-process 导入器推进 kg_mutation_seq 后,向量矩阵版本必须变化"
         )
-        assert repo._vector_matrix_warm(db, nb.id, "knowledge_embeddings") is False, (
+        assert repo.retrieval.candidates._vector_matrix_warm(db, nb.id, "knowledge_embeddings") is False, (
             "导入后旧版本矩阵不得再判暖 —— 否则大库守卫会放行、命中导入前的旧矩阵"
         )

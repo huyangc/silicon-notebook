@@ -309,7 +309,7 @@ def test_cluster_map_invalidates_on_same_second_rename_via_explicit_invalidation
 
     # Without invalidation the stale entry is still what a version-only cache would
     # return (this is exactly what makes the explicit invalidation load-bearing).
-    stale = repo._vector_cache.get(f"{nb.id}:clustermap", ver_after_no_invalidate,
+    stale = repo._runtime.retrieval_snapshots.vector_cache.get(f"{nb.id}:clustermap", ver_after_no_invalidate,
                                     lambda: (_ for _ in ()).throw(AssertionError(
                                         "loader should not run — must be a cache hit")))
     assert stale == {"o1": "K-old-name"}

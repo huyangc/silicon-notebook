@@ -44,8 +44,8 @@ def _repo(tmp_path, *, model_services_config: str = "") -> SQLiteRepository:
     repo = SQLiteRepository(
         _settings(tmp_path, model_services_config=model_services_config)
     )
-    repo._migrate()
-    repo._seed()
+    repo._migrator.migrate()
+    repo._migrator.seed()
     return repo
 
 

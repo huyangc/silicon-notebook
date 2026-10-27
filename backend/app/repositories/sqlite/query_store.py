@@ -608,13 +608,6 @@ class QueryStore:
         return bool(row[0])
 
     @staticmethod
-    def pending_kg_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
-        # Served from the seq-gated count cache (one correlated scan per
-        # kg_mutation_seq instead of ~2s per open at 48k sources).
-        from app.repositories.sqlite import knowledge_counts_cache
-        return knowledge_counts_cache.pending_source_count(db, notebook_id)
-
-    @staticmethod
     def visible_pending_kg_source_count(
         db: sqlite3.Connection, notebook_id: str
     ) -> int:
@@ -630,8 +623,8 @@ class QueryStore:
         user-visible content, which would otherwise double-count next to the
         Memory panel's own count / inflate the count past what list_sources
         shows (SourceStore.list_sources carries the SAME exclusion — see its
-        docstring). Internal paths (pending_kg_source_count above, copy
-        materialization, scale-index scans) keep counting the true full set
+        docstring). Internal paths (copy materialization, scale-index scans)
+        keep counting the true full set
         and must NOT reuse this method."""
         row = db.execute(
             "SELECT COUNT(*) AS count FROM sources "

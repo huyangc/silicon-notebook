@@ -76,7 +76,7 @@ def test_large_notebook_skips_seed_retrieval_entirely(repo, monkeypatch):
     rel_calls = _spy(repo, monkeypatch, "federated_retrieve_relations")
     events = _capture_events(repo, monkeypatch)
 
-    result = repo._chunk_kg_overlay(nb.id, "cascode output resistance", "", id_offset=5)
+    result = repo.retrieval.candidates._chunk_kg_overlay(nb.id, "cascode output resistance", "", id_offset=5)
 
     assert result == ("", {}, [], {})
     assert node_calls["n"] == 0, "large notebook must NOT call federated_retrieve"
@@ -98,7 +98,7 @@ def test_small_notebook_keeps_legacy_seed_retrieval(repo, monkeypatch):
     rel_calls = _spy(repo, monkeypatch, "federated_retrieve_relations")
     events = _capture_events(repo, monkeypatch)
 
-    block, id_map, hits, supports = repo._chunk_kg_overlay(
+    block, id_map, hits, supports = repo.retrieval.candidates._chunk_kg_overlay(
         nb.id, "cascode output resistance", "", id_offset=5
     )
 

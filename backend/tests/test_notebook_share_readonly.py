@@ -214,7 +214,9 @@ def test_ensure_conversation_scoped_to_caller_no_cross_inject(repo):
     tok = set_request_user(mbr)
     try:
         with repo._write() as db:
-            got = repo._ensure_conversation(db, nb, "conv-owner", "member q")
+            got = repo._runtime.ask_state.ensure_conversation(
+                db, nb, "conv-owner", "member q", repo._runtime.ask_component.current_user_id()
+            )
     finally:
         reset_request_user(tok)
     assert got != "conv-owner"   # 没注入 owner 的对话

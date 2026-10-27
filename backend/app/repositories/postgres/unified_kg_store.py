@@ -1359,16 +1359,6 @@ class UnifiedKgStore:
                 ],
             )
 
-    def checkpoint_put_current(
-        self, notebook_id: str, input_version: str, stage: str,
-        rows: List[Tuple[str, dict]],
-    ) -> None:
-        if self.now is None:
-            raise RuntimeError("checkpoint clock is not configured")
-        return self.checkpoint_put(
-            notebook_id, input_version, stage, rows, self.now()
-        )
-
     # ---------------------------------------------------- rebuild end-state
     @staticmethod
     def finish_rebuild_state(

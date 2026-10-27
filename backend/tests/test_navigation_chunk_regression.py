@@ -230,7 +230,7 @@ def seed_spec(repo, notebook_id: str, revision: str, sections=SECTIONS,
                 "text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
                 (f"el-{source_id}-{index:04d}", source_id, element_type, f"p{index}",
                  text, json.dumps({}), now))
-    repo._chunk_and_embed_source(source_id)
+    repo._runtime.source_chunking.chunk_and_embed_source(source_id)
     return source_id
 
 

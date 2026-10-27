@@ -82,7 +82,7 @@ def test_element_texts_does_not_scan_entire_notebook(repo, monkeypatch):
 
     monkeypatch.setattr(repo, "_connect", lambda: TrackingConnection(original_connect()))
     with repo._connect() as db:
-        texts, ordinal = repo._element_texts(db, [eids[0]])
+        texts, ordinal = repo._runtime.knowledge._element_texts(db, [eids[0]])
 
     assert texts[eids[0]] == "A target sentence."
     assert ordinal == {}
@@ -136,7 +136,7 @@ def test_facade_forwards_the_owner_library(repo):
     item = {"source_id": psid, "element_id": peids[0], "quoted_span": "stored snapshot"}
     with repo._connect() as db:
         (enriched,) = repo._enrich_evidence(db, [item], owner_notebook_id=nb.id)
-        texts, ordinal = repo._element_texts(
+        texts, ordinal = repo._runtime.knowledge._element_texts(
             db, peids, with_ordinal=True, owner_notebook_id=nb.id,
         )
     assert enriched["element_text"] == "stored snapshot"

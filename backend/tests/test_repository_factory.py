@@ -98,10 +98,6 @@ SQLITE_DIRECT_HELPER_ALLOWLIST = {
         "NotebookStore",
         "resolve_participants",
     ),
-    ("app/services/sqlite_repository.py", "AskStateStore", "read_trace"),
-    ("app/services/sqlite_repository.py", "GovernanceStore", "merge_evidence"),
-    ("app/services/sqlite_repository.py", "GovernanceStore", "seed_for"),
-    ("app/services/sqlite_repository.py", "KnowledgeStore", "delete_object_sources"),
     (
         "app/services/sqlite_repository.py",
         "KnowledgeStore",

@@ -610,14 +610,14 @@ def test_tier2_ann_early_stop_below_threshold_bounds_knn_calls(repo, monkeypatch
 
     idx = repo._scale_index(nb.id, allow_stale=True)
     assert idx is not None and idx.ann_labels
-    real_ann = repo._open_scale_ann(idx, "kg")
+    real_ann = repo._runtime.scale_artifacts.open_ann(idx, "kg")
     assert real_ann is not None
     proxy = _CountingAnn(real_ann)
     new_objs = [{"object_id": "ko-new", "name": "MoE Gating"}]
     # PR-C:第 5 个参数是调用方在 append **之前**冻结的「本批新对象各自的
     # canonical」(缺失记 "")。这里直接调方法、没有走 append,所以本源新对象本就
     # 没有簇行,冻结值就是空串。
-    cands = repo._tier2_bridge_candidates_ann(
+    cands = repo._runtime.knowledge_lifecycle._tier2_bridge_candidates_ann(
         nb.id, idx, proxy, new_objs, {"ko-new": ""},
         seed_version=1, override=frozenset())
 
@@ -652,10 +652,10 @@ def test_tier2_ann_symbol_only_new_concept_never_bare_K(repo):
 
     idx = repo._scale_index(nb.id, allow_stale=True)
     assert idx is not None and idx.ann_labels
-    ann = repo._open_scale_ann(idx, "kg")
+    ann = repo._runtime.scale_artifacts.open_ann(idx, "kg")
     assert ann is not None
     new_objs = [{"object_id": "ko-sym", "name": "→"}]
-    cands = repo._tier2_bridge_candidates_ann(
+    cands = repo._runtime.knowledge_lifecycle._tier2_bridge_candidates_ann(
         nb.id, idx, ann, new_objs, {"ko-sym": ""},
         seed_version=1, override=frozenset())
 

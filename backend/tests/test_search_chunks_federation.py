@@ -64,7 +64,7 @@ def _seed_source(repo, notebook_id: str, prefix: str, *, source_type="markdown",
                 (f"el-{prefix}-{index}", source_id, f"p{index}",
                  f"{body} 第 {index} 节。", _NOW),
             )
-    repo._chunk_and_embed_source(source_id)
+    repo._runtime.source_chunking.chunk_and_embed_source(source_id)
     return source_id
 
 

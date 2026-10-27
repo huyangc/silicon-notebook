@@ -70,7 +70,7 @@ def test_review_pending_merges_batch_matches_old_slice_order(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb")).id
     _seed_pending(repo, nb, 30)
     old_slice_ids = [r["id"] for r in repo.pending_merges(nb)[:10]]
-    new_batch_ids = [r["id"] for r in repo._pending_merges_batch(nb, 10)]
+    new_batch_ids = [r["id"] for r in repo._runtime.knowledge_governance._pending_merges_batch(nb, 10)]
     assert new_batch_ids == old_slice_ids
 
 

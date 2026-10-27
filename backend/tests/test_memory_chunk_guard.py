@@ -438,8 +438,8 @@ def scenario_service_entrypoints_write_nothing(repo) -> None:
     maintenance adapter's `chunk_and_embed_source` all reach the service guard."""
     _service, events, _dirty = _spy_service(repo)
     _nb, source_id = seed_source(repo, "memory")
-    repo._build_chunks_for_source(source_id)
-    repo._chunk_and_embed_source(source_id)
+    repo._runtime.source_chunking.build_chunks_for_source(source_id)
+    repo._runtime.source_chunking.chunk_and_embed_source(source_id)
     repo.maintenance.chunk_and_embed_source(source_id)
     assert _count(repo, "chunks", source_id) == 0
     assert _count(repo, "chunk_embeddings", source_id) == 0

@@ -71,7 +71,7 @@ def test_backfill_relation_embeddings_fills_missing(repo):
     with repo._write() as db:
         db.execute("DELETE FROM relation_embeddings WHERE notebook_id=?", (nb.id,))
     repo._runtime.models.calls.clear()
-    repo._backfill_relation_embeddings(nb.id)
+    repo.maintenance.backfill_relation_embeddings(nb.id)
     with repo._connect() as db:
         n = db.execute(
             "SELECT COUNT(*) AS c FROM relation_embeddings WHERE notebook_id=?",

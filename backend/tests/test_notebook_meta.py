@@ -88,7 +88,7 @@ def test_augment_fills_default_name_and_blank_desc(repo):
 
     _insert_source(repo, nb.id, title="Innovus 实现流程手册", status="extracted")
 
-    repo._augment_notebook_meta(nb.id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(nb.id)
 
     nb_after = repo.get_notebook(nb.id)
     assert nb_after.name == "Innovus 流程"
@@ -112,7 +112,7 @@ def test_augment_preserves_user_set_values(repo):
 
     _insert_source(repo, nb.id, title="Some Paper", status="extracted")
 
-    repo._augment_notebook_meta(nb.id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(nb.id)
 
     nb_after = repo.get_notebook(nb.id)
     # Both fields must be unchanged
@@ -134,7 +134,7 @@ def test_augment_fallback_without_llm(repo):
 
     _insert_source(repo, nb.id, title="Innovus 实现手册", status="extracted")
 
-    repo._augment_notebook_meta(nb.id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(nb.id)
 
     nb_after = repo.get_notebook(nb.id)
     assert nb_after.name  # non-empty
@@ -154,7 +154,7 @@ def test_augment_counts_pending_source(repo):
     # Insert source with status='extracting' (not yet 'extracted')
     src_id = _insert_source(repo, nb.id, title="Innovus 流程文档", status="extracting")
 
-    repo._augment_notebook_meta(nb.id, pending_source_id=src_id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(nb.id, pending_source_id=src_id)
 
     nb_after = repo.get_notebook(nb.id)
     # LLM stub returns "Innovus 流程" and "覆盖 Innovus 实现流程。"
@@ -165,10 +165,10 @@ def test_augment_counts_pending_source(repo):
 def test_automatic_name_and_description_follow_later_sources(repo):
     nb = repo.create_notebook(NotebookCreate())
     _insert_source(repo, nb.id, title="Timing")
-    repo._augment_notebook_meta(nb.id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(nb.id)
     _insert_source(repo, nb.id, title="Power")
     bind_chat_client(repo, "notebook_metadata", FakeLLMMeta("时序与功耗", "覆盖两类资料。"))
-    repo._augment_notebook_meta(nb.id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(nb.id)
     assert (repo.get_notebook(nb.id).name, repo.get_notebook(nb.id).purpose) == (
         "时序与功耗", "覆盖两类资料。",
     )
@@ -178,10 +178,10 @@ def test_automatic_name_and_description_follow_later_sources(repo):
 def test_manual_fields_remain_manual_even_when_cleared_or_placeholder(repo, field, value):
     nb = repo.create_notebook(NotebookCreate())
     _insert_source(repo, nb.id)
-    repo._augment_notebook_meta(nb.id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(nb.id)
     repo.update_notebook(nb.id, NotebookUpdate(**{field: value}))
     bind_chat_client(repo, "notebook_metadata", FakeLLMMeta("新标题", "新描述"))
-    repo._augment_notebook_meta(nb.id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(nb.id)
     result = repo.get_notebook(nb.id)
     assert getattr(result, field) == value
     assert getattr(result, "purpose" if field == "name" else "name") == (
@@ -203,7 +203,7 @@ def test_all_sources_and_summary_tails_reach_model(repo):
         _insert_source(repo, nb.id, title=f"source-{i:02d}",
                        status="parsed", summary="前文" * 150 + f"尾部主题-{i:02d}")
     _insert_source(repo, nb.id, title="等待解析的来源", status="queued")
-    repo._augment_notebook_meta(nb.id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(nb.id)
     prompts = "\n".join(seen)
     for i in range(25):
         assert f"source-{i:02d}" in prompts
@@ -226,7 +226,7 @@ def test_large_inputs_reduce_all_batches_without_truncating(repo):
     bind_chat_client(repo, "notebook_metadata", Summaries())
     _insert_source(repo, nb.id, title="Large", summary="全文" * 5000 + "结尾主题")
     _insert_source(repo, nb.id, title="第二来源", summary="其他主题")
-    repo._augment_notebook_meta(nb.id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(nb.id)
     assert any("结尾主题" in block for block in seen)
     assert any("第二来源" in block for block in seen)
     assert all(f"分组{i}" in seen[-1] for i in range(1, len(seen)))
@@ -250,7 +250,7 @@ def test_concurrent_refresh_coalesces_and_does_not_publish_old_response(repo):
 
     def invoke(identity):
         caller.set(identity)
-        repo._augment_notebook_meta(nb.id)
+        repo._runtime.source_ingestion.augment_notebook_metadata(nb.id)
 
     calls = []
 
@@ -295,7 +295,7 @@ def test_manual_edit_during_model_call_wins_and_other_field_updates(repo):
             return super().chat_json(messages, schema_hint)
 
     bind_chat_client(repo, "notebook_metadata", EditWhileGenerating())
-    repo._augment_notebook_meta(nb.id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(nb.id)
     assert repo.get_notebook(nb.id).name == "手动标题"
     assert repo.get_notebook(nb.id).purpose == "覆盖 Innovus 实现流程。"
 
@@ -303,7 +303,7 @@ def test_manual_edit_during_model_call_wins_and_other_field_updates(repo):
 def test_delete_last_source_clears_only_automatic_metadata(repo):
     nb = repo.create_notebook(NotebookCreate())
     source_id = _insert_source(repo, nb.id)
-    repo._augment_notebook_meta(nb.id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(nb.id)
     repo.update_notebook(nb.id, NotebookUpdate(name="保留标题"))
     repo.delete_source(source_id)
     result = repo.get_notebook(nb.id)
@@ -316,7 +316,7 @@ def test_offline_multi_source_fallback_does_not_claim_first_source_topic(repo):
     bind_chat_client(repo, "notebook_metadata", FakeLLMOff())
     _insert_source(repo, nb.id, title="Timing")
     _insert_source(repo, nb.id, title="Power")
-    repo._augment_notebook_meta(nb.id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(nb.id)
     assert repo.get_notebook(nb.id).name == "资料集（2 个来源）"
     assert "2 个来源" in repo.get_notebook(nb.id).purpose
 
@@ -325,7 +325,7 @@ def test_explicit_copy_name_becomes_manual(repo):
     nb = repo.create_notebook(NotebookCreate())
     copied = repo._runtime.sharing.copy_notebook(nb.id, new_owner_id=repo.current_user().id, new_name="手动副本")
     _insert_source(repo, copied.id)
-    repo._augment_notebook_meta(copied.id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(copied.id)
     assert repo.get_notebook(copied.id).name == "手动副本"
     assert repo.get_notebook(copied.id).purpose == "覆盖 Innovus 实现流程。"
 
@@ -334,7 +334,7 @@ def test_explicit_copy_name_becomes_manual(repo):
 def test_metadata_fallback_survives_client_initialization_failure(repo, monkeypatch, empty):
     nb = repo.create_notebook(NotebookCreate())
     source_id = _insert_source(repo, nb.id)
-    repo._augment_notebook_meta(nb.id)
+    repo._runtime.source_ingestion.augment_notebook_metadata(nb.id)
     calls = []
 
     class BrokenProvider:
@@ -350,7 +350,7 @@ def test_metadata_fallback_survives_client_initialization_failure(repo, monkeypa
         assert repo.get_notebook(nb.id).purpose == "尚未添加来源。"
     else:
         _insert_source(repo, nb.id, title="New subject")
-        repo._augment_notebook_meta(nb.id)
+        repo._runtime.source_ingestion.augment_notebook_metadata(nb.id)
         assert calls == ["notebook_metadata"]
         assert repo.get_notebook(nb.id).name == "资料集（2 个来源）"
         assert "2 个来源" in repo.get_notebook(nb.id).purpose

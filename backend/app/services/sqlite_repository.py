@@ -8,6 +8,7 @@ from typing import Any, Iterable, List, Optional
 from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 from app.core.config import Settings
 from app.domain.repository import remap_json_ids as _remap_json_ids
+from app.domain.retrieval import ChunkRetrievalPlan
 from app.domain.extensions import (
     AskCompletedObserverHostPort,
     ElementEnricherHostPort,
@@ -24,9 +25,7 @@ from app.core.request_context import (
     reset_request_user,
     set_request_user,
 )
-from app.repositories.sqlite.ask_state_store import AskStateStore
 from app.repositories.sqlite.bundle import SqlitePersistenceBundleFactory
-from app.repositories.sqlite.governance_store import GovernanceStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.maintenance import SQLiteMaintenanceAdapter
 from app.repositories.sqlite.migrations import SCHEMA_VERSION, SqliteMigrator
@@ -42,7 +41,6 @@ from app.services.mineru_client import MinerUClient
 from app.services.mineru_cloud_client import MinerUCloudClient, MinerUCloudNotConfigured
 from app.services.repository import UploadedSourceFile
 from app.services.repository_facade import (
-    ChunkRetrievalPlan,
     RepositoryFacade,
     _COPY_CHUNK,
     _new_id,
@@ -112,14 +110,6 @@ class SQLiteRepository(RepositoryFacade):
     def db_path(self, value: Path) -> None:
         self._runtime.database.db_path = value
 
-    @property
-    def _write_lock(self):
-        return self._runtime.database.write_lock
-
-    @_write_lock.setter
-    def _write_lock(self, value) -> None:
-        self._runtime.database.write_lock = value
-
     def _connect(self) -> sqlite3.Connection:
         return self._runtime.database.connect()
 
@@ -157,16 +147,6 @@ class SQLiteRepository(RepositoryFacade):
             statuses,
             id_filter,
         )
-
-    def _migrate(self) -> list[int]:
-        return self._migrator.migrate()
-
-    def _migrate_legacy(self) -> list[int]:
-        return self._migrator.migrate()
-
-    @staticmethod
-    def _add_column_if_missing(db, table: str, column: str, coldef: str) -> None:
-        return SqliteMigrator.add_column_if_missing(db, table, column, coldef)
 
     def _run_migration(self, version: int) -> None:
         return getattr(self._migrator, f"_migration_{version}")()
@@ -209,15 +189,6 @@ class SQLiteRepository(RepositoryFacade):
 
     def _recover_interrupted_jobs(self) -> None:
         return self._migrator.recover_interrupted_jobs()
-
-    def _recover_interrupted_jobs_legacy(self) -> None:
-        return self._migrator.recover_interrupted_jobs()
-
-    def _seed(self) -> None:
-        return self._migrator.seed()
-
-    def _seed_legacy(self) -> None:
-        return self._migrator.seed()
 
     @property
     def maintenance(self):
@@ -298,39 +269,11 @@ class SQLiteRepository(RepositoryFacade):
             self.__dict__["_checkup"] = c
         return c
 
-    def eval_insert_source_for_test(
-        self, nb_id: str, name: str, text: str, tmpdir: str
-    ) -> str:
-        return self.maintenance.eval_insert_source_for_test(
-            nb_id, name, text, tmpdir
-        )
-
-    def _backfill_relation_embeddings(self, notebook_id: str) -> int:
-        return self.maintenance.backfill_relation_embeddings(notebook_id)
-
     @staticmethod
     def _source_ids_from_evidence(evidence_json: Optional[str | list]) -> set:
         return KnowledgeStore.source_ids_from_evidence(evidence_json)
 
     @staticmethod
-    def _delete_knowledge_object_sources(
-        db: object, object_ids: List[str]
-    ) -> None:
-        return KnowledgeStore.delete_object_sources(db, object_ids)
-
-    @staticmethod
     def _insert_row(db, table: str, data: dict) -> None:
         return SharingStore.insert_row_values(db, table, data)
 
-    @staticmethod
-    def _seed_fn_for(object_type: str, *, concept_seed_version: int):
-        return GovernanceStore.seed_for(
-            object_type, concept_seed_version=concept_seed_version)
-
-    @staticmethod
-    def _merge_evidence_lists(base_ev: list, src_ev: list) -> list:
-        return GovernanceStore.merge_evidence(base_ev, src_ev)
-
-    @staticmethod
-    def _read_ask_trace(db, job_id: str) -> list:
-        return AskStateStore.read_trace(db, job_id)

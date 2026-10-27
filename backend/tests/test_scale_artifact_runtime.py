@@ -53,23 +53,10 @@ def _seed(repo):
     return notebook
 
 
-def test_facade_scale_runtime_properties_share_identity(repo):
+def test_scale_runtime_owns_its_catalog_and_builder(repo):
     scale = repo._runtime.scale_artifacts
     assert scale.catalog is repo._runtime.scale_catalog
     assert scale.builder is repo._runtime.scale_builder
-    assert repo._scale_idx_cache is scale.scale_cache
-    assert repo._viz_idx_cache is scale.viz_cache
-    assert repo._scale_ver_cache is scale.version_memo
-    assert repo._scale_ver_lock is scale.version_lock
-    assert repo._scale_ver_locks is scale.version_locks
-    assert repo._scale_idx_load_lock is scale.load_lock
-    assert repo._scale_idx_load_locks is scale.load_locks
-    assert repo._scale_building is scale.building
-    assert repo._scale_building_lock is scale.building_lock
-    assert repo._scale_idle_queue is scale.idle_queue
-    assert repo._auto_index_checked is scale.auto_index_checked
-    assert repo._viz_building is scale.viz_building
-    assert repo._viz_building_lock is scale.viz_building_lock
 
 
 def test_scale_runtime_callbacks_do_not_retain_repository_facade(repo):
@@ -353,7 +340,7 @@ def test_startup_preload_loads_ann_and_safe_ppr_core_before_progress(repo):
     # R2-2 之后 ScaleArtifactRuntime 不再持有 snapshots(唯一读者是搬走的
     # copy-stats memo);共享 VectorCache 仍由 facade 的写穿句柄暴露,是同一
     # 个对象。
-    repo._vector_cache.invalidate(f"{notebook.id}:scale_combined")
+    repo._runtime.retrieval_snapshots.vector_cache.invalidate(f"{notebook.id}:scale_combined")
     progress = []
 
     result = repo._preload_scale_retrieval_artifacts(
@@ -370,7 +357,7 @@ def test_startup_preload_loads_ann_and_safe_ppr_core_before_progress(repo):
     # Combined graphs share the general VectorCache and are intentionally not
     # claimed as startup-resident: mounted multi-index composition can require
     # multi-GB copies.  The reusable self-only core lives on ScaleIndex instead.
-    assert f"{notebook.id}:scale_combined" not in repo._vector_cache.keys()
+    assert f"{notebook.id}:scale_combined" not in repo._runtime.retrieval_snapshots.vector_cache.keys()
     assert result == {"indexes": 1, "ann_handles": 1, "ppr_cores": 1}
     assert progress == [(0, 1), (1, 1)]
 

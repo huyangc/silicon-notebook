@@ -169,10 +169,10 @@ def _seed_queued_source(repo, notebook_id, file_path="/tmp/s.md"):
 def test_runtime_wires_ingestion_service_and_builds_fresh_hooks(repo):
     service = repo._runtime.source_ingestion
     assert isinstance(service, SourceIngestionService)
-    hooks = repo._source_pipeline_hooks()
+    hooks = repo._runtime.source_ingestion.pipeline_hooks()
     assert isinstance(hooks, SourcePipelineHooks)
     # Hooks are minted per call and never stored on the runtime.
-    assert repo._source_pipeline_hooks() is not hooks
+    assert repo._runtime.source_ingestion.pipeline_hooks() is not hooks
     assert not hasattr(repo._runtime, "source_pipeline_hooks")
 
 

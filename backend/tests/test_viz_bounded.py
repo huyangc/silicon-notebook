@@ -44,7 +44,7 @@ def _build_star(repo):
 
 def test_bounded_graph_matches_legacy_shape_and_neighbors(repo):
     nb = _build_star(repo)
-    legacy = repo._unified_graph_full(nb.id, "object")
+    legacy = repo._runtime.knowledge_lifecycle._unified_graph_full(nb.id, "object")
     from app.services.kg_merge import limit_graph_by_degree
     legacy_top2 = limit_graph_by_degree(legacy, 2)
 

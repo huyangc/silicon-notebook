@@ -1169,13 +1169,6 @@ class SharingStore:
                 ).fetchone()
         return row["notebook_id"] if row else None
 
-    def answer_notebook_id(self, answer_id: str) -> str | None:
-        with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT notebook_id FROM answers WHERE id=%s", (answer_id,)
-            ).fetchone()
-        return row["notebook_id"] if row else None
-
     def snapshot_copy_rows(self, notebook_id: str) -> dict[str, list[dict]]:
         """Read every copyable table's rows in ONE REPEATABLE READ transaction,
         with the copyable-row bound enforced atomically inside it (codex PR#353

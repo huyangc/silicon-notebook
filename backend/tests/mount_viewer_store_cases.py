@@ -197,8 +197,7 @@ def any_mounted_has_kg_failures(stores: Any) -> list[str]:
     failures = []
     for notebook_id, viewer, case in _cells():
         want = has_kg(notebook_id, viewer)
-        for name in ("any_mounted_has_kg_on", "any_mounted_has_kg",
-                     "any_mounted_has_kg_compat"):
+        for name in ("any_mounted_has_kg_on", "any_mounted_has_kg"):
             got = bool(getattr(stores, name)(notebook_id, viewer))
             if got != want:
                 failures.append(f"{case} {name}: {got} != {want}")

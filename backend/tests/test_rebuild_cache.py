@@ -84,15 +84,15 @@ def _cluster_rows(repo, nb_id):
 
 def test_version_changes_when_concept_added(repo):
     nb = _make_kg(repo)
-    v0 = repo._cluster_input_version(nb.id)
+    v0 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     repo.store_kg(nb.id, "s3", [_concept("c0", "bandgap", "bandgap-c")], [])
-    v1 = repo._cluster_input_version(nb.id)
+    v1 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     assert v0 != v1
 
 
 def test_version_changes_when_embedding_replaced(repo):
     nb = _make_kg(repo)
-    v0 = repo._cluster_input_version(nb.id)
+    v0 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     # Add a brand-new embedding row (count changes) for a synthetic object id.
     with repo._write() as db:
         db.execute(
@@ -100,14 +100,14 @@ def test_version_changes_when_embedding_replaced(repo):
             "VALUES (?,?,?,?)",
             ("ko-synthetic", nb.id, json.dumps([0.0] * 16), _now()),
         )
-    v1 = repo._cluster_input_version(nb.id)
+    v1 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     assert v0 != v1
 
 
 def test_version_changes_when_decided_pair_recorded(repo):
     nb = _make_kg(repo)
     repo.rebuild_unified_kg(nb.id)  # populates pending candidates
-    v0 = repo._cluster_input_version(nb.id)
+    v0 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     # Record a confirmed decided pair (mirrors decided_pairs' WHERE).
     now = _now()
     with repo._write() as db:
@@ -117,7 +117,7 @@ def test_version_changes_when_decided_pair_recorded(repo):
             "VALUES (?,?,?,?,?, 'confirmed', ?, ?)",
             ("mc-decided", nb.id, "K-foo", "K-bar", 0.9, now, now),
         )
-    v1 = repo._cluster_input_version(nb.id)
+    v1 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     assert v0 != v1
 
 
@@ -125,9 +125,9 @@ def test_version_stable_across_rebuild(repo):
     """rebuild writes only concept_clusters + pending candidates, neither of which
     is in the signature, so the version is identical before and after a rebuild."""
     nb = _make_kg(repo)
-    before = repo._cluster_input_version(nb.id)
+    before = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     repo.rebuild_unified_kg(nb.id)
-    after = repo._cluster_input_version(nb.id)
+    after = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     assert before == after
 
 
@@ -135,7 +135,7 @@ def test_version_excludes_pending_candidates(repo):
     """Pending merge candidates (written by rebuild) must NOT move the version;
     only confirmed/rejected decisions do."""
     nb = _make_kg(repo)
-    v0 = repo._cluster_input_version(nb.id)
+    v0 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     now = _now()
     with repo._write() as db:
         db.execute(
@@ -144,7 +144,7 @@ def test_version_excludes_pending_candidates(repo):
             "VALUES (?,?,?,?,?, 'pending', ?, ?)",
             ("mc-pending", nb.id, "K-foo", "K-bar", 0.9, now, now),
         )
-    v1 = repo._cluster_input_version(nb.id)
+    v1 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     assert v0 == v1
 
 
@@ -234,7 +234,7 @@ def test_rename_same_second_moves_version_and_recomputes(repo, monkeypatch):
     rows_before = [tuple(r) for r in _cluster_rows(repo, nb.id)]
     n_canon_before = len({r[2] for r in rows_before})   # canonical_id set
     assert n_canon_before == 2                          # alpha, beta distinct
-    v0 = repo._cluster_input_version(nb.id)
+    v0 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
 
     # RENAME beta -> alpha (both sources' "beta" objects). Now every concept
     # normalizes to "alpha" -> the two canonicals MUST collapse to one.
@@ -244,7 +244,7 @@ def test_rename_same_second_moves_version_and_recomputes(repo, monkeypatch):
             break
         repo.update_knowledge(nb.id, oid, KnowledgeUpdate(payload={"name": "alpha", "section_path": "1"}))
 
-    v1 = repo._cluster_input_version(nb.id)
+    v1 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     assert v1 != v0, "version must move on an in-place rename (same-second)"
 
     calls = _spy_stream(repo, monkeypatch)
@@ -271,11 +271,11 @@ def test_decision_flip_same_second_moves_version_and_recomputes(repo, monkeypatc
             ("mc-flip", nb.id, "K-foo", "K-bar", 0.9, "2020-01-01T00:00:00", "2020-01-01T00:00:00"),
         )
     repo.rebuild_unified_kg(nb.id, force=True)          # bake decision into version
-    v0 = repo._cluster_input_version(nb.id)
+    v0 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
 
     # FLIP confirmed -> rejected via the real mutator (same-second, COUNT fixed).
     repo.reject_merge(nb.id, "mc-flip")
-    v1 = repo._cluster_input_version(nb.id)
+    v1 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     assert v1 != v0, "version must move on a confirmed<->rejected flip (same-second)"
 
     calls = _spy_stream(repo, monkeypatch)
@@ -336,10 +336,10 @@ def test_version_changes_when_algo_version_bumped(repo, monkeypatch):
     import app.services.kg_merge as kg_merge
 
     nb = _make_kg(repo)
-    v0 = repo._cluster_input_version(nb.id)
+    v0 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     monkeypatch.setattr(kg_merge, "CLUSTER_ALGO_VERSION",
                         kg_merge.CLUSTER_ALGO_VERSION + 1)
-    v1 = repo._cluster_input_version(nb.id)
+    v1 = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     assert v0 != v1
 
 

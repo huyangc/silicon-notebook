@@ -3,10 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from tests.architecture.repository_callers import (
-    private_repository_sites,
-    production_source_index,
-)
+from tests.architecture.repository_callers import private_repository_sites
 from tests.architecture.semantic_source import PythonSourceIndex
 
 
@@ -271,16 +268,6 @@ def test_retired_retrieval_privates_have_no_production_callers():
         finding.key
         for finding in private_repository_sites()
         if finding.key.target in RETIRED_RETRIEVAL_PRIVATES
-    } == set()
-
-
-def test_eval_insert_source_helper_has_no_production_consumer():
-    assert {
-        finding.key
-        for finding in production_source_index().attributes()
-        if finding.key.path != "backend/app/services/sqlite_repository.py"
-        and finding.key.target.rsplit(".", 1)[-1]
-        == "eval_insert_source_for_test"
     } == set()
 
 

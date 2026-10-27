@@ -111,7 +111,7 @@ def test_field_level_drift_with_more_than_one_reading_is_delivered_as_written(
     shape = validate_model_json_shape(raw, schema)
 
     assert shape.content == raw
-    assert shape.normalised is False
+    assert not any(d.fix for d in shape.deviations)
     assert [(d.path, d.reason, d.fix) for d in shape.deviations] == expected
 
 
@@ -180,7 +180,7 @@ def test_single_reading_deviations_are_absorbed_and_reported(
 ):
     shape = validate_model_json_shape(raw, schema)
 
-    assert shape.normalised is True
+    assert any(d.fix for d in shape.deviations)
     assert json.loads(shape.content) == content
     assert [(d.path, d.reason, d.fix) for d in shape.deviations] == expected
 
@@ -558,7 +558,7 @@ def test_absorption_does_not_depend_on_the_diagnostic_cap():
     shape = validate_model_json_shape(json.dumps({"sub_queries": items}), PLAN_SCHEMA)
 
     assert len(shape.deviations) == SHAPE_DEVIATIONS_MAX
-    assert shape.normalised is False  # the report never saw the fix …
+    assert not any(d.fix for d in shape.deviations)  # the report never saw the fix …
     assert json.loads(shape.content)["sub_queries"][-1] == {"types": []}  # … but it happened
 
 

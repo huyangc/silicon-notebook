@@ -70,7 +70,7 @@ class _FakeRerank:
 
 def test_mix_retrieve_adds_concept_walk_stream_when_flag_on(repo):
     nb = _seed_two_doc_moe(repo)
-    cand, _block, _idmap, _hits, ppr_n = repo._mix_retrieve(
+    cand, _block, _idmap, _hits, ppr_n = repo.retrieval.candidates._mix_retrieve(
         nb.id, "DeepSeek-V3 Mixture-of-Experts", "", ["DeepSeek-V3 Mixture-of-Experts"])
     assert ppr_n > 0                                       # 概念漫游(PPR)贡献了 chunk
     ids = [c.chunk_id for c in cand]
@@ -81,7 +81,7 @@ def test_mix_retrieve_adds_concept_walk_stream_when_flag_on(repo):
 def test_mix_retrieve_no_concept_walk_when_flag_off(repo, monkeypatch):
     nb = _seed_two_doc_moe(repo)
     monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
-    cand, _block, _idmap, _hits, ppr_n = repo._mix_retrieve(
+    cand, _block, _idmap, _hits, ppr_n = repo.retrieval.candidates._mix_retrieve(
         nb.id, "DeepSeek-V3 Mixture-of-Experts", "", ["DeepSeek-V3 Mixture-of-Experts"])
     assert ppr_n == 0                                      # flag 关 → 不跑 PPR
     assert len(set(c.chunk_id for c in cand)) == len(cand) # 仍去重

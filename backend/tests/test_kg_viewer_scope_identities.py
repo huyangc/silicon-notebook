@@ -337,7 +337,7 @@ def test_a_raw_object_is_judged_on_its_own_source_whatever_its_status(scenario, 
 def _legacy(repo, nb, name, section, source_id, evidence):
     """A legacy procedure (no payload ``steps``) with exactly ``evidence``,
     the reverse index kept in step like the production write path."""
-    oid = repo._test_insert_object(
+    oid = repo._runtime.knowledge_query.insert_test_object(
         nb, "procedure", {"name": name, "section_path": section}, source_id=source_id)
     raw = json.dumps(evidence)
     with repo._connect() as db:
@@ -408,7 +408,7 @@ def seed_member_clusters(repo, nb, specs, *, ph="?", cast=""):
     Backend-agnostic: ``ph`` is the placeholder, ``cast`` the JSON cast."""
     names = {}
     for canonical, kinds in specs.items():
-        ids = sorted(repo._test_insert_object(nb, "concept", {"name": "tmp"}, source_id="src-s")
+        ids = sorted(repo._runtime.knowledge_query.insert_test_object(nb, "concept", {"name": "tmp"}, source_id="src-s")
                      for _ in kinds)
         with repo._runtime.database.write() as db:
             generation = db.execute(

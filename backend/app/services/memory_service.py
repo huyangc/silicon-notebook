@@ -862,16 +862,6 @@ class MemoryService:
             values["tags"] = normalize_tags(values["tags"])
         return values, reason
 
-    @staticmethod
-    def _snapshot(item: MemoryRecord) -> dict:
-        return {
-            "title": item.title,
-            "content_md": item.content_md,
-            "tags": list(item.tags),
-            "status": item.status,
-            "promotion_state": item.promotion_state,
-        }
-
     def _require_notebook(self, notebook_id: str, user_id: str) -> None:
         if not self.notebooks.user_can_read_notebook(notebook_id, user_id):
             raise PermissionError(notebook_id)

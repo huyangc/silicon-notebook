@@ -10,12 +10,12 @@ def test_required_protocol_catalogue_has_declared_operations():
             "create_user", "authenticate_user", "create_session", "delete_session",
         },
         "ModelStatusStorePort": {"get_all", "record"},
-        "NotebookSharingRepository": {"share_notebook", "unshare_notebook", "copy_notebook", "add_member", "remove_member", "join_shared", "leave_notebook"},
+        "NotebookSharingRepository": {"share_notebook", "unshare_notebook", "copy_notebook", "add_member", "remove_member", "join_shared"},
         "KnowledgeGovernanceRepository": {"update_knowledge", "merge_knowledge", "confirm_conflict", "approve_promotion_as_reviewer", "reject_promotion_as_reviewer"},
         "KnowledgeLifecycleRepository": {"build_notebook_kg", "rebuild_unified_kg", "unified_kg_status"},
         "AskStateRepository": {"begin_ask_job", "finish_ask_job", "append_ask_trace", "get_conversation", "submit_feedback"},
         "ReportRepository": {"create_report", "update_report", "get_report", "list_reports", "delete_report", "export_reports"},
-        "RetrievalPort": {"retrieve_scored", "federated_retrieve", "federated_retrieve_relations", "retrieve_neighbors", "retrieve_elements", "ppr_retrieve", "follow_chain", "node_context"},
+        "RetrievalPort": {"retrieve_scored", "federated_retrieve", "retrieve_neighbors", "retrieve_elements", "ppr_retrieve", "follow_chain", "node_context"},
         "EvidenceKnowledgeContextPort": {
             "cluster_map", "node_context", "in_network_relations",
             "relation_support_count",
@@ -76,6 +76,9 @@ def test_access_and_sharing_protocols_still_declare_the_facade_reads():
         assert ports.NotebookAccessRepository not in facade_bound.__mro__
     assert ports.NotebookShareReadRepository in ports.NotebookRepository.__mro__
     assert ports.NotebookSharingRepository not in ports.NotebookRepository.__mro__
+    # S2-E: the facade's share_state had no consumer; the sharing protocol
+    # still declares it for the routes, the facade-bound one does not.
+    assert "share_state" not in _protocol_members(ports.NotebookRepository)
 
 
 def test_facade_bound_model_contract_is_the_reasoning_provider_without_rerank():

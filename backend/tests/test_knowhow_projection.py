@@ -354,7 +354,7 @@ def test_project_table_twice_produces_identical_id_sets(
     objects_1 = _row_object_ids(repo, row_id)
     source_id = projector.ensure_hidden_source(table_id)
     with repo._connect() as db:
-        assert repo._source_index_backfilled(db, notebook_id)
+        assert repo._runtime.knowledge.source_index_backfilled(db, notebook_id)
         indexed = {
             row["object_id"] for row in db.execute(
                 "SELECT object_id FROM knowledge_object_sources "
@@ -1023,7 +1023,7 @@ def test_anchor_removed_after_being_set_clears_all_kos_on_reproject(
             "WHERE notebook_id=? AND source_id=?",
             (notebook_id, source_id),
         ).fetchone()["c"] == 0
-        assert repo._source_index_backfilled(db, notebook_id)
+        assert repo._runtime.knowledge.source_index_backfilled(db, notebook_id)
         # chunks are untouched by the anchor removal — still a valid
         # retrieval-only table.
         assert db.execute(
@@ -1473,7 +1473,7 @@ def test_delete_table_projection_clears_all_artifacts(repo, projector, table_id,
             "WHERE notebook_id=? AND source_id=?",
             (notebook_id, source_id),
         ).fetchone()["c"] == 0
-        assert repo._source_index_backfilled(db, notebook_id)
+        assert repo._runtime.knowledge.source_index_backfilled(db, notebook_id)
 
 
 def test_delete_table_projection_is_a_noop_for_none_or_missing_id(repo, projector):

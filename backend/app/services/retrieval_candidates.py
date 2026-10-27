@@ -41,7 +41,7 @@ from app.domain.retrieval import ChunkRetrievalPlan
 from app.domain.retrieval_control import RetrievalControlError
 from app.repositories.ports import ChunkLexicalSearchTimeout
 from app.repositories.read_budget import classify_statement_failure
-from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
+from app.services.cancellation import AskCancelled
 # chunk 召回腿的两个 per-task ContextVar 与那把 routing 探针住在
 # ``app.services.chunk_lane``(一个零服务层依赖的叶子模块),不在本文件:联邦腿
 # ``chunk_federation`` 与本文件的生产者用的是同一套,而本文件的
@@ -390,10 +390,6 @@ class _RetrievalState:
     @property
     def _vector_cache(self):
         return self.snapshots.vector_cache
-
-    @property
-    def _MIX_KG_KEY_BASE(self):
-        return 1000
 
     def _connect(self):
         return self.database.connect()
@@ -1529,14 +1525,6 @@ class CandidateRetrievalService(_RetrievalState):
                 }
             )
         return elements
-    @staticmethod
-    def _element_vectors(elements: List[dict]) -> dict:
-        """Map element_id -> embedding vector for elements that have one."""
-        return {
-            element["element_id"]: element["vector"]
-            for element in elements
-            if element.get("vector")
-        }
     def _gather_chunks(
         self, db: object, notebook_id: str, allowed_source_ids=None
     ) -> List[dict]:
@@ -6022,44 +6010,6 @@ class CandidateRetrievalService(_RetrievalState):
             )
         result.sort(key=lambda it: it.score, reverse=True)
         return result
-    def _graph_seed_fusion(
-        self,
-        notebook_id: str,
-        question: str,
-        base_seeds: List[str],
-        cancel_event: CancelEvent = None,
-    ) -> List[str]:
-        """flag 关 → 原样返回 base_seeds(等价护栏:node recall 不降由「只增不减」保证)。
-        flag 开 → 用 high-level keywords 查关系索引,两端 object 并入;low-level
-        keywords 额外查节点并入。去重保序:base 在前(只增不减),其后并入关系两端
-        (≤2·relation_seed_top_n)与 low-level 节点命中(≤relation_seed_top_n);
-        multihop 自身有 max_depth/max_fan_out 兜底,此处不再硬截。"""
-        if not self.settings.relation_retrieval_enabled:
-            return base_seeds
-        from app.services.query_rewrite import expand_query
-        raise_if_cancelled(cancel_event)
-        exp = expand_query(self.model_clients.chat("query_rewrite"), question,
-                           corpus_langs=self._notebook_langs(notebook_id),
-                           cancel_event=cancel_event)
-        hl = " ".join(exp.high_level_keywords) or exp.query or question
-        ll = " ".join(exp.low_level_keywords)
-        extra: List[str] = []
-        rel_hits = self.federated_retrieve_relations(notebook_id, hl)[
-            : self.settings.relation_seed_top_n]
-        raise_if_cancelled(cancel_event)
-        for h in rel_hits:
-            extra.extend((h.source_object_id, h.target_object_id))
-        if ll:
-            node_hits = self.federated_retrieve(notebook_id, ll)[
-                : self.settings.relation_seed_top_n]
-            raise_if_cancelled(cancel_event)
-            extra.extend(h.object_id for h in node_hits)
-        seen, fused = set(), []
-        for oid in list(base_seeds) + extra:   # base 优先保序,只增不减
-            if oid and oid not in seen:
-                seen.add(oid)
-                fused.append(oid)
-        return fused
     def _ceiling_scoped_subgraph(self, subgraph: list, scope) -> list:
         """Drop walk nodes no in-ceiling source of THEIR OWN library supports,
         and narrow each surviving edge's evidence to that same ceiling.

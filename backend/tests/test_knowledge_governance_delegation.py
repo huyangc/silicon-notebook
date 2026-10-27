@@ -39,8 +39,6 @@ def test_facade_governance_methods_delegate_to_the_runtime_instance(repo, monkey
     for name, call in (
         ("set_edge_review", lambda: repo.set_edge_review("nb", "rel", "verified")),
         ("pending_merges", lambda: repo.pending_merges("nb")),
-        ("_pending_merges_batch", lambda: repo._pending_merges_batch("nb", 5)),
-        ("_has_pending_merges", lambda: repo._has_pending_merges("nb")),
         ("confirm_merge", lambda: repo.confirm_merge("nb", "c")),
         ("reject_merge", lambda: repo.reject_merge("nb", "c")),
         ("review_pending_merges", lambda: repo.review_pending_merges("nb")),
@@ -55,7 +53,6 @@ def test_facade_governance_methods_delegate_to_the_runtime_instance(repo, monkey
         ("update_knowledge", lambda: repo.update_knowledge("nb", "k", None)),
         ("find_duplicates", lambda: repo.find_duplicates("nb", "concept")),
         ("merge_knowledge", lambda: repo.merge_knowledge("nb", "s", None)),
-        ("decided_seed_pairs", lambda: repo.decided_seed_pairs("nb")),
         ("concept_whitelist_terms", lambda: repo.concept_whitelist_terms()),
         ("concept_whitelist_list", lambda: repo.concept_whitelist_list()),
         ("concept_whitelist_add", lambda: repo.concept_whitelist_add("t")),
@@ -90,8 +87,8 @@ def test_compound_conflict_status_rides_the_facade_wrapper(repo, monkeypatch):
     import json as _json
 
     notebook = repo.create_notebook(NotebookCreate(name="port"))
-    left = repo._test_insert_object(notebook.id, "claim", {"name": "before"})
-    right = repo._test_insert_object(notebook.id, "claim", {"name": "other"})
+    left = repo._runtime.knowledge_query.insert_test_object(notebook.id, "claim", {"name": "before"})
+    right = repo._runtime.knowledge_query.insert_test_object(notebook.id, "claim", {"name": "other"})
     candidate_id = repo._runtime.knowledge_governance.write_conflict_candidate(
         notebook.id,
         "node",
@@ -158,7 +155,7 @@ def test_t4deleg_promotion_object_type_row_delegate(repo, monkeypatch):
     base = repo.create_notebook(NotebookCreate(name="promo base"))
     repo.mark_notebook_base(base.id)
     repo.replace_notebook_bases(notebook.id, [base.id], "user-local")
-    object_id = repo._test_insert_object(notebook.id, "concept", {"name": "Widget"})
+    object_id = repo._runtime.knowledge_query.insert_test_object(notebook.id, "concept", {"name": "Widget"})
     store = repo._runtime.governance
     original = store.promotion_object_type_row  # staticmethod -> plain function
     calls = []
@@ -179,7 +176,7 @@ def test_t4deleg_notebook_tier_row_delegate(repo, monkeypatch):
     base = repo.create_notebook(NotebookCreate(name="tier base"))
     repo.mark_notebook_base(base.id)
     repo.replace_notebook_bases(notebook.id, [base.id], "user-local")
-    object_id = repo._test_insert_object(notebook.id, "concept", {"name": "T"})
+    object_id = repo._runtime.knowledge_query.insert_test_object(notebook.id, "concept", {"name": "T"})
     calls = []
 
     def spy(db, notebook_id):
@@ -196,7 +193,7 @@ def test_t4deleg_promotion_object_rows_delegate(repo, monkeypatch):
     base = repo.create_notebook(NotebookCreate(name="pq base"))
     repo.mark_notebook_base(base.id)
     repo.replace_notebook_bases(notebook.id, [base.id], "user-local")
-    object_id = repo._test_insert_object(notebook.id, "concept", {"name": "Q"})
+    object_id = repo._runtime.knowledge_query.insert_test_object(notebook.id, "concept", {"name": "Q"})
     repo.propose_promotion(notebook.id, object_id)  # seeds one 'proposed' candidate
     calls = []
 
@@ -218,7 +215,7 @@ def test_t4deleg_object_payload_row_delegate(repo, monkeypatch):
     # candidate with an empty target, so this seeds one directly via raw SQL,
     # mirroring a pre-Task-7 legacy row (see promotion_candidates migration).
     notebook = repo.create_notebook(NotebookCreate(name="approve"))
-    object_id = repo._test_insert_object(notebook.id, "concept", {"name": "A"})
+    object_id = repo._runtime.knowledge_query.insert_test_object(notebook.id, "concept", {"name": "A"})
     candidate_id = "promo-t4deleg-empty-target"
     with repo._write() as db:
         db.execute(

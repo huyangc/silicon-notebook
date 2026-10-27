@@ -142,7 +142,7 @@ import json
 import random
 import threading
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -248,20 +248,6 @@ class PreviousPartition:
             raise ValueError("PreviousPartition: 旧板块在当前图里的成员多于它的总成员数")
         object.__setattr__(self, "sizes", sizes)
         object.__setattr__(self, "label_of_node", labels)
-
-    @classmethod
-    def from_mapping(
-        cls, canonical_ids: Sequence[str], board_key_of: Mapping[str, str]
-    ) -> "PreviousPartition":
-        """由 canonical id → 旧 board_key 构造(测试与小库用;生产走 builder 流式读)。
-
-        映射里不在 ``canonical_ids`` 中的 canonical 只计入旧板块的大小。
-        """
-        index_of = {c: i for i, c in enumerate(canonical_ids)}
-        builder = PreviousPartitionBuilder(len(canonical_ids))
-        for canonical_id in sorted(board_key_of):
-            builder.add(index_of.get(canonical_id), board_key_of[canonical_id])
-        return builder.build()
 
 
 class PreviousPartitionBuilder:

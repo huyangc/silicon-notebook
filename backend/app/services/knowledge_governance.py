@@ -258,16 +258,8 @@ class KnowledgeGovernanceService:
         self._current_user_id = current_user_id
 
     @staticmethod
-    def promotion_dict(row, *, payload=None, evidence=None) -> dict:
-        return promotion_row_to_dict(row, payload=payload, evidence=evidence)
-
-    @staticmethod
     def headline(object_type: str, payload: dict) -> str:
         return knowledge_headline(object_type, payload)
-
-    @staticmethod
-    def joined_payload(payload: dict) -> str:
-        return payload_join(payload)
 
     # ------------------------------------------------------------------
     # Track E: edge trust review queue + curation feedback loop
@@ -706,9 +698,6 @@ class KnowledgeGovernanceService:
         if previous_status is None:
             raise KeyError(candidate_id)
         return previous_status
-
-    def set_merge_decision(self, notebook_id: str, candidate_id: str, status: str) -> None:
-        self._set_merge_decision(notebook_id, candidate_id, status)
 
     def confirm_merge(self, notebook_id: str, candidate_id: str) -> None:
         self.get_notebook(notebook_id)
@@ -1592,9 +1581,13 @@ class KnowledgeGovernanceService:
     # Decided pairs + concept whitelist
     # ------------------------------------------------------------------
 
+    # 测试观察点：读回已落库的合并决定（按 canonical 对折叠）；生产在重建里
+    # 经 decided_seed_pairs_from 读同一张表。
     def decided_pairs(self, notebook_id: str) -> Dict[tuple, str]:
         return self.governance_store.decided_pairs(notebook_id)
 
+    # 测试观察点：按已发布种子空间读回合并决定；生产重建直接调
+    # decided_seed_pairs_from。
     def decided_seed_pairs(self, notebook_id: str) -> Dict[frozenset, str]:
         """{frozenset({seed_a, seed_b}): status} for confirmed/rejected/deferred,
         the rows minted in the notebook's PUBLISHED concept seed space (the

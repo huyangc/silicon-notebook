@@ -162,28 +162,28 @@ def test_notebook_langs_english_only(repo):
     from app.models.schemas import NotebookCreate
     nb = repo.create_notebook(NotebookCreate(name="nb-en"))
     _seed_chunk_texts(repo, nb.id, ["Low noise amplifier design", "cascode output resistance"])
-    assert repo._notebook_langs(nb.id) == ["en"]
+    assert repo.retrieval.candidates._notebook_langs(nb.id) == ["en"]
 
 
 def test_notebook_langs_includes_zh_when_cjk_present(repo):
     from app.models.schemas import NotebookCreate
     nb = repo.create_notebook(NotebookCreate(name="nb-zh"))
     _seed_chunk_texts(repo, nb.id, ["低噪声放大器设计", "cascode 共源共栅"])
-    langs = repo._notebook_langs(nb.id)
+    langs = repo.retrieval.candidates._notebook_langs(nb.id)
     assert "zh" in langs
 
 
 def test_notebook_langs_empty_defaults_to_en(repo):
     from app.models.schemas import NotebookCreate
     nb = repo.create_notebook(NotebookCreate(name="nb-empty"))
-    assert repo._notebook_langs(nb.id) == ["en"]
+    assert repo.retrieval.candidates._notebook_langs(nb.id) == ["en"]
 
 
 def test_notebook_langs_is_cached(repo, monkeypatch):
     from app.models.schemas import NotebookCreate
     nb = repo.create_notebook(NotebookCreate(name="nb-cache"))
     _seed_chunk_texts(repo, nb.id, ["Low noise amplifier"])
-    first = repo._notebook_langs(nb.id)
+    first = repo.retrieval.candidates._notebook_langs(nb.id)
     # After the first call, further calls must NOT re-open a read connection.
     calls = {"n": 0}
     orig_connect = repo._connect
@@ -193,7 +193,7 @@ def test_notebook_langs_is_cached(repo, monkeypatch):
         return orig_connect()
 
     monkeypatch.setattr(repo, "_connect", _spy)
-    second = repo._notebook_langs(nb.id)
+    second = repo.retrieval.candidates._notebook_langs(nb.id)
     assert second == first
     assert calls["n"] == 0  # served from cache, no DB access
 
@@ -205,10 +205,10 @@ def test_notebook_langs_invalidated_on_new_language_chunk(repo):
     from app.models.schemas import NotebookCreate
     nb = repo.create_notebook(NotebookCreate(name="nb-grows"))
     _seed_chunk_texts(repo, nb.id, ["Low noise amplifier design"])
-    assert repo._notebook_langs(nb.id) == ["en"]        # warms the cache
+    assert repo.retrieval.candidates._notebook_langs(nb.id) == ["en"]        # warms the cache
     _seed_chunk_texts(repo, nb.id, ["低噪声放大器设计"])   # add zh content
     repo._runtime.knowledge_query.backfill_chunk_fts(nb.id)                       # settle point -> invalidates hint
-    assert "zh" in repo._notebook_langs(nb.id)
+    assert "zh" in repo.retrieval.candidates._notebook_langs(nb.id)
 
 
 def test_notebook_langs_invalidated_on_mark_dirty(repo):
@@ -217,10 +217,10 @@ def test_notebook_langs_invalidated_on_mark_dirty(repo):
     from app.models.schemas import NotebookCreate
     nb = repo.create_notebook(NotebookCreate(name="nb-dirty"))
     _seed_chunk_texts(repo, nb.id, ["Low noise amplifier design"])
-    assert repo._notebook_langs(nb.id) == ["en"]        # warms the cache
+    assert repo.retrieval.candidates._notebook_langs(nb.id) == ["en"]        # warms the cache
     _seed_chunk_texts(repo, nb.id, ["低噪声放大器设计"])
     repo._mark_unified_kg_dirty(nb.id)                  # content-mutation funnel
-    assert "zh" in repo._notebook_langs(nb.id)
+    assert "zh" in repo.retrieval.candidates._notebook_langs(nb.id)
 
 
 def test_notebook_langs_samples_spread_not_first_50(repo):
@@ -230,7 +230,7 @@ def test_notebook_langs_samples_spread_not_first_50(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb-spread"))
     texts = [f"English chunk number {i}" for i in range(60)] + ["末尾追加的中文段落"]
     _seed_chunk_texts(repo, nb.id, texts)
-    assert "zh" in repo._notebook_langs(nb.id)
+    assert "zh" in repo.retrieval.candidates._notebook_langs(nb.id)
 
 
 # ── ① [MAIN] bilingual keywords reach the CHUNK FTS ───────────────────

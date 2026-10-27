@@ -82,7 +82,7 @@ def test_runtime_composes_chunking_service(repo):
 def test_build_chunks_mints_ck_ids_with_json_element_ids(repo):
     nb, sid = _seed_source_with_elements(repo, ["x" * 300, "y" * 300, "z" * 300])
 
-    repo._build_chunks_for_source(sid)
+    repo._runtime.source_chunking.build_chunks_for_source(sid)
 
     rows = _chunk_rows(repo, sid)
     assert rows                                              # 900 chars / 600 target → >1 chunk
@@ -105,7 +105,7 @@ def test_build_chunks_consumes_section_path_breadcrumb_from_metadata(repo):
         ("table_row", "name | type", "{}"),
     ])
 
-    repo._build_chunks_for_source(sid)
+    repo._runtime.source_chunking.build_chunks_for_source(sid)
 
     with repo._connect() as db:
         chunk_rows = db.execute(
@@ -127,7 +127,7 @@ def test_build_chunks_carries_metadata_description_for_image_elements(repo):
         ("image", "三级流水线示意", json.dumps({"description": "三级流水线示意"})),
     ])
 
-    repo._build_chunks_for_source(sid)
+    repo._runtime.source_chunking.build_chunks_for_source(sid)
 
     with repo._connect() as db:
         chunk_rows = db.execute(
@@ -142,7 +142,7 @@ def test_build_chunks_skips_image_elements_with_neither_caption_nor_description(
         ("image", "Markdown 图 1", "{}"),
     ])
 
-    repo._build_chunks_for_source(sid)
+    repo._runtime.source_chunking.build_chunks_for_source(sid)
 
     with repo._connect() as db:
         assert db.execute(
@@ -159,7 +159,7 @@ def test_build_chunks_carries_metadata_caption_for_image_elements(repo):
         ("image", "a plot of x vs y", json.dumps({"caption": "a plot of x vs y"})),
     ])
 
-    repo._build_chunks_for_source(sid)
+    repo._runtime.source_chunking.build_chunks_for_source(sid)
 
     with repo._connect() as db:
         chunk_rows = db.execute(
@@ -180,7 +180,7 @@ def test_build_chunks_id_minting_rides_module_seam(repo, monkeypatch):
 
     monkeypatch.setattr(sqlite_repository, "_new_id", recording_new_id)
 
-    repo._build_chunks_for_source(sid)
+    repo._runtime.source_chunking.build_chunks_for_source(sid)
 
     assert [prefix for prefix, _ in minted].count("ck") == len(_chunk_rows(repo, sid))
 
@@ -196,7 +196,7 @@ def test_build_chunks_marks_unified_dirty_via_facade_seat(repo, monkeypatch):
 
     monkeypatch.setattr(repo, "_mark_unified_kg_dirty", spy_mark)
 
-    repo._build_chunks_for_source(sid)
+    repo._runtime.source_chunking.build_chunks_for_source(sid)
 
     assert marked == [nb.id]
 
@@ -204,7 +204,7 @@ def test_build_chunks_marks_unified_dirty_via_facade_seat(repo, monkeypatch):
 # ----------------------------------------------------------- atomic replace
 def test_replace_failure_keeps_previous_chunks_intact(repo, monkeypatch):
     nb, sid = _seed_source_with_elements(repo, ["alpha " * 60, "beta " * 60])
-    repo._build_chunks_for_source(sid)
+    repo._runtime.source_chunking.build_chunks_for_source(sid)
     before = {row["id"] for row in _chunk_rows(repo, sid)}
     assert before
 
@@ -214,7 +214,7 @@ def test_replace_failure_keeps_previous_chunks_intact(repo, monkeypatch):
     monkeypatch.setattr(repo._runtime.chunk_store, "_insert_fts_rows", broken_fts)
 
     with pytest.raises(RuntimeError, match="fts exploded"):
-        repo._build_chunks_for_source(sid)
+        repo._runtime.source_chunking.build_chunks_for_source(sid)
 
     assert {row["id"] for row in _chunk_rows(repo, sid)} == before
 
@@ -269,7 +269,7 @@ def test_zero_chunk_success_sets_chunked_at(repo):
     # early-return 的确证: 0-chunk 路径也走到 replace_source_chunks(mark_chunked_at=)
     # 的原子打标。
     nb, sid = _seed_source_with_elements(repo, ["A Pure Title"], element_type="heading")
-    repo._build_chunks_for_source(sid)
+    repo._runtime.source_chunking.build_chunks_for_source(sid)
     assert _counts(repo, sid) == (1, 0)         # elements>0, 0 chunk
     assert _chunked_at(repo, sid) is not None    # 分块成功 -> 标记置位
 
@@ -282,7 +282,7 @@ def test_h3_chunked_at_decides_zero_chunk_success_vs_failure(repo, monkeypatch):
     nb_bad, sid_bad = _seed_source_with_elements(repo, ["Title X"], element_type="heading")
 
     # #1 分块成功产 0 chunk (真实 build_chunks 于纯标题输入)。
-    repo._build_chunks_for_source(sid_ok)
+    repo._runtime.source_chunking.build_chunks_for_source(sid_ok)
 
     # #2 分块失败: monkeypatch build_chunks 抛异常。process_source 用 best-effort
     # except 吞掉它(:586),这里镜像那次吞咽。
@@ -293,7 +293,7 @@ def test_h3_chunked_at_decides_zero_chunk_success_vs_failure(repo, monkeypatch):
 
     monkeypatch.setattr(sc_mod, "build_chunks", _boom)
     with pytest.raises(RuntimeError, match="chunk boom"):
-        repo._build_chunks_for_source(sid_bad)
+        repo._runtime.source_chunking.build_chunks_for_source(sid_bad)
 
     # A4 能观测到的两个维度上两支完全相同:
     assert _counts(repo, sid_ok) == _counts(repo, sid_bad) == (1, 0)

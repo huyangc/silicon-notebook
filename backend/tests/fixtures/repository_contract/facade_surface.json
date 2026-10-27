@@ -105,49 +105,13 @@
       },
       {
         "kind": "import",
-        "path": "backend/app/eval/inference.py",
-        "scope": "<module>.run_inference",
-        "target": "app.services.sqlite_repository:SQLiteRepository"
-      },
-      {
-        "kind": "import",
-        "path": "backend/app/eval/run_all.py",
-        "scope": "<module>.main",
-        "target": "app.services.sqlite_repository:SQLiteRepository"
-      },
-      {
-        "kind": "import",
         "path": "backend/app/eval/sa_calibration.py",
         "scope": "<module>._run_arm",
         "target": "app.services.sqlite_repository:SQLiteRepository"
       },
       {
         "kind": "import",
-        "path": "backend/app/eval/speed.py",
-        "scope": "<module>.measure_speed",
-        "target": "app.services.sqlite_repository:SQLiteRepository"
-      },
-      {
-        "kind": "import",
-        "path": "backend/app/scripts/gen_recall_gold.py",
-        "scope": "<module>",
-        "target": "app.services.sqlite_repository:SQLiteRepository"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_replay_retrieval.py",
-        "scope": "<module>.test_record_run_requires_retrieval_query_embedding",
-        "target": "SQLiteRepository"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_replay_retrieval.py",
-        "scope": "<module>.test_report_run_enters_report_generation_scope",
-        "target": "SQLiteRepository"
-      },
-      {
-        "kind": "import",
-        "path": "scripts/backfill_knowhow_md.py",
+        "path": "backend/app/services/repository_factory.py",
         "scope": "<module>",
         "target": "app.services.sqlite_repository:SQLiteRepository"
       },
@@ -159,20 +123,8 @@
       },
       {
         "kind": "import",
-        "path": "scripts/kg_product_smoke.py",
-        "scope": "<module>",
-        "target": "app.services.sqlite_repository:SQLiteRepository"
-      },
-      {
-        "kind": "import",
         "path": "scripts/measure_sync_capture_cost.py",
         "scope": "<module>._measure_sqlite",
-        "target": "app.services.sqlite_repository:SQLiteRepository"
-      },
-      {
-        "kind": "import",
-        "path": "scripts/replay_retrieval.py",
-        "scope": "<module>.record_run",
         "target": "app.services.sqlite_repository:SQLiteRepository"
       },
       {
@@ -193,24 +145,7 @@
       "app.services.sqlite_repository"
     ],
     "owner": "RepositoryFacade",
-    "patch_targets": [
-      {
-        "base": "repository_module",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_replay_retrieval.py",
-        "scope": "<module>.test_record_run_requires_retrieval_query_embedding",
-        "target": "SQLiteRepository"
-      },
-      {
-        "base": "repository_module",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_replay_retrieval.py",
-        "scope": "<module>.test_report_run_enters_report_generation_scope",
-        "target": "SQLiteRepository"
-      }
-    ],
+    "patch_targets": [],
     "scope": "module",
     "signature": "type"
   },
@@ -801,7 +736,7 @@
     "owner": "SourceEmbeddingService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', rel_items: 'List[dict]') -> 'None'"
+    "signature": "(self, notebook_id: 'str', rel_items: 'List[dict]') -> 'int'"
   },
   "_fast_loads": {
     "consumers": [
@@ -1130,43 +1065,13 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._migrate",
-        "target": "_migrator"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._migrate_legacy",
-        "target": "_migrator"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository._recover_interrupted_jobs",
         "target": "_migrator"
       },
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._recover_interrupted_jobs_legacy",
-        "target": "_migrator"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository._run_migration",
-        "target": "_migrator"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._seed",
-        "target": "_migrator"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._seed_legacy",
         "target": "_migrator"
       }
     ],
@@ -1204,6 +1109,12 @@
       },
       {
         "kind": "patch",
+        "path": "backend/tests/test_section_navigation_e2e.py",
+        "scope": "<module>.spec",
+        "target": "_new_id"
+      },
+      {
+        "kind": "patch",
         "path": "backend/tests/test_source_chunking_service.py",
         "scope": "<module>.test_build_chunks_id_minting_rides_module_seam",
         "target": "_new_id"
@@ -1229,6 +1140,14 @@
         "kind": "patch",
         "path": "backend/tests/test_notebook_copy_service.py",
         "scope": "<module>.test_copy_observes_new_id_patched_after_construction",
+        "target": "_new_id"
+      },
+      {
+        "base": "sqlite_repository",
+        "compatibility": "production-compatible",
+        "kind": "patch",
+        "path": "backend/tests/test_section_navigation_e2e.py",
+        "scope": "<module>.spec",
         "target": "_new_id"
       },
       {
@@ -1683,6 +1602,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
+        "scope": "<module>.pending_actions_service",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
         "scope": "<module>.retrieval_experience_jobs_service",
         "target": "_runtime"
       },
@@ -1779,18 +1704,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
-        "scope": "<module>._backfill_page_rows",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/source_routes.py",
-        "scope": "<module>._backfill_vectors_job",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/source_routes.py",
         "scope": "<module>.backfill_paper_metadata",
         "target": "_runtime"
       },
@@ -1804,6 +1717,18 @@
         "kind": "attribute",
         "path": "backend/app/services/knowhow/api.py",
         "scope": "<module>.complete_row",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/knowhow/api.py",
+        "scope": "<module>.fill_missing_knowhow_chunk_vectors",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/knowhow/api.py",
+        "scope": "<module>.knowhow_chunk_gap_exists",
         "target": "_runtime"
       },
       {
@@ -1850,6 +1775,18 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/services/navigation_backfill.py",
+        "scope": "<module>.NavigationBackfill.for_repository",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/notebook_reembed.py",
+        "scope": "<module>.NotebookReembedService._source_vector_legs",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.__init__",
         "target": "_runtime"
@@ -1869,73 +1806,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._answer_chunks",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._answer_context",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._answer_mix",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._answer_reasoning",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._answer_with_retry",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._any_base_notebook_has_kg",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._apply_notebook_meta",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._ask_cancel_events",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._ask_cancel_lock",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._augment_notebook_meta",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._auto_index_checked",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._backfill_knowledge_embeddings",
         "target": "_runtime"
       },
       {
@@ -1947,37 +1818,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._build_chunks_for_source",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._bump_cluster_mutation_seq",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._chunk_and_embed_source",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._chunk_answer_context",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._citations_from",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._cleanup_empty_conversation",
         "target": "_runtime"
       },
       {
@@ -1989,97 +1830,13 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._cluster_input_version",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._compute_scale_version_cold",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._connect",
         "target": "_runtime"
       },
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._conversation_history",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._count",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._count_knowledge",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._count_pending_kg_sources",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._delete_file",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._delete_knowledge_object_sources",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._delete_relations_for_source",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._dequeue_scale_idle",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._derive_object_graph_lite",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._edge_centrality_map",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._element_texts",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._embed_chunks_batch",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._embed_chunks_for_source",
         "target": "_runtime"
       },
       {
@@ -2103,43 +1860,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._embed_source",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._enrich_evidence",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._ensure_conversation",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._ensure_scale_scheduler",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._extraction_warning",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._find_base_dedup_match",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._find_stale_knowledge_ids_for_source",
         "target": "_runtime"
       },
       {
@@ -2151,37 +1872,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._flush_object_vectors",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._fold_hits_to_canonical",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._gather_kg_graph",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._has_kg",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._has_pending_merges",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._hydrate_search_hits",
         "target": "_runtime"
       },
       {
@@ -2205,49 +1896,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._kg_headline",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._kg_neighbors_db",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._knowledge_objects",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._knowledge_record",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._knowledge_ref",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._knowledge_similarity",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._knowledge_type_counts",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._mark_source_index_backfilled",
         "target": "_runtime"
       },
       {
@@ -2265,37 +1914,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._maybe_enqueue_scale_fold",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._merge_evidence_lists",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._mounted_bases",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._needs_index",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._note_model_error",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._notebook_from_row",
         "target": "_runtime"
       },
       {
@@ -2343,126 +1962,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._object_meta",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._open_scale_ann",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._parse_answer_anchors",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._parse_url_via_local",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._pending_merges_batch",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._probe_scale_version_signal",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._process_idle_queue",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._read_ask_trace",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._read_manifest_version",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._rebuild_ckpt_clear",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._rebuild_ckpt_gc",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._rebuild_ckpt_load",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._rebuild_ckpt_put",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._refine_context",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._relink_extra_relations",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._report_row_to_dict",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._resolve_index_owner",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._resolve_path",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._resolve_scale_mode",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._rewrite_followup_query",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._rule_card",
         "target": "_runtime"
       },
@@ -2475,61 +1974,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._run_scale_op",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._save_answer",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._scale_building",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._scale_building_lock",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._scale_idle_queue",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._scale_idx_cache",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._scale_idx_load_lock",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._scale_idx_load_locks",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._scale_index",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._scale_index_eligible",
         "target": "_runtime"
       },
       {
@@ -2541,61 +1986,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._scale_scheduler_started",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._scale_ver_cache",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._scale_ver_lock",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._scale_ver_locks",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._seed_fn_for",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._semantic_search",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._set_source_status",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._should_extract_kg",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._source_from_row",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._source_has_kg",
         "target": "_runtime"
       },
       {
@@ -2607,43 +1998,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._source_index_backfilled",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._source_pipeline_hooks",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._source_raw_text",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._source_type_from_name",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._sources_from_rows",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._spawn_viz_build",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._stream_seed_reps",
         "target": "_runtime"
       },
       {
@@ -2655,139 +2010,13 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._sweep_stuck_copies",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._test_insert_object",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._tier2_bridge_candidates_ann",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._tier_map_for",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._truncate_kg_block",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._unconfigured_model_response",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._unified_cache",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._unified_graph_bounded",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._unified_graph_full",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._upsert_knowledge_object_sources",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._user_profile",
         "target": "_runtime"
       },
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._vector_cache",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._viz_arrays_from_graph",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._viz_building",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._viz_building_lock",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._viz_dict",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._viz_idx_cache",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._viz_index",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._viz_index_dir",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._viz_index_probe",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._viz_node",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._write",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._write_cluster_map_streamed",
         "target": "_runtime"
       },
       {
@@ -2950,12 +2179,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.bulk_delete_memories",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.bump_knowhow_mutation_seq",
         "target": "_runtime"
       },
       {
@@ -3154,12 +2377,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.current_user",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.decided_seed_pairs",
         "target": "_runtime"
       },
       {
@@ -4017,12 +3234,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.set_knowhow_hidden_source",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.set_notebook_personal",
         "target": "_runtime"
       },
@@ -4036,12 +3247,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.share_report",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.share_state",
         "target": "_runtime"
       },
       {
@@ -4317,18 +3522,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.visible_source_count",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.visible_source_ids",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.visible_source_scope_snapshot",
         "target": "_runtime"
       },
@@ -4348,12 +3541,6 @@
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository._connect",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._write_lock",
         "target": "_runtime"
       },
       {
@@ -4685,6 +3872,12 @@
         "path": "backend/app/api/ask_routes.py",
         "scope": "<module>._validate_source_scope",
         "target": "all_visible_source_ids"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>._followup_source_scope",
+        "target": "all_visible_source_ids"
       }
     ],
     "kind": "method",
@@ -4856,6 +4049,12 @@
         "path": "backend/tests/mcp_answer_link_cases.py",
         "scope": "<module>._fake_engine",
         "target": "ask_with_job"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/mcp_ask_linked_report_cases.py",
+        "scope": "<module>._reasoning_engine",
+        "target": "ask_with_job"
       }
     ],
     "kind": "method",
@@ -4867,6 +4066,14 @@
         "kind": "patch",
         "path": "backend/tests/mcp_answer_link_cases.py",
         "scope": "<module>._fake_engine",
+        "target": "ask_with_job"
+      },
+      {
+        "base": "env.repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/mcp_ask_linked_report_cases.py",
+        "scope": "<module>._reasoning_engine",
         "target": "ask_with_job"
       }
     ],
@@ -5444,12 +4651,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
-        "scope": "<module>._backfill_vectors_job",
-        "target": "configured"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/source_routes.py",
         "scope": "<module>.backfill_vectors",
         "target": "configured"
       },
@@ -5463,6 +4664,12 @@
         "kind": "attribute",
         "path": "backend/app/scripts/reembed_kg.py",
         "scope": "<module>.main",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>._backfill_missing_chunk_embeddings",
         "target": "configured"
       },
       {
@@ -5508,6 +4715,30 @@
         "target": "configured"
       },
       {
+        "kind": "attribute",
+        "path": "backend/app/services/notebook_reembed.py",
+        "scope": "<module>.NotebookReembedService._kg_objects_leg",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/notebook_reembed.py",
+        "scope": "<module>.NotebookReembedService._kg_relations_leg",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/notebook_reembed.py",
+        "scope": "<module>.NotebookReembedService._source_vector_legs",
+        "target": "configured"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/notebook_reembed_cases.py",
+        "scope": "<module>.check_fill_and_admission_never_read_cell_content",
+        "target": "configured"
+      },
+      {
         "kind": "patch",
         "path": "backend/tests/test_checkup_service.py",
         "scope": "<module>.test_backfill_job_discovers_chunks_once_too",
@@ -5535,6 +4766,12 @@
         "kind": "patch",
         "path": "backend/tests/test_checkup_service.py",
         "scope": "<module>.test_backfill_job_notifies_h45_exactly_once",
+        "target": "configured"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_notebook_reembed.py",
+        "scope": "<module>.test_backfill_vectors_accepts_a_chunk_gap_only_when_its_workload_is_bound",
         "target": "configured"
       },
       {
@@ -5587,6 +4824,14 @@
         "base": "repo",
         "compatibility": "test-only",
         "kind": "patch",
+        "path": "backend/tests/notebook_reembed_cases.py",
+        "scope": "<module>.check_fill_and_admission_never_read_cell_content",
+        "target": "configured"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
         "path": "backend/tests/test_checkup_service.py",
         "scope": "<module>.test_backfill_job_discovers_chunks_once_too",
         "target": "configured"
@@ -5621,6 +4866,14 @@
         "kind": "patch",
         "path": "backend/tests/test_checkup_service.py",
         "scope": "<module>.test_backfill_job_notifies_h45_exactly_once",
+        "target": "configured"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_notebook_reembed.py",
+        "scope": "<module>.test_backfill_vectors_accepts_a_chunk_gap_only_when_its_workload_is_bound",
         "target": "configured"
       },
       {
@@ -5951,7 +5204,19 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.ask",
+        "target": "current_user"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.ask_stream._attach_ask_stream",
+        "target": "current_user"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.ask_stream.prepare_ask_stream",
         "target": "current_user"
       },
       {
@@ -6841,6 +6106,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.check_ask_report_link",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.preview_ask_intent.prepare_preview",
         "target": "get_notebook"
       },
@@ -6908,6 +6179,12 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/session.py",
         "scope": "<module>.register_session_tools.list_notebooks.load",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>._report_followup_scope",
         "target": "get_notebook"
       },
       {
@@ -7126,6 +6403,18 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._require_linked_report",
+        "target": "get_report"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/ask.py",
+        "scope": "<module>._require_report",
+        "target": "get_report"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/mcp_tools/reports.py",
         "scope": "<module>.register_report_tools.get_report.load",
         "target": "get_report"
@@ -7140,6 +6429,12 @@
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>.cancel_report_endpoint",
+        "target": "get_report"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/ask_report_followup_api_cases.py",
+        "scope": "<module>.case_check_does_not_read_the_report_before_the_verdict",
         "target": "get_report"
       },
       {
@@ -7163,7 +6458,16 @@
     ],
     "kind": "method",
     "owner": "ReportStore",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "world.repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/ask_report_followup_api_cases.py",
+        "scope": "<module>.case_check_does_not_read_the_report_before_the_verdict",
+        "target": "get_report"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', report_id: 'str') -> 'dict'"
   },
@@ -7665,7 +6969,7 @@
     "owner": "NotebookStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str') -> 'list[dict]'"
+    "signature": "(self, notebook_id: 'str', viewer_id: 'str | None' = None) -> 'list[dict]'"
   },
   "list_notebook_object_schemas": {
     "consumers": [
@@ -7836,12 +7140,6 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/source_routes.py",
-        "scope": "<module>._backfill_vectors_job",
-        "target": "maintenance"
-      },
-      {
-        "kind": "attribute",
         "path": "backend/app/scripts/backfill_relation_embeddings.py",
         "scope": "<module>.main",
         "target": "maintenance"
@@ -7862,6 +7160,12 @@
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>._backfill_chunk_elements_for_notebook",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>._backfill_missing_chunk_embeddings",
         "target": "maintenance"
       },
       {
@@ -8035,7 +7339,37 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/knowhow/api.py",
+        "scope": "<module>.fill_missing_knowhow_chunk_vectors",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/knowhow/api.py",
+        "scope": "<module>.knowhow_chunk_gap_exists",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/knowhow/api.py",
         "scope": "<module>.maybe_sweep_orphan_assets._sweep",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/notebook_reembed.py",
+        "scope": "<module>.NotebookReembedService._kg_objects_leg",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/notebook_reembed.py",
+        "scope": "<module>.NotebookReembedService._kg_relations_leg",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/notebook_reembed.py",
+        "scope": "<module>.NotebookReembedService._source_vector_legs",
         "target": "maintenance"
       },
       {
@@ -8047,19 +7381,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._backfill_relation_embeddings",
-        "target": "maintenance"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.checkup.<lambda>",
-        "target": "maintenance"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository.eval_insert_source_for_test",
         "target": "maintenance"
       },
       {
@@ -8659,6 +7981,18 @@
       },
       {
         "kind": "patch",
+        "path": "backend/tests/ask_report_followup_api_cases.py",
+        "scope": "<module>.case_a_finished_own_report_passes_the_gate_and_reaches_the_receipt",
+        "target": "preview_reasoning_intent"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/mcp_ask_linked_report_cases.py",
+        "scope": "<module>._reasoning_engine",
+        "target": "preview_reasoning_intent"
+      },
+      {
+        "kind": "patch",
         "path": "backend/tests/test_ask_modes_api.py",
         "scope": "<module>.test_auto_is_a_retired_alias_for_reasoning",
         "target": "preview_reasoning_intent"
@@ -8667,6 +8001,22 @@
     "kind": "method",
     "owner": "AskService",
     "patch_targets": [
+      {
+        "base": "world.repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/ask_report_followup_api_cases.py",
+        "scope": "<module>.case_a_finished_own_report_passes_the_gate_and_reaches_the_receipt",
+        "target": "preview_reasoning_intent"
+      },
+      {
+        "base": "env.repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/mcp_ask_linked_report_cases.py",
+        "scope": "<module>._reasoning_engine",
+        "target": "preview_reasoning_intent"
+      },
       {
         "base": "repo",
         "compatibility": "test-only",
@@ -9504,12 +8854,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
-        "scope": "<module>._backfill_vectors_job",
-        "target": "require_indexing_pipeline_write"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/source_routes.py",
         "scope": "<module>.backfill_vectors",
         "target": "require_indexing_pipeline_write"
       },
@@ -9521,14 +8865,14 @@
       },
       {
         "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._build_chunks_for_source",
+        "path": "backend/app/services/knowhow/api.py",
+        "scope": "<module>.fill_missing_knowhow_chunk_vectors",
         "target": "require_indexing_pipeline_write"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._chunk_and_embed_source",
+        "path": "backend/app/services/notebook_reembed.py",
+        "scope": "<module>.NotebookReembedService._source_vector_legs",
         "target": "require_indexing_pipeline_write"
       },
       {
@@ -9659,6 +9003,12 @@
       },
       {
         "kind": "patch",
+        "path": "backend/tests/notebook_reembed_cases.py",
+        "scope": "<module>.check_a_pipeline_switch_aborts_the_pass",
+        "target": "require_indexing_pipeline_write"
+      },
+      {
+        "kind": "patch",
         "path": "backend/tests/test_kg_repository.py",
         "scope": "<module>.test_extract_source_delegates_to_run_extraction",
         "target": "require_indexing_pipeline_write"
@@ -9673,6 +9023,14 @@
     "kind": "method",
     "owner": "RepositoryRuntime.indexing_pipeline",
     "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/notebook_reembed_cases.py",
+        "scope": "<module>.check_a_pipeline_switch_aborts_the_pass",
+        "target": "require_indexing_pipeline_write"
+      },
       {
         "base": "repo",
         "compatibility": "test-only",
@@ -9770,48 +9128,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._active_kg_delta",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._build_chunk_retrieval_plan",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._chunk_kg_overlay",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._concept_cluster_id",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._delta_vector_matrix",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._edge_support_map",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._elem_chunk_map",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._embed_query",
         "target": "retrieval"
       },
@@ -9836,61 +9152,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._follow_chain",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._gather_chunks",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._gather_elements",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._gather_vector_chunks",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._graph_seed_fusion",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._hydrate_chunk_candidates",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._in_batches",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._keyword_chunk_candidates",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._keyword_token_sets",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._kg_object_candidates",
         "target": "retrieval"
       },
       {
@@ -9908,42 +9170,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._mix_retrieve",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._mmr_select_chunks",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._notebook_langs",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._ppr_fact_rerank",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._ppr_graph",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._ppr_reset_vector",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._ppr_retrieve",
         "target": "retrieval"
       },
@@ -9956,31 +9182,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._relation_ann_candidates",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._relations_with_names",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._retrieve_chunks",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._retrieve_chunks_ann",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._retrieve_chunks_fts_degraded",
         "target": "retrieval"
       },
       {
@@ -9998,61 +9200,13 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._retrieve_neighbors",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._retrieve_relations_scored",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._retrieve_scored",
         "target": "retrieval"
       },
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._rrf_scored",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._runtime_dim",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._scale_combined_graph",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._scale_xlayer_bridge_edges",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._vector_matrix",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._vector_matrix_version",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._vector_matrix_warm",
         "target": "retrieval"
       },
       {
@@ -10483,8 +9637,20 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/services/knowhow/api.py",
+        "scope": "<module>.fill_missing_knowhow_chunk_vectors",
+        "target": "settings"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/services/memory_isolation_rebuild.py",
         "scope": "<module>.MemoryIsolationRebuild.for_repository",
+        "target": "settings"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/notebook_reembed.py",
+        "scope": "<module>._backfill_page_rows",
         "target": "settings"
       },
       {
@@ -11442,6 +10608,12 @@
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
         "scope": "<module>._validate_source_scope",
+        "target": "visible_source_scope_snapshot"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>._report_followup_scope",
         "target": "visible_source_scope_snapshot"
       }
     ],

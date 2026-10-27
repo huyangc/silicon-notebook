@@ -46,7 +46,7 @@ def test_relink_extra_relations_links_isolated_claim_to_concept(repo):
          "payload": {"name": "Engram"},
          "evidence": [{"element_id": "e1", "quote": "..."}]},
     ]
-    extra = repo._relink_extra_relations(objects, [], "s1")
+    extra = repo._runtime.source_ingestion.relink_extra_relations(objects, [], "s1")
     assert len(extra) == 1
     rel = extra[0]
     assert rel["source_local_id"] == "K1"      # claim is the about-source
@@ -68,7 +68,7 @@ def test_relink_extra_relations_noop_when_already_connected(repo):
     ]
     relations = [{"source_local_id": "K1", "target_local_id": "C1",
                   "edge_type": "about", "evidence": []}]
-    extra = repo._relink_extra_relations(objects, relations, "s1")
+    extra = repo._runtime.source_ingestion.relink_extra_relations(objects, relations, "s1")
     assert extra == []
 
 

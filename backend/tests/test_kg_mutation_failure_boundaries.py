@@ -152,7 +152,7 @@ def test_write_clusters_insert_failure_rolls_back_the_whole_replace(
     repo, monkeypatch
 ):
     notebook = repo.create_notebook(NotebookCreate(name="cluster rollback"))
-    object_id = repo._test_insert_object(notebook.id, "concept", {"name": "seed"})
+    object_id = repo._runtime.knowledge_query.insert_test_object(notebook.id, "concept", {"name": "seed"})
     repo._runtime.knowledge_lifecycle.write_clusters(notebook.id, [{
         "canonical_id": "K-old",
         "member_object_id": object_id,
@@ -200,7 +200,7 @@ def test_approve_promotion_candidate_failure_rolls_back_base_and_candidate(
     base = repo.create_notebook(NotebookCreate(name="base rollback"))
     repo.mark_notebook_base(base.id)
     repo.replace_notebook_bases(personal.id, [base.id], "user-local")
-    object_id = repo._test_insert_object(
+    object_id = repo._runtime.knowledge_query.insert_test_object(
         personal.id, "claim", {"name": "rollback promotion"}
     )
     candidate = repo.propose_promotion(personal.id, object_id)
@@ -251,8 +251,8 @@ def test_confirm_conflict_status_failure_leaves_mutation_committed(
     repo, monkeypatch
 ):
     notebook = repo.create_notebook(NotebookCreate(name="conflict boundary"))
-    left = repo._test_insert_object(notebook.id, "claim", {"name": "before"})
-    right = repo._test_insert_object(notebook.id, "claim", {"name": "other"})
+    left = repo._runtime.knowledge_query.insert_test_object(notebook.id, "claim", {"name": "before"})
+    right = repo._runtime.knowledge_query.insert_test_object(notebook.id, "claim", {"name": "other"})
     candidate_id = repo._runtime.knowledge_governance.write_conflict_candidate(
         notebook.id,
         "node",
@@ -311,7 +311,7 @@ def test_update_knowledge_embed_failure_still_invalidates_and_marks_dirty(
     still reaches the intended RuntimeError instead of failing on an
     unexpected keyword argument."""
     notebook = repo.create_notebook(NotebookCreate(name="embed boundary"))
-    object_id = repo._test_insert_object(
+    object_id = repo._runtime.knowledge_query.insert_test_object(
         notebook.id, "claim", {"name": "embed me"}
     )
     events = []

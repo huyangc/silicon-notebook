@@ -137,7 +137,7 @@ def assert_a_memory_vector_takes_no_synonym_slot(repo, monkeypatch) -> None:
                           "DO UPDATE SET vector = EXCLUDED.vector"),
                 (ids[name], nb_id, struct.pack("<16f", *values), NOW),
             )
-    repo._vector_cache.invalidate(f"{nb_id}:matrix:knowledge_embeddings")
+    repo._runtime.retrieval_snapshots.vector_cache.invalidate(f"{nb_id}:matrix:knowledge_embeddings")
     settings = repo._runtime.index_projections.settings
     monkeypatch.setattr(settings, "ppr_emb_synonym_enabled", True)
     monkeypatch.setattr(settings, "ppr_emb_synonym_threshold", 0.9)
@@ -192,7 +192,7 @@ def mix_a_shared_object_into_a_memory_cluster(repo, seeded) -> None:
             ).fetchall()
         }
     assert members == {ids["left"], memory_member}, members  # the mixed cluster exists
-    repo._vector_cache.invalidate(f"{nb_id}:clustermap")
+    repo._runtime.retrieval_snapshots.vector_cache.invalidate(f"{nb_id}:clustermap")
 
 
 def assert_no_partition_names_a_memory_cluster(repo, seeded) -> None:
@@ -580,7 +580,7 @@ def assert_a_memory_confirmed_at_the_object_read_never_reaches_a_published_index
     )
     runtime = repo._runtime.scale_artifacts
     assert runtime.load(notebook_id) is not None
-    served = repo._viz_index(notebook_id)
+    served = repo._runtime.scale_artifacts.viz_index(notebook_id)
     assert served is not None
     assert not set(_late(raced, "name")) & set(served.viz_names)
 
@@ -615,7 +615,7 @@ def assert_a_pre_isolation_index_is_rebuilt_once_its_memory_is_deleted(repo) -> 
     with repo._write() as db:
         db.execute(sql(repo, "UPDATE sources SET source_type='memory' WHERE id=?"),
                    (MEMORY_SOURCE,))
-    repo._scale_idx_cache.pop(nb_id, None)
+    repo._runtime.scale_artifacts.scale_cache.pop(nb_id, None)
     old = store.read_manifest(store.scale_dir(nb_id))
     assert "memory_isolation" not in old and MEMORY_SOURCE in old["watermark_sources"]
 
@@ -642,7 +642,7 @@ def assert_a_pre_isolation_index_is_rebuilt_once_its_memory_is_deleted(repo) -> 
     idx = repo._runtime.scale_artifacts.load(nb_id)
     assert idx is not None and "NEWCOMER" in set(idx.viz_names)
     assert not set(SECRET_NAMES) & set(idx.viz_names)
-    served = repo._viz_index(nb_id)
+    served = repo._runtime.scale_artifacts.viz_index(nb_id)
     assert served is not None and not set(SECRET_NAMES) & set(served.viz_names)
 
 
@@ -969,7 +969,7 @@ def _change_only_shared_clusters(repo, notebook_id: str) -> None:
                       "WHERE notebook_id=? AND generation=?"),
             (_after_every_existing_row(), notebook_id, generation),
         )
-    repo._vector_cache.invalidate(f"{notebook_id}:clustermap")
+    repo._runtime.retrieval_snapshots.vector_cache.invalidate(f"{notebook_id}:clustermap")
 
 
 def _change_only_shared_relation_vectors(repo, notebook_id: str) -> None:
@@ -1164,9 +1164,9 @@ def _pre_isolation_notebook(repo, tier: str) -> str:
     repo.build_scale_index(notebook_id)
     repo._runtime.scale_artifacts.build_viz(notebook_id)
     make_it_look_pre_isolation(store.scale_dir(notebook_id))
-    make_it_look_pre_isolation(repo._viz_index_dir(notebook_id))
-    repo._scale_idx_cache.pop(notebook_id, None)
-    repo._viz_idx_cache.pop(notebook_id, None)
+    make_it_look_pre_isolation(str(repo._runtime.scale_artifact_store.viz_dir(notebook_id)))
+    repo._runtime.scale_artifacts.scale_cache.pop(notebook_id, None)
+    repo._runtime.scale_artifacts.viz_cache.pop(notebook_id, None)
     return notebook_id
 
 
@@ -1184,13 +1184,13 @@ def assert_no_artifact_built_before_the_isolation_is_served(
     status = repo.scale_index_status(notebook_id)
     assert status["state"] == "stale" and status["stale"] is True
     assert (status["n_nodes"], status["n_ann"]) == (0, 0)
-    probe = repo._viz_index_probe(notebook_id)
+    probe = repo._runtime.scale_artifacts.viz_probe(notebook_id)
     assert (probe["viz_indexed"], probe["viz_nodes"], probe["viz_edges"]) == (False, 0, 0)
 
     with monkeypatch.context() as patch:
         patch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
-        assert repo._viz_index(notebook_id) is None
-    rebuilt = repo._viz_index(notebook_id)
+        assert repo._runtime.scale_artifacts.viz_index(notebook_id) is None
+    rebuilt = repo._runtime.scale_artifacts.viz_index(notebook_id)
     assert rebuilt is not None and rebuilt.manifest["memory_isolation"] == 1
     assert {"MOSFET", "gain"} <= set(rebuilt.viz_names)
 
@@ -1209,7 +1209,7 @@ def assert_a_pre_isolation_index_is_rebuilt_by_the_next_fold(repo, tier: str) ->
     store = repo._runtime.scale_artifacts.artifacts
     repo.build_scale_index(notebook_id)
     make_it_look_pre_isolation(store.scale_dir(notebook_id))
-    repo._scale_idx_cache.pop(notebook_id, None)
+    repo._runtime.scale_artifacts.scale_cache.pop(notebook_id, None)
     events = _capture_events(repo)
     for n in (1, 2):
         source_id = f"src-new-{n}"

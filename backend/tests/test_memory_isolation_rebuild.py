@@ -693,8 +693,8 @@ def test_pre_isolation_scale_indexes_are_queued_for_a_full_build(scale_repo, mon
         assert again.pre_isolation_scale_notebook_ids() == []
         assert again.schedule() is None
     finally:
-        for notebook_id in list(scale.idle_queue):
-            scale.dequeue_idle(notebook_id)
+        with scale.building_lock:
+            scale.idle_queue.clear()
 
 
 def _gk_state(repo):
@@ -782,5 +782,5 @@ def test_a_large_standalone_viz_without_a_scale_root_is_queued_too(viz_repo):
         assert queued.get(cases.NB_GK) == "full" and queued.get(cases.NB_C) == "full"
         assert cases.NB_COPY not in queued
     finally:
-        for notebook_id in list(scale.idle_queue):
-            scale.dequeue_idle(notebook_id)
+        with scale.building_lock:
+            scale.idle_queue.clear()

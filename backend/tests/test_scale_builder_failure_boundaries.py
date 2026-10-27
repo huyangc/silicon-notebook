@@ -196,7 +196,7 @@ def test_fold_failure_before_swap_keeps_old_artifact(
         builder.fold(indexed_notebook)
     assert manifest.read_bytes() == before
     assert store.load_scale(indexed_notebook) is not None
-    assert indexed_notebook not in repo._scale_building
+    assert indexed_notebook not in repo._runtime.scale_artifacts.building
 
 
 def test_fold_second_rename_failure_rolls_old_artifact_back(
@@ -281,7 +281,7 @@ def test_full_save_failure_keeps_existing_cached_artifact(
     builder = repo._runtime.scale_builder
     cached = repo._scale_index(indexed_notebook, allow_stale=True)
     assert cached is not None
-    repo._scale_idx_cache[indexed_notebook] = cached
+    repo._runtime.scale_artifacts.scale_cache[indexed_notebook] = cached
     monkeypatch.setattr(
         repo._runtime.scale_artifact_store,
         "save_full",
@@ -291,7 +291,7 @@ def test_full_save_failure_keeps_existing_cached_artifact(
     )
     with pytest.raises(RuntimeError, match="injected full-save failure"):
         builder.build(indexed_notebook)
-    assert repo._scale_idx_cache.get(indexed_notebook) is cached
+    assert repo._runtime.scale_artifacts.scale_cache.get(indexed_notebook) is cached
 
 
 def test_builder_gather_graph_preserves_compact_array_dtypes(repo):

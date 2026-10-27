@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import threading
-from types import MappingProxyType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
@@ -129,9 +129,6 @@ def test_reasoning_stage_data_contracts_are_frozen_slotted_and_narrow():
     with pytest.raises(dataclasses.FrozenInstanceError):
         run_input.question = "changed"
     assert isinstance(run_input.intent_queries, tuple)
-    assert isinstance(run_input.intent.as_mapping(), MappingProxyType)
-    with pytest.raises(TypeError):
-        run_input.intent.as_mapping()["result_scope"] = "complete"
     trace_detail = run_input.intent.as_json_mapping()
     assert trace_detail["entities"] == ["entity"]
     assert isinstance(trace_detail["entities"], list)

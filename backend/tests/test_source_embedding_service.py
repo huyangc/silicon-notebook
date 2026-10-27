@@ -143,7 +143,7 @@ def test_embed_source_warms_up_late_bound_embedder_once(repo):
     emb = _RecordingEmbedder(dim=8)
     _bind(repo, "source_element_embedding", emb)
 
-    repo._embed_source(sid)
+    repo._runtime.source_embedding.embed_source(sid)
     assert ("embedding", "source_element_embedding") in repo.recording_model_provider.calls
 
     assert emb.events.count("ensure") == 1                 # warm-up exactly once
@@ -162,7 +162,7 @@ def test_embed_source_warmup_failure_is_swallowed(repo):
     emb = _RecordingEmbedder(dim=8, ensure_raises=True)
     _bind(repo, "source_element_embedding", emb)
 
-    repo._embed_source(sid)                                # must not raise
+    repo._runtime.source_embedding.embed_source(sid)                                # must not raise
 
     assert _count(
         repo,
@@ -180,7 +180,7 @@ def test_embed_source_truncates_element_texts(tmp_path, monkeypatch):
     emb = _RecordingEmbedder(dim=8)
     _bind(trunc_repo, "source_element_embedding", emb)
 
-    trunc_repo._embed_source(sid)
+    trunc_repo._runtime.source_embedding.embed_source(sid)
 
     assert emb.texts_seen and all(len(t) <= 40 for t in emb.texts_seen)
 
@@ -255,7 +255,7 @@ def test_embed_chunks_for_source_isolates_failed_batches(repo):
     sid = _insert_source_with_elements(
         repo, nb.id, 30, text="chunk body marker {i} " + "filler " * 80
     )
-    repo._build_chunks_for_source(sid)
+    repo._runtime.source_chunking.build_chunks_for_source(sid)
     total = _count(repo, "SELECT COUNT(*) FROM chunks WHERE source_id=?", (sid,))
     assert total >= 2
 
@@ -266,7 +266,7 @@ def test_embed_chunks_for_source_isolates_failed_batches(repo):
     emb = _RecordingEmbedder(dim=8, fail_substr=victim["text"][:60])
     _bind(repo, "chunk_embedding", emb)
 
-    repo._embed_chunks_for_source(sid)
+    repo._runtime.source_embedding.embed_chunks_for_source(sid)
     assert ("embedding", "chunk_embedding") in repo.recording_model_provider.calls
 
     embedded = _count(
@@ -295,10 +295,10 @@ def test_unconfigured_embedder_paths_are_noops(tmp_path, monkeypatch):
         def __getattr__(self, name):
             raise AssertionError("embedder must not be touched when unconfigured")
 
-    bare_repo._embed_source("src-missing")                 # returns before get_source
+    bare_repo._runtime.source_embedding.embed_source("src-missing")                 # returns before get_source
     bare_repo._embed_objects_batch(nb.id, [{"_oid": "ko-1", "payload": {"name": "x"}}])
     bare_repo._embed_relations_batch(nb.id, [{"_rid": "rel-1", "text": "x"}])
-    bare_repo._embed_chunks_batch(nb.id, [{"_oid": "ck-1", "payload": {"text": "x"}}])
+    bare_repo._runtime.source_embedding.embed_chunks_batch(nb.id, [{"_oid": "ck-1", "payload": {"text": "x"}}])
 
     assert _count(
         bare_repo,
@@ -364,7 +364,7 @@ def test_embed_source_pages_before_mapping(tmp_path, monkeypatch):
         r._runtime.embedding_store, "replace_element_vectors", spy_replace
     )
 
-    r._embed_source(sid)
+    r._runtime.source_embedding.embed_source(sid)
 
     assert len(calls) >= 3                                            # paged, not one shot
     assert max(calls) <= 2                                            # each map call ≤ one page
@@ -390,7 +390,7 @@ def _embed_source_run(tmp_path, monkeypatch, *, commit_batches, n=55):
             return super().embed_texts(texts)
 
     _bind(r, "source_element_embedding", _CallRecordingEmbedder(dim=8))
-    r._embed_source(sid)
+    r._runtime.source_embedding.embed_source(sid)
     with r._connect() as db:
         stored = [
             # source id 是随机的,只留 el-<sid>-<idx> 的序号部分,让两次跑法可比。
@@ -483,7 +483,7 @@ def test_embed_chunks_batch_pages_before_mapping(tmp_path, monkeypatch):
 
     items = [{"_oid": f"ck-{i}", "payload": {"text": f"chunk number {i}"}}
              for i in range(55)]
-    r._embed_chunks_batch(nb.id, items)
+    r._runtime.source_embedding.embed_chunks_batch(nb.id, items)
 
     assert len(calls) >= 3
     assert max(calls) <= 2
@@ -586,7 +586,7 @@ def test_embed_source_reads_elements_in_bounded_keyset_pages(tmp_path, monkeypat
     _bind(r, "source_element_embedding", _RecordingEmbedder(dim=8))
     pages = _spy_element_pages(r, monkeypatch)
 
-    r._embed_source(sid)
+    r._runtime.source_embedding.embed_source(sid)
 
     assert pages, "至少读了一页"
     assert all(p["limit"] == 7 for p in pages)
@@ -646,7 +646,7 @@ def test_embed_source_single_page_source_still_writes_one_transaction(
     )
     pages = _spy_element_pages(r, monkeypatch)
 
-    r._embed_source(sid)
+    r._runtime.source_embedding.embed_source(sid)
 
     assert flushes == [7]
     assert len(pages) == 1                 # 短页 → 游标即刻耗尽,不再多发一次查询
@@ -668,7 +668,7 @@ def test_embed_source_with_nothing_embeddable_skips_warmup_and_eviction(
     invalidated = _spy_invalidate(r._runtime.source_embedding, monkeypatch)
     pages = _spy_element_pages(r, monkeypatch)
 
-    r._embed_source(sid)
+    r._runtime.source_embedding.embed_source(sid)
 
     assert embedder.events == []                  # 既没 warm-up 也没 embed
     assert invalidated == []
@@ -688,7 +688,7 @@ def test_embed_source_warms_up_once_even_across_many_read_pages(tmp_path, monkey
     embedder = _RecordingEmbedder(dim=8)
     _bind(r, "source_element_embedding", embedder)
 
-    r._embed_source(sid)
+    r._runtime.source_embedding.embed_source(sid)
 
     assert embedder.events.count("ensure") == 1
     assert embedder.events[0] == "ensure"
@@ -726,6 +726,6 @@ def test_embed_source_raises_when_the_store_cursor_does_not_advance(
     monkeypatch.setattr(store, "source_elements_after", stuck)
 
     with pytest.raises(RuntimeError, match="cursor did not advance"):
-        r._embed_source(sid)
+        r._runtime.source_embedding.embed_source(sid)
     # 第一页给出的游标是新的(previous 是 None),第二页才发现它没动 —— 至多两次。
     assert len(calls) == 2, calls

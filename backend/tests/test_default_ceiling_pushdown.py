@@ -97,7 +97,7 @@ def _add_source(repo, nb, texts) -> str:
                 (f"el-{sid}-{index:04d}", sid, "paragraph", f"p{index}", text,
                  "{}", now),
             )
-    repo._chunk_and_embed_source(sid)
+    repo._runtime.source_chunking.chunk_and_embed_source(sid)
     repo._runtime.knowledge_query.backfill_chunk_fts(nb)
     return sid
 

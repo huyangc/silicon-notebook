@@ -508,13 +508,3 @@ class EmbeddingStore:
         ).fetchall()
         return _compat_vector_rows(rows)
 
-    @staticmethod
-    def embedded_object_ids(db, notebook_id: str) -> set:
-        return {
-            row["object_id"]
-            for row in db.execute(
-                "SELECT object_id FROM knowledge_embeddings "
-                "WHERE notebook_id=%s AND vector IS NOT NULL",
-                (notebook_id,),
-            ).fetchall()
-        }

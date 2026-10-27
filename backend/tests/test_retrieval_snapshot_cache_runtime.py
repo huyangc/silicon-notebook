@@ -32,26 +32,24 @@ def repo(tmp_path, monkeypatch):
 
 
 def test_cache_transfer_preserves_object_identity(repo):
-    """The snapshot cache owns THE cache objects — the facade handles and the
-    coordinator/lifecycle collaborators all alias them, no replacement copies."""
+    """The snapshot cache owns THE cache objects — the coordinator/lifecycle
+    collaborators all alias them, no replacement copies."""
     runtime = repo._runtime
-    assert repo._vector_cache is runtime.retrieval_snapshots.vector_cache
-    assert repo._unified_cache is runtime.retrieval_snapshots.unified_cache
-    assert runtime.kg_mutations.vector_cache is repo._vector_cache
-    assert runtime.kg_mutations.unified_cache is repo._unified_cache
-    assert runtime.knowledge_lifecycle.unified_cache is repo._unified_cache
+    assert runtime.kg_mutations.vector_cache is repo._runtime.retrieval_snapshots.vector_cache
+    assert runtime.kg_mutations.snapshots.unified_cache is repo._runtime.retrieval_snapshots.unified_cache
+    assert runtime.knowledge_lifecycle.unified_cache is repo._runtime.retrieval_snapshots.unified_cache
 
 
 def test_facade_vector_cache_setter_updates_all_consumers(repo):
     replacement = VectorCache(max_entries=3)
-    repo._vector_cache = replacement
+    repo._runtime.retrieval_snapshots.vector_cache = replacement
     assert repo._runtime.retrieval_snapshots.vector_cache is replacement
     assert repo._runtime.kg_mutations.vector_cache is replacement
 
 
 def test_knowledge_query_reads_replaced_vector_cache(repo, monkeypatch):
     """Query projections must not retain the cache object captured at wiring."""
-    old_cache = repo._vector_cache
+    old_cache = repo._runtime.retrieval_snapshots.vector_cache
     replacement = VectorCache(max_entries=3)
     notebook_id = "nb-cache-swap"
     version = ("replacement",)
@@ -64,7 +62,7 @@ def test_knowledge_query_reads_replaced_vector_cache(repo, monkeypatch):
         lambda _notebook_id: list(version),
     )
 
-    repo._vector_cache = replacement
+    repo._runtime.retrieval_snapshots.vector_cache = replacement
 
     assert repo._edge_centrality_map(notebook_id) == {"new-cache": 1.0}
     assert old_cache.peek(f"{notebook_id}:edge_centrality", version) is False
@@ -86,9 +84,9 @@ def test_knowledge_query_invalidates_replaced_notebook_language_map(repo):
 
 def test_facade_unified_cache_setter_updates_all_consumers(repo):
     replacement: dict = {}
-    repo._unified_cache = replacement
+    repo._runtime.set_unified_cache(replacement)
     assert repo._runtime.retrieval_snapshots.unified_cache is replacement
-    assert repo._runtime.kg_mutations.unified_cache is replacement
+    assert repo._runtime.kg_mutations.snapshots.unified_cache is replacement
     assert repo._runtime.knowledge_lifecycle.unified_cache is replacement
 
 

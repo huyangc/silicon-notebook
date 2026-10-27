@@ -57,31 +57,31 @@ def test_deployed_v9_db_gets_checkpoint_table_backfilled(repo):
 
 def test_ckpt_put_load_roundtrip(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo._rebuild_ckpt_put(nb.id, "v1", "merge_review",
-                           [("K-a\x1fK-b", {"decision": "merge", "confidence": 0.9})])
-    loaded = repo._rebuild_ckpt_load(nb.id, "v1", "merge_review")
+    repo._runtime.unified_kg.checkpoint_put(nb.id, "v1", "merge_review",
+                           [("K-a\x1fK-b", {"decision": "merge", "confidence": 0.9})], repo._runtime.unified_kg.now())
+    loaded = repo._runtime.unified_kg.checkpoint_load(nb.id, "v1", "merge_review")
     assert loaded == {"K-a\x1fK-b": {"decision": "merge", "confidence": 0.9}}
     # 不同 stage / 版本互不干扰
-    assert repo._rebuild_ckpt_load(nb.id, "v1", "concept_desc") == {}
-    assert repo._rebuild_ckpt_load(nb.id, "v2", "merge_review") == {}
+    assert repo._runtime.unified_kg.checkpoint_load(nb.id, "v1", "concept_desc") == {}
+    assert repo._runtime.unified_kg.checkpoint_load(nb.id, "v2", "merge_review") == {}
 
 
 def test_ckpt_gc_drops_other_versions_only(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo._rebuild_ckpt_put(nb.id, "old", "merge_review", [("k1", {"d": 1})])
-    repo._rebuild_ckpt_put(nb.id, "cur", "merge_review", [("k2", {"d": 2})])
-    repo._rebuild_ckpt_gc(nb.id, "cur")
-    assert repo._rebuild_ckpt_load(nb.id, "old", "merge_review") == {}
-    assert repo._rebuild_ckpt_load(nb.id, "cur", "merge_review") == {"k2": {"d": 2}}
+    repo._runtime.unified_kg.checkpoint_put(nb.id, "old", "merge_review", [("k1", {"d": 1})], repo._runtime.unified_kg.now())
+    repo._runtime.unified_kg.checkpoint_put(nb.id, "cur", "merge_review", [("k2", {"d": 2})], repo._runtime.unified_kg.now())
+    repo._runtime.unified_kg.checkpoint_gc(nb.id, "cur")
+    assert repo._runtime.unified_kg.checkpoint_load(nb.id, "old", "merge_review") == {}
+    assert repo._runtime.unified_kg.checkpoint_load(nb.id, "cur", "merge_review") == {"k2": {"d": 2}}
 
 
 def test_ckpt_clear_drops_all(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo._rebuild_ckpt_put(nb.id, "cur", "merge_review", [("k1", {"d": 1})])
-    repo._rebuild_ckpt_put(nb.id, "cur", "concept_desc", [("k2", {"d": 2})])
-    repo._rebuild_ckpt_clear(nb.id)
-    assert repo._rebuild_ckpt_load(nb.id, "cur", "merge_review") == {}
-    assert repo._rebuild_ckpt_load(nb.id, "cur", "concept_desc") == {}
+    repo._runtime.unified_kg.checkpoint_put(nb.id, "cur", "merge_review", [("k1", {"d": 1})], repo._runtime.unified_kg.now())
+    repo._runtime.unified_kg.checkpoint_put(nb.id, "cur", "concept_desc", [("k2", {"d": 2})], repo._runtime.unified_kg.now())
+    repo._runtime.unified_kg.checkpoint_clear(nb.id)
+    assert repo._runtime.unified_kg.checkpoint_load(nb.id, "cur", "merge_review") == {}
+    assert repo._runtime.unified_kg.checkpoint_load(nb.id, "cur", "concept_desc") == {}
 
 
 class _CountingReviewLLM:
@@ -247,7 +247,7 @@ def test_concept_desc_checkpoint_skips_relled_llm_on_second_run(repo, monkeypatc
         "payload": {"name": "bandgap reference", "section_path": ""},
         "evidence": [{"quoted_span": "bandgap ref circuit"}]}], [])
 
-    ver_before = repo._cluster_input_version(nb.id)
+    ver_before = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
 
     # 首跑:写簇前(object_type=='concept' 的第一次调用)人为炸掉。
     orig_write = repo._runtime.knowledge_lifecycle._write_cluster_map_streamed
@@ -271,7 +271,7 @@ def test_concept_desc_checkpoint_skips_relled_llm_on_second_run(repo, monkeypatc
             (nb.id,)).fetchone()["c"]
     assert cc == 0
 
-    ver_after_crash = repo._cluster_input_version(nb.id)
+    ver_after_crash = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
     assert ver_after_crash == ver_before    # 崩溃发生在 mutation_seq bump 之前,
                                              # 二跑能在同一 input_version 下找到 checkpoint
 
@@ -379,8 +379,8 @@ def test_node_vector_backfill_preserves_merge_review_checkpoint(repo, monkeypatc
     first = fake.calls
     assert first > 0                        # 首跑确有 merge 审查 LLM
 
-    ver_before = repo._cluster_input_version(nb.id)
-    ck_ver_before = repo._cluster_input_version(nb.id, exclude_emb_count=True)
+    ver_before = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
+    ck_ver_before = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id, exclude_emb_count=True)
 
     # 模拟节点向量部分 backfill 落库一行:直接 INSERT 进 knowledge_embeddings,
     # 不经 store_kg/_mark_unified_kg_dirty —— 只有 emb_c 的 COUNT 会变,
@@ -393,8 +393,8 @@ def test_node_vector_backfill_preserves_merge_review_checkpoint(repo, monkeypatc
             ("dummy-partial-backfill", nb.id, encode_vector([0.0] * 16), "2026-07-10T00:00:00"),
         )
 
-    ver_after = repo._cluster_input_version(nb.id)
-    ck_ver_after = repo._cluster_input_version(nb.id, exclude_emb_count=True)
+    ver_after = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id)
+    ck_ver_after = repo._runtime.knowledge_lifecycle._cluster_input_version(nb.id, exclude_emb_count=True)
     # 含 emb_c 的版本确实变了(证明这是个有意义的"backfill 中途"模拟,不是空操作)
     assert ver_after != ver_before
     # exclude_emb_count 版本对 emb_c 变化免疫 —— Fix 1 的核心保证
@@ -417,9 +417,9 @@ def test_fresh_implies_force_even_when_force_false(repo, monkeypatch):
                                  "evidence": []}], [])
     repo.rebuild_unified_kg(nb.id, force=True)          # 建立 clusters + 存 cluster_input_version
     # 塞一行残留 checkpoint(任意版本);store_kg/rebuild 之间无变更 → skip-gate 本会跳过。
-    repo._rebuild_ckpt_put(nb.id, "stale-ver", "merge_review",
-                           [("k", {"decision": "merge", "confidence": 1.0})])
+    repo._runtime.unified_kg.checkpoint_put(nb.id, "stale-ver", "merge_review",
+                           [("k", {"decision": "merge", "confidence": 1.0})], repo._runtime.unified_kg.now())
     # force=False + fresh=True:无兜底会命中 skip-gate 提前 return、clear 落空;
     # 有 force=force or fresh 兜底 → 强制重建 → _rebuild_ckpt_clear 清空整个 notebook。
     repo.rebuild_unified_kg(nb.id, force=False, fresh=True)
-    assert repo._rebuild_ckpt_load(nb.id, "stale-ver", "merge_review") == {}
+    assert repo._runtime.unified_kg.checkpoint_load(nb.id, "stale-ver", "merge_review") == {}

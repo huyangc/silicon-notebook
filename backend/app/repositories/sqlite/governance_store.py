@@ -315,10 +315,6 @@ class GovernanceStore:
         self.seams = seams
 
     @staticmethod
-    def seed_for(object_type: str, *, concept_seed_version: int):
-        return seed_fn_for(object_type, concept_seed_version=concept_seed_version)
-
-    @staticmethod
     def published_concept_seed_space(
         connection, notebook_id: str, *, override_keys: bool = True,
     ) -> "tuple[int, frozenset]":
@@ -332,19 +328,6 @@ class GovernanceStore:
         if not override_keys:
             return published_concept_seed_version_on(connection, notebook_id), frozenset()
         return published_concept_seed_space_on(connection, notebook_id)
-
-    @staticmethod
-    def find_base_match(
-        object_type: str, payload: dict, rows, *, concept_seed_version: int,
-        override: frozenset = frozenset(),
-    ) -> str:
-        return find_base_dedup_match(
-            object_type, payload, rows, concept_seed_version=concept_seed_version,
-            override=override)
-
-    @staticmethod
-    def merge_evidence(base_evidence: list, source_evidence: list) -> list:
-        return merge_evidence_lists(base_evidence, source_evidence)
 
     # ------------------------------------------------ lifecycle projections
     @staticmethod
@@ -1068,13 +1051,6 @@ class GovernanceStore:
             # (kg_merge_seed.DECISION_STRENGTH), whatever the row order.
             fold_decision(out, frozenset(_decision_keys(r)), r["status"])
         return out
-
-    def decided_seed_pairs(
-        self, notebook_id: str, *, seed_version: Optional[int]
-    ) -> Dict[frozenset, str]:
-        with self.database.connect() as db:
-            return self.decided_seed_pairs_from(
-                db, notebook_id, seed_version=seed_version)
 
     @staticmethod
     def merge_decision_rows(

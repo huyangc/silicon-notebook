@@ -290,18 +290,6 @@ class NotebookSummaryQuery:
             return {}
         return {"viewer_id": viewer_identity(user_id or "")}
 
-    def knowledge_type_counts(
-        self, db: object, notebook_id: str, **viewer: str
-    ) -> Dict[str, int]:
-        """{counts-dict key: count} for the 6 knowledge object_types
-        from_row surfaces, via ONE GROUP BY query instead of 6 separate
-        per-type COUNT(*) calls. Same USABLE_STATUSES filter and same
-        zero-default for absent types as the old per-type COUNT(*) calls.
-        ``viewer``: ``viewer_count_kwargs``."""
-        return self._type_counts_from_rows(self.queries.knowledge_type_count_rows(
-            db, notebook_id, USABLE_STATUSES, **viewer
-        ))
-
     @classmethod
     def _type_counts_from_rows(cls, rows: Any) -> Dict[str, int]:
         """The counts-dict projection of ``knowledge_type_count_rows`` rows."""
@@ -326,12 +314,6 @@ class NotebookSummaryQuery:
         stays unfiltered (it is a table-agnostic primitive shared with the
         facade's ``_count`` re-export / its equivalence-oracle test)."""
         return self.queries.visible_source_count(db, notebook_id)
-
-    def count_pending_kg_sources(
-        self, db: object, notebook_id: str
-    ) -> int:
-        """Count every physical parsed source without a complete KG extraction."""
-        return self.queries.pending_kg_source_count(db, notebook_id)
 
     def visible_pending_kg_sources(
         self, db: object, notebook_id: str
@@ -376,12 +358,6 @@ class NotebookSummaryQuery:
             for r in rows
         ]
         return (refs, [str(r["id"]) for r in rows if bool(r["has_kg"])])
-
-    def viewer_from_row(self, connection: object, row: Any) -> NotebookSummary:
-        """``from_row`` for the current viewer (``current_viewer_id()``: the
-        retrieval run's actor, else the requesting user, else nobody) -- the
-        summary's mounts are the viewer's (N-6)."""
-        return self.from_row(connection, row, user_id=current_viewer_id() or None)
 
     def from_row(
         self,
