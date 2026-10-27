@@ -2252,7 +2252,10 @@ class ReportEngine:
                     seen_elements.add(element.element_id)
                     seen_element_content.add(content_key)
                     new_count += 1
-            except AskCancelled:
+            except (AskCancelled, RetrievalControlError):
+                # Registered fail-soft handler: under a participant override
+                # ``retrieve_elements`` fans out per participant
+                # (``_peer_retrieve_elements`` -> the participant seat).
                 raise
             except Exception:
                 pass

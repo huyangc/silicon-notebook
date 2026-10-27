@@ -31,7 +31,6 @@ import pytest
 
 from app.core.ask_retrieval_policy import ask_retrieval_limits
 from app.core.config import Settings
-from app.domain.retrieval_control import RetrievalControlError
 from app.domain.reflect_action import (
     ReflectActionDescriptor,
     ReflectActionItem,
@@ -1143,7 +1142,7 @@ def _expect_repair_declined(obs):
     name="outline_overflow_repair_structure_change",
     effort="exhaustive", plan_queries=("版图设计", "版图规则"),
     retrieval_overrides=lambda ctx: {
-        "weak_support_relations": _raise(RetrievalControlError("参与集座位不可用"))},
+        "weak_support_relations": _raise(RuntimeError("图谱支撑读取失败"))},
     reflects=_overflow_pair(True) + [
         outline({"id": "s1", "title": "改过的标题"}),
         ANSWER,
@@ -1151,7 +1150,8 @@ def _expect_repair_declined(obs):
 )
 def _expect_repair_structure(obs):
     reasons = obs.reasons()
-    # the RetrievalControlError from the weak-support probe is swallowed
+    # an ordinary weak-support probe failure is a skip (a control error ends
+    # the run instead: ``kg_gap_probe_control_error`` in the stage scenarios)
     assert "kg_gap_unavailable" in reasons
     assert obs.data["outcome"] == {"returned": True}
     assert "outline_repair_structure" in reasons

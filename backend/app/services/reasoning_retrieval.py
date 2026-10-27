@@ -6630,8 +6630,8 @@ class ReasoningRetriever:
         `keywords`(`_action_search_chunks`)。失败语义对两者相同。
 
         失败语义与 `_chunk_seed_search` 逐字一致:fail-open 吞掉、`fail_closed`
-        下照抛、`AskCancelled` 始终上抛——词法臂炸掉不该把已经到手的向量臂命中
-        一起拖走。
+        下照抛、`AskCancelled` 与 `RetrievalControlError` 始终上抛——词法臂炸掉
+        不该把已经到手的向量臂命中一起拖走。
 
         **但吞掉不等于不说**(codex R3 P2-2)。只 fail-open 的话,「`RetrievalPort`
         的某个实现根本没有 `keyword_chunk_candidates`」这类接线错误会被压成一句
@@ -6644,7 +6644,10 @@ class ReasoningRetriever:
         raise_if_cancelled(self.cancel_event)
         try:
             return self.keyword_chunks(notebook_id, keywords), False
-        except AskCancelled:
+        except (AskCancelled, RetrievalControlError):
+            # 登记的 fail-soft handler:对等 run 里关键词臂是逐库联邦扇出
+            # (``keyword_chunk_candidates`` -> ``federated_keyword_chunk_candidates``
+            # -> 参与集座位),身份复核失败不许压成一次 ``keyword_failed``。
             raise
         except Exception:
             if self.fail_closed:
@@ -9524,7 +9527,7 @@ class ReasoningRetriever:
             # codex #538 R1 P2:整个执行体 fail-open——注入开着时一次
             # 瞬态/畸形的经验库读取(_cached_experiences 会发 version_signal
             # 聚合查询)不得把整次 Ask/报告 run 打挂;这是可选的建议面,
-            # 与被动块的既有 fail-open 同口径。取消照常上抛。
+            # 与被动块的既有 fail-open 同口径。取消与控制异常照常上抛。
             try:
                 consult_situation = current_situation(
                     state.intent_detail, mode=_EXPERIENCE_RUN_MODE,
@@ -9618,7 +9621,7 @@ class ReasoningRetriever:
                             ),
                             detail={"entries": len(newly_delivered),
                                     "chars": len(state.consult_block_text)}))
-            except AskCancelled:
+            except (AskCancelled, RetrievalControlError):
                 raise
             except Exception:  # noqa: BLE001 — 建议面绝不挂 run
                 state.record(TraceStep(
@@ -9882,7 +9885,10 @@ class ReasoningRetriever:
                 probed = self.retrieval.weak_support_relations(
                     state.notebook_id, object_ids
                 )
-        except AskCancelled:
+        except (AskCancelled, RetrievalControlError):
+            # 登记的 fail-soft handler(参与者守卫 `_SEAT_FAILSOFT_SITES`):今天
+            # 这条探测只读本库的 store 与来源天花板,不触达参与集座位;照抛是
+            # 与同文件其他站点同口径的纵深防御,提示缺席不许盖住控制异常。
             raise
         except Exception as exc:  # noqa: BLE001 — 见上:提示不是必需品
             state.record(TraceStep(
