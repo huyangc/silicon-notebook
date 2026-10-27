@@ -80,21 +80,21 @@ test("删除详情在铃铛内展开，可返回通知、收起再打开；清�
     return <PendingBell
       snapshot={{ count: 1, items: [OWNER_ITEM] }} doneItems={[]} userId="u-detail"
       onOpenItem={() => setDetail(true)} onOpenDone={vi.fn()} onDismissDone={vi.fn()}
-      detail={detail ? { key: 1, onBack: () => setDetail(false), content: <p>删除详情内容</p> } : null}
+      detail={{ key: detail ? 1 : null, onBack: () => setDetail(false), render: () => <p>删除详情内容</p> }}
       deletionAccess={{ hasNotices: true, onOpen: () => setDetail(true) }}
     />;
   }
   render(<Host />);
   await user.click(screen.getByLabelText("待确认中心"));
   await user.click(screen.getByText(bellDeletionLabel(OWNER_ITEM.notebook_name!, OWNER_ITEM.delete_after!)));
-  expect(await screen.findByText("删除详情内容")).toBeInTheDocument();
+  expect(await screen.findByText("删除详情内容")).toBeVisible();
   await user.click(screen.getByRole("button", { name: "返回通知" }));
-  expect(screen.queryByText("删除详情内容")).toBeNull();
+  expect(screen.getByText("删除详情内容")).not.toBeVisible();
   await user.click(screen.getByRole("button", { name: "全部清空" }));
   await user.click(screen.getByRole("button", { name: "查看即将删除的笔记本" }));
-  expect(screen.getByText("删除详情内容")).toBeInTheDocument();
+  expect(screen.getByText("删除详情内容")).toBeVisible();
   await user.keyboard("{Escape}");
-  expect(screen.queryByText("删除详情内容")).toBeNull();
+  expect(screen.getByText("删除详情内容")).not.toBeVisible();
   expect(screen.getByLabelText("待确认中心")).toHaveFocus();
   await user.click(screen.getByLabelText("待确认中心"));
   expect(screen.getByRole("button", { name: "查看即将删除的笔记本" })).toBeInTheDocument();

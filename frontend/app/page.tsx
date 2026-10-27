@@ -1187,13 +1187,12 @@ export default function Home() {
     `${deletionNoticeKey}#${notebookCollection.rows.length}`,
   );
   const [deletionFocus, setDeletionFocus] = useState<DeletionFocusRequest | null>(null);
+  const deletionFocusSequence = useRef(0);
   const deletionBellRef = useRef<HTMLButtonElement | null>(null);
   const deletionReceipts = useMemo(() => ({ userId: currentUser?.id, introduced: new Set<string>() }), [currentUser?.id]);
   const closeDeletionDetails = useCallback(() => setDeletionFocus(null), []);
   const focusDeletion = useCallback((notebookId: string | null) => {
-    setDeletionFocus((current) => (
-      notebookId === null ? null : { id: notebookId, seq: (current?.seq ?? 0) + 1 }
-    ));
+    setDeletionFocus(notebookId === null ? null : { id: notebookId, seq: ++deletionFocusSequence.current });
   }, []);
   // 说明框的打开函数(每次渲染重新指向最新的闭包;见 reportError)。
   const openDeletionNoticeRef = useRef<(notice: NotebookDeletionNotice) => void>(() => undefined);
@@ -5463,17 +5462,17 @@ export default function Home() {
           />
           <PendingBell
             buttonRef={deletionBellRef}
-            detail={deletionFocus ? {
-              key: deletionFocus.seq,
+            detail={{
+              key: deletionFocus?.seq ?? null,
               onBack: closeDeletionDetails,
-              content: <NotebookDeletionsBlock
+              render: (active) => <NotebookDeletionsBlock
                 deletions={notebookDeletions}
                 targets={deletionTargets}
-                focus={deletionFocus}
+                focus={active ? deletionFocus : null}
                 showEmpty
                 onCancelled={(notebook) => notebookCollection.showCancelledNotebook(notebook)}
               />,
-            } : null}
+            }}
             deletionAccess={{
               hasNotices: notebookDeletions.state.items.length > 0 || notebookDeletions.state.status === "unavailable",
               onOpen: () => { focusDeletion(""); notebookDeletions.reload(); },

@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useRef, useState } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import {
@@ -17,6 +18,7 @@ import {
   TRANSFER_NO_TARGET_TEXT,
   TRANSFER_WARNING_TEXT,
   deletionNoticeText,
+  bellDeletionLabel,
   exportLabel,
   transferDoneText,
   transferProgressText,
@@ -33,6 +35,7 @@ import {
 import { LEAVE_EXPORT_TOO_LARGE_TEXT } from "../../app/group-leave-dialog.tsx";
 import type { NotebookDeletionNotice } from "../../app/notebook-deletion-api.ts";
 import type { NotebookSummary } from "../../app/workspace-model.ts";
+import { PendingBell, type PendingItem } from "../../app/pending-center.tsx";
 
 // 「即将永久删除的笔记本」区块:只替换网络,区块、控件、网络客户端与下载 helper 都是真的。
 // 钉的是三状态(窗口里 / 截止已过 / 读不到)× 两种身份(主人 / 有记忆的成员)的呈现,以及
@@ -117,6 +120,75 @@ afterEach(() => {
 });
 
 const block = () => screen.findByRole("region", { name: DELETIONS_BLOCK_TITLE });
+
+function NotificationHost() {
+  const deletions = useNotebookDeletions(true, "notification");
+  const [focus, setFocus] = useState<DeletionFocusRequest | null>(null);
+  const sequence = useRef(0);
+  const item: PendingItem = {
+    type: "notebook_pending_delete", notebook_id: MEMBER.notebook_id,
+    notebook_name: MEMBER.name, delete_after: MEMBER.delete_after,
+    memory_count: MEMBER.memory_count, transferable_count: MEMBER.transferable_count,
+  };
+  return <PendingBell
+    userId="notification-action-test" snapshot={{ count: 1, items: [item] }} doneItems={[]}
+    onOpenItem={() => setFocus({ id: MEMBER.notebook_id, seq: ++sequence.current })}
+    onOpenDone={vi.fn()} onDismissDone={vi.fn()}
+    detail={{
+      key: focus?.seq ?? null, onBack: () => setFocus(null),
+      render: (active) => <NotebookDeletionsBlock deletions={deletions} targets={TARGETS}
+        focus={active ? focus : null} onCancelled={vi.fn()} showEmpty />,
+    }}
+  />;
+}
+
+for (const dismissal of ["铃铛", "外部", "返回通知"]) {
+  test(`导出途中通过${dismissal}收起详情，下载仍完成，重新打开可见结果`, async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const gate = deferred<Response>();
+    installServer([
+      listOf([MEMBER]),
+      (call) => call.path === "/api/notebooks/nb-shared/memories/export" ? gate.promise : undefined,
+    ]);
+    render(<NotificationHost />);
+    await user.click(screen.getByRole("button", { name: "待确认中心" }));
+    await user.click(screen.getByText(bellDeletionLabel(MEMBER.name, MEMBER.delete_after)));
+    const region = await block();
+    await user.click(within(region).getByRole("button", { name: /导出「封装工艺库」/ }));
+    if (dismissal === "外部") await user.click(document.body);
+    else await user.click(screen.getByRole("button", { name: dismissal === "铃铛" ? "待确认中心" : "返回通知" }));
+    expect(region).not.toBeVisible();
+    await act(async () => { gate.resolve(new Response("memory export", { status: 200 })); });
+    await waitFor(() => expect(URL.createObjectURL).toHaveBeenCalledOnce());
+    if (dismissal !== "返回通知") await user.click(screen.getByRole("button", { name: "待确认中心" }));
+    await user.click(screen.getByText(bellDeletionLabel(MEMBER.name, MEMBER.delete_after)));
+    expect(within(await block()).getByText("已导出")).toBeVisible();
+    expect(within(await block()).getByRole("listitem")).toHaveFocus();
+  });
+}
+
+test("分页转移途中返回通知，后续页继续执行，重新打开保留完整结果", async () => {
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  const first = deferred<Response>();
+  const second = deferred<Response>();
+  let pages = 0;
+  installServer([
+    listOf([MEMBER]),
+    (call) => call.path === "/api/notebooks/nb-shared/memories/transfer" ? (++pages === 1 ? first.promise : second.promise) : undefined,
+  ]);
+  render(<NotificationHost />);
+  await user.click(screen.getByRole("button", { name: "待确认中心" }));
+  await user.click(screen.getByText(bellDeletionLabel(MEMBER.name, MEMBER.delete_after)));
+  const region = await block();
+  await user.click(within(region).getByRole("button", { name: "转移到我的笔记本" }));
+  await user.click(within(region).getByRole("button", { name: "确认转移" }));
+  await user.click(screen.getByRole("button", { name: "返回通知" }));
+  await act(async () => first.resolve(json({ results: [{ id: "m1", ok: true }], remaining: 1, next_after: "m1" })));
+  await waitFor(() => expect(pages).toBe(2));
+  await act(async () => second.resolve(json({ results: [{ id: "m2", ok: true }], remaining: 0, next_after: "m2" })));
+  await user.click(screen.getByText(bellDeletionLabel(MEMBER.name, MEMBER.delete_after)));
+  expect(within(await block()).getByText(transferSummaryText(2, 0, 0, "我的笔记本"))).toBeVisible();
+});
 
 test("没有与我有关的删除:区块不出现", async () => {
   const calls = installServer([listOf([])]);
