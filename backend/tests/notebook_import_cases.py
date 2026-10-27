@@ -796,6 +796,76 @@ def check_tampered_archives_are_refused(repo, backend: Backend, tmp: Path, monke
     assert_refused(repo, good, "单行上限")
 
 
+#: A string that stands for content, a database value or a private path inside
+#: an exception message: it must never reach a log.
+LOG_SENTINEL = "SENTINEL-cell-text /private/srv/notebooks/secret.md"
+
+
+def _assert_logs_carry_no_message(records) -> None:
+    for record in records:
+        if record.name in ("silicon_notebook.notebook_import", "silicon_notebook.startup"):
+            assert record.exc_info is None and not record.exc_text, record
+        assert LOG_SENTINEL not in record.getMessage(), record.getMessage()
+
+
+def check_failure_logs_carry_ids_and_class_only(repo, backend, tmp, monkeypatch, caplog) -> None:
+    """A Knowhow projection that fails after publish, a compensation that fails,
+    and a startup sweep that fails each log the notebook / table ids and the
+    exception's class -- never its message nor a traceback (either can carry
+    cell content, database values or private paths). The failure report is
+    unchanged: the projection failure is still listed, the import's own error
+    still raised."""
+    import logging
+
+    from app.services import startup_warmup
+
+    notebook_id = seed_world(repo, backend, "full")
+    path = tmp / "logs.snbk"
+    export(repo, notebook_id, path)
+    svc = service(repo)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError(LOG_SENTINEL)
+
+    caplog.set_level(logging.DEBUG)
+    with monkeypatch.context() as patched:
+        patched.setattr(svc, "_project_table", boom)
+        report = run_import(repo, path)
+    assert report.projection_failures and set(report.projection_failures) == set(
+        report.knowhow_tables
+    )
+    projection = [r for r in caplog.records if "投影失败" in r.getMessage()]
+    assert projection and all("RuntimeError" in r.getMessage() for r in projection)
+
+    class Refused(Exception):
+        pass
+
+    def refuse(*args, **kwargs):
+        raise Refused("validate_import: sources 行数不一致 1!=2")
+
+    store_type = type(repo._runtime.sharing_store)
+    with monkeypatch.context() as patched:
+        patched.setattr(store_type, "validate_import", refuse)
+        patched.setattr(store_type, "compensate_import", boom)
+        with pytest.raises(Refused):
+            run_import(repo, path)
+    compensation = [r for r in caplog.records if "补偿" in r.getMessage()]
+    assert compensation and all("RuntimeError" in r.getMessage() for r in compensation)
+
+    class Runtime:
+        class notebook_import:
+            sweep_stale_imports = staticmethod(boom)
+
+    class Repo:
+        _runtime = Runtime()
+
+    startup_warmup._sweep_stale_notebook_imports(Repo())
+    sweep = [r for r in caplog.records if "stale notebook import sweep failed" in r.getMessage()]
+    assert sweep and all("RuntimeError" in r.getMessage() for r in sweep)
+    _assert_logs_carry_no_message(caplog.records)
+    assert LOG_SENTINEL not in caplog.text
+
+
 def check_unservable_values_are_refused(repo, backend, tmp) -> None:
     """Values a serving path trusts because this deployment only ever persists
     them in one shape: an attachment whose MIME type is not one of the image

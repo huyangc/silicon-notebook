@@ -965,10 +965,13 @@ class NotebookImportService:
         for table_id in run.khtbl_map.values():
             try:
                 self._project_table(table_id, embed)
-            except Exception:  # noqa: BLE001 -- the published notebook must survive it
+            except Exception as exc:  # noqa: BLE001 -- the published notebook must survive it
+                # Ids and the exception class only: a traceback or message can
+                # carry cell content, database values or private paths.
                 _log.warning(
-                    "notebook import: %s 的 knowhow 表 %s 投影失败（笔记本已导入，可在表内手动重建投影）",
-                    run.new_id, table_id, exc_info=True,
+                    "notebook import: %s 的 knowhow 表 %s 投影失败（%s；笔记本已导入，"
+                    "可在表内手动重建投影）",
+                    run.new_id, table_id, type(exc).__name__,
                 )
                 failures.append(table_id)
         return tuple(failures)
@@ -991,9 +994,10 @@ class NotebookImportService:
                     runner.run(job["id"])
             else:
                 self._store.compensate_import(notebook_id)
-        except Exception:  # noqa: BLE001 -- the import's own failure is re-raised
-            _log.exception(
-                "notebook import: 补偿 %s 失败；残留的导入哨兵会在启动时被收割", notebook_id
+        except Exception as exc:  # noqa: BLE001 -- the import's own failure is re-raised
+            _log.error(
+                "notebook import: 补偿 %s 失败（%s）；残留的导入哨兵会在启动时被收割",
+                notebook_id, type(exc).__name__,
             )
         finally:
             trees.remove()
