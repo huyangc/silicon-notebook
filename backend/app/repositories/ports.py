@@ -4468,10 +4468,6 @@ class SharingStorePort(Protocol):
     def is_member(self, notebook_id: str, user_id: str) -> bool: ...
     def add_member(self, notebook_id: str, user_id: str) -> None: ...
     def remove_member(self, notebook_id: str, user_id: str) -> None: ...
-    # 在调用方的写连接上结束本库全部链接成员关系、返回被移除的 user_id(唯一调用方
-    # `clear_share`,同一事务里先作废 token)。不碰授权边。
-    @staticmethod
-    def kick_all_members(db: object, notebook_id: str) -> list[str]: ...
     def list_members(self, notebook_id: str) -> list: ...
     # The copy closure streamed for an export: the snapshot's statement set
     # (same Memory-aware choice), paged, in one read transaction, without the
@@ -5895,7 +5891,7 @@ class AgentProfileClaim:
 #: telling them apart is the whole point of the tri-state: the caller's
 #: revoked-overlay wipe must fire for one and MUST NOT fire for the other.
 AGENT_PROFILE_SETTLED = "settled"
-#: The job row is gone. Only member removal deletes it (``clear_job_row``), so
+#: The job row is gone. Only member removal deletes it (``clear_job_rows``), so
 #: any block this run wrote is revoked private data and gets wiped.
 AGENT_PROFILE_SETTLE_GONE = "gone"
 #: The row is there but belongs to a LATER claim (a different ``claim_token``,
@@ -6027,11 +6023,15 @@ class AgentProfileStorePort(Protocol):
         same-transaction history append as ``write_block``; raises
         ``KeyError`` if the block was never written (nothing to clear)."""
         ...
-    def clear_all(self, notebook_id: str, owner_id: str) -> int:
-        """Delete every block row for one (notebook, owner) scope outright —
+    def clear_all(self, notebook_id: str, owner_ids: Iterable[str]) -> int:
+        """Delete every block row of these (notebook, owner) scopes outright —
         the "start this chain's understanding over" reset, not a per-block
         clear. Returns the row count deleted. No CAS: this is a full-scope
-        wipe, not a single block's optimistic-concurrency edit."""
+        wipe, not a single block's optimistic-concurrency edit.
+
+        ``owner_ids`` is a collection (one element for one chain; a bare
+        string is refused): removing N members at once is one write
+        transaction, not N, and one member is the same delete with N=1."""
         ...
 
     # --------------------------------------------------------------- jobs
@@ -6144,9 +6144,10 @@ class AgentProfileStorePort(Protocol):
         cannot leave rows that no guard recognises; T6/T7 deliberately do not
         render a queued state."""
         ...
-    def clear_job_row(self, notebook_id: str, owner_id: str) -> int:
-        """Delete this chain's status/threshold row outright — the job-table
-        counterpart of ``clear_all`` for the block rows.
+    def clear_job_rows(self, notebook_id: str, owner_ids: Iterable[str]) -> int:
+        """Delete these chains' status/threshold rows outright — the job-table
+        counterpart of ``clear_all`` for the block rows (same ``owner_ids``
+        contract: one write transaction for any number of owners).
 
         Agentic Memory P1 (T5 repair round). A removed member's overlay
         JOB row is exactly as much "unreadable data about a notebook they can
@@ -6155,7 +6156,7 @@ class AgentProfileStorePort(Protocol):
         own activity, and a stale ``running``/``failed`` status would
         otherwise survive their removal and greet them with someone else's
         (or their own, stale) job state if they are ever re-added. Returns
-        the row count deleted (0 or 1 — the primary key is
+        the row count deleted (at most one per owner — the primary key is
         ``(notebook_id, owner_id)``)."""
         ...
 
@@ -6795,13 +6796,14 @@ class AgentObservationStorePort(Protocol):
     def clear_observations(
         self,
         notebook_id: str,
-        owner_id: str,
+        owner_ids: Iterable[str],
         *,
         agent_profile_id: str = "",
         kind: str = "",
     ) -> int:
-        """Delete observations for one ``(notebook_id, owner_id)`` scope.
-        Returns the row count deleted.
+        """Delete observations for these ``(notebook_id, owner_id)`` scopes.
+        Returns the row count deleted. ``owner_ids`` is a collection (a bare
+        string is refused); any number of owners is one write transaction.
 
         4. ``agent_profile_id=""`` (the default) clears EVERY observation in
         scope, regardless of which Agent wrote it. A non-empty value narrows

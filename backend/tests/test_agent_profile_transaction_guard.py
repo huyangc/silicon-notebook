@@ -68,7 +68,7 @@ REQUIRED_SQL_IN_WRITE_TRANSACTION: dict[str, dict[str, frozenset[str]]] = {
     "sqlite": {
         # ``claim_token``:P2 的 claim 代际校验必须与它放行的那次写入同事务。挪到
         # ``with`` 块之前,单线程测试同样全绿——而真正的后果是校验退回「尽力而为」:
-        # 成员被移出(``clear_job_row``)可以落在校验与写入之间,被移出的成员的私有块
+        # 成员被移出(``clear_job_rows``)可以落在校验与写入之间,被移出的成员的私有块
         # 就这样被一个已经作废的 run 重建出来。P1 的写前 ``job_row`` 探针正是这个
         # 形状,R4 登记的就是它。
         "write_block": frozenset({"agent_notebook_profile", "claim_token"}),
@@ -85,7 +85,7 @@ REQUIRED_SQL_IN_WRITE_TRANSACTION: dict[str, dict[str, frozenset[str]]] = {
     "postgres": {
         # 质量评审 P2-2:``FOR SHARE`` 是这个后端让 claim 代际校验与 SQLite 的
         # ``begin_immediate`` 一样原子的那个锁——不锁住这一行,一次并发的
-        # ``clear_job_row``(成员移出)就能落在校验读与后续写之间,把生成检查
+        # ``clear_job_rows``(成员移出)就能落在校验读与后续写之间,把生成检查
         # 变回「尽力而为」。少了它,单线程测试照样全绿,只有这条静态判据拦得住。
         "write_block": frozenset(
             {"agent_notebook_profile", "claim_token", "FOR SHARE"}

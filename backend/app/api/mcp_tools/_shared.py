@@ -919,7 +919,7 @@ def _record_agent_call(
     if not still_member:
         try:
             repo.agent_observations.clear_observations(
-                notebook_id, principal.owner_id
+                notebook_id, [principal.owner_id]
             )
         except Exception:  # noqa: BLE001 — 补偿同样不该炸掉这次工具调用
             logger.warning("agent call ledger compensation failed")

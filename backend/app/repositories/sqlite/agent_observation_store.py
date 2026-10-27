@@ -13,8 +13,13 @@ eviction ordering and why the projected row never carries ``owner_id``.
 from __future__ import annotations
 
 import sqlite3
-from typing import Callable
+from typing import Callable, Iterable
 
+from app.repositories.owner_batches import (
+    owner_id_list,
+    sqlite_in_placeholders,
+    sqlite_owner_chunks,
+)
 from app.repositories.ports import (
     AGENT_CALL_RING_MAX,
     AGENT_OBSERVATION_KIND_CALL,
@@ -316,27 +321,38 @@ class AgentObservationStore:
     def clear_observations(
         self,
         notebook_id: str,
-        owner_id: str,
+        owner_ids: Iterable[str],
         *,
         agent_profile_id: str = "",
         kind: str = "",
     ) -> int:
+        owners = owner_id_list(owner_ids)
+        if not owners:
+            return 0
         profile = str(agent_profile_id or "")
         # Both narrowings are OPTIONAL and independent: the SQL is assembled
         # from the two that were actually supplied rather than branching on
         # every combination, so "clear this Agent's call rows only" needs no
         # fourth hand-written statement.
-        clauses = ["notebook_id=?", "owner_id=?"]
-        params: list[object] = [notebook_id, owner_id]
+        clauses: list[str] = []
+        narrowing: list[object] = []
         if profile:
             clauses.append("agent_profile_id=?")
-            params.append(profile)
+            narrowing.append(profile)
         if kind:
             clauses.append("kind=?")
-            params.append(str(kind))
+            narrowing.append(str(kind))
+        deleted = 0
+        # One write transaction whatever the number of owners (chunked IN).
         with self.database.write() as db:
-            cursor = db.execute(
-                "DELETE FROM agent_observations WHERE " + " AND ".join(clauses),
-                tuple(params),
-            )
-        return cursor.rowcount
+            for chunk in sqlite_owner_chunks(owners):
+                where = [
+                    "notebook_id=?",
+                    f"owner_id IN ({sqlite_in_placeholders(len(chunk))})",
+                    *clauses,
+                ]
+                deleted += db.execute(
+                    "DELETE FROM agent_observations WHERE " + " AND ".join(where),
+                    (notebook_id, *chunk, *narrowing),
+                ).rowcount
+        return deleted

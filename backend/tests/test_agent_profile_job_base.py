@@ -429,7 +429,7 @@ def test_a_superseded_settle_skips_the_leftover_recheck(harness, monkeypatch):
         # 模拟一次手动重建的竞态(run_base 自己文档里点名的场景):旧世代还
         # 卡在模型调用里的时候,链路已经被重新认领、跑完并落终态——留下一份
         # 够触发下一轮的 pending_signal。
-        profiles.clear_job_row(NOTEBOOK_ID, BASE_CHAIN_OWNER)
+        profiles.clear_job_rows(NOTEBOOK_ID, [BASE_CHAIN_OWNER])
         newer = profiles.claim(NOTEBOOK_ID, BASE_CHAIN_OWNER)
         for _ in range(3):
             profiles.bump_signal(NOTEBOOK_ID, BASE_CHAIN_OWNER)

@@ -1,13 +1,13 @@
 """Unsharing the link and joining through it, interleaved on PostgreSQL.
 
-``clear_share`` voids the token and removes every link member in one
-transaction (``UPDATE notebooks`` first, then ``kick_all_members``'s
-``DELETE ... RETURNING``); ``join_shared`` takes ``FOR SHARE`` on the notebook
-row, with the token in the predicate, before it inserts. Under READ COMMITTED
-both orders must end with the joiner not a member and their private overlay
-state cleared — the backend-neutral sequential cases are in
+``clear_share`` locks the notebook row ``FOR UPDATE``, voids the token and
+removes every link member in one transaction (``kick_all_members``'s
+``DELETE ... RETURNING``); ``join_shared`` takes ``FOR KEY SHARE`` on the
+notebook row, with the token in the predicate, before it inserts. Under READ
+COMMITTED both orders must end with the joiner not a member and their private
+overlay state cleared — the backend-neutral sequential cases are in
 ``tests/memory_purge_cases.py`` (``join_with_voided_link_refused`` and the
-``unshare_*`` cases); these two pin the row lock:
+``unshare_*`` cases); the first two here pin the two locks:
 
 * the unshare holds the row when the join arrives: the join waits, re-checks
   the token after the commit and inserts nothing (a 404). Without the lock the
@@ -16,6 +16,11 @@ state cleared — the backend-neutral sequential cases are in
 * the join holds the row when the unshare arrives: the unshare waits, and its
   ``DELETE`` (a later statement) sees and removes the new row, and returns it,
   so that member's state is cleared too.
+
+The third pins what the join's lock does NOT block: an ordinary
+``UPDATE notebooks SET name=…`` (``FOR NO KEY UPDATE``) goes through while a
+join holds its ``FOR KEY SHARE``; a ``FOR SHARE`` there would queue it for the
+whole summary hydration.
 """
 from __future__ import annotations
 
@@ -150,3 +155,39 @@ def test_an_unshare_arriving_while_the_join_holds_the_row_removes_the_joiner(
     assert not sharing.is_member(notebook_id, carol.id)
     assert repo._runtime.agent_profile.job_row(notebook_id, carol.id) is None
     assert sharing.find_notebook_by_share_token(token) is None
+
+
+def test_a_join_holding_its_row_lock_does_not_block_a_rename(repo, monkeypatch):
+    sharing = repo._runtime.sharing
+    store = repo._runtime.sharing_store
+    notebook_id, carol, token = _shared_notebook(repo)
+    renamed: list[str] = []
+
+    def rename() -> None:
+        try:
+            with repo._runtime.database.write() as connection:
+                connection.execute("SET LOCAL lock_timeout = '2s'")
+                connection.execute(
+                    "UPDATE notebooks SET name=%s WHERE id=%s", ("Renamed", notebook_id)
+                )
+        except Exception as exc:  # noqa: BLE001 - the outcome is the assertion
+            renamed.append(type(exc).__name__)
+        else:
+            renamed.append("ok")
+
+    real_insert = store.insert_member_if_live
+
+    def insert_then_rename(connection, nb_id, user_id, now, share_token):
+        inserted = real_insert(connection, nb_id, user_id, now, share_token)
+        # The join holds its notebook row lock and has not committed.
+        renamer = threading.Thread(target=rename)
+        renamer.start()
+        renamer.join(_WAIT_SECONDS)
+        assert not renamer.is_alive()
+        return inserted
+
+    monkeypatch.setattr(store, "insert_member_if_live", insert_then_rename)
+    joined = sharing.join_shared(notebook_id, carol.id, share_token=token)
+    assert joined.access == "reader"
+    assert renamed == ["ok"]
+    assert sharing.is_member(notebook_id, carol.id)

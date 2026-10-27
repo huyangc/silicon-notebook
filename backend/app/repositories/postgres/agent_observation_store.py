@@ -15,8 +15,9 @@ full contract.
 """
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Iterable
 
+from app.repositories.owner_batches import owner_id_list
 from app.repositories.postgres._store_utils import (
     TimestampInput,
     iso_timestamp,
@@ -338,16 +339,20 @@ class AgentObservationStore:
     def clear_observations(
         self,
         notebook_id: str,
-        owner_id: str,
+        owner_ids: Iterable[str],
         *,
         agent_profile_id: str = "",
         kind: str = "",
     ) -> int:
+        owners = owner_id_list(owner_ids)
+        if not owners:
+            return 0
         profile = str(agent_profile_id or "")
         # Assembled from the narrowings actually supplied, mirroring the
         # SQLite implementation, so no combination needs its own statement.
-        clauses = ["notebook_id=%s", "owner_id=%s"]
-        params: list[object] = [notebook_id, owner_id]
+        # One statement whatever the number of owners (``= ANY``).
+        clauses = ["notebook_id=%s", "owner_id=ANY(%s)"]
+        params: list[object] = [notebook_id, owners]
         if profile:
             clauses.append("agent_profile_id=%s")
             params.append(profile)

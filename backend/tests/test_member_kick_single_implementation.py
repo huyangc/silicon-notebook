@@ -55,18 +55,14 @@ def test_the_notebook_wide_member_delete_lives_only_in_kick_all_members(path):
 
 
 @pytest.mark.parametrize("path", STORES, ids=lambda p: p.parent.name)
-def test_clear_share_removes_members_through_the_primitive_and_returns_them(path):
+def test_clear_share_removes_members_through_the_primitive(path):
     tree = ast.parse(path.read_text(encoding="utf-8"))
     clear_share = _functions(tree)["clear_share"]
-    returned_calls = [
-        node.value
-        for node in ast.walk(clear_share)
-        if isinstance(node, ast.Return) and isinstance(node.value, ast.Call)
+    calls = [
+        node for node in ast.walk(clear_share)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "kick_all_members"
     ]
-    assert any(
-        isinstance(call.func, ast.Attribute)
-        and call.func.attr == "kick_all_members"
-        and isinstance(call.func.value, ast.Name)
-        and call.func.value.id == "self"
-        for call in returned_calls
-    ), "clear_share must return self.kick_all_members(<its connection>, notebook_id)"
+    assert calls, "clear_share must remove the members through kick_all_members"
+    assert _notebook_wide_member_deletes(clear_share) == []

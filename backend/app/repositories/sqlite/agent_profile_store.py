@@ -13,8 +13,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from app.repositories.owner_batches import (
+    owner_id_list,
+    sqlite_in_placeholders,
+    sqlite_owner_chunks,
+)
 from app.repositories.ports import (
     AGENT_PROFILE_JOB_TERMINAL_STATUSES,
     AGENT_PROFILE_RESTART_FAILURE_MESSAGE,
@@ -320,16 +325,28 @@ class AgentProfileStore:
             ).fetchone()
         return _block_row(result)
 
-    def clear_all(self, notebook_id: str, owner_id: str) -> int:
-        """Delete every block row for one (notebook, owner) scope outright —
+    def clear_all(self, notebook_id: str, owner_ids: Iterable[str]) -> int:
+        """Delete every block row of these (notebook, owner) scopes outright —
         "start this chain's understanding over", not a per-block clear. No
-        CAS: this is a full-scope wipe. Returns the row count deleted."""
+        CAS: this is a full-scope wipe. One write transaction whatever the
+        number of owners (chunked ``IN``). Returns the row count deleted."""
+        return self._delete_for_owners("agent_notebook_profile", notebook_id, owner_ids)
+
+    def _delete_for_owners(
+        self, table: str, notebook_id: str, owner_ids: Iterable[str]
+    ) -> int:
+        owners = owner_id_list(owner_ids)
+        if not owners:
+            return 0
+        deleted = 0
         with self.database.write() as db:
-            cursor = db.execute(
-                "DELETE FROM agent_notebook_profile WHERE notebook_id=? AND owner_id=?",
-                (notebook_id, owner_id),
-            )
-        return cursor.rowcount
+            for chunk in sqlite_owner_chunks(owners):
+                deleted += db.execute(
+                    f"DELETE FROM {table} WHERE notebook_id=? "
+                    f"AND owner_id IN ({sqlite_in_placeholders(len(chunk))})",
+                    (notebook_id, *chunk),
+                ).rowcount
+        return deleted
 
     # ------------------------------------------------------------------- jobs
     def job_row(self, notebook_id: str, owner_id: str) -> dict | None:
@@ -543,13 +560,8 @@ class AgentProfileStore:
             )
         return cursor.rowcount
 
-    def clear_job_row(self, notebook_id: str, owner_id: str) -> int:
-        """Delete this chain's status/threshold row outright (see the port
+    def clear_job_rows(self, notebook_id: str, owner_ids: Iterable[str]) -> int:
+        """Delete these chains' status/threshold rows outright (see the port
         docstring — the job-table counterpart of ``clear_all``). Primary-key
-        delete, at most one row."""
-        with self.database.write() as db:
-            cursor = db.execute(
-                "DELETE FROM agent_profile_jobs WHERE notebook_id=? AND owner_id=?",
-                (notebook_id, owner_id),
-            )
-        return cursor.rowcount
+        deletes, at most one row per owner, one write transaction."""
+        return self._delete_for_owners("agent_profile_jobs", notebook_id, owner_ids)

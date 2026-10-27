@@ -251,7 +251,7 @@ def test_clear_observations_by_agent_profile_only_removes_that_agent(
         NOTEBOOK_ID, "user-a", "agent-2", text="other-agent", client_request_id="r1",
     )
     removed = harness.store.clear_observations(
-        NOTEBOOK_ID, "user-a", agent_profile_id="agent-1"
+        NOTEBOOK_ID, ["user-a"], agent_profile_id="agent-1"
     )
     assert removed == 1
     remaining = harness.store.recent_observations(NOTEBOOK_ID, "user-a", limit=10)
@@ -268,7 +268,7 @@ def test_clear_observations_without_agent_profile_removes_everything_in_scope(
     harness.store.append_observation(
         NOTEBOOK_ID, "user-a", "agent-2", text="b", client_request_id="r2",
     )
-    removed = harness.store.clear_observations(NOTEBOOK_ID, "user-a")
+    removed = harness.store.clear_observations(NOTEBOOK_ID, ["user-a"])
     assert removed == 2
     assert harness.store.recent_observations(NOTEBOOK_ID, "user-a", limit=10) == []
 
@@ -417,13 +417,13 @@ def test_clear_narrows_by_kind(agent_observation_harness):
     )
     harness.store.append_call(NOTEBOOK_ID, "user-a", "agent-1", capability="ask:execute")
 
-    assert harness.store.clear_observations(NOTEBOOK_ID, "user-a", kind="call") == 1
+    assert harness.store.clear_observations(NOTEBOOK_ID, ["user-a"], kind="call") == 1
     assert harness.store.list_calls(NOTEBOOK_ID, "user-a", limit=10) == []
     assert len(harness.store.list_observations(NOTEBOOK_ID, "user-a", limit=10)) == 1
 
     # 缺省仍然清两种(成员移除路径走的就是这一条)。
     harness.store.append_call(NOTEBOOK_ID, "user-a", "agent-1", capability="ask:execute")
-    assert harness.store.clear_observations(NOTEBOOK_ID, "user-a") == 2
+    assert harness.store.clear_observations(NOTEBOOK_ID, ["user-a"]) == 2
 
 
 def test_notebook_delete_cascades_call_rows(agent_observation_harness):

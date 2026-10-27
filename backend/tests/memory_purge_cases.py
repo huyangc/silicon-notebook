@@ -2229,7 +2229,87 @@ def case_the_row_delete_itself_is_scoped_to_the_creator(
     ) == 1, "the DELETE removed a row its caller no longer created"
 
 
+def _link_members(world: World, notebook_id: str, count: int, tag: str) -> list[str]:
+    """``count`` users who joined ``notebook_id`` through its link, each with
+    an overlay job row there — written in ONE transaction, so a few hundred
+    members cost the fixture one write."""
+    sql = world.sql
+    user_ids = [f"u-{tag}-{number:04d}" for number in range(count)]
+    with world.repo._runtime.database.write() as db:
+        for user_id in user_ids:
+            db.execute(
+                sql._text(
+                    "INSERT INTO users (id,email,display_name,role,status,created_at,updated_at) "
+                    "VALUES (?,?,?,'user','active',?,?)"
+                ),
+                (user_id, f"{user_id}@example.com", user_id, _GRANT_CREATED_AT, _GRANT_CREATED_AT),
+            )
+            db.execute(
+                sql._text(
+                    "INSERT INTO notebook_members (notebook_id,user_id,role,added_at) "
+                    "VALUES (?,?,'reader',?)"
+                ),
+                (notebook_id, user_id, _GRANT_CREATED_AT),
+            )
+            db.execute(
+                sql._text(
+                    "INSERT INTO agent_profile_jobs "
+                    "(notebook_id,owner_id,status,pending_signal,created_at,updated_at) "
+                    "VALUES (?,?,'idle',1,?,?)"
+                ),
+                (notebook_id, user_id, _GRANT_CREATED_AT, _GRANT_CREATED_AT),
+            )
+    return user_ids
+
+
+def _write_transactions(world: World, monkeypatch, fn: Callable[[], Any]) -> int:
+    """Write transactions opened through the runtime database while ``fn`` runs."""
+    database = world.repo._runtime.database
+    opened = [0]
+    original = database.write
+
+    def counted(*args: Any, **kwargs: Any):
+        opened[0] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(database, "write", counted)
+    try:
+        fn()
+    finally:
+        monkeypatch.undo()
+    return opened[0]
+
+
+def case_unshare_costs_the_same_writes_for_one_or_many_members(
+    world: World, monkeypatch
+) -> None:
+    """Removing every link member clears each table for the whole set at
+    once: unsharing a notebook with 300 members opens exactly as many write
+    transactions as unsharing one with a single member (the token-and-rows
+    transaction, then job rows, blocks and observations), and every member's
+    job row is gone afterwards."""
+    sharing = world.repo._runtime.sharing
+    counts = {}
+    for size in (1, 300):
+        notebook_id = _as_user(
+            world.owner,
+            lambda: world.repo.create_notebook(NotebookCreate(name=f"Kick {size}")),
+        ).id
+        sharing.share_notebook(notebook_id)
+        members = _link_members(world, notebook_id, size, f"k{size}")
+        counts[size] = _write_transactions(
+            world, monkeypatch, lambda: sharing.unshare_notebook(notebook_id)
+        )
+        assert sharing.list_members(notebook_id) == []
+        assert world.sql.count(
+            "SELECT COUNT(*) AS c FROM agent_profile_jobs WHERE notebook_id=?",
+            (notebook_id,),
+        ) == 0, members[:3]
+    assert counts[1] == counts[300] == 4, counts
+
+
 MONKEYPATCH_CASES: dict[str, Callable[..., None]] = {
+    "unshare_writes_do_not_grow": case_unshare_costs_the_same_writes_for_one_or_many_members,
     "store_delete_rechecks_creator": case_the_row_delete_itself_is_scoped_to_the_creator,
     "late_source_removed": case_a_source_published_just_before_the_row_delete_is_removed_after,
     "gone_source_is_removed": case_a_source_removed_concurrently_counts_as_removed,
