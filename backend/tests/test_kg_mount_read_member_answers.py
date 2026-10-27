@@ -557,6 +557,60 @@ def test_stale_names_left_by_a_pruned_knowhow_member_stay_out(
     assert_answered_by_members(env, ids)
 
 
+#: A fused description written while the Knowhow member was in the cluster:
+#: its quote is in the text.
+FUSED_DESCRIPTION = "QZX, the Quiet Zebra Xylophone, keeps the tempo."
+OTHER_DESCRIPTION = "A widget drives the QZX."
+
+
+def describe_library(repo, ids) -> None:
+    with repo._runtime.database.write() as db:
+        for cluster_id, text in ((SEEDED_ID, FUSED_DESCRIPTION),
+                                 (ids.widget_c, OTHER_DESCRIPTION)):
+            db.execute(f"UPDATE concept_clusters SET canonical_description={_P(repo)} "
+                       f"WHERE notebook_id={_P(repo)} AND canonical_id={_P(repo)}",
+                       (text, ids.lib, cluster_id))
+
+
+def stored_descriptions(repo, lib) -> dict:
+    """``{cluster id: {descriptions on its rows}}``."""
+    with repo._runtime.database.connect() as db:
+        rows = db.execute("SELECT canonical_id, canonical_description FROM concept_clusters "
+                          f"WHERE notebook_id={_P(repo)}", (lib,)).fetchall()
+    found: dict = {}
+    for row in rows:
+        found.setdefault(row["canonical_id"], set()).add(row["canonical_description"])
+    return found
+
+
+def _P(repo) -> str:
+    return "%s" if "Postgres" in type(repo).__name__ else "?"
+
+
+@pytest.mark.parametrize("drop_source", [False, True])
+def test_a_pruned_knowhow_member_takes_the_fused_description_with_it(env, drop_source):
+    """The fused description was written from every member's quotes, the
+    Knowhow member's included, and nothing about the cluster says so once
+    that member is pruned.  The prune clears it on every row of each cluster
+    that lost a member (the next merge writes it again), leaves every other
+    cluster's description alone, and the non-member's object context of
+    ``QZX`` no longer carries it.  The library's member read it before."""
+    ids = build_library(env)
+    describe_library(env.repo, ids)
+    url = f"/api/notebooks/{env.nb}/objects/{ids.qzx}/context"
+    params = {"source_notebook_id": ids.lib}
+    before = env.client.get(url, headers=env.owner, params=params)
+    assert before.status_code == 200 and FUSED_DESCRIPTION in before.text, before.text
+    drop_knowhow_member(env.repo, ids.lib, drop_source=drop_source)
+    stored = stored_descriptions(env.repo, ids.lib)
+    assert stored[SEEDED_ID] == {""}, stored
+    assert stored[ids.widget_c] == {OTHER_DESCRIPTION}, stored
+    r = env.client.get(url, headers=env.member, params=params)
+    assert r.status_code == 200, r.text
+    assert_names_no_hidden_member(r.text, "context of QZX after the prune")
+    assert r.json()["definition_basis"] != "cluster_description", r.text
+
+
 def test_a_library_without_a_hidden_source_reads_one_member_row_per_cluster(
     env, monkeypatch,
 ):

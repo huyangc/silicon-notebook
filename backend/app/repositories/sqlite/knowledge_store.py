@@ -3146,6 +3146,15 @@ class KnowledgeStore:
         With this in place the repository has ZERO paths that leave a dangling
         membership row behind, which is what lets the fusion-side sweep be a
         pure per-process legacy backstop (see ``incremental_fuse_source``).
+
+        Every cluster that lost a member here also loses its fused
+        ``canonical_description`` (set to ``''`` on all its rows, in the same
+        transaction): the description was written from quotes of every member,
+        the pruned one included, and a knowhow projection is a hidden source --
+        a reader of a mounted library who is not its member may not read it,
+        yet would get that text from object context or an Ask anchor until the
+        next merge rewrites it. The cluster's stored id and name stay; the
+        mount-read rule answers them by a visible member.
         """
         keep = set(keep_object_ids)
         stale = [
@@ -3157,15 +3166,26 @@ class KnowledgeStore:
             if row["id"] not in keep
         ]
         deleted = 0
+        touched: set = set()
         for offset in range(0, len(stale), _DELETE_OBJECT_BATCH_SIZE):
             batch = stale[offset : offset + _DELETE_OBJECT_BATCH_SIZE]
             placeholders = ",".join("?" for _ in batch)
-            cursor = connection.execute(
+            rows = connection.execute(
                 f"DELETE FROM concept_clusters "
-                f"WHERE notebook_id=? AND member_object_id IN ({placeholders})",
+                f"WHERE notebook_id=? AND member_object_id IN ({placeholders}) "
+                f"RETURNING canonical_id",
                 (notebook_id, *batch),
+            ).fetchall()
+            deleted += len(rows)
+            touched.update(str(row["canonical_id"]) for row in rows)
+        if touched:
+            clusters = bind_ids(sorted(touched))
+            connection.execute(
+                "UPDATE concept_clusters SET canonical_description='' "
+                f"WHERE notebook_id=? AND {drive_by('canonical_id', clusters)} "
+                "AND canonical_description!=''",
+                (notebook_id, clusters.param),
             )
-            deleted += int(cursor.rowcount or 0)
         return deleted
 
     @staticmethod

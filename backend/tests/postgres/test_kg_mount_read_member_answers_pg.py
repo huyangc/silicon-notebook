@@ -24,12 +24,16 @@ from tests.postgres.test_kg_viewer_scope_pg import (
 )
 from tests.pre_isolation_graph import build_pre_isolation
 from tests.test_kg_mount_read_member_answers import (
+    FUSED_DESCRIPTION,
     HIDDEN_NAME,
     NEVER_ID,
+    OTHER_DESCRIPTION,
     SEEDED_ID,
     assert_names_no_hidden_member,
+    describe_library,
     drop_knowhow_member,
     serve_from,
+    stored_descriptions,
 )
 
 pytestmark = [
@@ -262,3 +266,18 @@ def test_pg_stale_names_left_by_a_pruned_knowhow_member_stay_out(
     assert {row["canonical_name"] for row in stored} == {HIDDEN_NAME}
     assert bool(repo._runtime.source_store.hidden_source_ids(w.lib, "")) is not drop_source
     assert_answered_by_members(repo, w)
+
+
+@pytest.mark.parametrize("drop_source", [False, True])
+def test_pg_a_pruned_knowhow_member_takes_the_fused_description_with_it(repo, drop_source):
+    w = build_world(repo)
+    describe_library(repo, w)
+    before = as_user(w.owner, repo.node_context, w.nb, w.qzx, source_notebook_id=w.lib)
+    assert FUSED_DESCRIPTION in text_of(before), before
+    drop_knowhow_member(repo, w.lib, drop_source=drop_source)
+    stored = stored_descriptions(repo, w.lib)
+    assert stored[SEEDED_ID] == {""}, stored
+    assert stored[w.widget_c] == {OTHER_DESCRIPTION}, stored
+    after = as_user(w.member, repo.node_context, w.nb, w.qzx, source_notebook_id=w.lib)
+    assert_names_no_hidden_member(text_of(after), "context of QZX after the prune")
+    assert after["definition_basis"] != "cluster_description", after
