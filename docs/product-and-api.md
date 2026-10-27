@@ -479,7 +479,21 @@ raises a banner (nor does a model call that fails inside the leg, such as its qu
 `model_error` event only), and its full-text timeouts never switch off that notebook's full-text search for the semantic legs;
 the elements handed to the model are fingerprinted at retrieval time from the full text that was read, so their
 citations get the same recheck as every other passage. `REASONING_MAX_ELEMENT_SEARCHES` still caps the calls per
-run (one federated search counts once). Each call of the arm emits one content-free `ask_stage` event,
+run (one federated search counts once). Within one retrieval run an element search does not repeat a passage recall
+the run has already made: each library's element leg first recalls passages for its text (the `CHUNK_RECALL`
+window, at least four times the element cap) and then reads elements from them, and when that library has already
+been recalled for exactly that text under the same source ceiling in this run -- by the passage search (the
+first-round seed, `search_chunks`, a direction's passages), by the empty-first-round top-up or by an earlier element
+search -- the leg reuses that recall's ranking instead of searching again. The same holds in a single-notebook ask
+whenever its element search takes the passage route (a large notebook, or a run whose ceiling binds a source list),
+in a Deep Report's element probes and on the plugin element seam. The candidates, their order and the answer are
+exactly what a fresh recall gives; the passage search itself never reuses anything (it needs the vectors for its
+diversity selection). What a run keeps is only each recalled passage's identity, element ids and scores -- no text,
+no vectors -- at most `CHUNK_FEDERATION_MAX_PARTICIPANTS` x `CHUNK_RECALL` passages and 64 recalls, least recently
+used out first; a recall during which any lane failed open (a model error, a full-text timeout or failure) is not
+kept, a ceiling-drift flip (a source outside the run's frozen ceiling seen on read) drops that library's recalls that
+were read without the source list, and `chunk` runs keep nothing. The run's closing `retrieval_run_stats` counts the
+reuses as `chunk_recall_hits` and the kept recalls as `chunk_recall_stores`. Each call of the arm emits one content-free `ask_stage` event,
 `stage: "global_element_arm"`, with participant, notebooks-with-hits, merged and failed-notebook counts and latency.
 `GLOBAL_ASK_ELEMENT_ARM_ENABLED` (default `true`) is the rollback switch: `false` returns global runs to the
 pre-federation behaviour — `search_elements` is not in the action catalog (a model that names it anyway gets the

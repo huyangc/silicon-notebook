@@ -41,6 +41,7 @@ from app.domain.retrieval import ChunkRetrievalPlan
 from app.domain.retrieval_control import RetrievalControlError
 from app.repositories.ports import ChunkLexicalSearchTimeout
 from app.repositories.read_budget import classify_statement_failure
+from app.services import chunk_recall_memo
 from app.services.cancellation import AskCancelled
 # chunk 召回腿的两个 per-task ContextVar 与那把 routing 探针住在
 # ``app.services.chunk_lane``(一个零服务层依赖的叶子模块),不在本文件:联邦腿
@@ -405,6 +406,8 @@ class _RetrievalState:
         failed_fingerprint: str = "",
         workload_id: str = "",
     ) -> None:
+        # A chunk recall that noted a failure is degraded: not kept for reuse.
+        chunk_recall_memo.note_recall_failure(stage)
         if workload_id:
             error = exc or model_or_error
             self.model_error_sink.note_model_error(
@@ -1418,6 +1421,7 @@ class CandidateRetrievalService(_RetrievalState):
                 corpus_langs=corpus_langs,
             )
         except ChunkLexicalSearchTimeout:
+            chunk_recall_memo.note_recall_failure("chunk_fts")
             if (run is not None and trip_circuit
                     and not _CHUNK_SUPPLEMENT_LEG.get()):
                 run.note_chunk_fts_timeout(notebook_id)
@@ -1434,6 +1438,7 @@ class CandidateRetrievalService(_RetrievalState):
             })
             raise
         except Exception:
+            chunk_recall_memo.note_recall_failure("chunk_fts")
             elapsed_ms = round((time.perf_counter() - started) * 1000)
             self.event_log.emit({
                 "kind": "ask_stage",
@@ -3365,25 +3370,30 @@ class CandidateRetrievalService(_RetrievalState):
             chunk_kwargs = (
                 {"producer_explicit": True} if element_producer_explicit else {}
             )
-            chunks, _ids, _matrix = self._retrieve_chunks(
-                notebook_id,
-                query,
-                # Direct-element fallback needs the configured broad chunk
-                # candidate pool too: a smaller limit-derived pool lets legacy
-                # repeated headers consume every upstream slot before content
-                # diversity can run.  ``chunk_recall`` is already the single
-                # deployment-owned quality/cost rail for this candidate family.
-                recall=max(self.settings.chunk_recall, limit * 4, limit),
-                allowed_source_ids=allowed_source_ids,
-                # See the docstring above: only a genuinely producer-explicit
-                # caller gets ``producer_explicit=True`` spelled out here; the
-                # contextual-ceiling path (scope-materialized OR the plugin
-                # seam's declared-``False`` live enumeration) leaves it
-                # unpassed so ``_retrieve_chunks``'s own ``False`` default
-                # applies and existing test doubles standing in for it need
-                # no knowledge of this parameter at all.
-                **chunk_kwargs,
-            )
+            # Only the chunks' element routing is read below, so the recall may
+            # be the one this run already made for this library and text
+            # (``chunk_recall_memo``): a semantic leg's, the empty-seed top-up's
+            # or an earlier element search's.
+            with chunk_recall_memo.element_recall():
+                chunks, _ids, _matrix = self._retrieve_chunks(
+                    notebook_id,
+                    query,
+                    # Direct-element fallback needs the configured broad chunk
+                    # candidate pool too: a smaller limit-derived pool lets legacy
+                    # repeated headers consume every upstream slot before content
+                    # diversity can run.  ``chunk_recall`` is already the single
+                    # deployment-owned quality/cost rail for this candidate family.
+                    recall=max(self.settings.chunk_recall, limit * 4, limit),
+                    allowed_source_ids=allowed_source_ids,
+                    # See the docstring above: only a genuinely producer-explicit
+                    # caller gets ``producer_explicit=True`` spelled out here; the
+                    # contextual-ceiling path (scope-materialized OR the plugin
+                    # seam's declared-``False`` live enumeration) leaves it
+                    # unpassed so ``_retrieve_chunks``'s own ``False`` default
+                    # applies and existing test doubles standing in for it need
+                    # no knowledge of this parameter at all.
+                    **chunk_kwargs,
+                )
             elements = self._retrieve_elements_from_chunks(
                 query, chunks, limit=limit, notebook_id=notebook_id,
             )
@@ -3594,24 +3604,65 @@ class CandidateRetrievalService(_RetrievalState):
         RAW candidate pool every lane handed ``score_chunks``
         (``observed_chunk_candidates``) plus the result, not only the scored
         survivors: an outsider that took an ANN/FTS slot and was then scored
-        below the floor still crowded an in-ceiling candidate out."""
+        below the floor still crowded an in-ceiling candidate out.
+
+        Inside a retrieval run every verified, failure-free recall is also
+        kept, as a light projection, for the raw-element arm
+        (``chunk_recall_memo``), which this call serves from it when the arm
+        made it (``chunk_recall_memo.element_recall``): ``(chunks, [], None)``
+        with text-less chunks.  No other caller is ever served."""
         from app.services.retrieval import observed_chunk_candidates
         from app.services.source_scope import unbound_ceiling, verify_unbound_read
 
         unbound = None if allowed_source_ids is not None else unbound_ceiling(notebook_id)
-        with observed_chunk_candidates() as candidate_sources:
+        slot = self._chunk_recall_slot(
+            notebook_id, query, recall, allowed_source_ids, producer_explicit,
+            drifted,
+        )
+
+        def still_unbound() -> bool:
+            return self._chunk_source_ceiling(notebook_id, allowed_source_ids) is None
+
+        if slot is not None and chunk_recall_memo.serves_light():
+            served = chunk_recall_memo.serve(slot, still_unbound)
+            if served is not None:
+                return served, [], None
+        with observed_chunk_candidates() as candidate_sources, \
+                chunk_recall_memo.computing() as failures:
             result = self._retrieve_chunks_once(
                 notebook_id, query, recall, allowed_source_ids=allowed_source_ids,
-                producer_explicit=producer_explicit, drifted=drifted,
+                producer_explicit=producer_explicit,
+                drifted=drifted if slot is None else slot.drifted,
             )
         if not verify_unbound_read(notebook_id, unbound, itertools.chain(
             candidate_sources, (chunk.source_id for chunk in result[0]),
         )):
-            result = self._retrieve_chunks_once(
+            if slot is not None:
+                chunk_recall_memo.forget_unbound(slot)
+            return self._retrieve_chunks_once(
                 notebook_id, query, recall,
                 producer_explicit=producer_explicit, drifted=drifted,
             )
+        if slot is not None and not failures:
+            chunk_recall_memo.keep(slot, result[0], still_unbound)
         return result
+
+    def _chunk_recall_slot(self, notebook_id, query, recall, allowed_source_ids,
+                           producer_explicit, drifted):
+        """``_retrieve_chunks``' memo key (``chunk_recall_memo.recall_slot``),
+        or ``None`` when this call neither keeps nor reuses anything: outside
+        a run, in a run kind that keeps nothing, or when its ceiling is empty
+        or unreadable (the recall returns empty without reading)."""
+        run = current_retrieval_run()
+        if run is None or not run.keeps_chunk_recalls():
+            return None
+        ceiling = self._chunk_source_ceiling(notebook_id, allowed_source_ids)
+        if ceiling is _REPORT_CHUNK_AUTHORITY_FAILED:
+            return None
+        return chunk_recall_memo.recall_slot(
+            self, notebook_id, query, recall, ceiling,
+            producer_explicit=producer_explicit, drifted=drifted,
+        )
 
     def _retrieve_chunks_once(
         self, notebook_id: str, query: str, recall: int = 0, *,
@@ -3815,6 +3866,7 @@ class CandidateRetrievalService(_RetrievalState):
         except AskCancelled:
             raise
         except Exception:  # noqa: BLE001 — optional recall must preserve baseline
+            chunk_recall_memo.note_recall_failure("generated_question")
             return call.fail_open_result()
 
     def _emit_generated_question_query_event(self, event: dict) -> None:
@@ -4280,6 +4332,7 @@ class CandidateRetrievalService(_RetrievalState):
                     corpus_langs=corpus_langs,
                 )
         except Exception as exc:  # noqa: BLE001 — 降级中的降级,守卫本身绝不抛
+            chunk_recall_memo.note_recall_failure("chunk_fts")
             fts_error = type(exc).__name__
         event = {
             "kind": "chunk_bruteforce_skipped", "notebook_id": notebook_id,
@@ -4484,7 +4537,7 @@ class CandidateRetrievalService(_RetrievalState):
                             )
                         )
                     except Exception:  # noqa: BLE001 - conservative FTS fallback
-                        pass
+                        chunk_recall_memo.note_recall_failure("chunk_ann_sidecar")
                 scope_ann_complete = not unindexed_allowed_sources
                 if eligible:
                     k = min(recall, eligible)
