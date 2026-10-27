@@ -244,19 +244,27 @@ class CommunityQueryService:
         ``community_unavailable/focal_unresolved``,共提路返回 [])。存储名可能是天花板
         外成员的写法,不加这一道,猜中隐藏写法就能解析出焦点并拿到兄弟。
 
-        成本:天花板在绑且存储名解析成功时多一条语句(``focal_name_members``,只取
-        该簇里名字等于焦点键的成员及其自己的 ``source_id``);天花板判定在这里对
-        冻结的天花板集合做,一整库的来源清单不进 SQL。无天花板 → 零额外语句。
-        ``resolve_comparison_peers`` 每库只解析一次,两路共用这一个答案。"""
+        成本:天花板在绑且存储名解析成功时,按页读该簇里名字等于焦点键的成员及其
+        自己的 ``source_id``(``focal_name_members``,与 ``_scan_peer_members`` 同形:
+        首页 ``_PEER_MEMBER_WINDOW`` 行、整页没有天花板内成员才翻倍往后读、页大小
+        封顶 ``_PEER_MEMBER_PAGE_MAX``,遇到第一个天花板内成员所在的页即停)——常见
+        情形一条语句;没有天花板内拼写者时读完整簇的同名成员(fail closed)。天花板
+        判定在这里对冻结的天花板集合做,一整库的来源清单不进 SQL。无天花板 → 零
+        额外语句。``resolve_comparison_peers`` 每库只解析一次,两路共用这一个答案。"""
         focal = _resolve_focal(self.unified_kg, notebook_id, focal_name)
         if not focal or not ceiling:
             return focal
         allowed = _library_ceiling(notebook_id)
-        members = self.unified_kg.focal_name_members(
-            notebook_id, focal, _norm(focal_name))
-        if any(_member_in_ceiling(row, allowed) for row in members):
-            return focal
-        return None
+        key, after, window = _norm(focal_name), "", _PEER_MEMBER_WINDOW
+        while True:
+            rows = self.unified_kg.focal_name_members(
+                notebook_id, focal, key, limit=window, after=after)
+            if any(_member_in_ceiling(row, allowed) for row in rows):
+                return focal
+            if len(rows) < window:
+                return None
+            after = str(rows[-1]["member_object_id"])
+            window = min(window * 2, _PEER_MEMBER_PAGE_MAX)
 
     def _ceiling_kwargs(self, notebook_id: str, ceiling: dict) -> dict:
         """入口处取的 ``_source_ceiling_kwargs``(``ceiling``)加一条可观测性:闸落在

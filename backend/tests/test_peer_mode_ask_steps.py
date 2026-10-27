@@ -510,7 +510,7 @@ class _FakeUnifiedKg:
             return [(f"K-{name}", name, 3) for name in names]
         return [(name, 3) for name in names]
 
-    def focal_name_members(self, notebook_id, canonical_id, focal_key):
+    def focal_name_members(self, notebook_id, canonical_id, focal_key, *, limit, after=""):
         # R4 的焦点成员读:焦点写法属于一个天花板内成员(本文件不测 R4)。
         return [{"member_object_id": f"ko-{canonical_id}",
                  "source_id": f"src-{notebook_id}"}]

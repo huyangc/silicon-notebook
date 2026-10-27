@@ -1998,12 +1998,25 @@ class UnifiedKgStore:
         return row["canonical_id"] if row else None
 
     def focal_name_members(
-        self, notebook_id: str, canonical_id: str, focal_key: str,
+        self, notebook_id: str, canonical_id: str, focal_key: str, *,
+        limit: int, after: str = "",
     ) -> List[dict]:
-        """对比焦点 R4 的成员读(SQLite 孪生同注记):这个簇里
-        ``lower(payload->>'name') == focal_key`` 的活成员,每行带成员自己的
-        ``source_id``;天花板判定在调用方(冻结的天花板集合),一整库的来源清单
-        不进这条语句。只绑三个标量,保持普通 ``execute``(计划缓存照用)。"""
+        """对比焦点 R4 的成员读,**一页**(SQLite 孪生同注记):这个簇里
+        ``lower(payload->>'name') == focal_key`` 的活成员,keyset 游标 ``after``
+        之后的前 ``limit`` 个,每行带成员自己的 ``source_id``;天花板判定与翻页在
+        调用方。按 ``(notebook_id, canonical_id, member_object_id)`` 索引的顺序走
+        (排序与游标比较都带 ``COLLATE "C"``),``LIMIT`` 让枢纽簇只读到凑满一页:
+        评审在 8000 成员、几乎全按焦点键拼写的枢纽簇上量过,不设上限时规划器改走
+        ``knowledge_objects`` 的并行顺扫(24–25 ms),``LIMIT 16`` 时走该索引
+        (0.6 ms)。``lower(... COLLATE "C")`` 只折叠 ASCII,与 SQLite 的
+        ``lower()`` 及 ``resolve_focal`` 的 ``lower(canonical_name)``(列本身是
+        ``COLLATE "C"``)同一口径——不随数据库 locale 把非 ASCII 字母也折叠掉。
+        只绑标量,保持普通 ``execute``(计划缓存照用)。"""
+        seek, seek_params = (
+            ('AND cc.member_object_id COLLATE "C" > %s '
+             'AND ko.id COLLATE "C" > %s ', (after, after))
+            if after else ("", ())
+        )
         with self.database.connect() as db:
             return db.execute(
                 "SELECT cc.member_object_id, ko.source_id "
@@ -2011,10 +2024,11 @@ class UnifiedKgStore:
                 "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
                 "WHERE cc.notebook_id=%s AND cc.canonical_id=%s "
                 "AND ko.status!='deprecated' "
-                f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN} "
-                "AND lower(ko.payload->>'name')=%s "
-                'ORDER BY cc.member_object_id COLLATE "C"',
-                (notebook_id, canonical_id, notebook_id, focal_key),
+                f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN} {seek}"
+                "AND lower((ko.payload->>'name') COLLATE \"C\")=%s "
+                'ORDER BY cc.member_object_id COLLATE "C" LIMIT %s',
+                (notebook_id, canonical_id, notebook_id, *seek_params, focal_key,
+                 int(limit)),
             ).fetchall()
 
     def top_community_for(self, notebook_id: str, canonical_id: str) -> Optional[str]:
