@@ -5303,7 +5303,12 @@ class KnowledgeLifecycleService:
         non-member of the library may not be shown) is answered exactly as an
         id no participant holds: from the notebook such an id resolves to
         (the hint, else the active notebook), echoed in
-        ``source_notebook_id`` -- never from the library that holds it."""
+        ``source_notebook_id`` -- never from the library that holds it.  A
+        focus refused only after the neighbour read (a deprecated object of a
+        hidden source, which the scope's live owned set does not list) has
+        already had the holding library's preview probed once; the response
+        is still the unknown id's, and the active notebook is not probed
+        twice."""
         self.get_notebook(notebook_id)
         source_id = unknown_at = notebook_id
         if source_notebook_id:

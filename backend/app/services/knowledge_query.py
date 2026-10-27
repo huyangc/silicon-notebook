@@ -676,7 +676,7 @@ class KnowledgeQueryService:
             # cluster, not only on its owned members). On a first page the
             # first kept row IS the first visible member.
             name = (
-                str(json.loads(kept[0]["payload"] or "{}").get("name", "") or "")
+                member_name(kept[0])
                 if not after and kept
                 else scope.cluster_display_name(canonical_id, name)
             )
