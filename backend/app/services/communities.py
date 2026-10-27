@@ -26,7 +26,7 @@ _note_ceiling_fallback 顺带发那条 source_index_fallback 事件(闸在 SQL �
 只有 ``source_id`` 非空且不在天花板内的成员不能命名(``_member_in_ceiling``)。
 
 焦点也一样(R4,_ceiling_focal):存储名解析出来的焦点簇,天花板在绑时还必须有一个
-天花板内成员的名字 ``lower(name)`` 等于焦点键,否则按未解析处理——与今天解析不到时
+天花板内成员的名字按 ASCII 小写化(``ascii_lower``)后等于焦点键,否则按未解析处理——与今天解析不到时
 同一条路径、同一个事件。猜中隐藏写法因此不再能解析出焦点(存在性预言机)。
 
 top_k 在哪里截:共提路无天花板时 SQL 的 LIMIT 就是 top_k(与今天逐字相同);天花板在
@@ -35,6 +35,7 @@ top_k 在哪里截:共提路无天花板时 SQL 的 LIMIT 就是 top_k(与今天
 from __future__ import annotations
 from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
+from app.domain.sql_text_fold import ascii_lower
 # PEER mode: the participant-set predicate. This module is reader #5 on the
 # participant override's frozen whitelist (see ``mounted_base_ids``).
 from app.services.retrieval_participants import federated_ask_active
@@ -249,7 +250,7 @@ class CommunityQueryService:
         主键探查,``LIMIT`` 限住的是**扫过的**成员行,不是「名字对得上的」行——名字
         比较放在 SQL 里时,没有统计信息的连表谓词让 PostgreSQL 先把整簇连完再排序
         截断(评审实测首页 LIMIT 8 与不设上限的旧读同为约 3.2 万 buffers)。名字比较
-        在这里做,只折叠 ASCII(``_ascii_lower``),与 SQLite 的 ``lower()``、PG 的
+        在这里做,只折叠 ASCII(``ascii_lower``),与 SQLite 的 ``lower()``、PG 的
         ``lower(... COLLATE "C")`` 以及 ``resolve_focal`` 的 ``lower(canonical_name)``
         同一口径。翻页与 ``_scan_peer_members`` 同形:首页 ``_PEER_MEMBER_WINDOW`` 行,
         整页没有天花板内拼写者才按扫过的最后一个成员往后翻、页大小翻倍、封顶
@@ -266,7 +267,7 @@ class CommunityQueryService:
             rows = self.unified_kg.comparison_peer_members(
                 notebook_id, [focal], limit=window, after=after)
             if any(_member_in_ceiling(row, allowed)
-                   and _ascii_lower(_member_name(row)) == key for row in rows):
+                   and ascii_lower(_member_name(row)) == key for row in rows):
                 return focal
             if len(rows) < window:
                 return None
@@ -556,17 +557,6 @@ def _member_in_ceiling(row, allowed: FrozenSet[str]) -> bool:
 def _member_name(row) -> str:
     value = row["member_name"]
     return "" if value is None else str(value)
-
-
-_ASCII_LOWER = str.maketrans(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
-
-
-def _ascii_lower(text: str) -> str:
-    """只把 A–Z 折成 a–z,其余字符原样:与 SQLite 的 ``lower()``、PostgreSQL 的
-    ``lower(... COLLATE "C")`` 同一口径——``resolve_focal`` 的
-    ``lower(canonical_name)`` 就是这样折叠存储名的,R4 判成员写法必须用同一把尺。"""
-    return text.translate(_ASCII_LOWER)
 
 
 def _in_ceiling_name(rows, stored_name: str, allowed: FrozenSet[str]) -> Optional[str]:

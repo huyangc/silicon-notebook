@@ -78,7 +78,7 @@ HIDDEN_ONLY = "Hidden Widget"
 # A non-ASCII case variant: the visible member is ``Ärger Widget``, the hidden
 # one (and the stored name) ``ärger widget`` -- equal only under a Unicode
 # lowercase, which neither ``resolve_focal``'s SQL ``lower()`` (ASCII-only on
-# both backends) nor R4's ``communities._ascii_lower`` applies.
+# both backends) nor R4's ``ascii_lower`` (``app.domain.sql_text_fold``) applies.
 ARGER = "Ärger Widget"
 ARGER_STORED = "ärger widget"
 

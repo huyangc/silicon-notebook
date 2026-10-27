@@ -112,3 +112,35 @@ def test_focal_paging_window_is_capped(inside):
     else:
         assert focal == "K-hub"
         assert store.limits == [8, 16, 32, 64, 128, 256, cap, cap]
+
+
+def test_postgres_member_read_orders_rows_itself():
+    """PostgreSQL ``comparison_peer_members`` has no outer ``ORDER BY`` (the plan
+    pin forbids its Sort node), so the ``(canonical_id, member_object_id)`` order
+    that R3's grouping and the R3/R4 page cursor rely on comes from its own Python
+    sort, in ``COLLATE "C"`` byte order (upper case before lower case, non-ASCII
+    after ASCII). A connection that hands the rows back in another order must not
+    change what the read returns."""
+    from contextlib import contextmanager
+
+    from app.repositories.postgres.unified_kg_store import UnifiedKgStore
+
+    expected = [
+        {"canonical_id": cid, "member_object_id": member,
+         "source_id": "s-in", "member_name": member}
+        for cid in ("K-B", "K-a")
+        for member in ("ko-Z", "ko-a", "ko-é")
+    ]
+
+    class _Connection:
+        def execute(self, statement, params=None, prepare=True):
+            rows = list(reversed(expected))
+            return type("Rows", (), {"fetchall": lambda self: rows})()
+
+    class _Database:
+        @contextmanager
+        def connect(self):
+            yield _Connection()
+
+    store = UnifiedKgStore(_Database())
+    assert store.comparison_peer_members("nb", ["K-a", "K-B"], limit=8) == expected
