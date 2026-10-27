@@ -49,7 +49,10 @@ KEY = "hub widget"
 MEMBERS = 8000
 NOISE = 50000
 CLUSTER_INDEX = "idx_clusters_nb_canonical_member_gen"
-PAGES = [8, 16, 32, 64, 128, 256] + [512] * 15
+# A sequential or bitmap scan of either table the page walks (a bitmap index
+# scan always feeds a Bitmap Heap Scan on its table).
+_WIDE_SCAN = r"(Seq Scan|Bitmap Heap Scan) on (knowledge_objects|concept_clusters)\b"
+PAGES =[8, 16, 32, 64, 128, 256] + [512] * 15
 # A page walks at most ``limit`` cluster index entries plus one primary-key
 # probe per member: a few buffers per row, never the ~5k-32k of a whole-cluster
 # or whole-table scan.
@@ -166,8 +169,10 @@ def test_focal_pages_walk_the_cluster_index_bounded(postgres_database, statistic
     ):
         plan = _explain(postgres_database, sql, params)
         print(f"--- {statistics} statistics, {label} page (limit {params[-1]}):\n{plan}")
-        assert "Seq Scan" not in plan, f"{label} page:\n{plan}"
-        assert "Bitmap" not in plan, f"{label} page:\n{plan}"
+        # Scoped to the two tables the page walks: the published-generation
+        # InitPlan reads the one-row ``unified_kg_state``, which may fairly
+        # turn into a Seq Scan once that table is vacuumed and analysed.
+        assert not re.search(_WIDE_SCAN, plan), f"{label} page:\n{plan}"
         assert not re.search(r"^\s*(->\s+)?(Incremental )?Sort\b", plan, re.M), (
             f"{label} page:\n{plan}")
         assert CLUSTER_INDEX in plan, f"{label} page:\n{plan}"

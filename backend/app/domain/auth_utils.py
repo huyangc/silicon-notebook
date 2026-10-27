@@ -10,6 +10,8 @@ import hashlib
 import re
 import secrets
 
+from app.domain.sql_text_fold import ascii_lower
+
 # 单个小写字母 + 8 位 ASCII 数字，如 a12345678。
 USERNAME_RE = re.compile(r"^[a-z][0-9]{8}$")
 
@@ -23,13 +25,11 @@ def normalize_username(username: str) -> str:
     return (username or "").strip().lower()
 
 
-_ASCII_LOWER = str.maketrans(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
-)
+def username_lookup_key(username: str) -> str:
+    """The key to compare with SQL ``lower(username)``: trimmed, ASCII-folded.
 
-
-def ascii_lower(value: str) -> str:
-    """Fold only A-Z to a-z, the way SQL ``lower(username)`` folds on every
+    ``ascii_lower`` (``app.domain.sql_text_fold``, re-exported here for the
+    username call sites) folds the way SQL ``lower(username)`` folds on every
     backend: SQLite's built-in lower() and PostgreSQL's lower() over the
     ``COLLATE "C"`` username column both leave non-ASCII letters alone.
     Deliberately not ``str.lower()``: a value compared with
@@ -37,11 +37,6 @@ def ascii_lower(value: str) -> str:
     ``lower(username)`` unique index) must fold exactly as the database does,
     or an administrator-chosen name such as ``Ä123`` could never be found by
     its exact spelling."""
-    return value.translate(_ASCII_LOWER)
-
-
-def username_lookup_key(username: str) -> str:
-    """The key to compare with SQL ``lower(username)``: trimmed, ASCII-folded."""
     return ascii_lower((username or "").strip())
 
 
