@@ -1,6 +1,6 @@
 "use client";
 
-// 笔记本列表顶部的「即将永久删除的笔记本」区块,以及同一套逐本控件(说明框也用)。
+// 通知面板里的「即将永久删除的笔记本」区块,以及同一套逐本控件。
 //
 // 数据只来自 `GET /me/notebook-deletions`(与我有关的、正在删除窗口里的笔记本:我是主人,
 // 或我在那里有记忆);读不到就如实说「暂时读不到」,不当作「没有」(fail-closed)。每行:
@@ -428,12 +428,13 @@ export function DeletionNoticeControls({
   );
 }
 
-/** 笔记本列表顶部的区块。没有与我有关的删除、且读得到时不渲染任何东西。 */
+/** 通知详情区块；不承担页面常驻占位。 */
 export function NotebookDeletionsBlock({
   deletions,
   targets,
   focus,
   onCancelled,
+  showEmpty = false,
 }: {
   deletions: NotebookDeletions;
   /** 我自己的、正常可用的笔记本(转移的目的地候选)。 */
@@ -441,6 +442,7 @@ export function NotebookDeletionsBlock({
   /** 铃铛点进来时要定位的那一本。 */
   focus: DeletionFocusRequest | null;
   onCancelled: (notebook: NotebookSummary) => void;
+  showEmpty?: boolean;
 }) {
   const { state, nowMs, reload } = deletions;
 
@@ -491,7 +493,9 @@ export function NotebookDeletionsBlock({
     return () => clearTimeout(timer);
   }, [highlightId, focusSeq]);
 
-  if (state.status !== "unavailable" && rows.length === 0) return null;
+  if (state.status !== "unavailable" && rows.length === 0) return showEmpty ? (
+    <p role="status" className="pending-empty">{state.status === "loading" ? "正在读取即将删除的笔记本…" : "暂无即将删除的笔记本，可能已恢复或已永久删除。"}</p>
+  ) : null;
   return (
     <section className="notebook-deletions" aria-label={DELETIONS_BLOCK_TITLE}>
       <h2>{DELETIONS_BLOCK_TITLE}</h2>

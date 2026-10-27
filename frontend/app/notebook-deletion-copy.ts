@@ -40,12 +40,11 @@ export function deleteMountText(count: number): string {
   return `${count} 个笔记本正在把它作为参考库。确认后它们立即用不到这条参考库；撤销删除可以恢复，一天后永久失去。`;
 }
 
-/** 确认成功后的提示(弹窗已关,这本笔记本出现在列表顶部的区块里)。 */
+/** 确认成功后的提示；操作入口由短暂提示和通知面板提供。 */
 export function deleteScheduledText(name: string, deleteAfter: string | null): string {
-  // 回答里没有可读的截止时刻:照样是「已安排删除」,时刻去列表顶部的区块里看(它重新拉取)。
-  const when = deleteAfter ? `${formatDeleteAt(deleteAfter)}起永久删除` : "一天后永久删除（确切时刻见笔记本列表顶部）";
-  return `已安排删除${named(name)}。它现在对所有人都不可用，${when}；`
-    + "在此之前可以在笔记本列表顶部撤销。";
+  // 回答里没有可读的截止时刻也不编造；通知详情会独立重新拉取。
+  const when = deleteAfter ? `${formatDeleteAt(deleteAfter)}起永久删除` : "一天后永久删除";
+  return `已安排删除${named(name)}。它现在对所有人都不可用，${when}。`;
 }
 
 // ------------------------------------------------------------- 列表区块 / 说明框

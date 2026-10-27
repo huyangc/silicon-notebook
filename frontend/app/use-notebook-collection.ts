@@ -1177,8 +1177,8 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     deletingRef.current.add(key);
     setDeletion((value) => value ? { ...value, busy: true } : value);
     try {
-      // 删除进入一天的窗口:这本库此刻起对所有人不可用,列表里马上拿掉;它出现在列表顶部
-      // 「即将永久删除的笔记本」区块里,在截止前可以撤销(撤销走 `showCancelledNotebook`)。
+      // 删除进入一天的窗口:这本库此刻起对所有人不可用,列表里马上拿掉;
+      // 通知面板在截止前提供撤销(撤销走 `showCancelledNotebook`)。
       const { deleteAfter } = await deleteNotebook(current.target.id);
       let tombstones = tombstonesRef.current.get(ownerKey(owner.actorId));
       if (!tombstones) {

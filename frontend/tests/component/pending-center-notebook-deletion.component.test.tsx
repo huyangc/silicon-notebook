@@ -1,5 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { bellDeletionHint, bellDeletionLabel } from "../../app/notebook-deletion-copy.ts";
@@ -7,7 +8,7 @@ import { itemSig, pendingView } from "../../app/pending-actions.ts";
 import { PendingBell, type PendingItem } from "../../app/pending-center.tsx";
 
 // 铃铛里的「即将永久删除的笔记本」:主人与在那里有记忆的成员各一条,带绝对时刻;
-// 计入未读;点击交给上层(回到笔记本列表、区块定位到这一行)。
+// 计入未读;点击交给上层,在通知内展开详情。
 
 const MEMBER_ITEM: PendingItem = {
   type: "notebook_pending_delete",
@@ -70,4 +71,31 @@ test("点击删除通知把整条交给上层", async () => {
   await user.click(screen.getByLabelText("待确认中心"));
   await user.click(screen.getByText(bellDeletionLabel("封装工艺库", MEMBER_ITEM.delete_after!)));
   expect(onOpenItem).toHaveBeenCalledWith(MEMBER_ITEM);
+});
+
+test("删除详情在铃铛内展开，可返回通知、收起再打开；清空通知后仍有操作入口", async () => {
+  const user = userEvent.setup();
+  function Host() {
+    const [detail, setDetail] = useState(false);
+    return <PendingBell
+      snapshot={{ count: 1, items: [OWNER_ITEM] }} doneItems={[]} userId="u-detail"
+      onOpenItem={() => setDetail(true)} onOpenDone={vi.fn()} onDismissDone={vi.fn()}
+      detail={detail ? { key: 1, onBack: () => setDetail(false), content: <p>删除详情内容</p> } : null}
+      deletionAccess={{ hasNotices: true, onOpen: () => setDetail(true) }}
+    />;
+  }
+  render(<Host />);
+  await user.click(screen.getByLabelText("待确认中心"));
+  await user.click(screen.getByText(bellDeletionLabel(OWNER_ITEM.notebook_name!, OWNER_ITEM.delete_after!)));
+  expect(await screen.findByText("删除详情内容")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "返回通知" }));
+  expect(screen.queryByText("删除详情内容")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "全部清空" }));
+  await user.click(screen.getByRole("button", { name: "查看即将删除的笔记本" }));
+  expect(screen.getByText("删除详情内容")).toBeInTheDocument();
+  await user.keyboard("{Escape}");
+  expect(screen.queryByText("删除详情内容")).toBeNull();
+  expect(screen.getByLabelText("待确认中心")).toHaveFocus();
+  await user.click(screen.getByLabelText("待确认中心"));
+  expect(screen.getByRole("button", { name: "查看即将删除的笔记本" })).toBeInTheDocument();
 });
