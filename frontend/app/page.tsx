@@ -175,6 +175,7 @@ import {
   exportLabel,
 } from "./notebook-deletion-copy";
 import { NotebookDeletionsBlock, useNotebookDeletions, type DeletionFocusRequest } from "./notebook-deletions-block";
+import { NotebookDeletionReceipt } from "./notebook-deletion-receipt";
 import { LEAVE_EXPORT_TOO_LARGE_TEXT } from "./group-leave-dialog";
 import { saveBlobAsFile } from "./download-file";
 import { detectSourceTypes, importUrlSources, listSources, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
@@ -1174,7 +1175,7 @@ export default function Home() {
   const modelTestCoordinatorRef = useRef(new ModelTestCoordinator());
   // Subscribe only after /me has established a business user.
   const pending = usePendingActions(Boolean(authChecked && currentUser));
-  // 「即将永久删除的笔记本」区块:铃铛里的删除通知集合一变(推送)、或笔记本列表的条数一变
+  // 删除通知数据:铃铛里的删除通知集合一变(推送)、或笔记本列表的条数一变
   // (删除 / 撤销之后的刷新),就重新拉取一次。
   const deletionNoticeKey = pending.snapshot.items
     .filter((item) => item.type === "notebook_pending_delete")
@@ -1186,6 +1187,9 @@ export default function Home() {
     `${deletionNoticeKey}#${notebookCollection.rows.length}`,
   );
   const [deletionFocus, setDeletionFocus] = useState<DeletionFocusRequest | null>(null);
+  const deletionBellRef = useRef<HTMLButtonElement | null>(null);
+  const deletionReceipts = useMemo(() => ({ userId: currentUser?.id, introduced: new Set<string>() }), [currentUser?.id]);
+  const closeDeletionDetails = useCallback(() => setDeletionFocus(null), []);
   const focusDeletion = useCallback((notebookId: string | null) => {
     setDeletionFocus((current) => (
       notebookId === null ? null : { id: notebookId, seq: (current?.seq ?? 0) + 1 }
@@ -2940,11 +2944,9 @@ export default function Home() {
 
   // --- Pending center: precise deep-link per item type --------------------
   async function openPendingItem(item: PendingItem) {
-    // 删除窗口里的笔记本打不开(对所有人不可用):回到笔记本列表,顶部区块定位到这一行,
-    // 在那里撤销 / 导出 / 转移。
+    // 删除窗口里的笔记本打不开:在铃铛内展开操作,保留当前页面。
     if (item.type === "notebook_pending_delete") {
-      showCollection();
-      focusDeletion(item.notebook_id ?? null);
+      focusDeletion(item.notebook_id ?? "");
       notebookDeletions.reload();
       return;
     }
@@ -4891,7 +4893,8 @@ export default function Home() {
    */
   function openDeletionNotice(notice: NotebookDeletionNotice) {
     const notebookId = notice.notebook_id;
-    const backToList = () => {
+    const openDetails = () => {
+      // 工作区隐藏集合顶栏；旧链接的说明框先回到可见的铃铛入口。
       showCollection();
       focusDeletion(notebookId);
       notebookDeletions.reload();
@@ -4929,9 +4932,9 @@ export default function Home() {
       });
     }
     if (notice.transferable_count > 0) {
-      actions.push({ label: TRANSFER_LABEL, action: backToList });
+      actions.push({ label: TRANSFER_LABEL, action: openDetails });
     }
-    actions.push({ label: "返回笔记本列表", action: backToList });
+    actions.push({ label: "返回笔记本列表", action: showCollection });
     openInfoModal(
       { title: NOTICE_DIALOG_TITLE, message: deletionNoticeText(notice), actions },
       rootModals.captureActorOwner(),
@@ -5459,6 +5462,22 @@ export default function Home() {
             onOpen={() => { void openModelPanel(); }}
           />
           <PendingBell
+            buttonRef={deletionBellRef}
+            detail={deletionFocus ? {
+              key: deletionFocus.seq,
+              onBack: closeDeletionDetails,
+              content: <NotebookDeletionsBlock
+                deletions={notebookDeletions}
+                targets={deletionTargets}
+                focus={deletionFocus}
+                showEmpty
+                onCancelled={(notebook) => notebookCollection.showCancelledNotebook(notebook)}
+              />,
+            } : null}
+            deletionAccess={{
+              hasNotices: notebookDeletions.state.items.length > 0 || notebookDeletions.state.status === "unavailable",
+              onOpen: () => { focusDeletion(""); notebookDeletions.reload(); },
+            }}
             snapshot={pending.snapshot}
             doneItems={pending.doneItems}
             userId={currentUser?.id}
@@ -5562,11 +5581,12 @@ export default function Home() {
             </div>
           </section>
 
-          <NotebookDeletionsBlock
+          <NotebookDeletionReceipt
             deletions={notebookDeletions}
-            targets={deletionTargets}
-            focus={deletionFocus}
-            onCancelled={(notebook) => notebookCollection.showCancelledNotebook(notebook)}
+            introduced={deletionReceipts.introduced}
+            enabled
+            destinationRef={deletionBellRef}
+            onOpen={() => { focusDeletion(""); notebookDeletions.reload(); }}
           />
 
           <section className="collection-title">

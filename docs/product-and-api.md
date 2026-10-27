@@ -2802,7 +2802,7 @@ Only five entries stay open during the window, each one deliberately:
    the caller's own Memory there (every status, what the export holds); `transferable_count` the part a
    transfer moves (confirmed, not proposed for promotion). The pending-actions center shows each as a
    `notebook_pending_delete` item that **counts as unread**; when the notices cannot be read the bell drops
-   only these items (logged) and keeps the rest, while the list block, reading its own endpoint, says it
+   only these items (logged) and keeps the rest, while the notification detail, reading its own endpoint, says it
    cannot read them. Each transition (request, cancel, promotion) refreshes the owner's and every Memory
    holder's bell (fail-open); request and cancel hand that refresh to the bounded light background pool
    (`deletion-notice`) so it never holds their answer. There is no separate reminder before the deadline (B10).
@@ -2848,7 +2848,10 @@ at once, is kept one day and then permanently deleted with everything in it, mem
 that Memory holders are notified and can export or move their Memory to their own notebook; that the owner
 can cancel at any time and everything else comes back, but Memory already moved out does not. It still shows
 no member or Memory counts; buttons 「取消」 / 「确认删除」 (「正在提交…」 while in flight); the success toast
-names the deadline. At the top of the notebook list a block 「即将永久删除的笔记本」 lists each notice with its
+names the deadline. The notebook list briefly shows a compact receipt with an inline 「待确认中心」 control;
+after 3.5 seconds it shrinks toward the bell over 550 ms and releases its space. Reduced-motion users get
+the same brief receipt without motion. Each deletion window is introduced once per signed-in page session;
+ordinary refreshes and returning to the list do not replay it. Inside the bell, 「即将永久删除的笔记本」 lists each notice with its
 sentence and controls whose outcome lands beside them: 「撤销删除」 (owner; 撤销中… / 已撤销 / 「删除时间已到，
 已无法撤销」 / 「这本笔记本已不存在」), 「导出我的记忆（N 条）」 (导出中… / 已导出 / 导出失败 with the reason:
 over the limit, window closed, nothing left) and 「转移到我的笔记本」 (first shows 「转移后这些记忆会离开这本笔记本，
@@ -2862,11 +2865,14 @@ shows the edge greyed with a reason that only states what holds, for the person 
 owner, while it is in its window, reads 「你已删除这本笔记本，撤销删除即可恢复」; anyone else (the mounting
 notebook's group admins included) 「该参考库暂时不可用」; once the six-phase delete has started, everyone reads
 「该参考库已被删除」. Names stay masked as before. A 202 whose `delete_after` cannot be read still reads as
-「已安排删除」 (the exact time is in the block, which re-reads). A row whose deadline passed on the local clock says 「删除时间已到，正在永久
+「已安排删除」 (the exact time is in the notification detail, which re-reads). A row whose deadline passed on the local clock says 「删除时间已到，正在永久
 删除。」 with no control and re-reads; an unreadable list says 「暂时读不到即将删除的笔记本，请稍后重试」
-(fail-closed, with a retry). Clicking the bell item opens the list on that row. Opening such a notebook (a
+(fail-closed, with a retry). Clicking the bell item expands the controls inside the notification popover
+without navigating away; 「返回通知」 returns to the notification list, and closing the popover releases its space.
+Even after notifications are cleared, a 「查看即将删除的笔记本」 entry remains while deletions exist or their
+endpoint is unavailable, preserving access to the controls and retry. Opening such a notebook (a
 stale link, a bookmark) shows the explanation box 「这本笔记本已被删除」 with the same sentence and
-「撤销删除」 (owner), 「导出我的记忆」, 「转移到我的笔记本」 (goes to the block) and 「返回笔记本列表」.
+「撤销删除」 (owner), 「导出我的记忆」, 「转移到我的笔记本」 (opens the notification detail) and 「返回笔记本列表」.
 
 | Bound | Value |
 | --- | --- |

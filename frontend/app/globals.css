@@ -8910,8 +8910,32 @@ button.tag:hover {
   color: var(--danger);
 }
 
-/* 「即将永久删除的笔记本」区块(notebook-deletions-block.tsx):笔记本列表顶部、工具栏
-   之下。每行一句说明 + 一排控件,结果写在控件下方;铃铛点进来的那一行描边高亮。 */
+/* 删除提示短暂出现后收进铃铛；详情与操作在通知浮层内展开。 */
+.notebook-deletion-receipt-wrap {
+  margin: 0;
+}
+.notebook-deletion-receipt {
+  box-sizing: border-box;
+  padding: 10px 14px;
+  border: 1px solid var(--warning-border);
+  border-radius: 12px;
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.pending-popover.pending-popover-detail {
+  width: min(480px, calc(100vw - 28px));
+}
+.pending-detail-back {
+  justify-self: start;
+  margin: 4px 8px 10px;
+}
+.pending-popover-detail .notebook-deletions {
+  margin: 0;
+  padding: 10px;
+}
 .notebook-deletions {
   margin: 0 0 18px;
   padding: 14px 16px;

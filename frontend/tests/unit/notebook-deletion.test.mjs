@@ -90,7 +90,7 @@ test("确认删除返回服务端定下的截止时刻", async () => {
   assert.deepEqual(await deleteNotebook("nb1"), { deleteAfter: null });
   const text = deleteScheduledText("旧库", null);
   assert.ok(text.startsWith("已安排删除“旧库”。"), text);
-  assert.ok(text.includes("确切时刻见笔记本列表顶部"), text);
+  assert.ok(text.includes("一天后永久删除"), text);
   assert.ok(!/\d{4}年/.test(text), text);
 });
 

@@ -1,6 +1,6 @@
 // frontend/app/pending-center.tsx
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { Bell } from "lucide-react";
 import { performApiRequest } from "./api-client.ts";
 import { getToken } from "./auth";
@@ -24,7 +24,7 @@ export type PendingItem = {
     | "report_outline" | "governance" | "index" | "paper_meta" | "share_request" | "ask"
     | "notebook_pending_delete";
   // notebook_pending_delete:正在一天删除窗口里、与我有关的笔记本(我是主人,或我在那里
-  // 有记忆)。计入未读;点击打开笔记本列表顶部的区块并定位到这一行。
+  // 有记忆)。计入未读;点击在通知面板展开该笔记本的操作。
   delete_after?: string;
   is_owner?: boolean;
   memory_count?: number;
@@ -156,6 +156,9 @@ export function PendingBell(props: {
   doneItems: DoneToast[];
   userId?: string;
   checkup?: CheckupAlert | null;
+  buttonRef?: Ref<HTMLButtonElement>;
+  detail?: { key: number; content: ReactNode; onBack: () => void } | null;
+  deletionAccess?: { onOpen: () => void; hasNotices: boolean };
   onOpenItem: (item: PendingItem) => void;
   onOpenDone: (d: DoneToast) => void;
   onDismissDone: (notebook_id: string, kind?: string) => void;
@@ -163,6 +166,15 @@ export function PendingBell(props: {
   const { snapshot, doneItems, userId, checkup, onOpenItem, onOpenDone, onDismissDone } = props;
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
+  const onBack = props.detail?.onBack;
+  const close = useCallback(() => {
+    setOpen(false);
+    onBack?.();
+  }, [onBack]);
+  const detailKey = props.detail?.key;
+  useEffect(() => {
+    if (detailKey !== undefined) setOpen(true);
+  }, [detailKey]);
   // 体检提醒的「已读」「关掉」——按 sig 记(纯内存,同 doneItems 不持久化)。**仍有问题时**
   // sig 变化(问题种类增减)由下面的 !== 比较自动复活;**恢复健康**(checkup=null)则由紧随的
   // effect 清空 sig——否则同一类损坏(sig 相同,如 nb:H2)修好后日后复发会被旧的 hidden/seen
@@ -232,10 +244,17 @@ export function PendingBell(props: {
 
   useEffect(() => {
     if (!open) return;
-    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) close(); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !e.defaultPrevented) { close(); ref.current?.querySelector<HTMLButtonElement>(".pending-bell")?.focus(); }
+    };
     document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, close]);
 
   const dismissItem = (sig: string) => {
     setDismissed((prev) => {
@@ -308,18 +327,25 @@ export function PendingBell(props: {
 
   return (
     <div className="pending-center" ref={ref}>
-      <button className="pending-bell" onClick={() => setOpen((o) => !o)} aria-label="待确认中心">
+      <button ref={props.buttonRef} className="pending-bell" onClick={() => { if (open) close(); else setOpen(true); }} aria-label="待确认中心" aria-expanded={open}>
         <Bell size={18} />
         {badge > 0 && <span className="pending-badge">{badge > 99 ? "99+" : badge}</span>}
       </button>
       {open && (
-        <div className="pending-popover">
+        <div className={`pending-popover${props.detail ? " pending-popover-detail" : ""}`}>
+          {props.detail ? <>
+            <button type="button" className="link-button inline-action pending-detail-back" onClick={props.detail.onBack}>返回通知</button>
+            {props.detail.content}
+          </> : <>
+          {props.deletionAccess?.hasNotices && !view.visibleItems.some((it) => it.type === "notebook_pending_delete") && (
+            <button type="button" className="pending-row" onClick={props.deletionAccess.onOpen}>查看即将删除的笔记本</button>
+          )}
           {hasAny && (
             <div className="pending-actions-bar">
               <button className="pending-clear" type="button" onClick={dismissAll}>全部清空</button>
             </div>
           )}
-          {!hasAny && <p className="pending-empty">暂无待确认</p>}
+          {!hasAny && !props.deletionAccess?.hasNotices && <p className="pending-empty">暂无待确认</p>}
           {checkupVisible && checkup && (
             <div className="pending-group">
               <div className="pending-group-title">
@@ -379,6 +405,7 @@ export function PendingBell(props: {
               ))}
             </div>
           )}
+          </>}
         </div>
       )}
     </div>
