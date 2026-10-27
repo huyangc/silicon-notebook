@@ -2649,9 +2649,6 @@
   "backend/tests/test_reasoning_external_evidence.py": {
     "I001": 2
   },
-  "backend/tests/test_reasoning_loop_characterization.py": {
-    "I001": 1
-  },
   "backend/tests/test_reasoning_outline.py": {
     "I001": 3
   },

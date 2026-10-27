@@ -962,6 +962,30 @@ _SEAT_FAILSOFT_SITES = (
      "ReasoningRetriever._run_enumeration", "enumerate_sources"),
     ("app/services/reasoning_retrieval.py",
      "ReasoningRetriever._action_follow_chain", "follow_chain"),
+    # 词法臂(首轮播种与 ``search_chunks`` 动作共用):对等 run 里
+    # ``keyword_chunks`` -> ``keyword_chunk_candidates`` ->
+    # ``federated_keyword_chunk_candidates`` -> ``_run_supplement_arm`` ->
+    # ``_bounded_participants``(覆盖预检 + 参与集座位)。今天**可达**:预检跑在
+    # 父线程,而父线程此刻正在这个 try 里,所以「预检在任何 fail-soft 帧之外」
+    # 对这条臂不成立;吞掉就是一次 ``keyword_failed`` 的正常回答。
+    ("app/services/reasoning_retrieval.py",
+     "ReasoningRetriever._keyword_seed_search", "keyword_chunks"),
+    # 下面两处今天**不可达**,照样登记(与选定来源图谱通道同一条理由:可达性
+    # 是今天的实现事实,不是结构保证;登记钉住「控制异常照抛、普通错误照旧记
+    # skip」)。
+    # * 弱支撑边探测:``RetrievalService.weak_support_relations`` 只读
+    #   ``source_scope`` 的 ContextVar 与天花板判定(判定探针是本库 store 的
+    #   宇宙摘要 / 外人 Memory 两条读)、``unsafe_source_scope_restricted`` 的
+    #   漂移探针,以及 ``candidates.weak_support_relations`` 对本库
+    #   ``canonical_relations`` 的三条 store 读——刻意不联邦,不调
+    #   ``_retrieval_participants``。
+    ("app/services/reasoning_retrieval.py",
+     "ReasoningRetriever._collect_kg_gap", "weak_support_relations"),
+    # * consult_memory:try 体只读检索打法库(``_cached_experience_layers`` 的
+    #   ``version_signal`` 与分区快照,分区由 ``subjectless_run_active`` 选)
+    #   并在内存里渲染,不触达任何检索通道。
+    ("app/services/reasoning_retrieval.py",
+     "ReasoningRetriever._action_consult_memory", "_consultable_rows"),
     ("app/services/report_engine.py",
      "ReportEngine._load_probe_query_results._safe", "loader"),
     ("app/services/report_engine.py",
@@ -970,6 +994,12 @@ _SEAT_FAILSOFT_SITES = (
      "ReportEngine._build_corpus_map", "ppr_retrieve"),
     ("app/services/report_engine.py",
      "ReportEngine._deep_dive", "federated_retrieve"),
+    # 按方向补取元素:覆盖在场时 ``retrieve_elements`` 走
+    # ``_peer_retrieve_elements`` -> ``federated_element_candidates`` -> 座位。
+    # 报告今天不在对等模式运行(``federated_ask_active()`` 恒假,走单库元素
+    # 检索),所以只因这个谓词不可达;与同函数的 ``federated_retrieve`` 腿同口径。
+    ("app/services/report_engine.py",
+     "ReportEngine._deep_dive", "retrieve_elements"),
     # D0-3:节撰写腿。``_draft_section`` -> ``knowledge_context_with_outline``
     # -> ``evidence_context.knowledge_context`` -> 折叠范围读座位;吞掉就是
     # 一份交付出去的报告里悄悄多一节「失败」。
@@ -1031,6 +1061,24 @@ _SEAT_FAILSOFT_SITES = (
 #   ``except BaseException`` 不是 fail-soft:两者都把异常记下来之后原样 ``raise``,
 #   ``_RunState.raise_first_error`` 还会在引擎返回后再抛一次——这正是为了让**别人**
 #   的 fail-soft 吞掉回调异常也照样失败。
+#
+# 2026-10-28 的「只放行 ``AskCancelled`` 的宽 handler」全仓扫描(AST 列出 try 体 +
+# 逐处人工追调用链),除上面新登记的四处外,检索层其余命中都**不登记**:
+# * ``reasoning_retrieval`` 的被动打法块与零命中提示(``_first_round_prompt_blocks``
+#   的经验库那一段、``_reflect_round_ledger_notes``)—— 与 consult_memory 同一份
+#   经验库读取,不触达检索通道;同函数的共享理解块读的是 Agent 理解存储。
+# * ``_action_read_document``(``prepare_source_overview`` 只读来源存储)、
+#   ``_rerank_chunk_selection``(rerank 模型)、``_first_round_plan``(搜索风格档)、
+#   ``_offerable_plugin_specs``(插件规格)、``_finish_run``(``note_adopted``)、
+#   ``reflect``(模型调用)。
+# * ``retrieval_candidates`` 的 ``_embed_query``、``_retrieve_chunks_ann``、
+#   ``_retrieve_chunks_multi._one`` 与 ``_run_chunk_candidate_contributors`` ——
+#   单库 chunk 腿内部,参与集早在外层读完;问题索引贡献在联邦腿上
+#   (``_CHUNK_PEER_LEG``)直接返回基线。``collection_enumeration._kg_total``
+#   拿的是已解析好的库 id 列表。
+# * ``extensions/ask_engine.AskEngineHost.answer`` 把插件抛出的一切换成
+#   ``plugin_engine_failed``(响亮失败,不是 fail-soft);插件引擎被全局问答的
+#   ``_resolve_mode`` 拒绝,覆盖不会与它同处。
 
 _CONTROL_ERROR = "RetrievalControlError"
 

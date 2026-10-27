@@ -1978,6 +1978,185 @@ def _expect_unconfigured_completeness(obs: Observation) -> None:
     assert response.completeness_notice == INCOMPLETE, response.completeness_notice
 
 
+# --- fail-soft reads inside the reflect loop ---------------------------------
+#
+# Four optional reads in the loop degrade to a skip on an ordinary error and
+# must let a retrieval control error (``RetrievalControlError``) end the run:
+# the weak-support probe behind an accepted outline, ``consult_memory``, the
+# keyword arm, and a Deep Report section's per-direction element top-up. Each
+# pair injects the same fault at the read itself -- once a control error, once
+# a ``RuntimeError`` -- through the real Ask (or report section) on the real
+# backend; the fault fires only on the read under test (``_Arm``).
+
+
+class _Arm:
+    """Whether the injected fault fires yet; reset by each scenario's install."""
+
+    on = False
+
+
+_KG_GAP_ARM, _CONSULT_ARM, _KEYWORD_ARM, _ELEMENT_ARM = _Arm(), _Arm(), _Arm(), _Arm()
+FAULT_MESSAGE = "participant override refused"
+CONSULT = {"next_action": "consult_memory", "reason": "回想以往打法"}
+KEYWORD_SEARCH = {"next_action": "search_chunks", "reason": "原文补查",
+                  "query": "寄生电容", "keywords": "寄生 电容"}
+
+
+def _shown_kg_ids(prompt: str) -> list[str]:
+    """The knowledge-object ids the reflect turn was shown as candidates."""
+    body = prompt.split("Candidates so far:", 1)[-1]
+    return [line.rsplit("(id=", 1)[-1].rstrip(")") for line in body.splitlines()
+            if line.startswith("- [") and "(id=" in line
+            and not line.startswith(("- [element]", "- [chunk]", "- [inference]"))]
+
+
+def _bind_first_object(prompt: str) -> dict:
+    """An outline section bound to the first object shown (the probe's seed)."""
+    return {"next_action": "update_outline", "reason": "整理大纲",
+            "outline_sections": [{"id": "a", "title": "锚点一节",
+                                  "evidence": _shown_kg_ids(prompt)[:1]}]}
+
+
+def _armed(arm: _Arm, reply: dict) -> Callable[[str], dict]:
+    def reflect(_prompt: str) -> dict:
+        arm.on = True
+        return reply
+    return reflect
+
+
+def _faulty(rig: Rig, owner: Any, name: str, arm: _Arm,
+            exc_factory: Callable[[], BaseException]) -> None:
+    """Replace ``owner.name`` (an instance attribute of this test's repository)
+    with a read that raises once ``arm`` is on."""
+    real = getattr(owner, name)
+    arm.on = False
+
+    def read(*args, **kwargs):
+        if arm.on:
+            rig.recorder.note({"fault": name})
+            raise exc_factory()
+        return real(*args, **kwargs)
+
+    setattr(owner, name, read)
+
+
+def _control_fault() -> BaseException:
+    from app.domain.retrieval_control import ParticipantOverrideError
+
+    return ParticipantOverrideError(FAULT_MESSAGE)
+
+
+def _ordinary_fault() -> BaseException:
+    return RuntimeError("read blew up")
+
+
+def _kg_gap_fault(exc_factory) -> Callable[[Rig], None]:
+    def install(rig: Rig) -> None:
+        _faulty(rig, rig.service.retrieval, "weak_support_relations", _KG_GAP_ARM,
+                exc_factory)
+        _KG_GAP_ARM.on = True  # only the accepted outline's probe reads it
+    return install
+
+
+def _consult_fault(exc_factory) -> Callable[[Rig], None]:
+    def install(rig: Rig) -> None:
+        # Armed by the reflect turn that picks consult_memory: the passive
+        # tactics block of the first round reads the same store first.
+        _faulty(rig, rig.service.retrieval_experiences, "version_signal",
+                _CONSULT_ARM, exc_factory)
+    return install
+
+
+def _keyword_fault(exc_factory) -> Callable[[Rig], None]:
+    def install(rig: Rig) -> None:
+        _faulty(rig, rig.service.retrieval, "keyword_chunk_candidates", _KEYWORD_ARM,
+                exc_factory)
+    return install
+
+
+def _faults(obs: Observation) -> list:
+    return [e["fault"] for e in obs.timeline + obs.worker if "fault" in e]
+
+
+def _expect_loop_control_error(read: str) -> Callable[[Observation], None]:
+    def expect(obs: Observation) -> None:
+        _raised(obs, "ParticipantOverrideError", FAULT_MESSAGE)
+        assert _faults(obs) == [read], _faults(obs)
+        # The run ends at the read: no table lane, no draft, no answer model.
+        assert not _called(obs, "self._spreadsheet_reasoning_results")
+        assert not _called(obs, "fn.execute_response_draft_stage")
+        assert obs.models("ask_answer") == []
+    return expect
+
+
+def _expect_loop_skip(read: str, reason: str) -> Callable[[Observation], None]:
+    def expect(obs: Observation) -> None:
+        response = _answered(obs, llm_mode="grounded")
+        _ran_stages(obs)
+        assert _faults(obs) == [read], _faults(obs)
+        skipped = [step.detail.get("reason") for step in response.reasoning_trace
+                   if step.step_type == "skip"]
+        assert reason in skipped, skipped
+    return expect
+
+
+def _expect_keyword_failed(obs: Observation) -> None:
+    response = _answered(obs, llm_mode="grounded")
+    _ran_stages(obs)
+    assert _faults(obs) == ["keyword_chunk_candidates"], _faults(obs)
+    (step,) = [step for step in response.reasoning_trace
+               if (step.detail or {}).get("keyword_failed")]
+    assert step.step_type == "search_chunks", step
+
+
+def _section_elements(exc_factory) -> Callable[..., Any]:
+    """A Deep Report section's deep dive whose per-direction element top-up
+    (after the section's reasoning run returned) hits the fault."""
+    def invoke(rig: Rig, payload, job_id, cancel, on_trace):
+        import dataclasses as _dc
+
+        from app.services import reasoning_retrieval as rr
+        from app.services.report_engine import ReportEngine
+        from app.services.retrieval_run import retrieval_run
+
+        del payload, job_id, on_trace
+        engine = ReportEngine.from_repository(rig.repo, rig.service.settings, cancel)
+        retrieval = engine.dependencies.retrieval
+        _faulty(rig, retrieval, "retrieve_elements", _ELEMENT_ARM, exc_factory)
+        engine = ReportEngine(_dc.replace(engine.dependencies, retrieval=retrieval),
+                              user_id=engine.user_id, cancel_event=engine.cancel_event)
+        real_run = rr.ReasoningRetriever.run
+
+        def run(self, *args, **kwargs):
+            result = real_run(self, *args, **kwargs)
+            _ELEMENT_ARM.on = True
+            return result
+
+        section = {"title": REPORT_SECTIONS[0], "scope": "版图寄生",
+                   "sub_queries": ["寄生电容如何控制"], "intent_questions": []}
+        rr.ReasoningRetriever.run = run
+        try:
+            with retrieval_run(run_kind="report_generation", actor_id=engine.user_id,
+                               cancel_event=cancel):
+                return engine._deep_dive(rig.notebook_id, section, QUESTION, depth=2)
+        finally:
+            rr.ReasoningRetriever.run = real_run
+    return invoke
+
+
+def _expect_section_control_error(obs: Observation) -> None:
+    _raised(obs, "ParticipantOverrideError", FAULT_MESSAGE)
+    assert _faults(obs) == ["retrieve_elements"], _faults(obs)
+
+
+def _expect_section_skips_elements(obs: Observation) -> None:
+    _common(obs)
+    assert obs.error is None, obs.outcome
+    assert _faults(obs) == ["retrieve_elements"], _faults(obs)
+    # The direction is still accounted for; only its element top-up is lost.
+    assert "寄生电容如何控制" in [row["query"] for row in obs.response.attempted]
+
+
 PROBE_STEP = "探针步"
 
 
@@ -2879,6 +3058,33 @@ SCENARIOS = [
     Scenario("report_graph_service_control_error", library_world, _narrowed,
              _expect_report_graph_service_refused, install=_refuse_in_graph_service,
              invoke=_graph_service_refused_in_report),
+    Scenario("kg_gap_probe_control_error", library_world, confirmed(effort="exhaustive"),
+             _expect_loop_control_error("weak_support_relations"),
+             script=Script(reflects=(_bind_first_object,)),
+             install=_kg_gap_fault(_control_fault)),
+    Scenario("kg_gap_probe_fails_soft", library_world, confirmed(effort="exhaustive"),
+             _expect_loop_skip("weak_support_relations", "kg_gap_unavailable"),
+             script=Script(reflects=(_bind_first_object,)),
+             install=_kg_gap_fault(_ordinary_fault)),
+    Scenario("consult_memory_control_error", library_world, confirmed(effort="deep"),
+             _expect_loop_control_error("version_signal"),
+             script=Script(reflects=(_armed(_CONSULT_ARM, CONSULT),)),
+             install=_consult_fault(_control_fault)),
+    Scenario("consult_memory_fails_soft", library_world, confirmed(effort="deep"),
+             _expect_loop_skip("version_signal", "consult_memory_unavailable"),
+             script=Script(reflects=(_armed(_CONSULT_ARM, CONSULT),)),
+             install=_consult_fault(_ordinary_fault)),
+    Scenario("keyword_arm_control_error", library_world, plain(),
+             _expect_loop_control_error("keyword_chunk_candidates"),
+             script=Script(reflects=(_armed(_KEYWORD_ARM, KEYWORD_SEARCH),)),
+             install=_keyword_fault(_control_fault)),
+    Scenario("keyword_arm_fails_soft", library_world, plain(), _expect_keyword_failed,
+             script=Script(reflects=(_armed(_KEYWORD_ARM, KEYWORD_SEARCH),)),
+             install=_keyword_fault(_ordinary_fault)),
+    Scenario("report_section_elements_control_error", library_world, plain(),
+             _expect_section_control_error, invoke=_section_elements(_control_fault)),
+    Scenario("report_section_elements_fail_soft", library_world, plain(),
+             _expect_section_skips_elements, invoke=_section_elements(_ordinary_fault)),
     Scenario("unconfigured_completeness", library_world,
              confirmed(LIST_ALL, topics=(), result_scope="complete", completeness=True),
              _expect_unconfigured_completeness, install=_unconfigured),
