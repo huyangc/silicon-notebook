@@ -1830,8 +1830,8 @@ bash scripts/cli.sh notebook import ./nb-a.snbk --owner alice --name "导入的�
   上（与复制相同），新材料才能与携带来的概念正确归簇。没有这个字段的旧文件，簇的种子空间未知：笔记本
   以「待重建」开始，报告注明 `seed_space_unknown`。
 - **发布后同步执行：** 先把每张 Knowhow 表重新投影一遍，再跑报告列出的重新嵌入腿（`notebook-reembed`；
-  有 Knowhow 表的笔记本一定带对象腿和关系腿，因为投影会重建它的对象和边、重建出来的没有向量，即使文件里的
-  向量被保留也一样）；`--reembed skip` 留给之后再跑（报告列出
+  有 Knowhow 表的笔记本一定带切块腿、对象腿和关系腿，因为投影会重建它的对象和边、重建出来的没有向量，还会给
+  源端从未投影过的单元格新建切块——Knowhow 向量没被保留时这些切块也没有向量；每条腿只补仍然缺的）；`--reembed skip` 留给之后再跑（报告列出
   这些腿）。然后在 `--rebuild-scale auto` 且重新嵌入成功或无需重新嵌入时，于 PostgreSQL 上全量重建 scale
   索引（与 `sync import` 一样先核对迁移台账，再走 `scale_build_cli.run_build`）；向量没补齐时建出的索引
   不完整，所以重新嵌入被跳过或失败时 scale 记为 `skipped:reembed_not_done`。SQLite 记为跳过。

@@ -590,6 +590,51 @@ def _embeddable(row: dict) -> bool:
     return row["status"] != "deprecated" and bool(str(payload.get("name") or "").strip())
 
 
+def check_unprojected_knowhow_cells_end_with_chunk_vectors(src, src_backend, dst, tmp,
+                                                           monkeypatch) -> None:
+    """Knowhow cells that were never projected travel without a single chunk;
+    with the Knowhow model absent here (not kept) the post-publish projection
+    creates their chunks without vectors (``embed=False``). The report names the
+    ``chunks`` leg all the same -- what is missing is read from storage, not from
+    the archive's chunk count -- and once the legs ran no chunk lacks a vector."""
+    from app.services.embedding import FakeEmbedder
+    from app.services.notebook_reembed import LEG_CHUNKS, NotebookReembedService
+    from tests.model_testkit import bind_embedding_client
+
+    notebook_id = seed_world(src, src_backend, "full")
+    good = tmp / "unprojected-good.snbk"
+    export(src, notebook_id, good)
+    tables = archive_cases.archive_rows(good)
+    hidden = {r["id"] for r in tables["sources"] if r.get("source_type") == "knowhow"}
+    knowhow_chunks = {r["id"] for r in tables["chunks"] if r["source_id"] in hidden}
+    knowhow_elements = {r["id"] for r in tables["source_elements"] if r["source_id"] in hidden}
+    assert hidden and knowhow_chunks and tables["knowhow_cells"]
+    unprojected = {
+        "chunks": lambda r: r["id"] not in knowhow_chunks,
+        "chunk_embeddings": lambda r: r["chunk_id"] not in knowhow_chunks,
+        "chunk_questions": lambda r: r["chunk_id"] not in knowhow_chunks,
+        "source_elements": lambda r: r["id"] not in knowhow_elements,
+        "element_embeddings": lambda r: r["element_id"] not in knowhow_elements,
+    }
+    path = tmp / "unprojected.snbk"
+    rebuild(good, path, rows=lambda table, rows: [
+        r for r in rows if unprojected[table](r)
+    ] if table in unprojected else rows)
+    target_models(dst, monkeypatch)
+    report = run_import(dst, path)
+    assert not report.vectors["knowhow_embedding"].kept
+    assert report.vectors["chunk_embedding"].kept
+    assert _without_vectors(dst, report.notebook_id)["chunks"], "projection embedded nothing"
+    assert LEG_CHUNKS in report.reembed_legs, report.reembed_legs
+    bind_embedding_client(dst, FakeEmbedder(dim=DIM), workload_ids=[
+        "chunk_embedding", "source_element_embedding", "knowledge_object_embedding",
+        "relation_embedding", "knowhow_embedding",
+    ])
+    status = NotebookReembedService(dst).run(report.notebook_id, legs=report.reembed_legs)
+    left = _without_vectors(dst, report.notebook_id)
+    assert left["chunks"] == [], (left, status)
+
+
 def check_knowhow_objects_end_with_vectors(src, src_backend, dst, tmp, monkeypatch) -> None:
     """A Knowhow table's knowledge objects are rebuilt by the post-publish
     projection, and the rebuilt objects carry no vector -- so the report names the

@@ -2376,8 +2376,10 @@ bash scripts/cli.sh notebook import ./nb-a.snbk --owner alice --name "Imported c
   report says `seed_space_unknown`.
 - **After publishing, synchronously:** every Knowhow table is projected again, then the
   re-embedding legs the report names run (`notebook-reembed`; a notebook with a Knowhow table
-  always gets the object and relation legs, since the projection rebuilds its objects and edges
-  without vectors, even when the archive's vectors were kept); `--reembed skip`
+  always gets the chunk, object and relation legs, since the projection rebuilds its objects and
+  edges without vectors and creates the chunks of cells never projected at the source -- without
+  vectors when the Knowhow vectors were not kept; each leg fills only what is still missing);
+  `--reembed skip`
   leaves them to be run later (the report lists them). Then, with `--rebuild-scale auto` and
   only when re-embedding succeeded or was not needed, a full scale-index build on PostgreSQL
   (`scale_build_cli.run_build`, after the ledger check, as `sync import` does); an index over
