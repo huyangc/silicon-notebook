@@ -36,6 +36,7 @@ from app.repositories.ports import (
     DocumentCapacityExceeded,
     SourceElementWrite,
 )
+from app.repositories.paper_card_rows import paper_card_row, utc_iso
 from app.repositories.sqlite import memory_sql
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.id_binding import bind_ids, drive_by
@@ -2515,6 +2516,8 @@ class SourceStore:
         with self.database.write() as db:
             db.execute("DELETE FROM source_paper_meta WHERE source_id = ?", (source_id,))
             db.execute("DELETE FROM source_authors WHERE source_id = ?", (source_id,))
+            # 论文卡片是论文元数据的派生缓存:不再是论文就同一事务里删掉。
+            db.execute("DELETE FROM source_paper_cards WHERE source_id = ?", (source_id,))
 
     @staticmethod
     def _paper_meta_dict(row: sqlite3.Row, authors: List[sqlite3.Row]) -> dict:
@@ -2628,6 +2631,77 @@ class SourceStore:
             sid: self._paper_meta_dict(row, author_rows.get(sid, []))
             for sid, row in meta_rows.items()
         }
+
+    def paper_cards_for_sources(self, db: sqlite3.Connection,
+                                source_ids: Sequence[str], *,
+                                notebook_id: str) -> Dict[str, dict]:
+        """批量取论文卡片行(IN 分批守 999 变量上限),按子表自身的
+        ``notebook_id`` 收窄到 ``notebook_id``;镜像 PostgreSQL 的同名方法。
+        ``+notebook_id`` 的一元 ``+`` 与 ``paper_meta_for_sources`` 同理:收窄项
+        不参与选索引,计划仍由主键驱动。"""
+        cards: Dict[str, dict] = {}
+        ids = list(source_ids)
+        for i in range(0, len(ids), self.IN_CHUNK):
+            batch = ids[i:i + self.IN_CHUNK]
+            ph = ",".join("?" for _ in batch)
+            for row in db.execute(
+                f"SELECT * FROM source_paper_cards WHERE source_id IN ({ph}) "
+                "AND +notebook_id = ?", [*batch, notebook_id],
+            ).fetchall():
+                cards[row["source_id"]] = paper_card_row(row)
+        return cards
+
+    def upsert_paper_card(self, source_id: str, notebook_id: str, *, basis: str,
+                          card_version: int, status: str, card: dict,
+                          raw_json: dict, model: str) -> bool:
+        """写入/覆盖一张论文卡片,返回是否真的写入;镜像 PostgreSQL 的同名方法。
+
+        单写事务里校验归属(来源不在该库则 ``KeyError``)。**条件写**:同 basis 同
+        版本已是 ``ready`` 时,``failed`` 不得覆盖它(返回 False);``attempts`` 在
+        SQL 里自增、``ready`` 写入时清零。"""
+        now = self.now()
+        ready = status == "ready"
+        with self.database.write() as db:
+            if db.execute(
+                "SELECT 1 FROM sources WHERE id = ? AND notebook_id = ?",
+                (source_id, notebook_id),
+            ).fetchone() is None:
+                raise KeyError(source_id)
+            cursor = db.execute(
+                "INSERT INTO source_paper_cards "
+                "(source_id, notebook_id, basis, card_version, status, card, raw_json, "
+                "model, attempts, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(source_id) DO UPDATE SET "
+                "notebook_id=excluded.notebook_id, basis=excluded.basis, "
+                "card_version=excluded.card_version, status=excluded.status, "
+                "card=excluded.card, raw_json=excluded.raw_json, model=excluded.model, "
+                + ("attempts=0, " if ready
+                   else "attempts=source_paper_cards.attempts+1, ")
+                + "updated_at=excluded.updated_at"
+                + ("" if ready else
+                   " WHERE NOT (source_paper_cards.status='ready'"
+                   " AND source_paper_cards.basis=excluded.basis"
+                   " AND source_paper_cards.card_version=excluded.card_version)"),
+                (
+                    source_id, notebook_id, basis, int(card_version), status,
+                    json.dumps(card if ready else {}, ensure_ascii=False),
+                    json.dumps(raw_json or {}, ensure_ascii=False),
+                    str(model or ""), 0 if ready else 1, now, now,
+                ),
+            )
+            return int(cursor.rowcount or 0) > 0
+
+    def source_element_generation_utc(self, source_id: str) -> str:
+        """与 ``CatalogStore.source_element_generation`` 同一聚合
+        (``MAX(source_elements.created_at)``),但统一渲染成 UTC ISO 字符串,与 PostgreSQL
+        侧的同名方法同一形状。无元素给 ``""``。"""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT MAX(created_at) FROM source_elements WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+        return utc_iso(row[0] if row else None)
 
     def sources_missing_paper_meta(self, notebook_id: str,
                                    include_existing: bool = False) -> List[str]:

@@ -654,6 +654,9 @@ MEMORY_CARRIERS_NOT_COPIED = frozenset({
     # goes -- not into a copy; the marks on findings go where the other user
     # decisions about a graph (concept_merge_candidates) go.
     "kg_analysis_findings", "kg_analysis_marks",
+    # v104: the paper-card cache is generated from a source's text on demand in
+    # each environment; a copy neither carries nor invalidates it.
+    "source_paper_cards",
 })
 
 

@@ -6102,5 +6102,46 @@ MIGRATION_MANIFEST[(102, 103)] = {
     "views": {},
 }
 
+# v104 (parity with PostgreSQL 0085_source_paper_cards.sql): the paper-card
+# cache. A new table with FKs to sources and notebooks (both ON DELETE
+# CASCADE) and its notebook_id index; no ALTER of an existing table, no
+# trigger or view, no backfill.
+PAPER_CARD_TABLES = {
+    "source_paper_cards": """CREATE TABLE source_paper_cards (
+                  source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  basis TEXT NOT NULL,
+                  card_version INTEGER NOT NULL,
+                  status TEXT NOT NULL,
+                  card TEXT NOT NULL DEFAULT '{}',
+                  raw_json TEXT NOT NULL DEFAULT '{}',
+                  model TEXT NOT NULL DEFAULT '',
+                  attempts INTEGER NOT NULL DEFAULT 0,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )""",
+}
+PAPER_CARD_INDEXES = {
+    "idx_source_paper_cards_nb": (
+        "CREATE INDEX idx_source_paper_cards_nb\n"
+        "                  ON source_paper_cards(notebook_id)"
+    ),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 104, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **PAPER_CARD_TABLES},
+        "indexes": {**manifest["indexes"], **PAPER_CARD_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(103, 104)] = {
+    "tables": PAPER_CARD_TABLES,
+    "columns": {},
+    "indexes": PAPER_CARD_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

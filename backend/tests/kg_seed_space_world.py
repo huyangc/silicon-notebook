@@ -171,7 +171,7 @@ def upgrade_the_seed_space_again(repo) -> None:
         else:
             db.execute("PRAGMA user_version = 101")
     if not is_postgres(repo):
-        assert repo._migrator.migrate() == [102, 103]
+        assert repo._migrator.migrate() == [102, 103, 104]
 
 
 def what_a_library_reads_of_its_state(repo, nb: str) -> dict:
