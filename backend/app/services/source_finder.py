@@ -28,7 +28,9 @@ FTS-degraded lane, or a semantic lane whose passages carried no vector
 similarity -- no query embedding, unembedded passages) a passage-only source
 needs two hits to be ``related``.  The order is total and deterministic,
 so a page is recomputed on every call and the cursor is just an offset plus a
-fingerprint of the parameters (any change invalidates it).  Within one
+fingerprint of the parameters (any change invalidates it) and, separately, a
+digest of the source scope it was cut over (a change there -- a source added
+or removed between pages -- makes it stale, not invalid).  Within one
 retrieval run the ranked list is memoized by that fingerprint
 (``memoized_retrieval_value``), so turning a page only slices it; without a run
 (MCP) every call recomputes.  Only the page is hydrated (titles, authors, card
@@ -164,6 +166,13 @@ class FindSourcesCursorStaleError(FindSourcesCursorError):
     gone, so its offset would skip or repeat sources.  Restart from page 1."""
 
 
+class FindSourcesCursorScopeChangedError(FindSourcesCursorStaleError):
+    """The cursor's parameters match, but the source scope it was cut over
+    changed (a source was added to or removed from the notebook between
+    pages): stale for the same reason, with its own message.  Restart from
+    page 1."""
+
+
 @dataclass(frozen=True)
 class FindSourcesRequest:
     query: str = ""
@@ -230,10 +239,14 @@ class FindSourcesResult:
     #: continues at the first source not delivered).
     cursor_fingerprint: str = ""
     cursor_meta_digest: str = ""
+    cursor_scope_digest: str = ""
 
     def cursor_at(self, offset: int) -> str:
         """The cursor of the page starting at ``offset`` of this ranking."""
-        return encode_cursor(offset, self.cursor_fingerprint, self.cursor_meta_digest)
+        return encode_cursor(
+            offset, self.cursor_fingerprint, self.cursor_meta_digest,
+            scope_digest=self.cursor_scope_digest,
+        )
 
 
 @dataclass(frozen=True)
@@ -443,7 +456,9 @@ def _normalized(request: FindSourcesRequest) -> FindSourcesRequest:
     if None not in years and years[0] > years[1]:
         raise FindSourcesError("year_from is after year_to")
     try:
-        limit = int(request.limit or FIND_SOURCES_PAGE_SIZE)
+        # ``None`` is "the default page"; 0 is a request for no rows, refused
+        # like any other value outside 1..20 (never silently widened).
+        limit = int(FIND_SOURCES_PAGE_SIZE if request.limit is None else request.limit)
     except (TypeError, ValueError) as exc:
         raise FindSourcesError("limit must be an integer") from exc
     if not 1 <= limit <= FIND_SOURCES_PAGE_SIZE:
@@ -484,17 +499,37 @@ def _fingerprint(request: FindSourcesRequest, scope_identity: Sequence[Any]) -> 
     return hashlib.blake2b(payload.encode("utf-8"), digest_size=12).hexdigest()
 
 
-def encode_cursor(offset: int, fingerprint: str, meta_digest: str) -> str:
+def _params_fingerprint(request: FindSourcesRequest) -> str:
+    """The request's own parameters, without the source scope: what the
+    caller controls, so a mismatch is "other arguments" (invalid cursor)."""
+    return _fingerprint(request, ())
+
+
+def _scope_digest(scope_identity: Sequence[Any]) -> str:
+    """The source scope a ranking was cut over: a mismatch with identical
+    parameters means the notebook's sources changed (stale cursor)."""
+    payload = json.dumps(list(scope_identity), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.blake2b(payload.encode("utf-8"), digest_size=12).hexdigest()
+
+
+def encode_cursor(
+    offset: int, fingerprint: str, meta_digest: str, *, scope_digest: str = "",
+) -> str:
     raw = json.dumps(
-        {"o": int(offset), "f": fingerprint, "m": meta_digest}, separators=(",", ":"))
+        {"o": int(offset), "f": fingerprint, "s": scope_digest, "m": meta_digest},
+        separators=(",", ":"))
     return _CURSOR_PREFIX + base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
 
 
-def decode_cursor(cursor: str, fingerprint: str) -> Tuple[int, str]:
+def decode_cursor(
+    cursor: str, fingerprint: str, scope_digest: str = "",
+) -> Tuple[int, str]:
     """The offset and the metadata digest ``cursor`` carries (``(0, "")``
-    without one); ``FindSourcesCursorError`` when it is not a cursor of these
-    parameters over this source scope.  The digest is checked against the
-    current ranking's (``check_cursor_digest``) once that ranking exists."""
+    without one).  ``FindSourcesCursorError`` when it is not a cursor or was
+    cut for other parameters; ``FindSourcesCursorScopeChangedError`` when the
+    parameters match but the source scope changed since.  The metadata
+    digest is checked against the current ranking's (``check_cursor_digest``)
+    once that ranking exists."""
     if not cursor:
         return 0, ""
     if not cursor.startswith(_CURSOR_PREFIX):
@@ -504,6 +539,7 @@ def decode_cursor(cursor: str, fingerprint: str) -> Tuple[int, str]:
         data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
         offset = int(data["o"])
         cut_for = str(data["f"])
+        cut_over = str(data.get("s") or "")
         digest = str(data.get("m") or "")
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
         raise FindSourcesCursorError("not a find_sources cursor") from exc
@@ -511,8 +547,17 @@ def decode_cursor(cursor: str, fingerprint: str) -> Tuple[int, str]:
         raise FindSourcesCursorError(
             "the cursor belongs to other parameters; start a new search"
         )
+    if cut_over != scope_digest:
+        raise FindSourcesCursorScopeChangedError(SCOPE_CHANGED_CURSOR_MESSAGE)
     return offset, digest
 
+
+#: ``FindSourcesCursorScopeChangedError``'s message.
+SCOPE_CHANGED_CURSOR_MESSAGE = (
+    "the notebook's sources changed since this page was listed (a source was "
+    "added or removed), so the ranking changed; restart from the first page "
+    "without a cursor"
+)
 
 #: ``FindSourcesCursorStaleError``'s message.
 STALE_CURSOR_MESSAGE = (
@@ -593,7 +638,10 @@ class SourceFinder:
                 ceiling_binds=ceiling_binds, allowed_source_ids=allowed_source_ids,
             )
         fingerprint = _fingerprint(request, scope_identity)
-        offset, cursor_digest = decode_cursor(request.cursor, fingerprint)
+        params_fingerprint = _params_fingerprint(request)
+        scope_digest = _scope_digest(scope_identity)
+        offset, cursor_digest = decode_cursor(
+            request.cursor, params_fingerprint, scope_digest)
         generation = paper_meta_write_generation()
         # One ranking per fingerprint per run: a page turn only slices it.
         # Without a run (MCP) the memo is a pass-through.
@@ -635,15 +683,18 @@ class SourceFinder:
             ),
             semantic_recall_capped=ranking.capped,
             next_cursor=(
-                encode_cursor(offset + request.limit, fingerprint, ranking.meta_digest)
+                encode_cursor(
+                    offset + request.limit, params_fingerprint, ranking.meta_digest,
+                    scope_digest=scope_digest)
                 if more else ""
             ),
             lanes=dict(ranking.lanes),
             meta_pending_excluded=ranking.meta_pending_excluded,
             meta_pending_unchecked=ranking.meta_pending_unchecked,
             skipped_libraries=skipped,
-            cursor_fingerprint=fingerprint,
+            cursor_fingerprint=params_fingerprint,
             cursor_meta_digest=ranking.meta_digest,
+            cursor_scope_digest=scope_digest,
         )
 
     # ------------------------------------------------------------ source set

@@ -2931,6 +2931,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>._live_principal', kind='attribute', target='refresh_agent_principal'),
             ConsumerSite(path='backend/app/api/mcp_tools/ask.py', scope='<module>._refreshed_principal', kind='attribute', target='refresh_agent_principal'),
             ConsumerSite(path='backend/app/api/mcp_tools/global_ask.py', scope='<module>._authorize', kind='attribute', target='refresh_agent_principal'),
+            ConsumerSite(path='backend/app/api/mcp_tools/sources.py', scope='<module>._recheck_delivery', kind='attribute', target='refresh_agent_principal'),
             ConsumerSite(path='backend/app/services/answer_links.py', scope='<module>._live_issuer', kind='attribute', target='refresh_agent_principal'),
         ),
         patches=(
@@ -3050,6 +3051,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/mcp_tools/conversations.py', scope='<module>._notebook_turn', kind='attribute', target='require_agent_access'),
             ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._memory_read_allowed', kind='attribute', target='require_agent_access'),
             ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._memory_rows', kind='attribute', target='require_agent_access'),
+            ConsumerSite(path='backend/app/api/mcp_tools/sources.py', scope='<module>._recheck_delivery', kind='attribute', target='require_agent_access'),
             ConsumerSite(path='backend/tests/test_memory_mcp.py', scope='<module>.test_candidate_read_refused_by_the_later_scope_leaves_no_ledger_row', kind='patch', target='require_agent_access'),
         ),
         patches=(
@@ -3447,6 +3449,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/mcp_tools/citations.py', scope='<module>._read_element', kind='attribute', target='source_notebook_id'),
+            ConsumerSite(path='backend/app/api/mcp_tools/sources.py', scope='<module>._readable_requested', kind='attribute', target='source_notebook_id'),
         ),
         patches=(
         ),
