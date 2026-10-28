@@ -2626,7 +2626,10 @@ for the same reason, and so do hot-path fix batch 4's three source-search indexe
 (`idx_sources_nb_title_file_trgm` — which carries two trigram keys, `lower(title)` and
 `lower(file_name)`, so an `OR` of the two `LIKE` arms can BitmapOr two scans of one index —
 plus `idx_source_authors_nb_name_trgm` and `idx_source_paper_meta_nb_ptitle_trgm`,
-migration 0048). All of them ship through the hot-path channel documented in
+migration 0048), and so does batch 8's `idx_sources_nb_summary_trgm` (`find_sources`' summary
+leg; no migration — it exists only once the hot-path builder's `--apply` has built it, and the
+leg is correct without it; measurements and its ~1.7x-of-heap size in
+`docs/superpowers/plans/2026-10-28-find-sources-measurement.md`). All of them ship through the hot-path channel documented in
 `docs/deployment-and-configuration.md`, not through the script below.
 
 Two things are worth knowing before reading a plan against any of these trigram indexes,

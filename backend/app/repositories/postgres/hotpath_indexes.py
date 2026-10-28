@@ -30,7 +30,9 @@ of the old names, then migrate. Batch 7 added a seventh migration,
 ``backend/app/repositories/postgres/migrations/0084_source_paper_meta_source_nb.sql``,
 contributing one INCLUDE-carrying covering btree index for the own-notebook
 paper-metadata probe (``backend/tests/test_hotpath_indexes_batch7.py``
-cross-checks it).
+cross-checks it). Batch 8 (``idx_sources_nb_summary_trgm``, find_sources'
+summary leg) has NO migration: it exists only once this builder's ``--apply``
+has built it (``backend/tests/test_hotpath_indexes_batch8.py``).
 Every migration and this module's ``HOTPATH_INDEX_SPECS`` are independent
 hand-authored copies of the same index shapes on purpose (a migration file
 cannot import Python at apply time): ``backend/tests/test_hotpath_indexes.py``
@@ -555,6 +557,35 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
         collations=("pg_catalog:C",),
         include=("notebook_id", "is_paper"),
         serves="own-notebook paper-metadata probe (missing-metadata predicate, analytics has_meta/marker/missing) as an Index Only Scan",
+    ),
+    # -- Batch 8 (find_sources, design 2026-10-28 §5.2): the metadata leg's
+    # summary arm. Operator-built only (``--apply``), no migration: measured
+    # on a 69k-source corpus (one 49k notebook, 4 author rows per source, 80%
+    # carrying paper meta, summaries of 35-60 words), EXPLAIN (ANALYZE,
+    # BUFFERS) best of three, the summary leg is the one leg over 50 ms -- a
+    # three-term call with a 30%-frequency word costs 73 ms without this index
+    # and 31 ms with it; a single term 30 ms -> 1 ms; a rare term 30 -> 0.04 ms.
+    # Every other leg stays under 50 ms with or without the 0048 indexes (the
+    # full table lives in docs/superpowers/plans/2026-10-28-find-sources-
+    # measurement.md). Write amplification registered up front: 82 MB of index
+    # over a 47 MB heap on that corpus (~1.7x -- a summary carries far more
+    # trigrams than a title); summaries change once per extraction. Same shape
+    # and partial predicate as ``idx_sources_nb_title_file_trgm``: the leg
+    # spells VISIBLE_SOURCE_TYPES_PREDICATE as an inline literal, so the
+    # implication holds under a generic plan too.
+    HotpathIndexSpec(
+        name="idx_sources_nb_summary_trgm",
+        table="sources",
+        using="gin",
+        columns=("notebook_id", "lower(summary)"),
+        ddl_columns="notebook_id public.text_ops, lower(summary) public.gin_trgm_ops",
+        predicate="source_type NOT IN ('memory','knowhow')",
+        predicate_shape=(
+            "source_type <> ALL (ARRAY['memory'::text, 'knowhow'::text])"
+        ),
+        opclasses=("public:text_ops", "public:gin_trgm_ops"),
+        collations=("pg_catalog:C", "pg_catalog:C"),
+        serves="source_store.py:find_sources_metadata_rows (summary leg)",
     ),
 )
 

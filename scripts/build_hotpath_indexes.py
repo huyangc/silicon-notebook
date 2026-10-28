@@ -14,7 +14,7 @@ definitions and ``migrations/0039_hotpath_batch1_indexes.sql`` for the full
 per-group "which query family does this serve" evidence.
 
 Relationship to the migration: this script is how an operator builds these
-indexes (every entry of ``HOTPATH_INDEX_SPECS``, batches 1-7: batch 1's query-family btree/partial indexes, batch 2's payload-search GIN and checkup-H5 partial index, batch 4's source-search GIN trigram indexes, batch 5's delete-jobization FK/keyset indexes, batch 6's generation-aware cluster replacements, batch 7's paper-metadata covering index; entries a later batch superseded have left the registry -- per-batch counts in backend/tests/hotpath_index_batches.py) on an already-populated, already-serving-traffic production
+indexes (every entry of ``HOTPATH_INDEX_SPECS``, batches 1-8: batch 1's query-family btree/partial indexes, batch 2's payload-search GIN and checkup-H5 partial index, batch 4's source-search GIN trigram indexes, batch 5's delete-jobization FK/keyset indexes, batch 6's generation-aware cluster replacements, batch 7's paper-metadata covering index, batch 8's find_sources summary trigram GIN (``idx_sources_nb_summary_trgm``, which has NO migration and exists only when this script built it); entries a later batch superseded have left the registry -- per-batch counts in backend/tests/hotpath_index_batches.py) on an already-populated, already-serving-traffic production
 database WITHOUT taking a blocking lock (``CREATE INDEX CONCURRENTLY``, one
 statement per index, no transaction). Migration 0039 in
 ``backend/app/repositories/postgres/migrations/`` uses plain

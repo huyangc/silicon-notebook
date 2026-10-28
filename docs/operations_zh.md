@@ -2012,7 +2012,10 @@ PostgreSQL 词法 SQL 始终带 `notebook_id`，但旧的单表达式 trgm 索�
 `scripts/build_hotpath_indexes.py`）出于同一理由采用同一复合形；热路径修复批 4 的三条
 来源检索索引同理（`idx_sources_nb_title_file_trgm` 带两个 trgm 键 `lower(title)` 与
 `lower(file_name)`，让两条 `LIKE` 腿的 `OR` 能对同一条索引做两次扫描再 BitmapOr；另加
-`idx_source_authors_nb_name_trgm` 与 `idx_source_paper_meta_nb_ptitle_trgm`，迁移 0048）。
+`idx_source_authors_nb_name_trgm` 与 `idx_source_paper_meta_nb_ptitle_trgm`，迁移 0048）；批 8 的
+`idx_sources_nb_summary_trgm`（`find_sources` 的摘要腿）同形，但没有迁移，只有热路径构建脚本
+`--apply` 建过才存在，没有它查询照样正确（实测与约为堆 1.7 倍的体积见
+`docs/superpowers/plans/2026-10-28-find-sources-measurement.md`）。
 它们都走 `docs/deployment-and-configuration_zh.md` 记录的热路径通道，不经下面这个脚本。
 
 看这几条 trgm 索引的计划前，有两件事值得先知道，都已实测并登记在
