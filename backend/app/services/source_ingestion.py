@@ -23,7 +23,7 @@ from app.domain.indexing_pipeline import (
     IndexingPipelineUnavailableError,
 )
 from app.core.llm import cap_kwargs
-from app.domain.cancellation import CoreCancellation
+from app.domain.cancellation import CoreCancellation, raise_if_cancelled
 from app.domain.promotion_source import (
     PROMOTION_SOURCE_TYPE,
     PromotionSourceNotExtractable,
@@ -62,7 +62,11 @@ from app.services.kg.run_control import KgBuildAborted
 from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
-from app.services.model_work import model_artifact_scope
+from app.services.model_work import (
+    ModelQueueFull,
+    ModelQueueTimeout,
+    model_artifact_scope,
+)
 from app.services.paper_meta import (
     PAPER_META_SCHEMA_HINT,
     paper_meta_doc_type_eligible,
@@ -3303,16 +3307,9 @@ class SourceIngestionService:
         gate=paper_meta_enabled ∧ doc_type∈{'',academic_paper} ∧ 非合成源 ∧ LLM
         已配 ∧ 有文本 ∧ (force ∨ 无行)。失败不写行(下次可重试)、不碰
         extraction_runs、不阻断流水线(摄取侧惯例,不用 note_model_error)。"""
-        if not getattr(self.settings, "paper_meta_enabled", True):
-            return "disabled"
-        if source.type in ("memory", "knowhow", PROMOTION_SOURCE_TYPE):
-            return "skipped"
-        # 抽取合格判定与「retype 到不合格类型清旧元数据」共用同一 predicate
-        # (paper_meta_doc_type_eligible),单一定义点、不会各写一半再漂移。传入归一化
-        # 后的值('' 表自动/默认,predicate 视为合格)。
-        doc_type = self.normalize_doc_type(getattr(source, "doc_type", "") or "")
-        if not paper_meta_doc_type_eligible(doc_type):
-            return "skipped"
+        gate = self._paper_metadata_gate(source)
+        if gate:
+            return gate
         # From here on EVERYTHING is inside the try: the idempotency read,
         # the LLM-configured probe, element/text hydration and the LLM call
         # itself. Any of these can raise (a store read, a config resolution
@@ -3323,67 +3320,127 @@ class SourceIngestionService:
         # uncaught exception here would abort that call chain before KG
         # extraction ever runs.
         try:
-            if not force and self.sources.get_paper_meta(source.id, source.notebook_id) is not None:
-                return "skipped"
-            client = client or self.model_clients.chat("paper_metadata")
-            if not getattr(client, "configured", False):
-                return "no_llm"
-            if elements is None:
-                elements = self.source_elements(source.id)
-            head_chars = int(getattr(self.settings, "paper_meta_head_chars", 4000))
-            head_text = self.source_files.read_source_text(
-                getattr(source, "file_path", "") or "", elements
-            )[:head_chars]
-            if not head_text.strip():
-                return "no_text"
-            with model_artifact_scope(
-                notebook_id=source.notebook_id,
-                parent_id=source.id,
-            ):
-                raw = client.chat_json(
-                    [{"role": "user", "content": paper_meta_prompt(head_text)}],
-                    PAPER_META_SCHEMA_HINT,
-                    temperature=0.0,
-                    **cap_kwargs(client, "openai_compat_max_tokens"),
-                )
-            # Preserve the real top-level shape: safe_json always returns a
-            # dict, hiding array/scalar garbage behind {}. Only a single
-            # object wrapper can be unwrapped without guessing. The verifier
-            # below also requires an explicit boolean classification, so a
-            # missing/malformed is_paper stays retryable instead of becoming
-            # a persisted "not a paper" marker. Fall back to safe_json's
-            # think-tag/code-fence stripping only when direct parsing fails.
-            try:
-                parsed = json.loads(raw)
-            except (ValueError, TypeError):
-                parsed = safe_json(raw)
-            if (
-                isinstance(parsed, list)
-                and len(parsed) == 1
-                and isinstance(parsed[0], dict)
-            ):
-                parsed = parsed[0]  # single-object-in-array: unwrap, don't discard
-            if not isinstance(parsed, dict):
-                raise ValueError("paper-meta LLM returned non-object JSON")
-            meta = verify_paper_meta(
-                parsed, head_text,
-                model=str(getattr(client, "model", "") or ""),
+            return self._extract_paper_metadata(
+                source, elements, force, client=client, cancel_event=None
             )
-            self.sources.upsert_paper_meta(source.id, source.notebook_id, meta)
-            self.event_log.emit({
-                "kind": "paper_meta",
-                "source_id": source.id,
-                "notebook_id": source.notebook_id,
-                "is_paper": bool(meta["is_paper"]),
-                "authors": len(meta["authors"]),
-                "dropped": meta["dropped"],
-            })
-            return "stored" if meta["is_paper"] else "not_paper"
         except Exception:
             self.event_log.logger.exception(
                 "paper metadata extraction failed for %s", source.id
             )
             return "failed"
+
+    def extract_paper_metadata_cancellable(
+        self,
+        source: "SourceSummary | SourceDetail",
+        *,
+        cancel_event: Any,
+        client: Any | None = None,
+    ) -> str:
+        """``ensure_paper_metadata``(force=False)的可取消变体,供交互路径(论文卡片
+        懒生成)在请求线程里先补元数据。返回值集合与 gate 完全相同;区别只有两点:
+        模型调用带 ``cancel_event``,以及**取消(``CoreCancellation``)与调度层的
+        ``ModelQueueFull`` / ``ModelQueueTimeout`` 原样上抛**——前者让整次请求停下,
+        后两者让调用方把这一篇降级为「稍后再试」而不是记成失败。其它异常仍按
+        ``ensure_paper_metadata`` 的口径吞成 ``"failed"``(不写行,下次可重试)。"""
+        gate = self._paper_metadata_gate(source)
+        if gate:
+            return gate
+        try:
+            return self._extract_paper_metadata(
+                source, None, False, client=client, cancel_event=cancel_event
+            )
+        except (CoreCancellation, ModelQueueFull, ModelQueueTimeout):
+            raise
+        except Exception:
+            self.event_log.logger.exception(
+                "paper metadata extraction failed for %s", source.id
+            )
+            return "failed"
+
+    def _paper_metadata_gate(self, source: "SourceSummary | SourceDetail") -> str:
+        """抽取前的静态 gate:不合格时返回状态串,合格返回 ``""``。"""
+        if not getattr(self.settings, "paper_meta_enabled", True):
+            return "disabled"
+        if source.type in ("memory", "knowhow", PROMOTION_SOURCE_TYPE):
+            return "skipped"
+        # 抽取合格判定与「retype 到不合格类型清旧元数据」共用同一 predicate
+        # (paper_meta_doc_type_eligible),单一定义点、不会各写一半再漂移。传入归一化
+        # 后的值('' 表自动/默认,predicate 视为合格)。
+        doc_type = self.normalize_doc_type(getattr(source, "doc_type", "") or "")
+        if not paper_meta_doc_type_eligible(doc_type):
+            return "skipped"
+        return ""
+
+    def _extract_paper_metadata(
+        self,
+        source: "SourceSummary | SourceDetail",
+        elements: Optional[List[SourceElement]],
+        force: bool,
+        *,
+        client: Any | None,
+        cancel_event: Any,
+    ) -> str:
+        """gate 之后的抽取主体;异常一律上抛,由两个入口各自决定吞还是传。"""
+        if not force and self.sources.get_paper_meta(source.id, source.notebook_id) is not None:
+            return "skipped"
+        client = client or self.model_clients.chat("paper_metadata")
+        if not getattr(client, "configured", False):
+            return "no_llm"
+        if elements is None:
+            elements = self.source_elements(source.id)
+        head_chars = int(getattr(self.settings, "paper_meta_head_chars", 4000))
+        head_text = self.source_files.read_source_text(
+            getattr(source, "file_path", "") or "", elements
+        )[:head_chars]
+        if not head_text.strip():
+            return "no_text"
+        raise_if_cancelled(cancel_event)
+        # 只有可取消入口才传 cancel_event:原入口的调用形状保持逐字不变。
+        cancel_kwargs = {} if cancel_event is None else {"cancel_event": cancel_event}
+        with model_artifact_scope(
+            notebook_id=source.notebook_id,
+            parent_id=source.id,
+        ):
+            raw = client.chat_json(
+                [{"role": "user", "content": paper_meta_prompt(head_text)}],
+                PAPER_META_SCHEMA_HINT,
+                temperature=0.0,
+                **cap_kwargs(client, "openai_compat_max_tokens"),
+                **cancel_kwargs,
+            )
+        # Preserve the real top-level shape: safe_json always returns a
+        # dict, hiding array/scalar garbage behind {}. Only a single
+        # object wrapper can be unwrapped without guessing. The verifier
+        # below also requires an explicit boolean classification, so a
+        # missing/malformed is_paper stays retryable instead of becoming
+        # a persisted "not a paper" marker. Fall back to safe_json's
+        # think-tag/code-fence stripping only when direct parsing fails.
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            parsed = safe_json(raw)
+        if (
+            isinstance(parsed, list)
+            and len(parsed) == 1
+            and isinstance(parsed[0], dict)
+        ):
+            parsed = parsed[0]  # single-object-in-array: unwrap, don't discard
+        if not isinstance(parsed, dict):
+            raise ValueError("paper-meta LLM returned non-object JSON")
+        meta = verify_paper_meta(
+            parsed, head_text,
+            model=str(getattr(client, "model", "") or ""),
+        )
+        self.sources.upsert_paper_meta(source.id, source.notebook_id, meta)
+        self.event_log.emit({
+            "kind": "paper_meta",
+            "source_id": source.id,
+            "notebook_id": source.notebook_id,
+            "is_paper": bool(meta["is_paper"]),
+            "authors": len(meta["authors"]),
+            "dropped": meta["dropped"],
+        })
+        return "stored" if meta["is_paper"] else "not_paper"
 
     def backfill_paper_metadata(
         self,

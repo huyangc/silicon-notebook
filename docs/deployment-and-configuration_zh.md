@@ -1244,6 +1244,10 @@ REASONING_SECTION_HINT_MAX_ENTRIES / REASONING_SECTION_HINT_SOURCES / REASONING_
 REASONING_SECTION_OUTLINE_MAX_ROWS # 单个来源为大纲扫描、为向量读取的 chunk 数硬界（0 整体撤下导航）；同时约束单来源的向量内存（约 行数 × 运行时维度 × 4 字节）；默认值与取值范围见 product-and-api
 REASONING_SECTION_VECTOR_CACHE_MAX_BYTES # 跨 run 共享的进程级章节向量缓存的字节预算（LRU；0 关闭，此时每个 run 自己读取来源向量）。条目的键含数据库、库、来源、来源的 chunked_at、大纲指纹与查询维度，所以重新分块会让它失效；没有 chunked_at、或仍有 chunk 缺向量的来源不进缓存。已知限制：换成同维度的嵌入模型、或不重新分块就原地重嵌入，要等条目被淘汰或进程重启后才被看到；默认值与取值范围见 product-and-api
 REASONING_MAX_TOKENS # 逐步推理规划（查询扩展）与每轮反思的单次输出上限（默认 16384；ge=1）。这是 Legacy 共用的部署预算；各 workload 的输出、重试与超时边界仍独立生效。
+PAPER_CARD_ENABLED # 论文卡片懒生成的部署级开关（逐篇结构化要点，缓存在 source_paper_cards，只在调用方用到时生成；默认 true）。关闭后仍返回已缓存且有效的卡片，不再生成新卡（这些论文报 failed/disabled）。卡片复用 paper_metadata 模型绑定，不新增 workload，[bindings] 不用改
+PAPER_CARD_INPUT_CHARS # 单张卡片原文采样输入的字数上限（默认 16000；ge=2000）：前 40% 给开头，再放最多 6 张表格（每张截断到 1500 字），其余均匀取样（含最后一个元素）
+PAPER_CARD_MAX_WORKERS # 单次请求的卡片生成线程池上限（默认 4；1..16），实际取它与 paper_metadata 服务 max_concurrency 的较小值。交互队列满或等待超时只把该篇降级为 deferred、不记失败；卡片经常被推迟时调高该服务的 max_concurrency
+PAPER_CARD_RETRY_SECONDS # 同一内容版本卡片生成失败后的冷却秒数（默认 3600；ge=0）；连续失败 3 次后固定冷却 24 小时。来源重新解析（元素见证变化）或卡片版本升级后重新计数
 ```
 
 Reflect 只使用 Legacy。已退役的 `REASONING_REFLECT_*` 配置不再选择协议、布局

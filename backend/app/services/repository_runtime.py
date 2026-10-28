@@ -89,6 +89,7 @@ from app.services.source_chunking import SourceChunkingService
 from app.services.indexing_pipeline import IndexingPipelineService
 from app.services.source_embedding import SourceEmbeddingService
 from app.services.source_ingestion import SourceIngestionService
+from app.services.paper_card_service import PaperCardService
 from app.services.spreadsheet_analysis import SpreadsheetAnalysisService
 from app.services.chunk_question_index import ChunkQuestionIndexService
 from app.services.source_graph_primitives import SourceGraphPrimitives
@@ -1138,6 +1139,7 @@ class RepositoryRuntime:
         self.source_chunking = pipeline.source_chunking
         self.indexing_pipeline = None
         self.source_ingestion = pipeline.source_ingestion
+        self.paper_cards: PaperCardService | None = None  # wire_source_ingestion builds it
         report = _build_report_domain(seats, notebook)
         self.report_application = report.report_application
         self.report_cancellations = report.report_cancellations
@@ -1151,8 +1153,7 @@ class RepositoryRuntime:
         self.knowledge_lifecycle = knowledge.knowledge_lifecycle
         self.knowledge_query = knowledge.knowledge_query
         self.pending_actions_service = knowledge.pending_actions_service
-        # wire_knowledge_lifecycle finishes deletion after building its
-        # kg_maintenance and kg_conflict_jobs collaborators.
+        # wire_knowledge_lifecycle finishes deletion (kg_maintenance/kg_conflict_jobs first).
         self.notebook_delete = None
         # wire_sharing builds the .snbk importer and the web transfer job registry.
         self.notebook_import = self.notebook_transfers = None
@@ -1832,6 +1833,17 @@ class RepositoryRuntime:
         # set_promotion_service call in wire_knowledge_lifecycle.
         if self.memory_service is not None:
             self.memory_service.set_memory_kg_service(self.source_ingestion)
+        # 论文卡片(规格 2026-10-28 §4.5):与元数据抽取同层,复用 paper_metadata 绑定;
+        # 检索服务与 MCP 经 runtime.paper_cards 取用。镜像笔记本的判定读写入围栏同一列。
+        self.paper_cards = PaperCardService(
+            settings=self.settings,
+            database=self.database,
+            sources=self.source_store,
+            ingestion=self.source_ingestion,
+            model_clients=self.models,
+            sync_origin=self.sharing_store.notebook_sync_origin,
+            event_log=self.event_log,
+        )
         # paper-meta backfill status (Task 2): get_notebook reflects the
         # in-process _paper_meta_backfilling dict into NotebookSummary the
         # same way it reflects kg_building — catalog needs a live reference,

@@ -72,6 +72,8 @@ _LITERAL_HINTS: tuple[tuple[str, str, str | None, tuple[str, ...]], ...] = (
      'model_response_36062ed0ec3507e0', ('reformatted_md',)),
     ('services/model_provider.py', '{"ok":true}',
      'model_response_4528a3c79c4aaee2', ('ok',)),
+    ('services/paper_cards.py', '{"tldr":{"text":"","anchors":["e1"]},"problem":{"text":"","anchors":["e1"]},"method":{"text":"","anchors":["e1"]},"contributions":[{"text":"","anchors":["e1"]}],"metrics":[{"name":"","value":"","unit":"","setting":"","compared_to":"","anchor":"e1"}],"datasets":[{"name":"","anchors":["e1"]}]}',
+     'model_response_bce52f4a4bdd0287', ('contributions', 'datasets', 'method', 'metrics', 'problem', 'tldr')),
     ('services/paper_meta.py', '{"is_paper":true,"title":"","authors":[{"name":"","affiliations":[""]}],"venue":"","year":2024,"doi":"","keywords":[""]}',
      'model_response_6ed0a223d30c606d', ('is_paper',)),
     ('services/plugin_ask_engine.py', '{"text":""}',
