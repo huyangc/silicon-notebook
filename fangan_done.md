@@ -638,6 +638,27 @@ Agent profile、opaque token、scope/allowlist/过期与撤销、公开 onboardi
 - **MCP。** 工具总数 21 → 24：`find_sources`、`get_paper_cards`、`extract_from_sources`（均为 `read` 档，后两个会消耗模型配额，同一凭证主人至多 2 个并发，超出 `busy`）；响应用顶层去重的 `refs` 表适配 12KB 护栏；`list_sources` 增加 `authors`、`pub_year`、`venue`。
 - 当前合同见[产品/API][product]「论文检索、论文卡片与逐篇抽取」一节，部署开关与容量提示见[部署][deploy]。阈值（`FIND_SOURCES_STRONG_RELEVANCE` / `FIND_SOURCES_RELATED_RELEVANCE`）目前是保守的临时值。
 
+## 67. 笔记本单文件导出 / 跨部署导入（`.snbk`）（2026-10-22～29）
+
+**已交付，PR #967 / #974 / #989 / #1021 / #1029 / #1039 与文档收尾。** 计划见
+`docs/superpowers/plans/2026-10-22-notebook-export-import.md`（已标为交付，与代码不一致处以代码为准）。
+
+- **能力。** 库主在网页（笔记本设置「导出」，镜像从卡片菜单「导出笔记本」）或管理员 CLI（`scripts/cli.sh notebook
+  export|inspect|import`）把一本笔记本导出为一个 `.snbk` 文件；任何登录用户在首页「导入」上传，得到一本换新 id、归
+  自己所有、可编辑的独立新笔记本，不走 `sync_origin` 镜像围栏，同一文件可导入多次。新能力 `notebook:export`（恒
+  owner、镜像围栏放行），能力名共 14 个。
+- **共用写入器。** 同库深拷贝与导入共用 `NotebookCopyWriter`，差异收在 `CopyProfile`；行来源分别是内存快照与流式读
+  zip 的 `ArchiveRowSource`；归档表集合 `ARCHIVE_TABLES` 与复制闭包由 `test_notebook_archive_format` 两条守卫钉死。
+- **内容。** 带材料与原文件、附件、元素、切块、向量、知识图谱、Knowhow 表；不带记忆、交互数据、成员、授权、分享
+  链接与挂载。向量按 (model, dim) 保留或丢弃，发布后后台补齐；网页作业是进程内注册表加 sidecar，零迁移，前提是
+  单 API 进程。
+- **关闭的待办「`.snbk` 归档不带种子空间与板块分区列」（PR #988 登记）。** 种子空间随文件走：manifest 记
+  `kg.concept_seed_version`，导入写到新笔记本的 KG 状态行（与深拷贝同一做法）；没有这个键的旧文件，新笔记本以
+  「待重建」开始，报告给出 `seed_space_unknown`。主题板块（`communities`）不进归档：按原条目的第二个选项，导入后
+  由导入端重新划分，不携带分区列。
+- 当前合同见[产品/API][product]「笔记本导出与导入」、[运维][ops]「笔记本单文件导出 / 导入」「网页导出与导入作业」、
+  [部署][deploy] 与 [架构][arch] §5。
+
 [product]: docs/product-and-api_zh.md
 [flow]: docs/product-and-api_zh.md#产品流程
 [retrieval]: docs/product-and-api_zh.md#检索模式问答

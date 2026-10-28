@@ -1,6 +1,8 @@
 # silicon-notebook 待办（fangan_todo.md）
 
-更新日期：2026-10-29（第二节「检索」新增「`find_sources` 阈值校准（论文卡片特性 T10）」；论文卡片特性 PR1/PR2 已记入 `fangan_done.md` §66）。
+更新日期：2026-10-29（第四节「其它残余」的「`.snbk` 归档导出带 `concept_clusters`，但不带种子空间与板块分区列」随
+笔记本导出 / 导入特性交付关闭，移入 `fangan_done.md` §67）。此前：
+2026-10-29（第二节「检索」新增「`find_sources` 阈值校准（论文卡片特性 T10）」；论文卡片特性 PR1/PR2 已记入 `fangan_done.md` §66）。
 更新日期：2026-10-23（第二节「隐藏成员名字经 canonical id 暴露」已处理并移入 `fangan_done.md` §65：摸排确认
 直接读者面不越界，只修了经挂载读与来源天花板下的取名；同日早些时候，图谱分析「问题清单」特性已全部合入并记入 `fangan_done.md` §64，本文件相应补登：
 更新日期：2026-10-28（第二节「换描述模型或提示词后没有任何路径能重写概念描述」已按用户当日裁决（方案 b：显式维护命令，签名口径不变）补上 `kg rewrite-descriptions`，移入 `fangan_done.md` §61；「宽 except 吞掉 `RetrievalControlError`」已修，移入 `fangan_done.md`；按当日 master
@@ -302,15 +304,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       前端共享传输层的请求日志已改为查询串只记键；后端访问日志是否对所有路由同样只记键，与 `AGENTS.md`
       「日志不带内容」的口径相比是缺口，但会改变运维排障时能在日志里看到的查询内容，待用户拍板；拍板前不要放宽
       或改写那条用例。
-- [ ] **`.snbk` 归档导出带 `concept_clusters`，但不带种子空间与板块分区列**（来源：PR #988）：归档的
-      复制闭包（`backend/app/domain/notebook_archive.py::ARCHIVE_TABLES`，导出在
-      `backend/app/services/notebook_transfer/export.py`）含 `concept_clusters`，却不含 `unified_kg_state`——所以没有
-      `concept_seed_version`（这个库已发布的合并所用的概念种子空间）——也不含 `communities`，板块的 `board_key`
-      与 `unified_kg_state.community_partition_version` / `community_partition_mode` 同样不在其中。导入尚未实现
-      （`docs/operations*.md`「笔记本单文件导出」写明不在本版本内，计划见
-      `docs/superpowers/plans/2026-10-22-notebook-export-import.md`）；将来实现导入时需一并携带：没有状态行的库读作
-      种子空间 2，旧部署导出的空间 1 簇会被读歪（v102 / 0083 迁移注释记着同一风险）；板块分区列随板块一起——归档
-      目前整个不含 `communities`，要么连同板块一起带，要么接受导入后的第一次重建冷启动重新划分。
 
 ### 整改计划刻意不做、只登记
 
