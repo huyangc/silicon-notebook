@@ -41,7 +41,11 @@ from app.repositories.knowhow_asset_refs import (  # 后端中性,postgres maint
 )
 from app.repositories.ports import VectorBatchEncoder, VectorFillCount, VectorFillTally
 from app.repositories.source_fact_backfill import project_historical_source_fact
-from app.repositories.sqlite.source_store import NOT_PROMOTION_SOURCE_PREDICATE
+from app.repositories.sqlite.source_store import (
+    NOT_PROMOTION_SOURCE_PREDICATE,
+    PAPER_META_ELIGIBLE_SQL,
+    PAPER_META_NO_META_SQL,
+)
 from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,postgres maintenance 共用
 from app.domain.kg.source_partition import (
     SOURCE_PARTITION_FORMAT_VERSION,
@@ -447,17 +451,15 @@ class SQLiteMaintenanceAdapter:
     ) -> list[str]:
         if limit <= 0:
             raise ValueError("limit must be positive")
-        existing = (
-            "" if include_existing else
-            " AND NOT EXISTS (SELECT 1 FROM source_paper_meta m WHERE m.source_id=s.id)"
-        )
+        # 合规条件与「尚无本库自己的元数据行」都复用 source_store 的共享谓词:
+        # 离线补抽(batch_ingest --phase metadata)与界面补抽、按钮探针、看板
+        # missing 计数是同一个候选集,不各抄一份(手抄的一份曾漏掉按子表
+        # notebook_id 收窄,畸形遗留行在这里永远翻不出来)。
+        existing = "" if include_existing else PAPER_META_NO_META_SQL
         with self._runtime.database.connect() as db:
             rows = db.execute(
-                "SELECT s.id FROM sources s WHERE s.notebook_id=? AND s.id>? "
-                "AND s.source_type NOT IN ('memory','knowhow') "
-                f"AND s.{NOT_PROMOTION_SOURCE_PREDICATE} "
-                "AND s.doc_type IN ('','academic_paper') "
-                "AND s.parse_status IN ('parsed','extracting','extracted')"
+                "SELECT s.id FROM sources s WHERE s.notebook_id=? AND s.id>?"
+                + PAPER_META_ELIGIBLE_SQL
                 + existing
                 + " ORDER BY s.id LIMIT ?",
                 (notebook_id, after_id, int(limit)),

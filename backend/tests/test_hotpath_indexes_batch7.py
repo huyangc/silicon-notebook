@@ -7,7 +7,8 @@ own-notebook paper-metadata probe.
 Contract under test (anti-drift, same rationale as the earlier batches: the
 migration file, its DO-block validation values and the spec tuple are three
 hand-authored copies of one index shape), plus the SQLite twin: v103 builds
-the same index name with the include columns as trailing keys.
+the same index name with the include columns as trailing keys, and the
+SQLite readers that name it with ``INDEXED BY`` spell the same name.
 """
 from __future__ import annotations
 
@@ -92,9 +93,13 @@ def test_spec_renders_the_include_ddl():
 
 def test_sqlite_twin_builds_the_same_name_with_the_includes_as_trailing_keys():
     from app.repositories.sqlite import migrations as sqlite_migrations
+    from app.repositories.sqlite import source_store as sqlite_source_store
 
     source = Path(sqlite_migrations.__file__).read_text(encoding="utf-8")
     assert (
         f'"CREATE INDEX IF NOT EXISTS {_NAME} "\n'
         '                "ON source_paper_meta(source_id, notebook_id, is_paper)"'
     ) in source
+    assert sqlite_source_store.PAPER_META_SOURCE_NB_INDEX == _NAME
+    assert "INDEXED BY {PAPER_META_SOURCE_NB_INDEX}" in Path(
+        sqlite_source_store.__file__).read_text(encoding="utf-8")

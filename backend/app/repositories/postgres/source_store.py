@@ -123,17 +123,42 @@ _UNIVERSE_DIGEST_SQL = (
 
 
 # 论文元数据补抽候选谓词(接在 ``FROM sources s`` 且已按 ``s.notebook_id`` 过滤之后)。
-# 与 SQLite 侧 ``sqlite.source_store.PAPER_META_ELIGIBLE_SQL`` 同义;三个消费方
-# (sources_missing_paper_meta / notebook_analytics 的 missing 计数 /
-# NotebookSummary.paper_meta_missing 的 EXISTS 探针)共用这一份保证口径不漂移。
+# 与 SQLite 侧 ``sqlite.source_store.PAPER_META_ELIGIBLE_SQL`` 同义;四个消费方
+# (sources_missing_paper_meta / 离线补抽的分页读者
+# maintenance.paper_metadata_source_ids_page / notebook_analytics 的 missing 计数 /
+# NotebookSummary.paper_meta_missing 的 EXISTS 探针)共用这一份保证口径不漂移,
+# 与下面的 PAPER_META_NO_META_SQL 一起用;仓储层不许再手抄一份
+# (test_paper_meta_own_row.py 的源码守卫)。
 PAPER_META_ELIGIBLE_SQL = (
     " AND s.source_type NOT IN ('memory','knowhow')"
     f" AND s.{NOT_PROMOTION_SOURCE_PREDICATE}"
     " AND s.doc_type IN ('','academic_paper')"
     " AND s.parse_status IN ('parsed','extracting','extracted')"
 )
+# 「这一行是这条 source 自己的论文元数据」:子表行按 source_id 连到 source,且子表
+# 自身的 notebook_id 就是 source 所在的库——与 report_source_rows 家族、
+# paper_meta_for_sources 同一口径,子表 notebook_id 与 source 不一致的畸形遗留行
+# 不算。库的写者写不出这种行;读侧收窄让补抽能找到并改正它
+# (upsert_paper_meta 冲突时写回 notebook_id)。
+#
+# notebook_id 写成 ``IS NOT DISTINCT FROM`` 而不是 ``=``(两列都 NOT NULL,语义
+# 就是等值):``=`` 会进等价类,外层的 ``s.notebook_id=%s`` 被推成
+# ``m.notebook_id=<常量>``,planner 于是按库取出子表行、再逐行比对 source_id
+# (实测中等库的 EXISTS 探针 +80%)。写成过滤项后 source_id 仍是唯一的连接键,
+# 覆盖索引 idx_source_paper_meta_source_nb (source_id) INCLUDE (notebook_id,
+# is_paper)(迁移 0084)让探针与计数保持 Index Only Scan。
+PAPER_META_OWN_ROW_SQL = (
+    "m.source_id=s.id AND m.notebook_id IS NOT DISTINCT FROM s.notebook_id"
+)
+# 「尚无 meta 行」半句单独成段:sources_missing_paper_meta 的 --force
+# (include_existing=True)要能把它拿掉。
 PAPER_META_NO_META_SQL = (
-    " AND NOT EXISTS(SELECT 1 FROM source_paper_meta m WHERE m.source_id=s.id)"
+    f" AND NOT EXISTS(SELECT 1 FROM source_paper_meta m WHERE {PAPER_META_OWN_ROW_SQL})"
+)
+# notebook_analytics 的论文元数据三态计数用的连接:has_meta / marker 只数本库
+# source 自己的行,missing 是连不上的合规 source——与 NO_META 同一个条件。
+PAPER_META_OWN_ROW_JOIN_SQL = (
+    f" LEFT JOIN source_paper_meta m ON {PAPER_META_OWN_ROW_SQL}"
 )
 
 
@@ -1112,6 +1137,7 @@ class SourceStore:
                 "SELECT s.id,s.notebook_id,s.title,s.file_name,"
                 "m.is_paper,m.paper_title "
                 "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
+                "AND m.notebook_id IS NOT DISTINCT FROM s.notebook_id "
                 "WHERE s.id=ANY(%s)",
                 (batch,),
             ).fetchall())
@@ -1301,6 +1327,7 @@ class SourceStore:
                 "SELECT s.id,s.notebook_id,s.title,s.file_name,s.summary,s.doc_type,"
                 "s.source_type,m.is_paper,m.paper_title "
                 "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
+                "AND m.notebook_id IS NOT DISTINCT FROM s.notebook_id "
                 f"WHERE s.id IN ({placeholders(batch)})",
                 batch,
             ).fetchall())

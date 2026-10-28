@@ -133,20 +133,42 @@ def _universe_digest(joined: str | None) -> str:
 
 
 # 论文元数据补抽候选的 SQL 谓词(接在 ``FROM sources s`` 且已按 ``s.notebook_id``
-# 过滤之后)。三个消费方共用:sources_missing_paper_meta(补抽排队)、
-# query_store.notebook_analytics 的 missing 计数、以及 NotebookSummary.
+# 过滤之后)。四个消费方共用:sources_missing_paper_meta(补抽排队)、离线补抽的
+# 分页读者 maintenance.paper_metadata_source_ids_page(batch_ingest --phase
+# metadata)、query_store.notebook_analytics 的 missing 计数、以及 NotebookSummary.
 # paper_meta_missing 的 EXISTS 探针(「补全论文信息」按钮的显示门)——口径由这
-# 一份保证不漂移。合规条件与 models.sources 的 PAPER_META_ELIGIBLE_* 常量同义。
+# 一份保证不漂移,与下面的 PAPER_META_NO_META_SQL 一起用;仓储层不许再手抄一份
+# (test_paper_meta_own_row.py 的源码守卫)。合规条件与 models.sources 的
+# PAPER_META_ELIGIBLE_* 常量同义。
 PAPER_META_ELIGIBLE_SQL = (
     " AND s.source_type NOT IN ('memory', 'knowhow')"
     f" AND s.{NOT_PROMOTION_SOURCE_PREDICATE}"
     " AND s.doc_type IN ('', 'academic_paper')"
     " AND s.parse_status IN ('parsed', 'extracting', 'extracted')"
 )
+# 「这一行是这条 source 自己的论文元数据」:子表行按 source_id 连到 source,且子表
+# 自身的 notebook_id 就是 source 所在的库——与 report_source_rows 家族、
+# paper_meta_for_sources 同一口径,子表 notebook_id 与 source 不一致的畸形遗留行
+# 不算。读侧收窄让补抽能找到并改正它(upsert_paper_meta 冲突时写回 notebook_id)。
+#
+# 显式 ``INDEXED BY idx_source_paper_meta_source_nb``(v103 的 (source_id,
+# notebook_id, is_paper)):没有 ANALYZE 统计时(本库常态)SQLite 3.45 与 3.53 都
+# 只肯走主键唯一索引,收窄项于是逐行回表(实测 4.9 万源的库 +40%);强制覆盖索引
+# 后探针与计数是 COVERING INDEX,与收窄前同速。索引不存在时这条 SQL 直接报错,
+# 不会静默退化——迁移保证它在。
+PAPER_META_SOURCE_NB_INDEX = "idx_source_paper_meta_source_nb"
+PAPER_META_OWN_ROW_SQL = "m.source_id = s.id AND m.notebook_id = s.notebook_id"
 # 「尚无 meta 行」半句单独成段:sources_missing_paper_meta 的 --force
 # (include_existing=True)要能把它拿掉。
 PAPER_META_NO_META_SQL = (
-    " AND NOT EXISTS (SELECT 1 FROM source_paper_meta m WHERE m.source_id = s.id)"
+    " AND NOT EXISTS (SELECT 1 FROM source_paper_meta m "
+    f"INDEXED BY {PAPER_META_SOURCE_NB_INDEX} WHERE {PAPER_META_OWN_ROW_SQL})"
+)
+# notebook_analytics 的论文元数据三态计数用的连接:has_meta / marker 只数本库
+# source 自己的行,missing 是连不上的合规 source——与 NO_META 同一个条件。
+PAPER_META_OWN_ROW_JOIN_SQL = (
+    f" LEFT JOIN source_paper_meta m INDEXED BY {PAPER_META_SOURCE_NB_INDEX} "
+    f"ON {PAPER_META_OWN_ROW_SQL}"
 )
 
 
@@ -1060,6 +1082,7 @@ class SourceStore:
                 "SELECT s.id, s.notebook_id, s.title, s.file_name, "
                 "m.is_paper, m.paper_title "
                 "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id = s.id "
+                "AND +m.notebook_id = s.notebook_id "
                 f"WHERE s.id IN ({marks})",
                 batch,
             ).fetchall())
@@ -1259,6 +1282,7 @@ class SourceStore:
                 "SELECT s.id, s.notebook_id, s.title, s.file_name, s.summary, "
                 "s.doc_type, s.source_type, m.is_paper, m.paper_title "
                 "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
+                "AND +m.notebook_id=s.notebook_id "
                 f"WHERE s.id IN ({placeholders})",
                 batch,
             ).fetchall())

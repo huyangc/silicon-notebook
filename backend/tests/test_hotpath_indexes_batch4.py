@@ -324,9 +324,10 @@ def test_no_backend_regresses_to_the_cross_table_or_exists_predicate():
         assert "EXISTS(SELECT 1 FROM source_authors a" not in code, module.__name__
         assert "EXISTS(SELECT 1 FROM source_paper_meta m" not in code.replace(
             # PAPER_META_NO_META_SQL legitimately keeps its own EXISTS probe on
-            # source_paper_meta; it is a different predicate (row presence, no
-            # LIKE) and must not be caught by this guard.
-            "NOT EXISTS(SELECT 1 FROM source_paper_meta m WHERE m.source_id=s.id)", ""
-        ).replace(
-            "NOT EXISTS(SELECT 1 FROM source_paper_meta m WHERE m.source_id = s.id)", ""
+            # source_paper_meta; it is a different predicate (row presence of
+            # the source's own row, no LIKE) and must not be caught by this
+            # guard. PG spells it EXISTS(...) over PAPER_META_OWN_ROW_SQL;
+            # SQLite's EXISTS (... has a space and names its covering index.
+            "NOT EXISTS(SELECT 1 FROM source_paper_meta m WHERE {PAPER_META_OWN_ROW_SQL})",
+            "",
         ), module.__name__
