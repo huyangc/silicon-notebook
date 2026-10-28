@@ -110,6 +110,10 @@ def test_export_refuses_unknown_notebooks_and_leaves_no_part_file_pg(
     cases.check_unknown_notebook_and_cleanup(repo, BACKEND, out_dir, monkeypatch)
 
 
+def test_the_checkpoint_sees_the_bytes_and_can_stop_the_export_pg(repo, out_dir):
+    cases.check_checkpoint_sees_the_bytes_and_can_stop_the_export(repo, BACKEND, out_dir)
+
+
 def test_a_failing_consumer_leaves_no_server_cursor_on_the_connection_pg(repo, monkeypatch):
     """The page generator is closed while the store still holds its connection: when
     the consumer raises mid-table, the named ``copy_rows_*`` cursor is gone before the
