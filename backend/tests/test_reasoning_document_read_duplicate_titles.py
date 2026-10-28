@@ -289,32 +289,43 @@ def test_a_unique_real_title_that_looks_like_a_placeholder_resolves_as_itself():
     assert _resolved_ids(rows, "X") == ["a"]
 
 
-def test_unnamed_documents_keep_their_one_slot_next_to_numbered_same_titled_ones():
-    """未命名来源与同名混合:多篇无名文档**不编号**(账目对占位串「最多占一个标题位」
-    的规矩是 codex #724 R2 钉死的,编号会让 20 篇无名文档挤掉真标题);同名篇照常
-    编号。无名占位串多命中时仍是真正的歧义,文案走「无法区分」那一支。"""
+def test_unnamed_documents_are_numbered_in_one_slot_next_to_numbered_same_titled_ones():
+    """未命名来源与同名混合(用户 2026-10-28 裁决:无名条目共享子预算并编号):多篇
+    无名文档与同名篇同一条规则编号,整组仍只占一个标题位(codex #724 R2);裸占位串
+    多命中时与同名裸标题一样教模型连序号一起抄。"""
     rows = _roster_of(("u1", ""), ("u2", ""), ("a", "周报"), ("b", "周报"))
     placeholders = rr._roster_placeholders(rows)
-    assert set(placeholders) == {"a", "b"}
+    assert placeholders == {
+        "u1": "未命名来源（第 1 篇）", "u2": "未命名来源（第 2 篇）",
+        "a": "周报（第 1 篇）", "b": "周报（第 2 篇）"}
     assert rr._source_titles_note(rows, placeholders) == (
-        "，标题: 《未命名来源》《周报（第 1 篇）》《周报（第 2 篇）》")
+        "，标题: 《未命名来源（第 1 篇）》《未命名来源（第 2 篇）》"
+        "《周报（第 1 篇）》《周报（第 2 篇）》")
+    assert _resolved_ids(rows, "未命名来源（第 2 篇）") == ["u2"]
     assert sorted(_resolved_ids(rows, UNNAMED_SOURCE_LABEL)) == ["u1", "u2"]
     unnamed = rr._resolve_roster_rows(rows, UNNAMED_SOURCE_LABEL)
-    assert "无法区分" in rr._ambiguous_read_summary(unnamed, placeholders)
+    assert "「（第 1 篇）」" in rr._ambiguous_read_summary(unnamed, placeholders)
     shared = rr._resolve_roster_rows(rows, "周报")
     assert "「（第 1 篇）」" in rr._ambiguous_read_summary(shared, placeholders)
     # 20 篇无名 + 一对同名:真标题不被挤出账目。
     many = _roster_of(*[(f"u{i}", "") for i in range(20)],
                       ("a", "周报"), ("b", "周报"))
     note = rr._source_titles_note(many, rr._roster_placeholders(many))
-    assert note.count("《未命名来源》") == 1
+    assert note.count("《未命名来源（第") == rr._ENUM_NOTE_UNNAMED_TITLES
+    assert "(另有 16 篇未命名来源从略)" in note
     assert "《周报（第 1 篇）》《周报（第 2 篇）》" in note
 
 
-def test_a_single_unnamed_document_and_a_real_title_with_the_label_stay_unnumbered():
-    """真标题恰好就叫「未命名来源」与无标题文档显示得一样:同样不编号(同一条规矩)。"""
+def test_a_real_title_with_the_label_is_numbered_alongside_an_unnamed_document():
+    """真标题恰好就叫「未命名来源」与无标题文档显示得一样:同一条规则一起编号,
+    两篇各自读得到(改前两篇都只能报歧义)。只有其中一篇时不编号。"""
     rows = _roster_of(("u1", ""), ("u2", UNNAMED_SOURCE_LABEL))
-    assert rr._roster_placeholders(rows) == {}
+    assert rr._roster_placeholders(rows) == {
+        "u1": "未命名来源（第 1 篇）", "u2": "未命名来源（第 2 篇）"}
+    assert _resolved_ids(rows, "未命名来源（第 1 篇）") == ["u1"]
+    assert _resolved_ids(rows, "未命名来源（第 2 篇）") == ["u2"]
+    assert rr._roster_placeholders(rows[:1]) == {}
+    assert rr._roster_placeholders(rows[1:]) == {}
 
 
 def test_titles_that_only_differ_past_the_ledger_cut_are_numbered_and_addressable():
