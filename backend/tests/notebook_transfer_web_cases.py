@@ -1718,3 +1718,35 @@ def check_a_retry_with_the_same_upload_id_returns_its_job(world: World) -> None:
         refused = upload(world, data, **{"X-Upload-Id": bad})
         assert refused.status_code == 400, (bad, refused.text)
     assert [f for f in world.transfer_files() if f.startswith("imports/")] == []
+
+
+def check_the_upload_status_answers_authoritatively(world: World) -> None:
+    """``GET /notebook-imports/uploads/{id}`` tells the caller what became of an
+    upload: ``receiving`` while its reservation is held, ``job`` (with the job)
+    once a job carries the id, ``none`` otherwise. Another user's id is ``none``
+    like an unknown one; a malformed id is 400."""
+
+    def status(upload_id: str, headers: "dict | None" = None):
+        return world.client.get(
+            f"/api/notebook-imports/uploads/{upload_id}", headers=headers or world.owner
+        )
+
+    assert status("up-unknown-1").json() == {"status": "none", "job": None}
+    reservation = world.jobs.reserve_import(world.owner_id, "up-status-01")
+    try:
+        assert status("up-status-01").json() == {"status": "receiving", "job": None}
+        assert status("up-status-01", world.other).json() == {"status": "none", "job": None}
+    finally:
+        world.jobs.release_upload(reservation.job_id)
+    assert status("up-status-01").json() == {"status": "none", "job": None}
+
+    created = upload(world, archive_bytes(world), **{"X-Upload-Id": "up-status-02"})
+    assert created.status_code == 202, created.text
+    answer = status("up-status-02").json()
+    assert answer["status"] == "job"
+    assert answer["job"]["id"] == created.json()["id"]
+    assert answer["job"]["client_upload_id"] == "up-status-02"
+    assert status("up-status-02", world.other).json() == {"status": "none", "job": None}
+    for bad in ("short", "x" * 65, "dots.in.id1"):
+        assert status(bad).status_code == 400, bad
+    assert world.client.get("/api/notebook-imports/uploads/up-status-02").status_code == 401

@@ -55,6 +55,7 @@ from app.api.download_headers import attachment_content_disposition, safe_downlo
 from app.core.config import get_settings
 from app.models.identity import UserProfile
 from app.models.notebook_transfer import (
+    NotebookImportUploadStatus,
     NotebookTransferDeleted,
     NotebookTransferDownloadTicket,
     NotebookTransferJob,
@@ -230,8 +231,8 @@ async def import_notebook_route(
     if declared.isdigit() and int(declared) > limit:
         raise _upload_too_large(limit)
     client_upload_id = request.headers.get(UPLOAD_ID_HEADER, "")
-    if client_upload_id and not _UPLOAD_ID.fullmatch(client_upload_id):
-        raise user_error(400, "上传标识的格式不对，请刷新页面后重试。")
+    if client_upload_id:
+        _check_upload_id(client_upload_id)
     jobs = notebook_transfer_jobs()
     try:
         # The slot is taken before a byte of the body is read, and given back on
@@ -293,6 +294,26 @@ async def import_notebook_route(
         part.unlink(missing_ok=True)
         jobs.release_upload(job_id)
         raise
+
+
+def _check_upload_id(upload_id: str) -> None:
+    if not _UPLOAD_ID.fullmatch(upload_id):
+        raise user_error(400, "上传标识的格式不对，请刷新页面后重试。")
+
+
+@router.get(
+    "/notebook-imports/uploads/{upload_id}", response_model=NotebookImportUploadStatus,
+)
+def get_notebook_import_upload(
+    upload_id: str, user: UserProfile = Depends(get_current_user)
+) -> dict:
+    """What became of the caller's upload with this ``X-Upload-Id`` -- the
+    authoritative answer after an interrupted upload, read consistently with the
+    reservation turning into the job: ``job`` (with the job), ``receiving`` (still
+    being received or checked; it may still become a job) or ``none``. An id that
+    is not the caller's is ``none`` like an unknown one. A malformed id is 400."""
+    _check_upload_id(upload_id)
+    return notebook_transfer_jobs().upload_status(user.id, upload_id)
 
 
 @router.get("/notebook-transfers", response_model=NotebookTransferList)

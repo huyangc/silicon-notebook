@@ -61,6 +61,19 @@ class NotebookTransferList(BaseModel):
     jobs: List[NotebookTransferJob]
 
 
+class NotebookImportUploadStatus(BaseModel):
+    """``GET /notebook-imports/uploads/{upload_id}``: what became of the caller's
+    upload with that ``X-Upload-Id``. ``job``: a job carries it (``job`` is that
+    job); ``receiving``: an upload with it is still being received or checked
+    and may still become a job; ``none``: neither (also for an id that is not
+    the caller's)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["receiving", "job", "none"]
+    job: Optional[NotebookTransferJob] = None
+
+
 class NotebookTransferDeleted(BaseModel):
     """``DELETE /notebook-transfers/{id}``. ``outcome``: ``deleted`` (a finished
     job is gone), ``cancelled`` (an active job was stopped; nothing of it
