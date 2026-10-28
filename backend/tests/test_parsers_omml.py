@@ -795,6 +795,22 @@ def test_self_closing_math_root_before_a_closing_tag_keeps_the_part_well_formed(
     assert root.encode() in rewritten  # the empty root itself is left alone
 
 
+def test_math_root_whose_attribute_value_holds_a_slash_bracket_is_not_self_closing():
+    """The start tag is scanned with quoting in mind: `/>` inside an attribute
+    value does not make a root with content look self-closing."""
+    from app.services.omml import _rewrite_docx_part
+
+    xml = (
+        f'<w:document xmlns:w="{_W_NS}" xmlns:m="{M_NS}"><w:body><w:p>'
+        '<m:oMath xmlns:q="tag/>"><m:r><m:t>y</m:t></m:r></m:oMath></w:p></w:body></w:document>'
+    )
+    formulas: list = []
+    rewritten = _rewrite_docx_part(xml.encode(), formulas, "\ue000")
+    ElementTree.fromstring(rewritten)
+    assert [formula.inline for formula in formulas] == ["$y$"]
+    assert b"oMath" not in rewritten
+
+
 @pytest.mark.parametrize("root_tag", ["oMath", "oMathPara"])
 @pytest.mark.parametrize("where", ["paragraph", "cell", "body"])
 def test_docx_with_a_self_closing_math_root_stays_on_the_mammoth_path(tmp_path, root_tag, where):
