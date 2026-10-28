@@ -35,3 +35,23 @@ def world(client, monkeypatch):
 @pytest.mark.parametrize("case", sorted(CASES))
 def test_scope_empty_by_evidence_scenario(world, case):
     CASES[case](world)
+
+
+def test_an_exclude_shaped_library_scope_is_read_through_its_mode():
+    """Every route hands over the frozen include ceiling, but an exclude-shaped
+    scope must be complemented against the mount roster, never read inverted
+    (the unchecked libraries counted as the ticked ones)."""
+    from app.api.ask_routes import _checked_base_ids
+    from app.models.notebooks import NotebookRef, NotebookSummary
+    from app.models.source_scope import BaseNotebookScope
+
+    notebook = NotebookSummary(
+        id="nb", name="n", purpose="", primary_domain="", status="ready",
+        counts={}, created_label="",
+        base_notebooks=[NotebookRef(id="b1", name="b1"), NotebookRef(id="b2", name="b2")],
+    )
+    assert _checked_base_ids(notebook, None) is None
+    assert _checked_base_ids(
+        notebook, BaseNotebookScope(mode="exclude", notebook_ids=["b1"])) == ["b2"]
+    assert _checked_base_ids(
+        notebook, BaseNotebookScope(mode="include", notebook_ids=["b1"])) == ["b1"]
