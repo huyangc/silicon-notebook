@@ -275,6 +275,17 @@ test("补全检索数据没完成:只有没补完的全是段/内容块那两条
   }
 });
 
+test("导入报告里重新同步失败的 Knowhow 表:说出张数与「重新同步」;没有失败就不说", () => {
+  const imported = (report: Record<string, unknown>) => parseTransferJob(job({
+    kind: "import", state: "succeeded", phase: "done", notebook_id: "nb", report,
+  }))!;
+  expect(importReportNotes(imported({ projection_failures: ["kt-1", "kt-2"] }))).toEqual([
+    "有 2 张 Knowhow 表没有同步完成；打开笔记本后在「Knowhow 表」里打开它，点「重新同步」即可补上。",
+  ]);
+  expect(importReportNotes(imported({ projection_failures: [] }))).toEqual([]);
+  expect(importReportNotes(imported({ projection_failures: "kt-1" }))).toEqual([]);
+});
+
 test("上传:同一个上传标识的上一次上传还在处理(409 upload_in_progress)能被认出来,与名额满分开", async () => {
   vi.spyOn(console, "debug").mockImplementation(() => undefined);
   vi.spyOn(console, "error").mockImplementation(() => undefined);
