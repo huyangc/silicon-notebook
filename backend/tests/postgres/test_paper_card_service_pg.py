@@ -8,7 +8,7 @@ import pytest
 from app.models.schemas import NotebookCreate
 from app.services.paper_cards import PAPER_CARD_VERSION
 from tests import paper_card_testkit as kit
-from tests.model_testkit import RecordingModelProvider, bind_chat_client
+from tests.model_testkit import RecordingModelProvider
 
 pytestmark = [
     pytest.mark.postgres_integration,
@@ -32,7 +32,11 @@ def repo(postgres_settings):
 
 def test_card_end_to_end_on_postgres(repo):
     model = kit.FakePaperModel()
-    bind_chat_client(repo, "paper_metadata", model)
+    with kit.scheduled_paper_model(repo, model):
+        _end_to_end(repo, model)
+
+
+def _end_to_end(repo, model):
     nb = repo.create_notebook(NotebookCreate(name="papers")).id
     kit.seed_source(repo, nb, "pg-s1", filler=40)
     kit.seed_source(repo, nb, "pg-s2", doc_type="textbook")

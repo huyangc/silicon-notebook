@@ -290,6 +290,37 @@ class MalformedModelResponse(ModelProviderError):
         self.finish_reason = finish_reason
 
 
+#: Codes (``ModelSchedulingError.code`` / ``model_provider._stable_error_code``)
+#: that say "the service could not take this call right now", not "the reply
+#: was bad": a full or timed-out queue, an open breaker, a 429, a 5xx or a
+#: transport timeout. The scheduled adapter wraps every failure into a
+#: ``ModelInvocationError`` carrying one of these as ``.code``, so callers
+#: classify by code, never by exception type. Same set as
+#: ``kg.run_control._failure_for``'s "model unavailable" branch.
+TRANSIENT_MODEL_ERROR_CODES = frozenset({
+    "model_queue_full",
+    "model_queue_timeout",
+    "model_service_unavailable",
+    "provider_rate_limited",
+    "provider_unavailable",
+})
+#: The one code that means the model answered but the reply broke the JSON
+#: contract — a content failure, not an availability one.
+MALFORMED_RESPONSE_CODE = "malformed_response"
+
+
+def model_error_code(error: BaseException) -> str:
+    """The stable code of a model failure (raw scheduling errors included)."""
+    return str(getattr(error, "code", "") or "")
+
+
+def is_transient_model_error(error: BaseException) -> bool:
+    """Whether a model failure is an availability problem worth retrying later."""
+    return isinstance(error, (ModelQueueFull, ModelQueueTimeout)) or (
+        model_error_code(error) in TRANSIENT_MODEL_ERROR_CODES
+    )
+
+
 @dataclass(frozen=True)
 class ProviderObservation:
     service_id: str

@@ -63,10 +63,12 @@ from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.model_work import (
-    ModelQueueFull,
-    ModelQueueTimeout,
+    MALFORMED_RESPONSE_CODE,
+    is_transient_model_error,
     model_artifact_scope,
+    model_error_code,
 )
+from app.services.retrieval_run import retrieval_fanout_slot
 from app.services.paper_meta import (
     PAPER_META_SCHEMA_HINT,
     paper_meta_doc_type_eligible,
@@ -144,6 +146,9 @@ def trusted_proxy_origin_set(raw: str) -> "frozenset[str]":
             origins.add(origin)
     return frozenset(origins)
 
+
+# 可取消的论文元数据入口按页读开头元素的页大小(读够头部字数就停)。
+_PAPER_META_HEAD_PAGE = 32
 
 class PartialKgRetryIncomplete(RuntimeError):
     """A safe partial-KG retry left the previous graph untouched."""
@@ -3321,7 +3326,10 @@ class SourceIngestionService:
         # extraction ever runs.
         try:
             return self._extract_paper_metadata(
-                source, elements, force, client=client, cancel_event=None
+                source, force, client=client, cancel_event=None,
+                head_text=lambda head_chars: self._paper_meta_full_head(
+                    source, elements, head_chars),
+                io_slot=nullcontext,
             )
         except Exception:
             self.event_log.logger.exception(
@@ -3337,25 +3345,79 @@ class SourceIngestionService:
         client: Any | None = None,
     ) -> str:
         """``ensure_paper_metadata``(force=False)的可取消变体,供交互路径(论文卡片
-        懒生成)在请求线程里先补元数据。返回值集合与 gate 完全相同;区别只有两点:
-        模型调用带 ``cancel_event``,以及**取消(``CoreCancellation``)与调度层的
-        ``ModelQueueFull`` / ``ModelQueueTimeout`` 原样上抛**——前者让整次请求停下,
-        后两者让调用方把这一篇降级为「稍后再试」而不是记成失败。其它异常仍按
-        ``ensure_paper_metadata`` 的口径吞成 ``"failed"``(不写行,下次可重试)。"""
+        懒生成)在请求线程里先补元数据。与原入口的区别:
+
+        - 模型调用带 ``cancel_event``;取消(``CoreCancellation``)与**暂时不可用**的
+          模型失败(``is_transient_model_error``:队列满/等待超时/熔断/429/5xx/超时,
+          按调度层包装后的 ``.code`` 判定)原样上抛,调用方把这一篇降级为「稍后再试」;
+        - 头部文本按页读取开头元素,读够 ``paper_meta_head_chars`` 就停(不加载整篇);
+          数据库读写都在 ``retrieval_fanout_slot`` 里;
+        - 失败分两种:**内容失败**(模型回了但不是合法对象 / ``malformed_response`` /
+          is_paper 不是布尔)返回 ``"failed"``;其它非暂时性错误(鉴权、配置、未知
+          异常)返回 ``"error"``。两者都不写元数据行。
+        """
         gate = self._paper_metadata_gate(source)
         if gate:
             return gate
         try:
             return self._extract_paper_metadata(
-                source, None, False, client=client, cancel_event=cancel_event
+                source, False, client=client, cancel_event=cancel_event,
+                head_text=lambda head_chars: self._paper_meta_paged_head(
+                    source, head_chars, cancel_event),
+                io_slot=retrieval_fanout_slot,
             )
-        except (CoreCancellation, ModelQueueFull, ModelQueueTimeout):
+        except CoreCancellation:
             raise
-        except Exception:
+        except Exception as exc:
+            if is_transient_model_error(exc):
+                raise
             self.event_log.logger.exception(
                 "paper metadata extraction failed for %s", source.id
             )
-            return "failed"
+            content = isinstance(exc, ValueError) or (
+                model_error_code(exc) == MALFORMED_RESPONSE_CODE
+            )
+            return "failed" if content else "error"
+
+    def _paper_meta_full_head(
+        self,
+        source: "SourceSummary | SourceDetail",
+        elements: Optional[List[SourceElement]],
+        head_chars: int,
+    ) -> str:
+        """原入口的头部文本:整篇元素(或 .md/.txt 原文件)拼接后取前缀。"""
+        if elements is None:
+            elements = self.source_elements(source.id)
+        return self.source_files.read_source_text(
+            getattr(source, "file_path", "") or "", elements
+        )[:head_chars]
+
+    def _paper_meta_paged_head(
+        self, source: "SourceSummary | SourceDetail", head_chars: int, cancel_event: Any
+    ) -> str:
+        """与 ``_paper_meta_full_head`` 同一段文本(.md/.txt 读文件,否则按元素顺序以
+        空行拼接),但元素按页读取、读够 ``head_chars`` 即停。"""
+        path = getattr(source, "file_path", "") or ""
+        if path.endswith((".md", ".markdown", ".txt")):
+            text = self.source_files.read_source_text(path, ())
+            if text:
+                return text[:head_chars]
+        parts: List[str] = []
+        length = -2
+        offset = 0
+        while length < head_chars:
+            raise_if_cancelled(cancel_event)
+            with retrieval_fanout_slot():
+                page = self.sources.source_elements_page(
+                    source.id, offset=offset, limit=_PAPER_META_HEAD_PAGE
+                )
+            for element in page.items:
+                parts.append(element.text)
+                length += len(element.text) + 2
+            offset += len(page.items)
+            if not page.items or offset >= page.total_count:
+                break
+        return "\n\n".join(parts)[:head_chars]
 
     def _paper_metadata_gate(self, source: "SourceSummary | SourceDetail") -> str:
         """抽取前的静态 gate:不合格时返回状态串,合格返回 ``""``。"""
@@ -3374,24 +3436,24 @@ class SourceIngestionService:
     def _extract_paper_metadata(
         self,
         source: "SourceSummary | SourceDetail",
-        elements: Optional[List[SourceElement]],
         force: bool,
         *,
         client: Any | None,
         cancel_event: Any,
+        head_text: Callable[[int], str],
+        io_slot: Callable[[], ContextManager],
     ) -> str:
-        """gate 之后的抽取主体;异常一律上抛,由两个入口各自决定吞还是传。"""
-        if not force and self.sources.get_paper_meta(source.id, source.notebook_id) is not None:
+        """gate 之后的抽取主体;异常一律上抛,由两个入口各自决定吞还是传。
+        ``head_text`` 给出头部文本,``io_slot`` 包住本体里的数据库读写。"""
+        with io_slot():
+            existing = None if force else self.sources.get_paper_meta(source.id, source.notebook_id)
+        if existing is not None:
             return "skipped"
         client = client or self.model_clients.chat("paper_metadata")
         if not getattr(client, "configured", False):
             return "no_llm"
-        if elements is None:
-            elements = self.source_elements(source.id)
         head_chars = int(getattr(self.settings, "paper_meta_head_chars", 4000))
-        head_text = self.source_files.read_source_text(
-            getattr(source, "file_path", "") or "", elements
-        )[:head_chars]
+        head_text = head_text(head_chars)
         if not head_text.strip():
             return "no_text"
         raise_if_cancelled(cancel_event)
@@ -3431,7 +3493,8 @@ class SourceIngestionService:
             parsed, head_text,
             model=str(getattr(client, "model", "") or ""),
         )
-        self.sources.upsert_paper_meta(source.id, source.notebook_id, meta)
+        with io_slot():
+            self.sources.upsert_paper_meta(source.id, source.notebook_id, meta)
         self.event_log.emit({
             "kind": "paper_meta",
             "source_id": source.id,
