@@ -48,7 +48,9 @@ export type UploadSnapshot = Readonly<{
 export type UploadOutcome =
   | { kind: "uploaded"; job: NotebookTransferJob; fileName: string }
   | { kind: "stopped" }
-  | { kind: "failed"; text: string };
+  | { kind: "failed"; text: string }
+  /** 连接断了,而服务器有没有接收这次上传说不准:不能当失败,也不能叫人马上重传。 */
+  | { kind: "unsure"; text: string };
 
 type Listener = () => void;
 
@@ -113,17 +115,39 @@ async function createdSince(known: Set<string>): Promise<NotebookTransferJob | n
   }
 }
 
-/** 上传中途网络断了:再读一次作业,能说清原因就说清楚。 */
-async function explainCut(fileSize: number, limitBytes: number | null): Promise<string> {
+/** 连接断了、又判断不出服务器有没有接收时那句话:不叫人马上重传(会多出一本)。 */
+export const IMPORT_UPLOAD_UNSURE_TEXT = "连接中断，导入可能已被接收；请先看下方的导入记录，再决定是否重传。";
+
+/**
+ * 上传中途连接断了:再读一次作业,先判断服务器是不是**已经接收**了这次上传——请求体传完
+ * 之后它会接着检查、建作业,浏览器那边却只看到一次网络错误。
+ *
+ * * 预检之后多出来一个导入作业:那就是这一次的,照实交出(`uploaded`),不能说失败——
+ *   否则文件还选着,用户一重传就多出一本笔记本。
+ * * 判断不了:作业读不到、上传前没能读到基准、或者请求体已经传完(作业可能还没建出来)
+ *   却还没看到它——`unsure`,不叫人马上重传。
+ * * 确定没有被接收:名额满了就照实说;名额没满、文件也确定没超上限,那就只是网络;
+ *   其余说出可能的几种原因。
+ */
+async function explainCut(
+  known: Set<string> | null,
+  bodySent: boolean,
+  file: File,
+  limitBytes: number | null,
+): Promise<UploadOutcome> {
+  let jobs: NotebookTransferJob[];
   try {
-    const jobs = await listNotebookTransfers();
-    if (activeTransferCount(jobs) >= MAX_ACTIVE_TRANSFER_JOBS) return TRANSFER_BUSY_TEXT;
-    // 名额没满、文件也确定没超上限:那就只是网络。
-    if (limitBytes !== null && fileSize <= limitBytes) return IMPORT_UPLOAD_FAILED_TEXT;
+    jobs = await listNotebookTransfers();
   } catch {
-    // 读不到:原因说不清。
+    return { kind: "unsure", text: IMPORT_UPLOAD_UNSURE_TEXT };
   }
-  return IMPORT_UPLOAD_CUT_TEXT;
+  if (known === null) return { kind: "unsure", text: IMPORT_UPLOAD_UNSURE_TEXT };
+  const created = jobs.find((job) => job.kind === "import" && !known.has(job.id));
+  if (created) return { kind: "uploaded", job: created, fileName: file.name };
+  if (bodySent) return { kind: "unsure", text: IMPORT_UPLOAD_UNSURE_TEXT };
+  if (activeTransferCount(jobs) >= MAX_ACTIVE_TRANSFER_JOBS) return { kind: "failed", text: TRANSFER_BUSY_TEXT };
+  if (limitBytes !== null && file.size <= limitBytes) return { kind: "failed", text: IMPORT_UPLOAD_FAILED_TEXT };
+  return { kind: "failed", text: IMPORT_UPLOAD_CUT_TEXT };
 }
 
 export const importUpload = {
@@ -157,6 +181,8 @@ export const importUpload = {
     const current = () => mine === generation;
     // 预检时读到的作业 id:停止之后再读一次,多出来的那个导入就是这一次上传建出来的。
     let known: Set<string> | null = null;
+    // 请求体已经全部交给网络(进度到了 100%):此后服务器会接着检查、建作业。
+    let bodySent = false;
     try {
       let jobs: NotebookTransferJob[] | null = null;
       try {
@@ -178,6 +204,7 @@ export const importUpload = {
         onProgress: (sent, total) => {
           if (!current()) return;
           const percent = percentOf(sent, total);
+          if (percent >= 100) bodySent = true;
           publish({ ...base, percent, stage: percent >= 100 ? "checking" : "uploading" });
         },
       });
@@ -191,9 +218,9 @@ export const importUpload = {
         if (!current()) return;
         deliver(created ? { kind: "uploaded", job: created, fileName: file.name } : { kind: "stopped" });
       } else if (error instanceof TypeError) {
-        const text = await explainCut(file.size, limitBytes);
+        const outcome = await explainCut(known, bodySent, file, limitBytes);
         if (!current()) return;
-        deliver({ kind: "failed", text });
+        deliver(outcome);
       } else {
         // 超过上限被拒:上限可能刚被改小,下次重新读。
         if (httpErrorStatus(error) === 413) forgetTransferLimit();

@@ -152,7 +152,7 @@ test("导出弹窗(卡片菜单入口):被盖住时退出交互树,「×」不�
 function importView(over: Partial<NotebookImportView> = {}): NotebookImportView {
   return {
     limitBytes: 512 * 1024 * 1024, file: null, fileInputKey: 0, name: "", fileError: "",
-    uploadError: "", uploadNotice: "", uploadFailedUnseen: false, jobs: [], loadingJobs: false,
+    uploadError: "", uploadNotice: "", uploadAttention: "", jobs: [], loadingJobs: false,
     rows: {}, notes: {}, fileNames: {}, ...over,
   };
 }
@@ -347,18 +347,24 @@ test("铃铛:已经发布的导入给「打开笔记本」;发布前、失败、
 test("工具栏「导入」:上传中说「导入中…」,弹窗关着时失败了说「导入失败」,点一下都打开导入弹窗", async () => {
   const user = userEvent.setup();
   const onOpen = vi.fn();
-  const { rerender } = render(<ImportToolbarButton failed={false} onOpen={onOpen} />);
+  const { rerender } = render(<ImportToolbarButton attention="" onOpen={onOpen} />);
   expect(screen.getByRole("button", { name: "导入" })).toBeEnabled();
   upload.snapshot = { fileName: "库.snbk", total: 100, percent: 30, stage: "uploading" };
-  rerender(<ImportToolbarButton failed={false} onOpen={onOpen} />);
+  rerender(<ImportToolbarButton attention="" onOpen={onOpen} />);
   await user.click(screen.getByRole("button", { name: "导入中…" }));
   expect(onOpen).toHaveBeenCalledTimes(1);
   upload.snapshot = null;
-  rerender(<ImportToolbarButton failed onOpen={onOpen} />);
+  rerender(<ImportToolbarButton attention="failed" onOpen={onOpen} />);
   const failed = screen.getByRole("button", { name: "导入失败" });
   expect(failed).toHaveClass("transfer-toolbar-failed");
   await user.click(failed);
   expect(onOpen).toHaveBeenCalledTimes(2);
+  // 连接断了、说不准有没有被接收:不说「失败」(那会叫人重传),说「待确认」。
+  rerender(<ImportToolbarButton attention="unsure" onOpen={onOpen} />);
+  const unsure = screen.getByRole("button", { name: "导入待确认" });
+  expect(unsure).toHaveClass("transfer-toolbar-unsure");
+  await user.click(unsure);
+  expect(onOpen).toHaveBeenCalledTimes(3);
 });
 
 test("导出一节在读取已有作业时不给可点的开始按钮", async () => {

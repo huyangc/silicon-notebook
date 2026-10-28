@@ -22,7 +22,7 @@ vi.mock("../../app/page-reload.ts", () => ({
   reloadPage: () => { reload.reloading = true; },
 }));
 
-const { importUpload, useImportUpload, useImportUploadBusy } = await import("../../app/notebook-import-upload.ts");
+const { importUpload, useImportUpload, useImportUploadBusy, IMPORT_UPLOAD_UNSURE_TEXT } = await import("../../app/notebook-import-upload.ts");
 const { IMPORT_UPLOAD_CUT_TEXT, IMPORT_UPLOAD_FAILED_TEXT, TRANSFER_BUSY_TEXT } = await import(
   "../../app/notebook-transfer-api.ts"
 );
@@ -109,13 +109,12 @@ test("上传中挂 beforeunload 提示,结束就摘掉", async () => {
   stop();
 });
 
-test("中途网络断开:再读一次作业——名额满了就照实说;读不清时说可能的几种原因;确定没超上限就只是网络", async () => {
+test("中途网络断开、确定没被接收:名额满了就照实说;确定没超上限就只是网络;否则说出可能的几种原因", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   const { outcomes, stop } = collect();
   api.uploadNotebookImport.mockRejectedValue(new TypeError("Failed to fetch"));
-  api.listNotebookTransfers.mockResolvedValueOnce([]).mockResolvedValueOnce([active("a"), active("b")]);
-  await importUpload.start(file(), "", null);
-  api.listNotebookTransfers.mockResolvedValueOnce([]).mockRejectedValueOnce(new TypeError("offline"));
+  // 断开后多出来的是一个导出(不是这次上传建的),于是名额满了。
+  api.listNotebookTransfers.mockResolvedValueOnce([active("a")]).mockResolvedValueOnce([active("a"), active("b", "export")]);
   await importUpload.start(file(), "", null);
   api.listNotebookTransfers.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
   await importUpload.start(file(), "", 1024);
@@ -123,10 +122,63 @@ test("中途网络断开:再读一次作业——名额满了就照实说;读不
   await importUpload.start(file(), "", null);
   expect(outcomes).toEqual([
     { kind: "failed", text: TRANSFER_BUSY_TEXT },
-    { kind: "failed", text: IMPORT_UPLOAD_CUT_TEXT },
     { kind: "failed", text: IMPORT_UPLOAD_FAILED_TEXT },
     { kind: "failed", text: IMPORT_UPLOAD_CUT_TEXT },
   ]);
+  stop();
+});
+
+test("服务器已经接收、连接才断:多出来的那个导入照实交出(不报失败,免得重传出第二本)", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  let progress: (sent: number, total: number) => void = () => undefined;
+  let cut: (error: unknown) => void = () => undefined;
+  api.uploadNotebookImport.mockImplementationOnce((_file: File, options: { onProgress: typeof progress }) => {
+    progress = options.onProgress;
+    return new Promise((_, reject) => { cut = reject; });
+  });
+  api.listNotebookTransfers.mockResolvedValueOnce([active("old")])
+    .mockResolvedValueOnce([active("accepted"), active("old")]);
+  const { outcomes, stop } = collect();
+  const running = importUpload.start(file(), "", 1024);
+  await vi.waitFor(() => expect(importUpload.getSnapshot()?.stage).toBe("uploading"));
+  progress(100, 100);
+  cut(new TypeError("Failed to fetch"));
+  await running;
+  expect(outcomes).toEqual([{ kind: "uploaded", job: active("accepted"), fileName: "库.snbk" }]);
+  stop();
+});
+
+test("判断不了有没有被接收:说「可能已被接收」,不叫人马上重传", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { outcomes, stop } = collect();
+  // 一、请求体已经传完,作业却还没出现(服务器可能还在检查文件)。
+  let progress: (sent: number, total: number) => void = () => undefined;
+  let cut: (error: unknown) => void = () => undefined;
+  api.uploadNotebookImport.mockImplementationOnce((_file: File, options: { onProgress: typeof progress }) => {
+    progress = options.onProgress;
+    return new Promise((_, reject) => { cut = reject; });
+  });
+  api.listNotebookTransfers.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+  const sent = importUpload.start(file(), "", 1024);
+  await vi.waitFor(() => expect(importUpload.getSnapshot()?.stage).toBe("uploading"));
+  progress(100, 100);
+  cut(new TypeError("Failed to fetch"));
+  await sent;
+  // 二、断开之后作业读不到。
+  api.uploadNotebookImport.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+  api.listNotebookTransfers.mockResolvedValueOnce([]).mockRejectedValueOnce(new TypeError("offline"));
+  await importUpload.start(file(), "", 1024);
+  // 三、上传前就没能读到作业(没有基准可比)。
+  api.uploadNotebookImport.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+  api.listNotebookTransfers.mockRejectedValueOnce(new TypeError("offline")).mockResolvedValueOnce([active("x")]);
+  await importUpload.start(file(), "", 1024);
+  expect(outcomes).toEqual([
+    { kind: "unsure", text: IMPORT_UPLOAD_UNSURE_TEXT },
+    { kind: "unsure", text: IMPORT_UPLOAD_UNSURE_TEXT },
+    { kind: "unsure", text: IMPORT_UPLOAD_UNSURE_TEXT },
+  ]);
+  expect(IMPORT_UPLOAD_UNSURE_TEXT).toContain("可能已被接收");
+  expect(IMPORT_UPLOAD_UNSURE_TEXT).toContain("再决定是否重传");
   stop();
 });
 

@@ -326,8 +326,9 @@ export type NotebookImportView = {
   uploadError: string;
   /** 上传结束(成功 / 主动停止)后的一句话。「正在导入」那一句只在那个作业还在导入时说。 */
   uploadNotice: string;
-  /** 上一次上传失败、而弹窗当时关着:工具栏的「导入」按钮说「导入失败」,直到弹窗打开。 */
-  uploadFailedUnseen: boolean;
+  /** 上一次上传失败(`failed`)或说不准有没有被接收(`unsure`)、而弹窗当时关着:工具栏的
+   *  「导入」按钮说出来,直到弹窗打开;没有为 `""`。 */
+  uploadAttention: "" | "failed" | "unsure";
   /** 我的导入作业(新的在前);只在弹窗打开过之后才有。 */
   jobs: NotebookTransferJob[];
   /** 正在读取导入记录。 */
@@ -369,7 +370,7 @@ export function useNotebookImport(options: {
   // 上传之后那句话。说「正在导入」时记着是哪个作业:它结束(或已经发布)、或那一行被取消/
   // 移除了,这句话就不再成立,不显示。
   const [notice, setNotice] = useState<{ text: string; jobId?: string }>({ text: "" });
-  const [uploadFailedUnseen, setUploadFailedUnseen] = useState(false);
+  const [uploadAttention, setUploadAttention] = useState<"" | "failed" | "unsure">("");
   const openRef = useRef(open);
   openRef.current = open;
   const [jobs, setJobs] = useState<NotebookTransferJob[]>([]);
@@ -435,14 +436,14 @@ export function useNotebookImport(options: {
     } else {
       setNotice({ text: "" });
       setUploadError(outcome.text);
-      // 弹窗关着时失败的:失败要落在发起它的那颗按钮(工具栏「导入」)上。
-      if (!openRef.current) setUploadFailedUnseen(true);
+      // 弹窗关着时失败(或说不准)的:结果要落在发起它的那颗按钮(工具栏「导入」)上。
+      if (!openRef.current) setUploadAttention(outcome.kind === "unsure" ? "unsure" : "failed");
     }
   }), [announce]);
 
   // 弹窗一打开,失败原因就在「开始导入」旁边了:工具栏上的「导入失败」撤掉。
   useEffect(() => {
-    if (open) setUploadFailedUnseen(false);
+    if (open) setUploadAttention("");
   }, [open]);
 
   // 弹窗打开:读上限与导入记录。
@@ -594,7 +595,7 @@ export function useNotebookImport(options: {
     setName("");
     setUploadError("");
     setNotice({ text: "" });
-    setUploadFailedUnseen(false);
+    setUploadAttention("");
     setJobs([]);
     setRows({});
     setNotes({});
@@ -608,7 +609,7 @@ export function useNotebookImport(options: {
     ? ""
     : notice.text;
   const view: NotebookImportView = {
-    limitBytes, file, fileInputKey, name, fileError, uploadError, uploadNotice, uploadFailedUnseen,
+    limitBytes, file, fileInputKey, name, fileError, uploadError, uploadNotice, uploadAttention,
     jobs, loadingJobs, rows, notes, fileNames,
   };
   return { view, chooseFile, setName, start, stopUpload, cancelJob, removeJob, leaveActor };

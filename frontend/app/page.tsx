@@ -5617,7 +5617,7 @@ export default function Home() {
               <button className="sort-button" title="查看我分享出去的笔记本及其只读成员" onClick={() => openSharedByMe().catch(reportError)}>
                 <Share2 size={15} /> 已分享
               </button>
-              <ImportToolbarButton failed={notebookImport.view.uploadFailedUnseen} onOpen={openImportModal} />
+              <ImportToolbarButton attention={notebookImport.view.uploadAttention} onOpen={openImportModal} />
               <button className="new-pill" disabled={notebookCollection.creating} onClick={() => { void notebookCollection.createDefaultNotebook(); }}>＋ 新建</button>
             </div>
           </section>

@@ -15501,6 +15501,10 @@ button.transfer-toolbar-failed {
   color: var(--danger);
   border-color: var(--danger-border);
 }
+button.transfer-toolbar-unsure {
+  color: var(--warning);
+  border-color: var(--warning-border);
+}
 /* 上传进度条(role="progressbar"):细条,落在「开始导入」那一排里。 */
 .transfer-upload-bar {
   position: relative;

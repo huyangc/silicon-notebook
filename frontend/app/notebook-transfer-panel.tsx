@@ -196,20 +196,31 @@ export function NotebookExportModal({
 // ======================================================================== 导入
 
 /**
- * 集合页工具栏上的「导入」。上传与它的失败都要落在发起它的这颗按钮上:弹窗关着时,
- * 上传进行中说「导入中…」,失败了说「导入失败」(原因在弹窗里「开始导入」旁边),点一下
- * 都是打开导入弹窗。它自己订阅「有没有上传在进行」,进度变化不重渲它,更不重渲 Home。
+ * 集合页工具栏上的「导入」。上传与它的结果都要落在发起它的这颗按钮上:弹窗关着时,
+ * 上传进行中说「导入中…」,失败了说「导入失败」,连接断了又说不准有没有被接收时说
+ * 「导入待确认」(原因都在弹窗里「开始导入」旁边),点一下都是打开导入弹窗。它自己订阅
+ * 「有没有上传在进行」,进度变化不重渲它,更不重渲 Home。
  */
-export function ImportToolbarButton({ failed, onOpen }: { failed: boolean; onOpen: () => void }) {
+export function ImportToolbarButton({
+  attention,
+  onOpen,
+}: {
+  attention: "" | "failed" | "unsure";
+  onOpen: () => void;
+}) {
   const uploadInFlight = useImportUploadBusy();
+  const shown = uploadInFlight ? "" : attention;
   return (
     <button
       type="button"
-      className={!uploadInFlight && failed ? "sort-button transfer-toolbar-failed" : "sort-button"}
-      title={uploadInFlight ? "正在上传导入文件，点开查看进度" : failed ? "上一次导入没有开始，点开查看原因" : "把导出的笔记本文件导入为一本新的笔记本"}
+      className={shown === "failed" ? "sort-button transfer-toolbar-failed" : shown === "unsure" ? "sort-button transfer-toolbar-unsure" : "sort-button"}
+      title={uploadInFlight ? "正在上传导入文件，点开查看进度"
+        : shown === "failed" ? "上一次导入没有开始，点开查看原因"
+          : shown === "unsure" ? "连接中断，导入可能已被接收，点开查看导入记录"
+            : "把导出的笔记本文件导入为一本新的笔记本"}
       onClick={onOpen}
     >
-      {uploadInFlight ? "导入中…" : failed ? "导入失败" : "导入"}
+      {uploadInFlight ? "导入中…" : shown === "failed" ? "导入失败" : shown === "unsure" ? "导入待确认" : "导入"}
     </button>
   );
 }
