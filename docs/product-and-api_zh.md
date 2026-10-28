@@ -79,8 +79,8 @@ Silicon Notebook 是团队知识工作区，后端使用 FastAPI，前端使用 
 | 格式 | 本地解析与限制 |
 | --- | --- |
 | PDF | PyMuPDF4LLM 版面 Markdown，再回退 pypdf。 |
-| DOCX | mammoth 保留标题、列表和表格（`table_html` 元数据），最后回退 python-docx 平面抽取；不落内嵌图片，丢弃 base64 图片 URI。 |
-| PPTX | python-pptx 保留表格、图表标题、组合形状与讲者备注，最后回退原始幻灯片 XML；不落图片。 |
+| DOCX | mammoth 保留标题、列表和表格（`table_html` 元数据）与公式（转 LaTeX，见下），最后回退 python-docx 平面抽取；不落内嵌图片，丢弃 base64 图片 URI。 |
+| PPTX | python-pptx 保留表格、图表标题、组合形状、讲者备注与公式（转 LaTeX，见下），最后回退原始幻灯片 XML；不落图片。 |
 | XLSX／XLSM | openpyxl 保留所有单元格值。 |
 | 旧版二进制 XLS | 固定使用 `xlrd`，不走 MinerU。 |
 | 旧版 DOC／PPT | 不支持，需先另存为 DOCX／PPTX。 |
@@ -90,6 +90,8 @@ PDF／DOCX／PPTX 的有损回退设置 `parse_quality_warning`，来源仍为 `
 XLSX／DOCX／PPTX 来源（PDF 表格按渲染页天然有界，不受影响）里按行数（≤30 行）与字符数双重上限切分超长表格：字符上限直接取 `CHUNK_TARGET_CHARS`（与普通文本分块目标同源，不另设参数），先到者收段，单行本身超限也只落一段。识别出的标题/表头行整体绝不会被切开——即便因此让第 1 段超出字符上限，也保证它们完整落在第 1 段。切出的后段检索文本前面会带上识别出的表头行纯文本，但表头本身长过预算一半时不拼（避免宽表的表头占满整段预算）。正文为空的段（如末尾一整片空行）直接丢弃、不产出只剩表头/caption 的空壳元素，剩余的段重新连续编号，`table_part` 从 1 开始不留缺口。`CHUNK_TARGET_CHARS` 应明显小于 `EMBED_TRUNCATE_CHARS`，否则带表头的分段仍可能在进嵌入模型前被截断。
 
 每个被切出的表格元素带 `metadata.table_group`（同一张表各段相同，取不带 part 后缀的标签）、`metadata.table_part`（从 1 开始连续编号）、`metadata.table_parts`（过滤空段之后的总段数）；只有第 1 段的 `table_html` 含表头行，后段的 `table_html` 只有自己那些行。来源详情页把 `table_group` 相同、`table_part` 严格递增且连续的一串元素合并显示为一张表（只出现一行表头）。已入库文件需重新解析才会按新粒度切分。
+
+DOCX／PPTX 本地回退把 Office 公式（OMML：行内 `m:oMath`、独立 `m:oMathPara`）确定性地转成 LaTeX（`backend/app/services/omml.py`，不引新依赖），沿用 MinerU 的公式约定，检索、KG Formula 抽取与前端 KaTeX 渲染无需改动：独立公式每一行成为一个 `formula` 元素，正文是不带定界符的 LaTeX，`metadata.text_format` 为 `latex`，标签为 `DOCX formula N`／`PPTX slide S formula N`，所在段落或文本框在它前后切开；行内公式以 `$…$` 留在段落／幻灯片文本里。标题、列表项、表格单元格（`table_html` 里转义）与讲者备注不切分，其中的独立公式同样以行内 `$…$` 保留；最后一环（python-docx、原始幻灯片 XML）一律行内保留、不单独成元素。PowerPoint 把公式文本框放在 `mc:AlternateContent` 里，python-pptx 原先整框读不到（连框内其他文字一起丢）；现在只展开 Choice 内含公式的这类框，其他 AlternateContent 维持原状。转换覆盖分式、上下标、根式、n 元运算（∑∫∏ 等）、定界符、矩阵、函数、重音、上/下划线、组合符号、上下限、方程组与常见符号；不认识的结构降级为它的文字，转换从不抛错、不丢字。不含公式的文档解析结果逐字节不变。已入库的 DOCX／PPTX 需重新解析才会出现公式；由 MinerU 解析成功的来源不受影响（公式由 MinerU 给出）。
 
 已知取舍：集合地图的表格计数与智能体枚举工具对一张被切分的表只按 1 张计/枚举（只算第 1 段），不按物理段数——续段的判定看 `location_label` 是否以「 part N」（N≥2）结尾，与 `_split_table_into_elements` 生成分段标签用的是同一套约定。枚举同样只返回第 1 段；后续段不能被单独浏览到，但仍可通过普通的检索召回与引用触达。
 

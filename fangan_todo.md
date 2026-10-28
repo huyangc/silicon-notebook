@@ -200,7 +200,9 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 
 ### 解析
 
-- [ ] 扫描件本地 OCR（MinerU 之外无 OCR 路径）；DOCX / PPTX 的 OMML 公式解析。
+- [ ] 扫描件本地 OCR（MinerU 之外无 OCR 路径）。用户 2026-10-28 裁决：不做本地 OCR，扫描件继续只走
+      MinerU；未配置或 MinerU 失败时扫描/图片型 PDF 解析出 0 文本，来源详情给出扫描件提示（现状）。同条原有的
+      DOCX / PPTX 的 OMML 公式解析已按同日裁决完成，见 `fangan_done.md` §61。
 
 ---
 
