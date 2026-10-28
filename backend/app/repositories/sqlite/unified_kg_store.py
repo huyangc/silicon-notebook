@@ -485,9 +485,18 @@ class UnifiedKgStore:
     def lock_published_concept_clusters(
         db: sqlite3.Connection, notebook_id: str,
     ) -> "Tuple[int, int]":
-        """The published cluster generation and ``kg_reset_epoch``. On SQLite the
-        caller's write transaction already holds the database's one write lock,
-        which is what the PostgreSQL twin's advisory lock stands in for."""
+        """The published cluster generation and ``kg_reset_epoch``, read as the
+        first statement of the caller's write transaction, which this makes an
+        IMMEDIATE one (the guarded-write seam, as ``derived_claim_still_held``):
+        the database's write lock is taken before the read, so no other process
+        can write between this read and the page's writes -- what the
+        PostgreSQL twin's advisory lock stands in for. Without it the page
+        would still not write over a knowledge-graph delete, but only because
+        the caller renews its claim before reading or writing any cluster row
+        and a delete resets that claim (the renewal then fails); the lock makes
+        the page atomic whatever the order."""
+        if not db.in_transaction:
+            db.execute("BEGIN IMMEDIATE")
         row = db.execute(
             "SELECT cluster_generation, COALESCE(kg_reset_epoch, 0) AS epoch "
             "FROM unified_kg_state WHERE notebook_id=?",
@@ -1268,16 +1277,19 @@ class UnifiedKgStore:
                     (notebook_id, stage, keep_version, bound.param))
 
     def checkpoint_load(
-        self, notebook_id: str, input_version: str, stage: str
+        self, notebook_id: str, input_version: str, stage: str,
+        *, item_key: "str | None" = None,
     ) -> Dict[str, dict]:
-        """载入某阶段在当前 input_version 下已完成的 item:{item_key: payload_dict}。"""
+        """载入某阶段在当前 input_version 下已完成的 item:{item_key: payload_dict}。
+        给出 ``item_key`` 时只读这一个 item(主键点查)。"""
+        key_sql, key_params = ("", ()) if item_key is None else (" AND item_key=?", (item_key,))
         with self.database.connect() as db:
             return {
                 r["item_key"]: json.loads(r["payload"])
                 for r in db.execute(
                     "SELECT item_key, payload FROM kg_rebuild_checkpoint "
-                    "WHERE notebook_id=? AND input_version=? AND stage=?",
-                    (notebook_id, input_version, stage)).fetchall()
+                    "WHERE notebook_id=? AND input_version=? AND stage=?" + key_sql,
+                    (notebook_id, input_version, stage, *key_params)).fetchall()
             }
 
     def checkpoint_put(
@@ -1287,16 +1299,29 @@ class UnifiedKgStore:
         stage: str,
         rows: List[Tuple[str, dict]],
         now: str,
-    ) -> None:
-        """把一批已完成 item 落库(一个写事务,幂等 REPLACE)。rows=[(item_key, payload_dict)]。"""
+        *,
+        reset_epoch: "int | None" = None,
+    ) -> bool:
+        """把一批已完成 item 落库(一个写事务,幂等 REPLACE)。rows=[(item_key, payload_dict)]。
+        给出 ``reset_epoch`` 时,只有本库的 ``kg_reset_epoch`` 仍等于它才写(写锁内
+        复核;删除知识图谱会推进它),否则一行不写、返回 False。"""
         if not rows:
-            return
+            return True
         with self.database.write() as db:
+            if reset_epoch is not None:
+                if not db.in_transaction:
+                    db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    "SELECT COALESCE(kg_reset_epoch, 0) AS epoch FROM unified_kg_state "
+                    "WHERE notebook_id=?", (notebook_id,)).fetchone()
+                if (int(row["epoch"]) if row is not None else 0) != int(reset_epoch):
+                    return False
             db.executemany(
                 "INSERT OR REPLACE INTO kg_rebuild_checkpoint "
                 "(notebook_id, input_version, stage, item_key, payload, created_at) "
                 "VALUES (?,?,?,?,?,?)",
                 [(notebook_id, input_version, stage, k, json.dumps(v), now) for k, v in rows])
+        return True
 
     # ---------------------------------------------------- rebuild end-state
     @staticmethod

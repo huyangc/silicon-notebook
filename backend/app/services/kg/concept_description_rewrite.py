@@ -30,8 +30,11 @@ Three phases, per notebook:
    the same origin, so an interrupted or limited run resumes where it stopped.
    A failed call (exception, non-JSON, empty description) is logged by input
    number, signature prefix and class name only, and counted; the run goes on.
-   An interrupt does not wait for calls in flight: the finished results are
-   staged and the interrupt propagates at once.
+   An interrupt does not wait for calls in flight: every result that already
+   came back (also those still queued) is staged and the interrupt propagates
+   at once. Each staged row carries the ``kg_reset_epoch`` it was generated
+   under and is written only while the epoch is unchanged; a run that ends
+   with the epoch moved (a knowledge-graph delete) drops the whole stage.
 3. **Publish**. Under the notebook's derived-generation claim (the rebuild's
    cross-process single flight: no rebuild can be between reading the old
    descriptions and publishing them while this runs, and a rebuild that
@@ -63,11 +66,14 @@ Three phases, per notebook:
    until the next run, each a description the model wrote for that
    canonical.
 
-Completion record: a run that ends ``done`` stores the state row's four
-values (as read before the plan, plus exactly the bumps this run made) under
-the same origin. While they are unchanged nothing a description depends on
-changed, so the next run (or dry run) answers from the record without reading
-the slice; any write in between invalidates it, and the run plans as usual.
+Completion record: a run that ends ``done`` stores a fingerprint -- the state
+row's four values plus the published cluster row count, as read before the
+plan, plus exactly the bumps this run made -- under the same origin (version).
+While it is unchanged nothing a description depends on changed, so the next
+run (or dry run) answers from the record (read by key) without reading the
+slice. Any write that moves a sequence invalidates it; the row count covers
+the one registered writer that moves none (a reparse with KG extraction
+switched off deletes objects and their cluster rows without a bump).
 
 Runs beside the serving process: phases 1-2 take no lock at all, phase 3 holds
 the claim for seconds per notebook. A rebuild already in flight makes the
@@ -186,6 +192,8 @@ class ConceptDescriptionRewrite:
         self.signature = signature
         self._bumps = 0
         self._recordable = True
+        self._epoch = 0
+        self._stale: List[str] = []
 
     # ------------------------------------------------------------- entry
     def run(
@@ -209,16 +217,62 @@ class ConceptDescriptionRewrite:
                 CONCEPT_DESC_SCHEMA_HINT),
         )
         report = ConceptDescriptionRewriteReport(notebook_id=notebook_id, version=version)
-        staged = self.store.checkpoint_load(notebook_id, version, CONCEPT_DESC_REWRITE_STAGE)
-        record = staged.pop(_COMPLETE_KEY, None)
-        start_state = self._state(notebook_id)
-        if record is not None and tuple(record.get("state") or ()) == start_state:
+        start = self._fingerprint(notebook_id)
+        # The completion record alone (a primary-key read), under this version
+        # only: another model or prompt never answers from it.
+        record = self.store.checkpoint_load(
+            notebook_id, version, CONCEPT_DESC_REWRITE_STAGE, item_key=_COMPLETE_KEY,
+        ).get(_COMPLETE_KEY)
+        if record is not None and tuple(record.get("fingerprint") or ()) == start:
             report.canonicals = report.up_to_date = int(record.get("canonicals") or 0)
             report.status = "dry_run" if dry_run else "done"
             if not dry_run:
                 host.event_log.emit({"kind": "kg_concept_description_rewrite",
                                      **report.as_dict()})
             return report
+        self._epoch = start[1]
+        staged = self._load_staged(notebook_id, version)
+        try:
+            return self._run_planned(
+                notebook_id, version, client, report, staged, start,
+                dry_run=dry_run, limit=limit, progress=progress)
+        finally:
+            if not dry_run:
+                self._prune_after_a_graph_delete(notebook_id)
+
+    def _prune_after_a_graph_delete(self, notebook_id: str) -> None:
+        """The knowledge graph was deleted during the run (``kg_reset_epoch``
+        moved): whatever this run staged came from the deleted graph's
+        evidence, so the stage goes, whatever the run's outcome. Best effort:
+        a failure here must not hide the run's own exception."""
+        try:
+            if self._state(notebook_id)[1] != self._epoch:
+                self.store.checkpoint_prune_stage(
+                    notebook_id, CONCEPT_DESC_REWRITE_STAGE, None, ())
+        except Exception as exc:  # noqa: BLE001 -- the next run ignores such rows anyway
+            self.host.event_log.logger.warning(
+                "concept description rewrite could not prune after a graph delete: "
+                "notebook=%s error=%s", notebook_id, type(exc).__name__)
+
+    def _load_staged(self, notebook_id: str, version: str) -> Dict[str, dict]:
+        """The staged texts of this version generated under the notebook's
+        current graph (``kg_reset_epoch``). Rows a run staged before racing a
+        knowledge-graph delete are not reused (a regenerated input overwrites
+        its row) and the completion prune drops the rest."""
+        staged = self.store.checkpoint_load(notebook_id, version, CONCEPT_DESC_REWRITE_STAGE)
+        staged.pop(_COMPLETE_KEY, None)
+        self._stale = sorted(
+            key for key, value in staged.items() if value.get("epoch") != self._epoch)
+        for key in self._stale:
+            staged.pop(key)
+        return staged
+
+    def _run_planned(
+        self, notebook_id: str, version: str, client: Any,
+        report: ConceptDescriptionRewriteReport, staged: Dict[str, dict],
+        start: Tuple[int, ...], *, dry_run: bool, limit: Optional[int], progress: Progress,
+    ) -> ConceptDescriptionRewriteReport:
+        host = self.host
         budget = None if limit is None else max(0, int(limit))
         plan = None
         for attempt in range(_MAX_PLANS):
@@ -258,8 +312,9 @@ class ConceptDescriptionRewrite:
             wanted = {item[1] for item in plan.items}
             self.store.checkpoint_prune_stage(
                 notebook_id, CONCEPT_DESC_REWRITE_STAGE, version,
-                sorted(key for key in staged if key not in wanted))
-            self._record_completion(notebook_id, version, start_state, report)
+                sorted({key for key in staged if key not in wanted}
+                       | (set(self._stale) - set(staged))))
+            self._record_completion(notebook_id, version, start, report)
         host.event_log.emit({"kind": "kg_concept_description_rewrite", **report.as_dict()})
         return report
 
@@ -267,20 +322,33 @@ class ConceptDescriptionRewrite:
         with self.host._connect() as db:
             return _state_key(self.store.state_row(db, notebook_id))
 
+    def _fingerprint(self, notebook_id: str) -> Tuple[int, ...]:
+        """What the completion record compares: the state row's four values
+        and the published generation's cluster row count. The count covers
+        the one known writer that moves neither sequence -- a reparse with KG
+        extraction switched off deletes a source's objects and their cluster
+        rows without a bump (registered in both knowledge stores'
+        ``_delete_object_id_batch``). One index-only count per run."""
+        with self.host._connect() as db:
+            state = _state_key(self.store.state_row(db, notebook_id))
+            rows = int(self.store.concept_clusters_count(db, notebook_id))
+        return (*state, rows)
+
     def _record_completion(
-        self, notebook_id: str, version: str, start: Tuple[int, int, int, int],
+        self, notebook_id: str, version: str, start: Tuple[int, ...],
         report: ConceptDescriptionRewriteReport,
     ) -> None:
-        """Store the completion record only when the state now is exactly the
-        one the plan started from plus this run's own bumps: any other write
-        in between (an append, an evidence edit, a rebuild) means the plan may
-        not describe the notebook as it is now, so nothing is recorded."""
-        now = self._state(notebook_id)
-        expected = (start[0], start[1], start[2], start[3] + self._bumps)
+        """Store the completion record only when the fingerprint now is
+        exactly the one the plan started from plus this run's own bumps (the
+        rewrite changes no row count): any other write in between (an append,
+        an evidence edit, a rebuild, a reparse) means the plan may not
+        describe the notebook as it is now, so nothing is recorded."""
+        now = self._fingerprint(notebook_id)
+        expected = (start[0], start[1], start[2], start[3] + self._bumps, start[4])
         if not self._recordable or report.plans != 1 or now != expected:
             return
         self._stage(notebook_id, version, [(_COMPLETE_KEY, {
-            "state": list(now), "canonicals": report.canonicals})])
+            "fingerprint": list(now), "canonicals": report.canonicals})])
 
     # -------------------------------------------------------------- plan
     def _plan(self, notebook_id: str, staged: Dict[str, dict]) -> _Plan:
@@ -411,13 +479,30 @@ class ConceptDescriptionRewrite:
                     progress("generate", done, len(work))
         finally:
             stop.set()
+            # An interrupt or a failure leaves through here: every result that
+            # already came back -- including any still in the queue, never
+            # waited for -- is staged; calls still running are abandoned.
+            while True:
+                try:
+                    outcome, error = results.get_nowait()
+                except queue.Empty:
+                    break
+                if error is None and outcome[2]:
+                    staged[outcome[1]] = {"description": outcome[2]}
+                    buffer.append((outcome[1], {"description": outcome[2]}))
             if buffer:
                 self._stage(notebook_id, version, buffer)
         return generated, failed
 
     def _stage(self, notebook_id: str, version: str, rows: List[Tuple[str, dict]]) -> None:
+        """Stage rows under the graph the run planned on: each payload carries
+        that ``kg_reset_epoch`` and the write is skipped once a
+        knowledge-graph delete moved it (the end of the run then prunes
+        what raced in)."""
         self.store.checkpoint_put(
-            notebook_id, version, CONCEPT_DESC_REWRITE_STAGE, list(rows), self.host._now())
+            notebook_id, version, CONCEPT_DESC_REWRITE_STAGE,
+            [(key, {**payload, "epoch": self._epoch}) for key, payload in rows],
+            self.host._now(), reset_epoch=self._epoch)
 
     # ----------------------------------------------------------- publish
     def _publish(

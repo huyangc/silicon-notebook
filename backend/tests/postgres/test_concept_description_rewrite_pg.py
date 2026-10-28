@@ -164,3 +164,23 @@ def test_pg_a_hub_whose_input_changed_is_not_overwritten(repo, monkeypatch):
 
 def test_pg_no_completion_record_after_a_write_during_the_run(repo):
     cases.assert_no_completion_record_after_a_write_during_the_run(repo)
+
+
+def test_pg_a_reparse_without_a_bump_voids_the_record(repo):
+    cases.assert_a_reparse_without_a_bump_voids_the_record(repo)
+
+
+def test_pg_another_model_never_answers_from_the_record(repo):
+    cases.assert_another_model_never_answers_from_the_record(repo)
+
+
+def test_pg_a_graph_delete_during_generation_leaves_no_staged_texts(repo):
+    cases.assert_a_graph_delete_during_generation_leaves_no_staged_texts(repo)
+
+
+def test_pg_rows_that_raced_a_graph_delete_are_pruned_at_the_end(repo, monkeypatch):
+    cases.assert_rows_that_raced_a_graph_delete_are_pruned_at_the_end(repo, monkeypatch)
+
+
+def test_pg_the_record_is_read_by_key(repo, monkeypatch):
+    cases.assert_the_record_is_read_by_key(repo, monkeypatch)

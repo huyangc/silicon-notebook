@@ -147,6 +147,14 @@ def open_cli_repository(settings: Settings) -> Iterator[NotebookRepository]:
     it. A CLI gets that startup snapshot and no refresher -- the polling thread
     belongs to long-lived serving processes, not to a command that runs against
     a database the operator believes is quiesced.
+
+    One registered exception to "closing is unconditional": ``kg
+    rewrite-descriptions`` (``app.scripts.rewrite_concept_descriptions``)
+    leaves through ``os._exit(130)`` on Ctrl-C, without this close, because
+    closing the model provider waits for every model call still in flight.
+    Everything it needs on the way out (staging the results that already came
+    back, releasing its derived-generation claim) has run by then; what is
+    skipped is the provider's health observations of the abandoned calls.
     """
 
     repository = create_repository(settings)
