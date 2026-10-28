@@ -644,10 +644,16 @@ class NotebookTransferJobs:
 
     def _sweep_files(self, now: float, *, everything: bool) -> None:
         """Remove the files under ``transfers/`` that no job owns: all of them at
-        startup (``everything``), otherwise those untouched for the TTL."""
+        startup (``everything``), otherwise those untouched for the TTL. Live
+        work owns its files however old they look: an upload still holding its
+        reservation (it may wait on the admission checks longer than the TTL, its
+        part file untouched meanwhile), an active job, and a deleted job whose run
+        has not ended (``_draining``: it removes its own files when it does)."""
         with self._lock:
             active = {job.id for job in self._jobs.values() if job.state in ACTIVE_STATES}
+            active |= set(self._draining) | set(self._reserved)
             exports = {job.id for job in self._jobs.values() if job.kind == EXPORT}
+            exports |= {job.id for job in self._draining.values() if job.kind == EXPORT}
             known = set(self._jobs)
         candidates: list[tuple[Path, bool]] = []
         for path in self._directory("exports").iterdir():
