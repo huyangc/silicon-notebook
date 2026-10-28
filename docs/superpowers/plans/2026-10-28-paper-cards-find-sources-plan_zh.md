@@ -176,6 +176,7 @@ PR2 基于 PR1 合入后的 master，PR3 基于 PR2；每个 PR 开之前 rebase
      （开关、本次运行剩余次数、天花板非空、Knowhow 补全时关闭）；
    - `ReflectDecision` 新字段与解析分支（枚举回落、缺参 fail_closed、自由文本进 2000 字有界字段门）；
      `answer_layout` 作为顶层字段（进 `REFLECT_SCHEMA_TOP_LEVEL_FIELDS`，与卡片/抽取门一起门控），任何一轮可写、取最后一次；
+   - 调用 `PaperCardService.get_cards` / 抽取服务时**不得持有** `retrieval_fanout_slot`（不可重入，fanout 上限为 1 时会死锁）；
    - `find_sources` 翻页计入次数；`get_paper_cards` / `extract_from_sources` 接收的句柄或 source_id 在执行器入口按运行天花板校验；
    - `_dispatch_reflect_action` 三个分支与执行器 `_action_find_sources` / `_action_get_paper_cards` /
      `_action_extract_from_sources`；运行状态新增句柄表、卡片结果、抽取结果、计数；

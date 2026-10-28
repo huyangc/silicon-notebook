@@ -113,7 +113,9 @@ MCP 侧把同样的三个服务原样暴露成工具，由外部模型自行编�
 - **指标**：`anchor` 合法 **且** `value` 归一化后出现在该元素**送给模型的那段文本**里（表格截断后的文本，
   不是全文元素）。归一化规则：
   全角转半角；去千分位逗号；`85.20` 与 `85.2` 视为相同（去小数尾零）；`%`、`×`、`x` 单位与数字分开比对；
-  数值必须以完整数字 token 匹配（`85.2` 不能命中 `185.23`）。`name/setting/compared_to` 不做接地，只截断长度。
+  数值必须以完整数字 token 匹配（`85.2` 不能命中 `185.23`）；负号必须一致；多 token 的值（科学计数法、`±`、`×10^`）
+  必须在原文里以相邻序列出现；只由个位整数构成、没有小数部分的值视为无法接地（`ambiguous_value`）丢弃。
+  已知残余误判：`2.1` 这类值可能被章节号或版本号（`Section 2.1`、`v2.1`）命中，接受。`name/setting/compared_to` 不做接地，只截断长度。
 - 被丢弃的条目和原因写进 `raw_json.dropped`（与 `paper_meta` 同一审计信封形状）。
 - 校验后整张卡片字段全空 → 视为生成失败（§4.5）。
 
@@ -193,7 +195,10 @@ CardResult.status ∈ ready | generated | not_paper | meta_pending | failed | de
   `chat_json(..., cancel_event=)`；数据库读写包在 `retrieval_fanout_slot()` 里。
 - 优先级：继承调用方的 `model_work_scope`。问答里是 INTERACTIVE；MCP 工具显式进入
   `model_work_scope(priority=INTERACTIVE, actor_id=凭证主人, notebook_id=…)`。
-  队列等待超时（INTERACTIVE 30 秒）或 `ModelQueueFull` → 本篇返回 `deferred`，**不记失败**。
+  **瞬时错误**一律本篇返回 `deferred`、**不记失败**、不加 `attempts`：队列满、队列等待超时（INTERACTIVE 30 秒）、
+  服务熔断、服务商限流（429）、服务商不可用（5xx）、请求超时。生产里这些错误经调度适配器包成带 `.code` 的
+  `ModelInvocationError`，按 `code` 分类，不按原始异常类型。只有**内容失败**（返回非对象 JSON、无法解析、校验后为空、
+  元数据抽取内容失败）才写 `failed` 行并进入冷却。
 - 单飞：进程内按 `source_id` 加锁，并发请求同一篇时后来者等待前者结果；等待期间轮询取消、不占
   `retrieval_fanout_slot` 也不占线程池工位（在提交前判定、等待放在池外）。跨进程重复生成可接受（条件 upsert 兜底）。
 - 事件：每篇写一条 `paper_card` 事件（`source_id`、`status`、丢弃计数、耗时），只记 id 与类名，不记正文。
