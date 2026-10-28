@@ -61,7 +61,7 @@ test("拼出来的文案里,禁用词只来自引用的那颗按钮名", () => {
       "invalid_archive", "too_large", "future_code"].map((code) => transferFailureText(failed(code))),
     ...importReportNotes(parseTransferJob({
       id: "y", kind: "import", state: "succeeded", phase: "done", notebook_id: "nb",
-      report: { sources_reset: 2, mount_edges_dropped: 1 }, reembed: { state: "failed" },
+      report: { sources_reset: 2, mount_edges_dropped: 1, projection_failures: ["kt-1"] }, reembed: { state: "failed" },
     })),
   ];
   for (const text of texts) {

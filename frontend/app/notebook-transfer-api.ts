@@ -503,6 +503,8 @@ export function importReportNotes(job: NotebookTransferJob): string[] {
   if (reset > 0) notes.push(`有 ${reset} 份来源在导出时还没处理完，需要在笔记本里重新解析。`);
   const mounts = count(report.mount_edges_dropped) ?? 0;
   if (mounts > 0) notes.push("原笔记本挂载的参考库没有一起带过来，需要的话请重新挂载。");
+  const unsynced = Array.isArray(report.projection_failures) ? report.projection_failures.length : 0;
+  if (unsynced > 0) notes.push(projectionFailureNote(unsynced));
   if (job.state === "succeeded") {
     const reembed = job.reembed?.state;
     if (reembed === "failed") {
@@ -514,6 +516,15 @@ export function importReportNotes(job: NotebookTransferJob): string[] {
     }
   }
   return notes;
+}
+
+/**
+ * 导入后重新同步失败的 Knowhow 表(作业报告的 `projection_failures`,后端
+ * `import_.py::_project_knowhow`:笔记本照常导入、作业照常成功)。补法是表格工具栏那颗
+ * 「重新同步」(`knowhow-table-grid.tsx`,整表重新同步,导入者是库主、看得到它)。
+ */
+export function projectionFailureNote(tables: number): string {
+  return `有 ${tables} 张 Knowhow 表没有同步完成；打开笔记本后在「Knowhow 表」里打开它，点「重新同步」即可补上。`;
 }
 
 /** 看板「补齐向量」补得上的那两条腿(段、内容块;`notebook_reembed` 的腿名)。 */
