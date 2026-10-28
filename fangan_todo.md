@@ -118,7 +118,9 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 - [ ] **问答纠偏规则 12（限定词保真）人工 A/B**：仓库无问答质量评测台，放量前用「点名子部件 /
       周期性 / 方向」三句式各问一次验证；ledger 喂摘要未做。
 - [ ] **Prompt 三层化后的 per-notebook 定制与 self-evo**：接缝只有 `fragment_text()`；L1 片段分
-      两类（A 类离线 GEPA + 人审，B 类只改示例槽位），尚未拍板开放。
+      两类（A 类离线 GEPA + 人审，B 类只改示例槽位），尚未拍板开放。2026-10-28 用户批准规格
+      `docs/superpowers/specs/2026-10-28-prompt-customization-selfevo-design_zh.md`，按推荐立项
+      （Prompt 定制为 P2 评测台先行；D1=(c)、D17=(a)、D18=(a)，其余 D2–D16、D19–D21 待 P1/P3 立项时再定）。
 - [ ] **Agentic Memory 注入的真实 A/B 观测**：按笔记本分区一系列已收官（PR-1 #769 分区、
       PR-2 #771 界面、PR-3 本 PR 开闸；规格
       `docs/superpowers/specs/2026-09-22-retrieval-experience-per-notebook-design_zh.md`）。
@@ -135,6 +137,8 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       steps / validity_scope；决定前不要再往节点加字段（`scripts/kg_strip_attrs.py` 头注释同此）。
       候选：Concept `aliases[]`/`kind`/`definition`、Claim `quantitative_values{}`/`polarity`、
       Formula `variables{}`/`role`。决策牵动抽取 prompt、`models.Node`、canonicalize、评测维度。
+      2026-10-28 用户批准规格 `docs/superpowers/specs/2026-10-28-kg-node-attrs-design_zh.md`，
+      按推荐立项（D1–D16 全部按推荐，先做 Gate 0）。
 - [ ] **gold 人工策展**：`fangan/testcases_kg/` 仍在 `.gitignore`，未有策展后的权威 gold 入库。
 - [ ] **跨文档概念合并的真模型质量验证**：Embedder 现只有 openai / dashscope 协议 + FakeEmbedder
       （本地 BGE 路线已随 model_registry 退役），真模型下灰区候选量未做正式 smoke。
@@ -219,9 +223,13 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 - [ ] **分享的 edit 权限层与近实时协作**：写权限仍 owner-only；无 presence / revision 轮询
       （管理员用户列表的「在线状态」是另一特性）。原 spec
       `docs/superpowers/specs/2026-06-04-users-sharing-cowork-design.md` 的 D2 / D3 决策已被
-      账号系统取代，动手前须重写。
+      账号系统取代，动手前须重写。2026-10-28 用户批准重写后的规格
+      `docs/superpowers/specs/2026-10-28-share-edit-collaboration-design_zh.md`，按推荐立项
+      （D1–D18 全部按推荐，P1 先、P2 后）。
 - [ ] **自动用户记忆**：`memory_mode` 固定 manual；Agentic Memory 已提供候选 / 巡固机制，是否
-      开放自动写入待决。
+      开放自动写入待决。2026-10-28 用户批准规格
+      `docs/superpowers/specs/2026-10-28-auto-user-memory-design_zh.md`，按推荐立项
+      （D1–D21 全部按推荐）。
 - [ ] **插件化 X 系列剩余**：X6（「有真实消费者才重开扩展点」）已收官——`ask.reflect_action`
       扩展点（#714）与 arXiv 样例插件的 `search_arxiv` 动作分两个 PR 合入，样例插件现在演示
       三个点。剩余：X7 等仍无真实消费者的点；X10 后端热更用户明确要求「完全热更或不做」；
