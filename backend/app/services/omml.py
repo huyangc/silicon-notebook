@@ -27,12 +27,14 @@ whole formula degrades the same way. Text is never dropped.
 from __future__ import annotations
 
 import re
+import shutil
 import tempfile
 import unicodedata
 import zipfile
 from typing import Any, Dict, List, Sequence, Tuple
 from xml.etree.ElementTree import TreeBuilder
 from xml.parsers import expat
+from xml.sax.saxutils import escape as _xml_escape
 
 OMML_NAMESPACES = (
     "http://schemas.openxmlformats.org/officeDocument/2006/math",
@@ -89,7 +91,9 @@ _SYMBOLS = {
     "…": r"\ldots", "⋯": r"\cdots", "⋮": r"\vdots", "⋱": r"\ddots",
     "ℏ": r"\hbar", "ℓ": r"\ell", "ℜ": r"\Re", "ℑ": r"\Im", "ℵ": r"\aleph",
     "℘": r"\wp", "†": r"\dagger", "‡": r"\ddagger", "°": r"^{\circ}",
-    "′": "'", "″": "''", "‴": "'''", "√": r"\surd",
+    # Primes and the degree sign are superscripts in TeX; `_join` keeps them
+    # from stacking onto a superscript that is already there.
+    "′": r"^{\prime}", "″": r"^{\prime\prime}", "‴": r"^{\prime\prime\prime}", "√": r"\surd",
     "∑": r"\sum", "∏": r"\prod", "∫": r"\int", "∮": r"\oint",
     "⟨": r"\langle", "⟩": r"\rangle", "‖": r"\|", "⌊": r"\lfloor",
     "⌋": r"\rfloor", "⌈": r"\lceil", "⌉": r"\rceil",
@@ -136,6 +140,16 @@ _ACCENTS = {
     "\u20d6": r"\overleftarrow", "\u20e1": r"\overleftrightarrow",
 }
 
+#: Combining marks typed straight after a base character (x + U+0302). They
+#: have no glyph of their own, so they become an accent on the preceding piece
+#: — what the reader saw; one without such an accent command is dropped.
+_COMBINING_ACCENTS = {
+    "\u0302": r"\hat", "\u0303": r"\tilde", "\u0307": r"\dot", "\u0308": r"\ddot",
+    "\u20db": r"\dddot", "\u20d7": r"\vec", "\u0304": r"\bar", "\u0305": r"\overline",
+    "\u0301": r"\acute", "\u0300": r"\grave", "\u0306": r"\breve", "\u030c": r"\check",
+    "\u20d6": r"\overleftarrow", "\u20e1": r"\overleftrightarrow", "\u0332": r"\underline",
+}
+
 _FUNCTION_NAMES = frozenset({
     "sin", "cos", "tan", "cot", "sec", "csc", "sinh", "cosh", "tanh", "coth",
     "arcsin", "arccos", "arctan", "log", "ln", "lg", "exp", "lim", "liminf",
@@ -155,6 +169,8 @@ _SCRIPT_WRAPPERS = {
 }
 
 _TRAILING_COMMAND = re.compile(r"\\[A-Za-z]+$")
+#: A fragment whose last group may be a superscript: `x^{2}`, `f^{\prime}`.
+_ENDS_WITH_SCRIPT = re.compile(r"(?:\^\{.*\}|\^.|')$")
 _SINGLE_TOKEN = re.compile(r"^(?:[A-Za-z0-9]|\\[A-Za-z]+)$")
 _FALSE_VALUES = frozenset({"0", "off", "false"})
 
@@ -245,6 +261,10 @@ def _join(parts: Sequence[str]) -> str:
             continue
         if out and part[0].isascii() and part[0].isalpha() and _TRAILING_COMMAND.search(out[-1]):
             out.append(" ")
+        elif out and part[0] in "^'" and _ENDS_WITH_SCRIPT.search(out[-1]):
+            # `x^{2}` + `^{\circ}` would be a double superscript (a KaTeX
+            # error); an empty group gives the second one its own base.
+            out.append("{}")
         out.append(part)
     return "".join(out)
 
@@ -274,7 +294,15 @@ def _map_char(char: str, raw_ampersand: bool) -> str:
 
 
 def _map_text(text: str, raw_ampersand: bool = False) -> str:
-    return _join([_map_char(char, raw_ampersand) for char in text])
+    pieces: List[str] = []
+    for char in text:
+        if unicodedata.combining(char):
+            accent = _COMBINING_ACCENTS.get(char)
+            if accent and pieces and pieces[-1].strip():
+                pieces[-1] = accent + "{" + pieces[-1] + "}"
+            continue
+        pieces.append(_map_char(char, raw_ampersand))
+    return _join(pieces)
 
 
 def _text_mode(text: str) -> str:
@@ -301,6 +329,9 @@ class _Converter:
     def __init__(self) -> None:
         self._function_name_depth = 0
         self._equation_array_depth = 0
+        # Set when a raw alignment `&` reaches the output of the innermost
+        # equation array (a matrix's own column `&` never counts).
+        self._alignment_seen = False
 
     # -- dispatch ----------------------------------------------------------
     def convert(self, element: Any) -> str:
@@ -343,7 +374,10 @@ class _Converter:
 
     # -- runs --------------------------------------------------------------
     def _run_text(self, text: str) -> str:
-        return _map_text(text, raw_ampersand=self._equation_array_depth > 0)
+        aligned = self._equation_array_depth > 0
+        if aligned and "&" in text:
+            self._alignment_seen = True
+        return _map_text(text, raw_ampersand=aligned)
 
     def run(self, element: Any) -> str:
         text_parts: List[str] = []
@@ -437,33 +471,44 @@ class _Converter:
         begin = "(" if begin is None else begin
         end = ")" if end is None else end
         separator = "|" if separator is None else separator
+        items = [self.sequence(child) for child in _omml_children(element, "e")]
+        left = _DELIMITERS.get(begin) if begin else "."
+        right = _DELIMITERS.get(end) if end else "."
+        if left is None or right is None:
+            # A bracket \left cannot take: keep the characters as plain text
+            # (and so a plain separator — `\middle` only exists inside \left).
+            plain = _map_text(separator)
+            inner = (" " + plain + " ").join(items) if plain else "".join(items)
+            return _join([_map_text(begin), inner, _map_text(end)])
         if separator in ("|", "‖"):
             separator_latex = r"\middle" + _DELIMITERS[separator]
         else:
             separator_latex = _map_text(separator)
-        items = [self.sequence(child) for child in _omml_children(element, "e")]
         inner = (" " + separator_latex + " ").join(items) if separator_latex else "".join(items)
-        left = _DELIMITERS.get(begin) if begin else "."
-        right = _DELIMITERS.get(end) if end else "."
-        if left is None or right is None:
-            # A bracket \left cannot take: keep the characters as plain text.
-            return _join([_map_text(begin), inner, _map_text(end)])
         return _join([r"\left" + left, " ", inner, " ", r"\right" + right])
 
     def matrix(self, element: Any) -> str:
-        rows = [
-            " & ".join(self.sequence(cell) for cell in _omml_children(row, "e"))
-            for row in _omml_children(element, "mr")
-        ]
+        # Alignment `&` belongs to the enclosing eqArr only: inside a matrix a
+        # literal & is text (escaped), its own column separators are added here.
+        depth, self._equation_array_depth = self._equation_array_depth, 0
+        try:
+            rows = [
+                " & ".join(self.sequence(cell) for cell in _omml_children(row, "e"))
+                for row in _omml_children(element, "mr")
+            ]
+        finally:
+            self._equation_array_depth = depth
         return r"\begin{matrix} " + r" \\ ".join(rows) + r" \end{matrix}"
 
     def equation_array(self, element: Any) -> str:
         self._equation_array_depth += 1
+        outer_alignment, self._alignment_seen = self._alignment_seen, False
         try:
             rows = [self.sequence(row) for row in _omml_children(element, "e")]
+            environment = "aligned" if self._alignment_seen else "gathered"
         finally:
             self._equation_array_depth -= 1
-        environment = "aligned" if any("&" in row.replace(r"\&", "") for row in rows) else "gathered"
+            self._alignment_seen = outer_alignment
         return (
             r"\begin{" + environment + "} " + r" \\ ".join(rows) + r" \end{" + environment + "}"
         )
@@ -599,6 +644,27 @@ def inline_math(latex: str) -> str:
     return f"${latex}$" if latex else ""
 
 
+def inline_math_lines(lines: Sequence[str]) -> str:
+    """Display lines put inline: one formula, a `gathered` block when several."""
+    if len(lines) > 1:
+        return inline_math(r"\begin{gathered} " + r" \\ ".join(lines) + r" \end{gathered}")
+    return inline_math(lines[0]) if lines else ""
+
+
+def join_inline(pieces: Sequence[str]) -> str:
+    """Concatenate text pieces holding `$latex$`, with a space wherever one
+    piece ends and the next begins with `$` — `$a$$b$` would read as a display
+    formula in Markdown."""
+    out: List[str] = []
+    for piece in pieces:
+        if not piece:
+            continue
+        if out and out[-1].endswith("$") and piece.startswith("$"):
+            out.append(" ")
+        out.append(piece)
+    return "".join(out)
+
+
 def inline_math_for(element: Any) -> str:
     """Inline text for any math root; a multi-line display block collapses to
     one `gathered` formula because inline contexts cannot hold separate lines."""
@@ -613,7 +679,11 @@ def inline_math_for(element: Any) -> str:
 
 
 def _drawingml_paragraph(node: Any, segments: List[Tuple[str, Any]]) -> None:
-    for child in _children(node):
+    # Explicit stack, not recursion: wrapper depth is the file's to choose, and
+    # a RecursionError here would cost the whole shape its text.
+    pending = list(reversed(_children(node)))
+    while pending:
+        child = pending.pop()
         omml = _omml_local(child.tag)
         if omml == "oMathPara":
             segments.append(("display", omml_display_lines(child)))
@@ -629,10 +699,10 @@ def _drawingml_paragraph(node: Any, segments: List[Tuple[str, Any]]) -> None:
         elif local == "AlternateContent":
             choice = next((c for c in child if _local(c.tag) == "Choice"), None)
             if choice is not None:
-                _drawingml_paragraph(choice, segments)
+                pending.extend(reversed(_children(choice)))
         elif not local.endswith("Pr") and local != "Fallback":
             # `a14:m` and any other wrapper: look inside for runs and math.
-            _drawingml_paragraph(child, segments)
+            pending.extend(reversed(_children(child)))
 
 
 def drawingml_segments(text_body: Any) -> List[Tuple[str, Any]]:
@@ -654,10 +724,10 @@ def drawingml_segments(text_body: Any) -> List[Tuple[str, Any]]:
 
 def drawingml_inline_text(text_body: Any) -> str:
     """`drawingml_segments` flattened to one string, display math inline."""
-    return "".join(
-        value if kind == "text" else "".join(inline_math(line) for line in value)
+    return join_inline([
+        value if kind == "text" else inline_math_lines(value)
         for kind, value in drawingml_segments(text_body)
-    )
+    ])
 
 
 def _wordprocessing_run_text(run: Any) -> str:
@@ -668,8 +738,12 @@ def _wordprocessing_run_text(run: Any) -> str:
             parts.append(child.text or "")
         elif local in ("tab", "ptab"):
             parts.append("\t")
-        elif local in ("br", "cr"):
+        elif local == "cr":
             parts.append("\n")
+        elif local == "br":
+            # python-docx: page / column breaks have no text equivalent.
+            kind = next((v for k, v in child.attrib.items() if _local(k) == "type"), "textWrapping")
+            parts.append("\n" if kind == "textWrapping" else "")
         elif local == "noBreakHyphen":
             parts.append("-")
     return "".join(parts)
@@ -693,7 +767,7 @@ def wordprocessing_paragraph_text(paragraph: Any) -> str:
                     parts.append(inline_math_for(run))
                 elif _local(run.tag) == "r":
                     parts.append(_wordprocessing_run_text(run))
-    return "".join(parts)
+    return join_inline(parts)
 
 
 # --- DOCX package rewrite (mammoth path) ------------------------------------
@@ -717,10 +791,13 @@ _DOCX_TEXT_PARTS = ("word/document.xml", "word/footnotes.xml", "word/endnotes.xm
 _W_BLOCK_CONTAINERS = frozenset(
     {"body", "tc", "txbxContent", "footnote", "endnote", "comment", "hdr", "ftr", "docPartBody"}
 )
-#: The rewritten package spills to disk past this size, so a math-bearing DOCX
-#: full of images never doubles its footprint in memory.
+#: The rewritten package spills to disk past this size. It holds only the
+#: parts mammoth reads (images and other payloads become empty members), so
+#: in practice it stays small.
 _PACKAGE_SPOOL_BYTES = 16 * 1024 * 1024
-_NON_UTF8_DECLARATION = re.compile(rb"^\s*<\?xml[^>]*encoding=[\"'](?!utf-?8[\"'])", re.IGNORECASE)
+_NON_UTF8_DECLARATION = re.compile(
+    rb"^\s*<\?xml[^>]*encoding\s*=\s*[\"'](?!utf-?8[\"'])", re.IGNORECASE
+)
 
 
 class DocxFormula:
@@ -733,12 +810,21 @@ class DocxFormula:
 
 
 class DocxMath:
-    """A DOCX package with its equations swapped for sentinel tokens."""
+    """A DOCX package with its equations swapped for sentinel tokens.
 
-    def __init__(self, package: Any, formulas: List[DocxFormula], sentinel: str) -> None:
+    With no free sentinel (every private-use character already occurs in the
+    text) the equations were written in as plain `$latex$` text instead, and
+    `token` matches nothing: display formulas then stay inline, nothing is lost.
+    """
+
+    def __init__(self, package: Any, formulas: List[DocxFormula], sentinel: str | None) -> None:
         self.package = package
         self.formulas = formulas
-        self.token = re.compile(re.escape(sentinel) + r"(\d+)" + re.escape(sentinel))
+        self.sentinel = sentinel or ""
+        if sentinel is None:
+            self.token = re.compile(r"(?!)(\d+)")
+        else:
+            self.token = re.compile(re.escape(sentinel) + r"(\d+)" + re.escape(sentinel))
 
     def formula(self, match: "re.Match[str]") -> DocxFormula | None:
         index = int(match.group(1))
@@ -813,7 +899,7 @@ class _DocxMathScanner:
             self.builder.data(text)
 
 
-def _rewrite_docx_part(data: bytes, formulas: List[DocxFormula], sentinel: str) -> bytes | None:
+def _rewrite_docx_part(data: bytes, formulas: List[DocxFormula], sentinel: str | None) -> bytes | None:
     if data.startswith((b"\xff\xfe", b"\xfe\xff")) or _NON_UTF8_DECLARATION.match(data):
         return None  # byte offsets below assume the UTF-8 that Word always writes
     try:
@@ -827,8 +913,12 @@ def _rewrite_docx_part(data: bytes, formulas: List[DocxFormula], sentinel: str) 
     pieces: List[bytes] = []
     cursor = 0
     for start, end, element, needs_paragraph in spans:
-        token = f"{sentinel}{len(formulas)}{sentinel}".encode("utf-8")
-        formulas.append(DocxFormula(element))
+        formula = DocxFormula(element)
+        if sentinel is None:
+            token = _xml_escape(formula.inline).encode("utf-8")
+        else:
+            token = f"{sentinel}{len(formulas)}{sentinel}".encode("utf-8")
+        formulas.append(formula)
         if needs_paragraph:
             replacement = b"<w:p" + namespace + b">" + run % token + b"</w:p>"
         else:
@@ -840,18 +930,33 @@ def _rewrite_docx_part(data: bytes, formulas: List[DocxFormula], sentinel: str) 
     return b"".join(pieces)
 
 
+_PRIVATE_USE_CHARACTER = re.compile("[\ue000-\uf8ff]")
+_NUMERIC_CHARACTER_REFERENCE = re.compile(rb"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));")
+
+
 def _pick_sentinel(parts: Sequence[bytes]) -> str | None:
-    for code in range(0xE000, 0xF900):
-        char = chr(code)
-        needles = (
-            char.encode("utf-8"),
-            f"&#x{code:x};".encode(),
-            f"&#x{code:X};".encode(),
-            f"&#{code};".encode(),
-        )
-        if not any(needle in part for part in parts for needle in needles):
-            return char
-    return None
+    """The lowest private-use character no text part uses, literally or as a
+    numeric character reference (any spelling, leading zeros included). One
+    pass per part; None when all 6400 are taken."""
+    used: set[int] = set()
+    for part in parts:
+        used.update(ord(char) for char in _PRIVATE_USE_CHARACTER.findall(part.decode("utf-8", "replace")))
+        for match in _NUMERIC_CHARACTER_REFERENCE.finditer(part):
+            hexadecimal, decimal = match.groups()
+            used.add(int(hexadecimal, 16) if hexadecimal else int(decimal))
+    return next((chr(code) for code in range(0xE000, 0xF900) if code not in used), None)
+
+
+def _mammoth_reads(name: str) -> bool:
+    """Members mammoth may open: the content-type map, relationship parts and
+    the top-level WordprocessingML parts (document, styles, numbering, notes,
+    comments). Images, embedded objects, fonts, themes and the like are never
+    read — the parser's `convert_image` ignores image bytes — so the rewritten
+    package carries them as empty members of the same name (relationships
+    still resolve)."""
+    if name == "[Content_Types].xml" or name.endswith(".rels"):
+        return True
+    return name.startswith("word/") and name.count("/") == 1 and name.endswith(".xml")
 
 
 def docx_math_package(path: Any) -> DocxMath | None:
@@ -875,8 +980,6 @@ def docx_math_package(path: Any) -> DocxMath | None:
         if not any(OMML_MARKER in data for data in word_parts.values()):
             return None
         sentinel = _pick_sentinel(list(word_parts.values()))
-        if sentinel is None:
-            return None
         formulas: List[DocxFormula] = []
         rewritten: Dict[str, bytes] = {}
         for name, data in word_parts.items():
@@ -886,17 +989,21 @@ def docx_math_package(path: Any) -> DocxMath | None:
                     rewritten[name] = new_data
         if not rewritten:
             return None
+        # A non-standard main part name means the whole word/ tree may matter.
+        keep = _mammoth_reads if "word/document.xml" in names else (lambda name: name.endswith((".xml", ".rels")))
         package = tempfile.SpooledTemporaryFile(max_size=_PACKAGE_SPOOL_BYTES)
         try:
-            with zipfile.ZipFile(package, "w", zipfile.ZIP_STORED) as out:
+            with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as out:
                 for info in infos:
-                    if info.filename in rewritten:
-                        data = rewritten[info.filename]
-                    elif info.filename in word_parts:
-                        data = word_parts[info.filename]
+                    name = info.filename
+                    if name in rewritten or name in word_parts:
+                        out.writestr(name, rewritten.get(name, word_parts.get(name, b"")))
+                    elif keep(name):
+                        # Streamed, never materialised whole.
+                        with archive.open(info) as source, out.open(name, "w") as target:
+                            shutil.copyfileobj(source, target, 1024 * 1024)
                     else:
-                        data = archive.read(info)
-                    out.writestr(info.filename, data)
+                        out.writestr(name, b"")
         except BaseException:
             package.close()
             raise
