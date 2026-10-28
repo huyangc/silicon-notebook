@@ -1906,7 +1906,7 @@ other clients apply a flat per-call ceiling instead. `ask` in `reasoning` mode
 routinely runs for minutes (understanding, plan, federated retrieval, reflect loop, synthesis) and
 a deployment's plugin engine can take longer still, so without a heartbeat the client abandons a call the
 server is still executing successfully and the Agent sees a transport error where the
-answer was about to arrive. Every one of the 21 core tools therefore runs its blocking body
+answer was about to arrive. Every one of the 24 core tools therefore runs its blocking body
 under one progress heartbeat that fires every **5 seconds** and carries only the tool name
 and elapsed wall-clock seconds — never the question, a notebook or source name, or any
 other notebook content, the same rule the observability events follow. It is free where it
@@ -1985,7 +1985,7 @@ read's full authorization on every call. Errors read `[<code>] <Chinese message>
 `not_found`, `invalid_argument`, `busy`, `mirrored`, `unavailable`, `internal`. A `ValueError` becomes an
 `invalid_argument` carrying its text only when that text starts with Chinese (or is a known validator
 shape translated to Chinese); any other unexpected error is `internal` and its text is never echoed. The default core
-tool set is these 21 tools; `mcp_server.PUBLIC_TOOLS` is exactly these 21 tools, not a larger
+tool set is these 24 tools; `mcp_server.PUBLIC_TOOLS` is exactly these 24 tools, not a larger
 combined catalog -- it is the same list as `mcp_server.CORE_TOOLS`:
 
 | Group | Tools | Scope |
@@ -1997,6 +1997,7 @@ combined catalog -- it is the same list as `mcp_server.CORE_TOOLS`:
 | Q&A history and deep reports (read-only, the token owner's own only) | `list_conversations`, `get_conversation`, `list_reports`, `get_report` | `read` |
 | Contribute | `propose_memory`, `add_observation` | `contribute` |
 | Source read | `list_sources` | `read` |
+| Paper search, cards and per-source extraction (cards and extraction may spend model quota) | `find_sources`, `get_paper_cards`, `extract_from_sources` | `read` |
 | Source management | `add_source`, `reparse_source` | `manage` (owner-only) |
 | Source deletion | `delete_source` | `delete` (owner-only, Agent-added rows only) |
 | Build | `build` | `manage` (owner-only) |
@@ -2004,7 +2005,7 @@ combined catalog -- it is the same list as `mcp_server.CORE_TOOLS`:
 | Knowhow code write | `put_knowhow_cell_code` | `contribute` |
 
 The deployed server-local frozen catalog is authoritative for discovery and onboarding: it is
-exactly the 21 tools above, derived live from the eleven core registrars, and
+exactly the 24 tools above, derived live from the eleven core registrars, and
 `mcp_server.PUBLIC_TOOLS` is that same list rather than a second hand-kept copy. Every call
 repeats live token/tier/allowlist/membership checks, and both the `manage` and `delete` tiers are
 forced through the owner-only notebook gate. A tool refused for a missing tier says which tier in

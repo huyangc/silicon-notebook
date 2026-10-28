@@ -225,6 +225,15 @@ class FindSourcesResult:
     #: library's metadata hits are still in the result; ``hydrate:`` when the
     #: library ranked but its items on this page could not be displayed).
     skipped_libraries: Mapping[str, str] = field(default_factory=dict)
+    #: What ``encode_cursor`` needs to cut a cursor at another offset of THIS
+    #: ranking (MCP: a page the response budget delivered only in part
+    #: continues at the first source not delivered).
+    cursor_fingerprint: str = ""
+    cursor_meta_digest: str = ""
+
+    def cursor_at(self, offset: int) -> str:
+        """The cursor of the page starting at ``offset`` of this ranking."""
+        return encode_cursor(offset, self.cursor_fingerprint, self.cursor_meta_digest)
 
 
 @dataclass(frozen=True)
@@ -633,6 +642,8 @@ class SourceFinder:
             meta_pending_excluded=ranking.meta_pending_excluded,
             meta_pending_unchecked=ranking.meta_pending_unchecked,
             skipped_libraries=skipped,
+            cursor_fingerprint=fingerprint,
+            cursor_meta_digest=ranking.meta_digest,
         )
 
     # ------------------------------------------------------------ source set

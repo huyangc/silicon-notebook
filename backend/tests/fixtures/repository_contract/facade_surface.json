@@ -1451,6 +1451,12 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._scope_is_empty",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/deps.py",
         "scope": "<module>.admin_query_repository",
         "target": "_runtime"
@@ -1669,6 +1675,12 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/maintenance.py",
         "scope": "<module>._start_kg_build",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/sources.py",
+        "scope": "<module>._runtime_service",
         "target": "_runtime"
       },
       {
@@ -3893,6 +3905,12 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/sources.py",
+        "scope": "<module>._paper_source_set",
+        "target": "all_visible_source_ids"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>._followup_source_scope",
         "target": "all_visible_source_ids"
@@ -4496,6 +4514,24 @@
         "target": "close"
       },
       {
+        "kind": "patch",
+        "path": "backend/tests/concept_description_rewrite_cases.py",
+        "scope": "<module>.assert_calls_of_a_failed_notebook_are_charged_to_the_limit",
+        "target": "close"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_concept_description_rewrite.py",
+        "scope": "<module>._cli",
+        "target": "close"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_concept_description_rewrite.py",
+        "scope": "<module>.test_cli_interrupt_exits_130_at_once_and_the_rerun_continues",
+        "target": "close"
+      },
+      {
         "kind": "attribute",
         "path": "scripts/bench_scale_build_paging.py",
         "scope": "<module>._rss_child",
@@ -4540,7 +4576,32 @@
     ],
     "kind": "method",
     "owner": "RepositoryRuntime.close",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/concept_description_rewrite_cases.py",
+        "scope": "<module>.assert_calls_of_a_failed_notebook_are_charged_to_the_limit",
+        "target": "close"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_concept_description_rewrite.py",
+        "scope": "<module>._cli",
+        "target": "close"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_concept_description_rewrite.py",
+        "scope": "<module>.test_cli_interrupt_exits_130_at_once_and_the_rerun_continues",
+        "target": "close"
+      }
+    ],
     "scope": "facade",
     "signature": "(self) -> 'None'"
   },
@@ -6626,6 +6687,12 @@
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
         "scope": "<module>._validate_source_scope",
+        "target": "hidden_source_ids"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/sources.py",
+        "scope": "<module>._paper_source_set",
         "target": "hidden_source_ids"
       }
     ],

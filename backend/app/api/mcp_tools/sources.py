@@ -4,8 +4,10 @@ import base64
 import binascii
 import hashlib
 import mimetypes
+import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import anyio
 from mcp.server.fastmcp import Context, FastMCP
@@ -18,12 +20,26 @@ from app.api.source_routes import (
 )
 from app.core.config import get_settings
 from app.core.memory_inputs import normalize_text
+from app.domain.cancellation import CoreCancellation
 from app.domain.promotion_source import PROMOTION_SOURCE_TYPE
 from app.models.sources import SourceDetail
 from app.repositories.ports import DocumentCapacityExceeded, UploadedSourceFile
 from app.repositories.source_files import FILESYSTEM_NAME_MAX_BYTES, safe_filename
 from app.services.kg import scheduler as kg_scheduler
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
+from app.services.model_work import ModelPriority, model_work_scope
+from app.services.paper_extraction import (
+    EXTRACT_MAX_FIELDS,
+    ExtractionRequestError,
+    normalize_fields,
+)
+from app.services.source_finder import (
+    FIND_SOURCES_PAGE_SIZE,
+    FindSourcesCursorError,
+    FindSourcesCursorStaleError,
+    FindSourcesError,
+    FindSourcesRequest,
+)
 from app.services.source_format_admission import (
     supported_source_extensions,
     supported_source_suffixes,
@@ -33,14 +49,15 @@ from ._shared import (
     OUTPUT_INTEGER_LIMIT,
     RESULT_LIMIT,
     AgentToolError,
-    _record_agent_call,
     _budget_response,
     _owner_request_context,
+    _record_agent_call,
     _run_with_progress,
     _selected_notebook,
     _writable_notebook,
 )
-
+from .memory_context import _memory_read_allowed
+from .paper_pages import extraction_page, find_sources_page, paper_cards_page
 
 # This names a document rather than a Memory item. The full title is stored;
 # only the derived file name below is shortened.
@@ -344,6 +361,195 @@ def _add_url_source(
     }
 
 
+# ------------------------------------------------------------ paper tools
+# find_sources / get_paper_cards / extract_from_sources (design 2026-10-28
+# §7.4): the three services the reasoning Agent uses, exposed one call each.
+
+#: Sources one get_paper_cards / extract_from_sources call may name.
+PAPER_TOOL_MAX_SOURCES = 3
+#: Model calls (paper metadata + card together) one get_paper_cards call may
+#: make; the rest of its sources come back ``deferred``.
+PAPER_CARD_GENERATE_LIMIT = 3
+#: Model-calling paper tool calls one token OWNER may have running at once,
+#: across all of their tokens and both tools. ``ask``'s ``_waiter_slot``
+#: counts per (owner, key) and cannot bound this: these calls have no key.
+_GENERATING_PER_OWNER = 2
+_GENERATING: dict[str, int] = {}
+_GENERATING_LOCK = threading.Lock()
+
+_FIND_INVALID = (
+    "find_sources 参数不合法：query 最多 1000 字；terms 最多 6 个、每个最多 64 字；"
+    "venue、author 最多 64 字；kind 只能是 papers 或 all；year_from 不能晚于 year_to；"
+    "limit 为 1–20；query、terms 与过滤条件（年份、venue、author）至少给一个"
+)
+_CURSOR_STALE = (
+    "cursor 已失效：两页之间有论文的元数据被抽取，排序已经变化，沿用旧偏移会漏掉或重复来源；"
+    "请去掉 cursor、用同样的条件从第一页重新检索"
+)
+_CURSOR_INVALID = (
+    "cursor 无效：翻页时只改 cursor，其余参数必须与上一次完全相同；要换条件就去掉 cursor 重新检索"
+)
+_EXTRACT_INVALID = (
+    f"extract_from_sources 参数不合法：fields 需要 1–{EXTRACT_MAX_FIELDS} 条、"
+    "每条最多 80 字（去掉空白与重复后计）"
+)
+_CANCELLED = "调用已取消；没有完成的来源不会有结果，可以稍后重试"
+
+
+@contextmanager
+def _owner_generation_slot(owner_id: str) -> Iterator[None]:
+    with _GENERATING_LOCK:
+        if _GENERATING.get(owner_id, 0) >= _GENERATING_PER_OWNER:
+            raise AgentToolError(
+                "busy",
+                f"这个凭证主人已有 {_GENERATING_PER_OWNER} 个 get_paper_cards / "
+                "extract_from_sources 调用在进行；请等它们结束后再调用，不要并发重试",
+            )
+        _GENERATING[owner_id] = _GENERATING.get(owner_id, 0) + 1
+    try:
+        yield
+    finally:
+        with _GENERATING_LOCK:
+            remaining = _GENERATING.get(owner_id, 1) - 1
+            if remaining:
+                _GENERATING[owner_id] = remaining
+            else:
+                _GENERATING.pop(owner_id, None)
+
+
+def _paper_source_set(repo: Any, principal: Any, notebook_id: str) -> set[str]:
+    """The source set a paper tool reads: the notebook's visible sources plus
+    the hidden projections THIS owner may read (design §5.2).
+
+    MCP has no retrieval run, so nothing narrows the services' reads to the
+    caller: without this explicit set, another member's Memory projection
+    chunks would reach ``best_passage`` and extraction. The Memory half is
+    the owner's own only, and only while the token may read Memory -- the
+    same gate ``search`` applies (``""`` = Knowhow projections only)."""
+    viewer = (
+        principal.owner_id
+        if _memory_read_allowed(repo, principal, notebook_id) else ""
+    )
+    return {
+        *repo.all_visible_source_ids(notebook_id),
+        *repo.hidden_source_ids(notebook_id, viewer),
+    }
+
+
+def _paper_source_ids(source_ids: Any) -> list[str]:
+    cleaned = list(dict.fromkeys(
+        value.strip() for value in source_ids or ()
+        if isinstance(value, str) and value.strip()
+    ))
+    if not cleaned:
+        raise AgentToolError("invalid_argument", "source_ids 至少要给一个来源 id")
+    if len(cleaned) > PAPER_TOOL_MAX_SOURCES:
+        raise AgentToolError(
+            "invalid_argument",
+            f"source_ids 每次最多 {PAPER_TOOL_MAX_SOURCES} 篇；请分批调用",
+        )
+    return cleaned
+
+
+@contextmanager
+def _paper_work(principal: Any, notebook_id: str) -> Iterator[None]:
+    """The owner's request identity and an INTERACTIVE model scope (design
+    §4.5); a cancellation the services raise (the client went away and the
+    call's stop event was set) becomes one Agent error."""
+    with _owner_request_context(principal), model_work_scope(
+        priority=ModelPriority.INTERACTIVE,
+        actor_id=principal.owner_id,
+        notebook_id=notebook_id,
+    ):
+        try:
+            yield
+        except CoreCancellation:
+            raise AgentToolError("unavailable", _CANCELLED) from None
+
+
+def _runtime_service(repo: Any, name: str) -> Any:
+    service = getattr(repo._runtime, name, None)
+    if service is None:  # pragma: no cover - wired at startup
+        raise AgentToolError("unavailable", "这项功能在这个部署上暂时不可用")
+    return service
+
+
+def _find_request(
+    query: str, terms: Any, year_from: Any, year_to: Any, venue: str,
+    author: str, kind: str, cursor: str, limit: int,
+) -> FindSourcesRequest:
+    if kind not in ("papers", "all"):
+        raise AgentToolError("invalid_argument", "kind 只能是 papers 或 all")
+    return FindSourcesRequest(
+        query=query, terms=tuple(terms or ()), year_from=year_from,
+        year_to=year_to, venue=venue, author=author, kind=kind,
+        scope="current_notebook", cursor=cursor.strip(), limit=limit,
+    )
+
+
+def _find(
+    repo: Any, principal: Any, notebook_id: str, request: FindSourcesRequest,
+    stop: threading.Event,
+) -> dict[str, Any]:
+    allowed = sorted(_paper_source_set(repo, principal, notebook_id))
+    try:
+        result = _runtime_service(repo, "source_finder").find(
+            notebook_id, request, allowed_source_ids=allowed, cancel_event=stop,
+        )
+    except FindSourcesCursorStaleError:
+        raise AgentToolError("invalid_argument", _CURSOR_STALE) from None
+    except FindSourcesCursorError:
+        raise AgentToolError("invalid_argument", _CURSOR_INVALID) from None
+    except FindSourcesError:
+        raise AgentToolError("invalid_argument", _FIND_INVALID) from None
+    return find_sources_page(notebook_id, result, result.cursor_at)
+
+
+def _displays(repo: Any, results: list[Any]) -> dict[tuple[str, str], Any]:
+    keys = [
+        (result.notebook_id, result.source_id)
+        for result in results if result.status != "not_found"
+    ]
+    return _runtime_service(repo, "source_finder").display_metadata(keys) if keys else {}
+
+
+def _paper_cards(
+    repo: Any, principal: Any, notebook_id: str, source_ids: list[str],
+    stop: threading.Event,
+) -> dict[str, Any]:
+    scope = _paper_source_set(repo, principal, notebook_id)
+    results = _runtime_service(repo, "paper_cards").get_cards(
+        [(notebook_id, source_id) for source_id in source_ids],
+        allowed=[(notebook_id, sid) for sid in source_ids if sid in scope],
+        generate_limit=PAPER_CARD_GENERATE_LIMIT,
+        cancel_event=stop,
+        actor_id=principal.owner_id,
+    )
+    return paper_cards_page(notebook_id, results, _displays(repo, results))
+
+
+def _extract(
+    repo: Any, principal: Any, notebook_id: str, source_ids: list[str],
+    fields: list[str], stop: threading.Event,
+) -> dict[str, Any]:
+    scope = _paper_source_set(repo, principal, notebook_id)
+    service = _runtime_service(repo, "paper_extraction")
+    try:
+        # The service's own normalization: ``field_index`` in its results
+        # indexes exactly this tuple.
+        wanted = normalize_fields(fields)
+        results = service.extract(
+            [(notebook_id, source_id) for source_id in source_ids], wanted,
+            allowed=[(notebook_id, sid) for sid in source_ids if sid in scope],
+            limit=len(source_ids), cancel_event=stop, actor_id=principal.owner_id,
+        )
+    except ExtractionRequestError:
+        raise AgentToolError("invalid_argument", _EXTRACT_INVALID) from None
+    return extraction_page(
+        notebook_id, list(wanted), results, _displays(repo, results),
+    )
+
+
 def register_source_tools(
     server: FastMCP, repository_provider: Callable[[], Any]
 ) -> None:
@@ -352,7 +558,9 @@ def register_source_tools(
             "List the user-visible sources owned by a notebook (notebook_id "
             "omitted = the token's default notebook), in the same stable order "
             "as its Sources panel. Returns a bounded page with source ids, "
-            "display titles, file/type metadata, stored summary excerpts, and "
+            "display titles, file/type metadata, stored summary excerpts, "
+            "paper metadata (up to 3 `authors`, `pub_year`, `venue`; empty when "
+            "the source is not a paper or its metadata is not extracted yet) and "
             "parse/extraction state. Hidden Memory and Knowhow projection rows "
             "and sources from mounted reference notebooks are excluded. Follow "
             "`next_offset` until it is null to read the complete inventory. "
@@ -408,6 +616,11 @@ def register_source_tools(
                         "kg_analyzed_empty": item.kg_analyzed_empty,
                         "agent_created": item.agent_created,
                         "created_at": item.created_at,
+                        # Paper metadata the page read already hydrated
+                        # (``sources_from_rows``): no extra query.
+                        "authors": list(item.authors[:3]),
+                        "pub_year": item.pub_year,
+                        "venue": item.venue or "",
                     }
                     for item in page.items
                 ]
@@ -435,6 +648,8 @@ def register_source_tools(
                 "parse_status": 40,
                 "status": 40,
                 "created_at": 80,
+                "authors": 120,
+                "venue": 200,
             },
         )
         if source_id:
@@ -450,6 +665,140 @@ def register_source_tools(
             else None
         )
         return response
+
+    @server.tool(
+        description=(
+            "Find the documents of a notebook (notebook_id omitted = the "
+            "token's default notebook) that are about a topic -- the first step "
+            "for 'list every paper about X with its key numbers'. Give `query` "
+            "(a natural-language description, matched against the text) and/or "
+            "`terms` (up to 6 literal words, aliases or acronyms, each up to 64 "
+            "characters, the most literal first, matched against titles, paper "
+            "titles, keywords, summaries, authors and venues), optionally "
+            "narrowed by `year_from`/`year_to`, `venue`, `author`; at least one "
+            "of these is required. `kind` is 'papers' (default: papers, plus "
+            "eligible documents whose paper metadata is not extracted yet) or "
+            "'all'. Returns up to `limit` (1-20) items ranked strong before "
+            "related, each with title, year, venue, authors, the fields it "
+            "matched (`reasons`), its `card_status` and its best passage; a "
+            "passage's `ref` is an index into the top-level `refs` list, whose "
+            "entries read_reference resolves. `counts` and `coverage` say how "
+            "complete the search is: when `coverage.lexical_complete` is false, "
+            "`coverage.semantic_recall_capped` is true, `counts.meta_pending_*` "
+            "are non-zero or `coverage.skipped_libraries` is non-empty, do not "
+            "claim the list is complete. Pass `next_cursor` back as `cursor` "
+            "with otherwise identical arguments for the next page; a stale "
+            "cursor (paper metadata was extracted between pages) is refused -- "
+            "restart from page 1. Requires the read permission."
+        ),
+        tier="read",
+    )
+    async def find_sources(
+        ctx: Context, notebook_id: str = "", query: str = "",
+        terms: list[str] | None = None, year_from: int | None = None,
+        year_to: int | None = None, venue: str = "", author: str = "",
+        kind: str = "papers", cursor: str = "",
+        limit: int = FIND_SOURCES_PAGE_SIZE,
+    ) -> dict[str, Any]:
+        request = _find_request(
+            query, terms, year_from, year_to, venue, author, kind, cursor, limit,
+        )
+        repo = repository_provider()
+        stop = threading.Event()
+
+        def run() -> dict[str, Any]:
+            principal, selected = _selected_notebook(
+                repo, notebook_id, "knowledge:read"
+            )
+            with _paper_work(principal, selected):
+                return _find(repo, principal, selected, request, stop)
+
+        return await _run_with_progress(
+            ctx, run, label="find_sources", on_cancel=stop.set
+        )
+
+    @server.tool(
+        description=(
+            "Read the paper cards of up to 3 sources of a notebook (notebook_id "
+            "omitted = the token's default notebook): per paper a TL;DR, the "
+            "problem, the method, contributions, metrics (the paper's own "
+            "results, each value found verbatim in the cited text) and "
+            "datasets. Cards are generated on first use and cached; one call "
+            "makes at most 3 model calls (metadata + card together), and the "
+            "sources beyond that come back `deferred` -- call again for them. "
+            "Every source gets a `status`: ready / generated (card included), "
+            "not_paper (use extract_from_sources instead), meta_pending (paper "
+            "metadata not extracted yet / not writable here), deferred (retry "
+            "later), failed (with `reason`), not_found. Card fields cite "
+            "elements by index into the top-level `refs` list (`refs` for "
+            "tldr/problem/method, `ref` for each list entry); pass a ref to "
+            "read_reference to verify a number. `detail` says how much of the "
+            "cards fit the response budget. At most 2 get_paper_cards / "
+            "extract_from_sources calls per token owner run at once (`busy` "
+            "beyond). Requires the read permission (it can spend model quota)."
+        ),
+        tier="read",
+    )
+    async def get_paper_cards(
+        source_ids: list[str], ctx: Context, notebook_id: str = "",
+    ) -> dict[str, Any]:
+        wanted = _paper_source_ids(source_ids)
+        repo = repository_provider()
+        stop = threading.Event()
+
+        def run() -> dict[str, Any]:
+            principal, selected = _selected_notebook(
+                repo, notebook_id, "knowledge:read"
+            )
+            with _owner_generation_slot(principal.owner_id), _paper_work(
+                principal, selected
+            ):
+                return _paper_cards(repo, principal, selected, wanted, stop)
+
+        return await _run_with_progress(
+            ctx, run, label="get_paper_cards", on_cancel=stop.set
+        )
+
+    @server.tool(
+        description=(
+            "Extract up to 4 ad-hoc `fields` (each up to 80 characters, e.g. "
+            "'mAP on COCO') from each of up to 3 sources of a notebook "
+            "(notebook_id omitted = the token's default notebook) -- for what "
+            "a paper card does not carry, and for documents that are not "
+            "papers. One model call per source over the passages most similar "
+            "to each field; a value containing numbers is kept only when they "
+            "appear in the cited text. Returns per source a `status` "
+            "(extracted / no_text / deferred / failed / not_found) and per "
+            "field either `value` with `ref` (an index into the top-level "
+            "`refs` list; read_reference resolves it) or why it is `missing`. "
+            "Nothing is cached. Shares get_paper_cards' limit of 2 concurrent "
+            "calls per token owner (`busy` beyond). Requires the read "
+            "permission (it spends model quota)."
+        ),
+        tier="read",
+    )
+    async def extract_from_sources(
+        source_ids: list[str], fields: list[str], ctx: Context,
+        notebook_id: str = "",
+    ) -> dict[str, Any]:
+        wanted = _paper_source_ids(source_ids)
+        repo = repository_provider()
+        stop = threading.Event()
+
+        def run() -> dict[str, Any]:
+            principal, selected = _selected_notebook(
+                repo, notebook_id, "knowledge:read"
+            )
+            with _owner_generation_slot(principal.owner_id), _paper_work(
+                principal, selected
+            ):
+                return _extract(
+                    repo, principal, selected, wanted, list(fields or ()), stop
+                )
+
+        return await _run_with_progress(
+            ctx, run, label="extract_from_sources", on_cancel=stop.set
+        )
 
     @server.tool(
         description=(

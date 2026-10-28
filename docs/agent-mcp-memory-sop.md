@@ -55,7 +55,7 @@ Use a notebook the account can read. To test formal context retrieval, that note
 
 | Purpose | Required scope |
 | --- | --- |
-| Search source/KG context (`search`), read knowhow (`list_knowhow_tables`, `get_knowhow_discrimination`, `get_knowhow_row`), read a `ref` back to its original text (`read_reference`), notebook details (`get_notebook`), a source's parse state or build status (`list_sources`) | `read` (读取) |
+| Search source/KG context (`search`), read knowhow (`list_knowhow_tables`, `get_knowhow_discrimination`, `get_knowhow_row`), read a `ref` back to its original text (`read_reference`), notebook details (`get_notebook`), a source's parse state or build status (`list_sources`), find papers on a topic and read their cards or extract fields from them (`find_sources`, `get_paper_cards`, `extract_from_sources`; cards and extraction may spend model quota) | `read` (读取) |
 | Read the owner's own Memory (confirmed and candidates), read "AI 对这个库的理解" (notebook understanding, `get_notebook(include="all")`) | `read` (读取) |
 | Read your own Q&A history (questions asked in the browser or by an Agent; single-notebook and cross-notebook conversations; `list_conversations`, `get_conversation`) and deep reports (`list_reports`, `get_report`) | `read` (读取) |
 | Ask one notebook, or 2-8 notebooks at once, and re-read the result (`ask`, `get_ask`; including retrieval-only `output="evidence"`) | `ask` (问答; does not need `read`) |

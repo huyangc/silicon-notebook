@@ -65,9 +65,6 @@
   "backend/app/api/mcp_tools/refs.py": {
     "I001": 1
   },
-  "backend/app/api/mcp_tools/sources.py": {
-    "I001": 1
-  },
   "backend/app/api/memory_routes.py": {
     "I001": 1
   },

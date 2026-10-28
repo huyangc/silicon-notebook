@@ -1408,7 +1408,7 @@ Authorization 的 Agent 知道解法；工具清单从部署实例的冻结目�
 *idle* 超时——一次调用在若干秒内既没给出响应、也没发过任何 progress 通知就被中断——别的
 客户端则是每次调用一个固定上限。`reasoning` 档的 `ask` 动辄跑几分钟（理解、规划、联邦
 检索、反思循环、答案合成），部署的插件引擎可能更久，所以没有心跳时客户端会放弃一次服务端仍在正常
-执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 21 个 core 工具的阻塞主体一律
+执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 24 个 core 工具的阻塞主体一律
 跑在同一道心跳下，**每 5 秒**一拍，内容只有工具名与已耗墙钟秒数——绝不带问题原文、笔记本或
 来源名称，与观测事件同一条口径。不需要它的场合是免费的：客户端没有在请求 `_meta` 里带
 `progressToken` 时该通知是 no-op，而第一拍要等满一个间隔，所以毫秒级返回的工具（绝大多数）
@@ -1467,8 +1467,8 @@ token 的默认笔记本（`list_notebooks` 用 `is_default` 标出）。每个�
 重跑原读取的全部鉴权。报错统一为 `[<code>] <中文说明>`，code 取值 `token_inactive`、`scope_missing`、
 `notebook_not_allowed`、`notebook_unreadable`、`owner_only`、`forbidden`、`not_found`、`invalid_argument`、`busy`、
 `mirrored`、`unavailable`、`internal`。`ValueError` 只有在文本以中文开头（或属于已知校验器形状并被译成中文）
-时才作为 `invalid_argument` 带出原文；其他意外错误一律是 `internal`，文本从不回显。默认 core 的二十一个工具如下；
-`mcp_server.PUBLIC_TOOLS` 就是下面这 21 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
+时才作为 `invalid_argument` 带出原文；其他意外错误一律是 `internal`，文本从不回显。默认 core 的二十四个工具如下；
+`mcp_server.PUBLIC_TOOLS` 就是下面这 24 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
 是同一份清单：
 
 | 分组 | 工具 | Scope |
@@ -1480,6 +1480,7 @@ token 的默认笔记本（`list_notebooks` 用 `is_default` 标出）。每个�
 | 问答记录与深度报告（只读，仅凭证主人自己的） | `list_conversations`、`get_conversation`、`list_reports`、`get_report` | `read` |
 | 提交 | `propose_memory`、`add_observation` | `contribute` |
 | 来源读取 | `list_sources` | `read` |
+| 论文检索、卡片与逐篇抽取（卡片与抽取会消耗模型配额） | `find_sources`、`get_paper_cards`、`extract_from_sources` | `read` |
 | 来源管理 | `add_source`、`reparse_source` | `manage`（owner-only） |
 | 来源删除 | `delete_source` | `delete`（owner-only，且仅限 Agent 添加的来源） |
 | 构建 | `build` | `manage`（owner-only） |
@@ -1487,7 +1488,7 @@ token 的默认笔记本（`list_notebooks` 用 `is_default` 标出）。每个�
 | Knowhow 代码写入 | `put_knowhow_cell_code` | `contribute` |
 
 实际部署以 server-local frozen catalog 作为 discovery 与 onboarding 的权威清单：它精确等于上表
-21 个工具，由十一个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
+24 个工具，由十一个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
 手抄。每次调用都重新检查 live token/档位/allowlist/成员权，`manage` 与 `delete` 两档都强制经过 owner-only
 notebook 闸。缺档时工具报错是写明缺哪一档的中文文案（例：「此凭证缺少「读取」权限，请在 Agent 接入页为它勾选后重试」），
 不再只给笔记本 id；token 失效、笔记本不在白名单、主人已无权读该笔记本也各有一句可读文案。结果在构造时就被复制进有界形状——深度不超过 5 层，逐字段/map/list 施加上限——超大容器不会

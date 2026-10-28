@@ -620,6 +620,7 @@ SURFACE_MEMBERS = (
         kind='instance_attribute',
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._memory_store', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._scope_is_empty', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.admin_query_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.analysis_issue_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.answer_link_repository', kind='attribute', target='_runtime'),
@@ -657,6 +658,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.optimize_knowhow_cell_stream', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/mcp_tools/_shared.py', scope='<module>.refuse_if_mirrored', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/mcp_tools/maintenance.py', scope='<module>._start_kg_build', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/mcp_tools/sources.py', scope='<module>._runtime_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._report_llm_ready', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._report_mounts_still_effective', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._share_disclosure', kind='attribute', target='_runtime'),
@@ -1124,6 +1126,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.get_admin_user_notebook_source', kind='attribute', target='all_visible_source_ids'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._validate_source_scope', kind='attribute', target='all_visible_source_ids'),
+            ConsumerSite(path='backend/app/api/mcp_tools/sources.py', scope='<module>._paper_source_set', kind='attribute', target='all_visible_source_ids'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._followup_source_scope', kind='attribute', target='all_visible_source_ids'),
             ConsumerSite(path='backend/app/eval/find_sources_calibrate.py', scope='<module>.build_candidates', kind='attribute', target='all_visible_source_ids'),
         ),
@@ -1362,6 +1365,9 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.shutdown_repository_if_initialized', kind='attribute', target='close'),
+            ConsumerSite(path='backend/tests/concept_description_rewrite_cases.py', scope='<module>.assert_calls_of_a_failed_notebook_are_charged_to_the_limit', kind='patch', target='close'),
+            ConsumerSite(path='backend/tests/test_concept_description_rewrite.py', scope='<module>._cli', kind='patch', target='close'),
+            ConsumerSite(path='backend/tests/test_concept_description_rewrite.py', scope='<module>.test_cli_interrupt_exits_130_at_once_and_the_rerun_continues', kind='patch', target='close'),
             ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>._rss_child', kind='attribute', target='close'),
             ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>.cmd_build', kind='attribute', target='close'),
             ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>.cmd_drop', kind='attribute', target='close'),
@@ -1371,6 +1377,9 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='scripts/measure_sync_capture_cost.py', scope='<module>._measure_sqlite', kind='attribute', target='close'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/concept_description_rewrite_cases.py', scope='<module>.assert_calls_of_a_failed_notebook_are_charged_to_the_limit', kind='patch', target='close'),
+            ConsumerSite(path='backend/tests/test_concept_description_rewrite.py', scope='<module>._cli', kind='patch', target='close'),
+            ConsumerSite(path='backend/tests/test_concept_description_rewrite.py', scope='<module>.test_cli_interrupt_exits_130_at_once_and_the_rerun_continues', kind='patch', target='close'),
         ),
     ),
     SurfaceMember(
@@ -2181,6 +2190,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._validate_source_scope', kind='attribute', target='hidden_source_ids'),
+            ConsumerSite(path='backend/app/api/mcp_tools/sources.py', scope='<module>._paper_source_set', kind='attribute', target='hidden_source_ids'),
         ),
         patches=(
         ),
