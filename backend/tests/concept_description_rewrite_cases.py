@@ -687,8 +687,12 @@ def assert_a_graph_delete_during_generation_leaves_no_staged_texts(repo, monkeyp
             deleted.append(True)
             lifecycle.delete_notebook_kg(nb)
 
-    bind_chat_client(repo, WORKLOAD, DescModel("model-new", hook=delete_once))
-    rewrite(repo, nb)
+    # One input fails, so the run does not end done: the completion prune (which
+    # would drop every staged key the new, empty plan does not want) is not
+    # what cleans up here.
+    bind_chat_client(repo, WORKLOAD, DescModel("model-new", hook=delete_once,
+                                               fail={"cascode"}))
+    assert rewrite(repo, nb).status == "incomplete"
     assert deleted
     with repo._runtime.database.connect() as db:
         left = db.execute(_sql(repo,
@@ -717,8 +721,12 @@ def assert_rows_that_raced_a_graph_delete_are_pruned_at_the_end(repo, monkeypatc
             deleted.append(True)
             lifecycle.delete_notebook_kg(nb)
 
-    bind_chat_client(repo, WORKLOAD, DescModel("model-new", hook=delete_once))
-    rewrite(repo, nb)
+    # One input fails, so the run does not end done: the completion prune (which
+    # would drop every staged key the new, empty plan does not want) is not
+    # what cleans up here.
+    bind_chat_client(repo, WORKLOAD, DescModel("model-new", hook=delete_once,
+                                               fail={"cascode"}))
+    assert rewrite(repo, nb).status == "incomplete"
     with repo._runtime.database.connect() as db:
         left = db.execute(_sql(repo,
             "SELECT COUNT(*) AS n FROM kg_rebuild_checkpoint WHERE notebook_id=? AND stage=?"),
