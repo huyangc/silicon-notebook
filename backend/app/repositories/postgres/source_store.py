@@ -45,6 +45,7 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
     placeholders,
 )
+from app.repositories.paper_card_rows import paper_card_row, utc_iso
 from app.repositories.postgres import memory_sql
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.id_binding import bind_ids, execute_ids, member_of
@@ -1724,6 +1725,10 @@ class SourceStore:
             connection.execute(
                 "DELETE FROM source_authors WHERE source_id=%s", (source_id,)
             )
+            # 论文卡片是论文元数据的派生缓存:不再是论文就同一事务里删掉。
+            connection.execute(
+                "DELETE FROM source_paper_cards WHERE source_id=%s", (source_id,)
+            )
 
     def claim_failed_for_retry(self, source_id: str) -> bool:
         """Atomically flip a FAILED source to 'queued' to claim a retry; returns
@@ -2418,6 +2423,106 @@ class SourceStore:
             source_id: self._paper_meta_dict(row, author_rows.get(source_id, []))
             for source_id, row in meta_rows.items()
         }
+
+    def paper_cards_for_sources(
+        self, connection, source_ids: Sequence[str], *, notebook_id: str
+    ) -> dict[str, dict]:
+        """按 source_id 批量取论文卡片行,并按子表自身的 ``notebook_id`` 收窄到
+        ``notebook_id``(这些 source 自己所在的库),口径同 ``paper_meta_for_sources``。
+        一批一条 SQL,经 ``pk_source_paper_cards`` 驱动。有效性(basis / 版本 / 是否
+        仍是论文)由调用方判定;这里只读行。"""
+        cards: dict[str, dict] = {}
+        ids = list(source_ids)
+        for offset in range(0, len(ids), self.IN_CHUNK):
+            batch = ids[offset : offset + self.IN_CHUNK]
+            for row in connection.execute(
+                "SELECT * FROM source_paper_cards "
+                f"WHERE source_id IN ({placeholders(batch)}) AND notebook_id=%s",
+                [*batch, notebook_id],
+            ).fetchall():
+                cards[row["source_id"]] = paper_card_row(row)
+        return cards
+
+    def upsert_paper_card(
+        self,
+        source_id: str,
+        notebook_id: str,
+        *,
+        basis: str,
+        card_version: int,
+        status: str,
+        card: dict,
+        raw_json: dict,
+        model: str,
+    ) -> bool:
+        """写入/覆盖一张论文卡片,返回是否真的写入。
+
+        锁序与 ``upsert_paper_meta`` 相同:先 notebook 后 source(``FOR KEY SHARE``),
+        校验归属;来源已被删则 ``KeyError``。**条件写**:同 basis 同版本已是 ``ready``
+        时,``failed`` 不得覆盖它(返回 False);``attempts`` 在 SQL 里自增
+        (``attempts = 旧值 + 1``,不做读改写),``ready`` 写入时清零。"""
+        now = self.now()
+        ready = status == "ready"
+        with self.database.write() as connection:
+            if connection.execute(
+                "SELECT id FROM notebooks WHERE id=%s FOR KEY SHARE", (notebook_id,)
+            ).fetchone() is None:
+                raise KeyError(notebook_id)
+            if connection.execute(
+                "SELECT id FROM sources WHERE id=%s AND notebook_id=%s FOR KEY SHARE",
+                (source_id, notebook_id),
+            ).fetchone() is None:
+                raise KeyError(source_id)
+            cursor = connection.execute(
+                "INSERT INTO source_paper_cards"
+                "(source_id,notebook_id,basis,card_version,status,card,raw_json,model,"
+                "attempts,created_at,updated_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT(source_id) DO UPDATE SET "
+                "notebook_id=excluded.notebook_id,basis=excluded.basis,"
+                "card_version=excluded.card_version,status=excluded.status,"
+                "card=excluded.card,raw_json=excluded.raw_json,model=excluded.model,"
+                + (
+                    "attempts=0,"
+                    if ready
+                    else "attempts=source_paper_cards.attempts+1,"
+                )
+                + "updated_at=excluded.updated_at"
+                + (
+                    ""
+                    if ready
+                    else " WHERE NOT (source_paper_cards.status='ready'"
+                    " AND source_paper_cards.basis=excluded.basis"
+                    " AND source_paper_cards.card_version=excluded.card_version)"
+                ),
+                (
+                    source_id,
+                    notebook_id,
+                    basis,
+                    int(card_version),
+                    status,
+                    jsonb(card if ready else {}),
+                    jsonb(raw_json or {}),
+                    str(model or ""),
+                    0 if ready else 1,
+                    now,
+                    now,
+                ),
+            )
+            return int(cursor.rowcount or 0) > 0
+
+    def source_element_generation_utc(self, source_id: str) -> str:
+        """与 ``CatalogStore.source_element_generation`` 同一聚合
+        (``MAX(source_elements.created_at)``),但统一渲染成 UTC ISO 字符串,与 PG
+        会话时区无关——论文卡片的 ``basis`` 要存要比,按会话时区渲染会在时区变化时
+        让全部卡片失效。无元素给 ``""``。"""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT MAX(created_at) AS generation FROM source_elements "
+                "WHERE source_id=%s",
+                (source_id,),
+            ).fetchone()
+        return utc_iso(None if row is None else row["generation"])
 
     def sources_missing_paper_meta(
         self, notebook_id: str, include_existing: bool = False

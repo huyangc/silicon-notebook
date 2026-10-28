@@ -358,7 +358,12 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # notebook_id, is_paper): the covering index for "this source's own paper
 # metadata" (the child row's notebook_id is the source's). Index only. See
 # ``_migration_103``.
-SCHEMA_VERSION = 103
+# v104 (paired with PostgreSQL 0085_source_paper_cards.sql) adds the
+# source_paper_cards cache table (one lazily generated paper card per source;
+# FK source_id -> sources and notebook_id -> notebooks ON DELETE CASCADE,
+# idx_source_paper_cards_nb over notebook_id). No backfill. See
+# ``_migration_104``.
+SCHEMA_VERSION = 104
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -6303,6 +6308,43 @@ class SqliteMigrator:
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_source_paper_meta_source_nb "
                 "ON source_paper_meta(source_id, notebook_id, is_paper)"
+            )
+
+    def _migration_104(self) -> None:
+        """Paper-card cache, parity with PostgreSQL
+        ``0085_source_paper_cards.sql`` (design
+        docs/superpowers/specs/2026-10-28-paper-cards-find-sources-design_zh.md
+        §4.4).
+
+        ``source_paper_cards`` holds at most one lazily generated card per
+        source. ``basis`` is the source's element-generation witness
+        (``MAX(source_elements.created_at)``) normalised to a UTC ISO string;
+        a card is valid only while ``status='ready'`` and ``basis`` and
+        ``card_version`` match the current ones, so re-parsing or a prompt
+        upgrade invalidates it without cleanup code. ``attempts`` counts
+        consecutive failures (reset on success) for the retry cooldown. A pure
+        cache: the table is not copied, exported, imported or synced. No
+        backfill: cards are generated on demand.
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS source_paper_cards (
+                  source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  basis TEXT NOT NULL,
+                  card_version INTEGER NOT NULL,
+                  status TEXT NOT NULL,
+                  card TEXT NOT NULL DEFAULT '{}',
+                  raw_json TEXT NOT NULL DEFAULT '{}',
+                  model TEXT NOT NULL DEFAULT '',
+                  attempts INTEGER NOT NULL DEFAULT 0,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_source_paper_cards_nb
+                  ON source_paper_cards(notebook_id);
+                """
             )
 
     def migrate(self) -> list[int]:

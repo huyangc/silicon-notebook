@@ -127,7 +127,7 @@ knowhow_changes 与 knowhow_milestones 是编辑历史，归本层，但**默认
 | 分组 | 表 |
 | --- | --- |
 | 用户交互 | conversations、answers、ask_jobs、ask_trace_steps、feedback、reports、global_ask_conversations、global_ask_jobs、retrieval_experiences、agent_observations、agent_notebook_profile、retained_user_activity、wishes、wish_votes |
-| 运行态与作业 | kg_build_jobs、kg_rebuild_checkpoint、kg_cluster_scratch、kg_canonical_scratch、kg_relation_completion_state、merge_review_jobs、extraction_runs、catalog_jobs、catalog_candidates、promotion_candidates、concept_merge_candidates、kg_analysis_marks（v97/0077，图谱分析的「标为正常」与「补上关联已尝试」，与合并决定同口径）、kg_conflict_candidates、concept_whitelist、indexing_pipeline_stages、indexing_pipeline_stage_sources、source_index_backfills、knowledge_source_fact_backfills、chunk_element_backfills、notebook_delete_jobs、notebook_delete_files、agent_profile_jobs、notebook_share_requests |
+| 运行态与作业 | kg_build_jobs、kg_rebuild_checkpoint、kg_cluster_scratch、kg_canonical_scratch、kg_relation_completion_state、merge_review_jobs、extraction_runs、catalog_jobs、catalog_candidates、promotion_candidates、concept_merge_candidates、kg_analysis_marks（v97/0077，图谱分析的「标为正常」与「补上关联已尝试」，与合并决定同口径）、source_paper_cards（v104/0085，论文卡片懒生成缓存，各环境自己生成）、kg_conflict_candidates、concept_whitelist、indexing_pipeline_stages、indexing_pipeline_stage_sources、source_index_backfills、knowledge_source_fact_backfills、chunk_element_backfills、notebook_delete_jobs、notebook_delete_files、agent_profile_jobs、notebook_share_requests |
 | 身份与系统 | users、user_profiles、auth_*、agent_profiles、agent_access_tokens、agent_token_notebooks、model_service_status、system_model_service_status、app_settings、extension_runtime_toggles、command catalog |
 | 同步控制（PR-2 起，v83/0063） | sync_export_state（源端每个目标环境的导出水位）、sync_imports（目标端已引入的包与报告）、sync_import_progress（逐表断点） |
 

@@ -128,6 +128,7 @@ POSTGRES_BUSINESS_TABLES = (
     "source_authors",
     "source_elements",
     "source_index_backfills",
+    "source_paper_cards",
     "source_paper_meta",
     "sources",
     "sync_capture_control",
@@ -224,6 +225,8 @@ POSTGRES_JSON_COLUMNS = frozenset(
         "retrieval_experiences.provenance_json",
         "retrieval_experiences.situation_json",
         "source_elements.metadata",
+        "source_paper_cards.card",
+        "source_paper_cards.raw_json",
         "source_paper_meta.keywords",
         "source_paper_meta.raw_json",
         # SQLite v84 / PostgreSQL 0064: the change log's key_json is the
@@ -530,7 +533,12 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # PostgreSQL (source_id) INCLUDE (notebook_id, is_paper), SQLite (source_id,
 # notebook_id, is_paper) -- SQLite has no INCLUDE, so the two trail as keys.
 # Index only: no table, column, FK or unique-surface change, no backfill.
+# SQLite v104 / PostgreSQL 0085 add the source_paper_cards cache table
+# (source_id primary key; FK source_id -> sources and notebook_id -> notebooks,
+# both ON DELETE CASCADE; card and raw_json jsonb; NON-UNIQUE
+# idx_source_paper_cards_nb over notebook_id). A local cache: no backfill, not
+# synced, not copied.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=103,
-    postgres_version=84,
+    sqlite_version=104,
+    postgres_version=85,
 )

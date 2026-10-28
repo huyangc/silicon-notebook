@@ -29,6 +29,7 @@ _TIMESTAMP_COLUMNS_BY_TABLE = {
     "relation_embeddings": ("created_at",),
     "source_authors": ("created_at",),
     "source_elements": ("created_at",),
+    "source_paper_cards": ("created_at", "updated_at"),
     "source_paper_meta": ("created_at", "updated_at"),
     "sources": ("created_at", "updated_at"),
 }

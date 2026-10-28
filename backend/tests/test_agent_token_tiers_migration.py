@@ -62,7 +62,7 @@ def test_upgrade_rewrites_every_token_to_tiers(repo):
     database = repo._runtime.database
     _seed_at_v88(database)
     # v90 (ask job output) and v91 (MCP ask clarification handles) follow.
-    assert SqliteMigrator(database, repo.settings).migrate() == [89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103]
+    assert SqliteMigrator(database, repo.settings).migrate() == [89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104]
     cases.assert_migrated(_snapshot(database))
 
 

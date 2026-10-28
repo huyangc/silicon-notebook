@@ -1905,6 +1905,11 @@
         "type": "index"
       },
       {
+        "name": "idx_source_paper_cards_nb",
+        "sql_sha256": "fe0fb14355730f8ae277b12b0c9c5c830a3d3125060a50c05e060858dcd562a3",
+        "type": "index"
+      },
+      {
         "name": "idx_source_paper_meta_nb",
         "sql_sha256": "abb231c48578b560f95e890b45ae80a7ee5de30a54ecec7c42d88d316373f91c",
         "type": "index"
@@ -2567,6 +2572,11 @@
       {
         "name": "source_index_backfills",
         "sql_sha256": "08d29d775eab00595f9542ef57ed2fd7111d65c2555c7942cf6158a36db4a599",
+        "type": "table"
+      },
+      {
+        "name": "source_paper_cards",
+        "sql_sha256": "1f5a61e0ab1a2e424fc6bb422fce63d5f7c0c813b5ae4104411c9688731e8950",
         "type": "table"
       },
       {
@@ -3360,6 +3370,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 103
+    "user_version": 104
   }
 }

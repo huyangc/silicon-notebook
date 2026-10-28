@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=103, postgres_version=84, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=104, postgres_version=85, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -895,9 +895,16 @@ _TABLES = (
         112,
         "timestamptz",
     ),
+    # SQLite v104 / PostgreSQL 0085: the lazily generated paper-card cache.
+    # Deliberately not copied: a card is valid only while its basis (the
+    # source's element-generation witness) matches, and the witness renders
+    # differently after the migration, so every copied card would mismatch;
+    # each environment regenerates on demand. LOCAL_EPHEMERAL, no replication
+    # key.
+    TableSpec("source_paper_cards", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 113),
 )
 
-MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)
+MANIFEST =Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)
 
 
 def _pipeline_names(value: str) -> tuple[str, ...]:

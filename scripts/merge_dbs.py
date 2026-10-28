@@ -35,7 +35,7 @@ NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # object_schemas 是部署级全局基线；notebook_object_schemas 才随 notebook 合并。
 NOTEBOOK_SCOPED_TABLES = [
-    "sources", "source_authors", "source_paper_meta", "chunks", "chunk_embeddings",
+    "sources", "source_authors", "source_paper_meta", "source_paper_cards", "chunks", "chunk_embeddings",
     "chunk_questions",
     "element_embeddings", "knowledge_objects", "knowledge_embeddings",
     "knowledge_relations", "knowledge_object_sources", "knowledge_source_facts",

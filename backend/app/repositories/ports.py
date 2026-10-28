@@ -2160,6 +2160,25 @@ class SourceStorePort(Protocol):
     def meta_sources(self, notebook_id: str, pending_source_id: str = "") -> list[dict]: ...
     def get_paper_meta(self, source_id: str, notebook_id: str) -> dict | None: ...
     def sources_missing_paper_meta(self, notebook_id: str, include_existing: bool = False) -> list[str]: ...
+    def paper_cards_for_sources(self, db: object, source_ids: Sequence[str], *, notebook_id: str) -> dict[str, dict]:
+        """Paper-card cache rows (``source_paper_cards``) for the given sources, one
+        query per ``IN_CHUNK`` batch on the CALLER's connection, narrowed to
+        ``notebook_id`` (the notebook those sources live in) like
+        ``paper_meta_for_sources``. Validity (basis / card version / still a paper)
+        is the caller's judgement; this only reads rows."""
+        ...
+    def upsert_paper_card(self, source_id: str, notebook_id: str, *, basis: str, card_version: int, status: str, card: dict, raw_json: dict, model: str) -> bool:
+        """Write one paper card; returns whether a row was written. Lock order of
+        ``upsert_paper_meta`` (notebook, then source ``FOR KEY SHARE``, ownership
+        checked; ``KeyError`` when the source is gone). Conditional: a ``failed``
+        write never overwrites a ``ready`` row of the same basis and card version;
+        ``attempts`` is incremented in SQL on ``failed`` and reset on ``ready``."""
+        ...
+    def source_element_generation_utc(self, source_id: str) -> str:
+        """``MAX(source_elements.created_at)`` of the source as a UTC ISO string on
+        both backends (``""`` without elements): the paper cards' ``basis``,
+        independent of the PostgreSQL session time zone."""
+        ...
     def visible_document_count(self, notebook_id: str) -> int: ...
 
 

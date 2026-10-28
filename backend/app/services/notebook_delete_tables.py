@@ -301,6 +301,9 @@ _GROUP_D_STANDALONE: tuple[DirectTable, ...] = (
     # untouched by construction rather than by a special case.
     DirectTable("retrieval_experiences", "one", pk_column="id"),
     DirectTable("source_authors", "one", pk_column="id"),
+    # SQLite v104 / PostgreSQL 0085: the paper-card cache. A-class: cascades
+    # with the notebook; one row per source, keyed by source_id.
+    DirectTable("source_paper_cards", "one", pk_column="source_id"),
     DirectTable("source_index_backfills", "one", pk_column="notebook_id"),
     DirectTable("unified_kg_state", "one", pk_column="notebook_id"),
 )
@@ -354,7 +357,10 @@ assert len(CURSOR_KEYS) == len(set(CURSOR_KEYS)), "PHASE_3_PLAN cursor keys must
 # 69 since SQLite v97 / PostgreSQL 0077: `kg_analysis_findings` and
 # `kg_analysis_marks`, two A-class tables (ON DELETE CASCADE from
 # `notebooks`) cleared by form two like the other analysis products.
-EXPECTED_PHASE_3_TABLE_COUNT = 69
+#
+# 70 since SQLite v104 / PostgreSQL 0085: `source_paper_cards`, an A-class table
+# (ON DELETE CASCADE from `notebooks`) cleared by form one, keyed by source_id.
+EXPECTED_PHASE_3_TABLE_COUNT = 70
 
 
 def phase_3_table_names() -> frozenset[str]:

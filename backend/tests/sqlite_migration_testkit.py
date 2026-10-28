@@ -44,10 +44,19 @@ V78_AUTH_TABLES = {
 }
 
 
+def rollback_v104(db: sqlite3.Connection) -> None:
+    """Remove what SQLite migration 104 added: the ``source_paper_cards`` table
+    with ``idx_source_paper_cards_nb``. Callers lower ``user_version``
+    themselves."""
+    db.execute("DROP INDEX idx_source_paper_cards_nb")
+    db.execute("DROP TABLE source_paper_cards")
+
+
 def rollback_v103(db: sqlite3.Connection) -> None:
     """Remove what SQLite migration 103 added: the covering index
-    ``idx_source_paper_meta_source_nb``. Callers lower ``user_version``
-    themselves."""
+    ``idx_source_paper_meta_source_nb``. v104 is undone first
+    (newest-first). Callers lower ``user_version`` themselves."""
+    rollback_v104(db)
     db.execute("DROP INDEX idx_source_paper_meta_source_nb")
 
 

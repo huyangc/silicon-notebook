@@ -453,6 +453,8 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(PG_EXP, BATCHED, "source ids, IN_CHUNK per statement"),),
     ("postgres/source_store.py", "SourceStore.paper_meta_for_sources"): (
         s(PG_EXP, BATCHED, "source ids, IN_CHUNK per statement"),),
+    ("postgres/source_store.py", "SourceStore.paper_cards_for_sources"): (
+        s(PG_EXP, BATCHED, "source ids, IN_CHUNK per statement"),),
     ("postgres/unified_kg_store.py", "UnifiedKgStore.cluster_evidence_rows"): (
         s(PG_EXP, BATCHED, "seed ids of one cluster batch"),),
     ("postgres/unified_kg_store.py", "UnifiedKgStore.reap_derived_generations_page"): (
@@ -793,6 +795,8 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
     ("sqlite/source_store.py", "SourceStore.sources_from_rows"): (
         s(SQ_EXP, BATCHED, "source ids, one batch per statement"),),
     ("sqlite/source_store.py", "SourceStore.paper_meta_for_sources"): (
+        s(SQ_EXP, BATCHED, "source ids, one batch per statement"),),
+    ("sqlite/source_store.py", "SourceStore.paper_cards_for_sources"): (
         s(SQ_EXP, BATCHED, "source ids, one batch per statement"),),
     ("sqlite/unified_kg_store.py", "UnifiedKgStore.cluster_evidence_rows"): (
         s(SQ_EXP, BATCHED, "seed ids of one cluster batch"),),
