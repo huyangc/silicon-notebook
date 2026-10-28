@@ -23,8 +23,10 @@ Two legs over ONE source set (§5.2):
 
 Tiering (§5.3) exposes no float: ``strong`` / ``related`` from the matched
 fields, the word-boundary rule and two configured relevance lines that apply on
-the lanes with a semantic signal only; on the FTS-degraded lane a passage-only
-source needs two hits to be ``related``.  The order is total and deterministic,
+passages whose relevance carries a semantic signal only; without one (the
+FTS-degraded lane, or a semantic lane whose passages carried no vector
+similarity -- no query embedding, unembedded passages) a passage-only source
+needs two hits to be ``related``.  The order is total and deterministic,
 so a page is recomputed on every call and the cursor is just an offset plus a
 fingerprint of the parameters (any change invalidates it).  Within one
 retrieval run the ranked list is memoized by that fingerprint
@@ -91,6 +93,13 @@ FIND_SOURCES_SCOPES = ("all", "current_notebook")
 FIND_SOURCES_TIERS = ("strong", "related")
 #: The lane on which a fused relevance carries no semantic signal.
 LEXICAL_ONLY_LANE = "fts_degraded"
+#: Appended to a semantic lane (``baseline`` / ``ann``) whose returned passages
+#: carried no vector similarity at all (the query embedding or the passages'
+#: vectors were unavailable): what ran, and that its evidence was lexical only.
+NO_VECTOR_LANE_SUFFIX = ":lexical_only"
+#: ``RetrievalSupport.origin`` values whose score is a vector similarity that
+#: ``score_chunks`` folded into the passage's fused relevance.
+VECTOR_SUPPORT_ORIGINS = frozenset({"semantic", "generated_question"})
 #: Passages a passage-only source needs on the lexical-only lane.
 LEXICAL_LANE_MIN_HITS = 2
 
@@ -155,7 +164,9 @@ class FindSourcesResult:
     lexical_complete: bool
     semantic_recall_capped: bool
     next_cursor: str
-    #: ``{notebook_id: lane}`` of the libraries the semantic leg read.
+    #: ``{notebook_id: lane}`` of the libraries the semantic leg read; a
+    #: semantic lane whose passages carried no vector similarity is reported
+    #: with ``NO_VECTOR_LANE_SUFFIX`` (e.g. ``baseline:lexical_only``).
     lanes: Mapping[str, str]
     #: Eligible papers without extracted metadata that a year / venue / author
     #: filter excluded (they cannot be judged), design §5.4.
@@ -185,8 +196,12 @@ class _Library:
 @dataclass
 class _Candidate:
     row: Dict[str, Any]
+    #: The owning library's lane (as reported in ``lanes``).
     lane: str = ""
     best: Optional[float] = None
+    #: The best relevance among passages that carried a vector similarity
+    #: (``None``: no semantic evidence -- the lexical-only rule applies).
+    semantic_best: Optional[float] = None
     hits: int = 0
     passage: Optional[RetrievedChunk] = None
     tier: str = ""
@@ -255,25 +270,40 @@ def paper_card_status(
 
 def _tier(
     matches: Mapping[str, bool],
-    best: Optional[float],
+    semantic_best: Optional[float],
     hits: int,
-    lane: str,
     *,
     strong_line: float,
     related_line: float,
 ) -> str:
-    semantic = lane != LEXICAL_ONLY_LANE and best is not None
+    """The relevance lines read ``semantic_best`` only: a keyword-only fused
+    relevance (``score_chunks`` renormalizes it to 0..1, so one mention scores
+    1.0) is no semantic support.  A source without semantic evidence takes the
+    lexical-only rule whatever lane ran."""
     if any(matches.get(field) is True for field in STRONG_FIELDS):
         return "strong"
-    if semantic and best >= strong_line:
+    if semantic_best is not None and semantic_best >= strong_line:
         return "strong"
     if matches:
         return "related"
-    if semantic and best >= related_line:
-        return "related"
-    if lane == LEXICAL_ONLY_LANE and hits >= LEXICAL_LANE_MIN_HITS:
+    if semantic_best is not None:
+        return "related" if semantic_best >= related_line else ""
+    if hits >= LEXICAL_LANE_MIN_HITS:
         return "related"
     return ""
+
+
+def _vector_supported(chunk: RetrievedChunk) -> bool:
+    """Whether a vector similarity contributed to this passage's relevance --
+    read from the producer's own evidence, not from the lane's name."""
+    return any(
+        support.origin in VECTOR_SUPPORT_ORIGINS
+        for support in chunk.retrieval_supports
+    )
+
+
+def _lexical_only(lane: str) -> bool:
+    return lane == LEXICAL_ONLY_LANE or lane.endswith(NO_VECTOR_LANE_SUFFIX)
 
 
 def _year_key(value: Optional[int]) -> Tuple[bool, int]:
@@ -637,6 +667,11 @@ class SourceFinder:
                 candidate.lane = read.lane
                 candidate.hits += 1
                 relevance = float(chunk.relevance)
+                if not _lexical_only(read.lane) and _vector_supported(chunk) and (
+                    candidate.semantic_best is None
+                    or relevance > candidate.semantic_best
+                ):
+                    candidate.semantic_best = relevance
                 if (
                     candidate.best is None or relevance > candidate.best
                     or (relevance == candidate.best
@@ -695,8 +730,13 @@ class SourceFinder:
             [row["source_id"] for row in rows],
             peer=peer, narrowed=read.narrowed,
         )
+        if (
+            chunks and lane != LEXICAL_ONLY_LANE
+            and not any(_vector_supported(chunk) for chunk in chunks)
+        ):
+            lane = f"{lane}{NO_VECTOR_LANE_SUFFIX}"
         capped = len(chunks) >= recall and (
-            lane == LEXICAL_ONLY_LANE
+            _lexical_only(lane)
             or min(float(chunk.relevance) for chunk in chunks)
             >= float(self._settings.find_sources_related_relevance)
         )
@@ -782,8 +822,8 @@ class SourceFinder:
         kept = []
         for candidate in candidates.values():
             candidate.tier = _tier(
-                candidate.row["matches"], candidate.best, candidate.hits,
-                candidate.lane, strong_line=strong_line, related_line=related_line,
+                candidate.row["matches"], candidate.semantic_best, candidate.hits,
+                strong_line=strong_line, related_line=related_line,
             )
             if candidate.tier:
                 kept.append(candidate)

@@ -51,7 +51,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.services.paper_card_service import parse_model_object
-from app.services.source_finder import FindSourcesRequest, SourceFinder, _tier
+from app.services.source_finder import (
+    FindSourcesRequest,
+    SourceFinder,
+    _lexical_only,
+    _tier,
+)
 
 LABEL_FILE_VERSION = 1
 LABELS = ("strong", "related", "unrelated")
@@ -161,6 +166,7 @@ class _RecordingFinder(SourceFinder):
                 "source_id": c.row["source_id"],
                 "notebook_id": c.row["notebook_id"],
                 "best": c.best,
+                "semantic_best": c.semantic_best,
                 "hits": c.hits,
                 "lane": c.lane,
                 "matches": dict(c.row["matches"]),
@@ -360,6 +366,18 @@ def _labelled(data: Mapping[str, Any]) -> List[Tuple[str, Mapping[str, Any]]]:
     ]
 
 
+def _semantic_best(candidate: Mapping[str, Any]) -> Optional[float]:
+    """The relevance the lines read: the recorded ``semantic_best`` (best
+    among passages with a vector similarity); a label file written before it
+    was recorded falls back to ``best`` on a lane that is not lexical-only."""
+    if "semantic_best" in candidate:
+        value = candidate["semantic_best"]
+        return None if value is None else float(value)
+    if candidate.get("best") is None or _lexical_only(str(candidate.get("lane") or "")):
+        return None
+    return float(candidate["best"])
+
+
 def evaluate(data: Mapping[str, Any], strong_line: float, related_line: float) -> Dict[str, Any]:
     """Topic recall (labelled strong + related placed in any tier) and the
     precision of the strong tier, pooled over topics, plus per-topic recall."""
@@ -367,8 +385,8 @@ def evaluate(data: Mapping[str, Any], strong_line: float, related_line: float) -
     per_topic: Dict[str, List[int]] = {}
     for topic_id, candidate in _labelled(data):
         tier = _tier(
-            candidate["matches"], candidate["best"], int(candidate["hits"]),
-            str(candidate["lane"] or ""), strong_line=strong_line, related_line=related_line,
+            candidate["matches"], _semantic_best(candidate), int(candidate["hits"]),
+            strong_line=strong_line, related_line=related_line,
         )
         positive = candidate["label"] in ("strong", "related")
         bucket = per_topic.setdefault(topic_id, [0, 0])

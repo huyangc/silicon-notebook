@@ -92,7 +92,8 @@ def test_candidates_write_the_scored_sets_without_a_chat_model(corpus, tmp_path)
         for candidate in topic["candidates"]:
             assert candidate["source_id"] in by_source
             assert (candidate["label"], candidate["prelabel"], candidate["reviewed"]) == (None, None, False)
-            assert set(candidate) >= {"best", "hits", "lane", "matches", "title"}
+            assert set(candidate) >= {
+                "best", "semantic_best", "hits", "lane", "matches", "title"}
         # The labelled strong papers of the topic are among its candidates.
         strong = set(load_labels()[topic["id"]]["strong"])
         found = {by_source[c["source_id"]] for c in topic["candidates"]}
@@ -178,6 +179,19 @@ def test_sweep_picks_the_highest_related_and_lowest_strong_line():
     assert chosen["recall"] == 1.0 and chosen["strong_precision"] == 1.0
     recalls = [values["recall"] for _line, values in result["related_curve"]]
     assert recalls == sorted(recalls, reverse=True)
+
+
+def test_the_lines_read_only_semantic_evidence():
+    # A keyword-only 0.95 (no vector similarity) is not "strong" at any line;
+    # a label file without ``semantic_best`` keeps reading ``best`` per lane.
+    data = _labels(
+        (0.95, "strong", "baseline:lexical_only", {}),
+        (0.95, "strong", "baseline", {}),
+        (0.95, "strong", "fts_degraded", {}),
+    )
+    data["topics"][0]["candidates"][0]["semantic_best"] = None
+    result = calibrate.evaluate(data, 0.7, 0.3)
+    assert result["recall"] == pytest.approx(1 / 3)
 
 
 def test_sweep_reports_out_of_reach_targets(tmp_path):

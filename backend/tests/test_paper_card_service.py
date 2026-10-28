@@ -835,6 +835,10 @@ def test_a_waiter_adopts_the_leaders_terminal_status(repo, nb, service, model):
     assert (results["a"].status, results["a"].reason) == ("failed", "model_error:provider_auth")
     assert (results["b"].status, results["b"].reason) == ("failed", "model_error:provider_auth")
     assert model.card_calls == 1
+    # Only the leader's reservation is charged: the waiter adopted the outcome,
+    # never its ``calls`` (it would spend the waiter's run budget a second time).
+    assert results["a"].calls == 1
+    assert results["b"].calls == 0
     assert _card_row(repo, nb, "s1") is None
 
 
@@ -855,6 +859,7 @@ def test_a_waiter_adopts_the_leaders_not_paper(repo, nb, service, model):
     waiter.join(5)
     assert results["a"].status == results["b"].status == "not_paper"
     assert model.meta_calls == 1
+    assert results["a"].calls >= 1 and results["b"].calls == 0
 
 
 def test_a_round_that_fails_to_start_releases_its_flights(repo, nb, service, model, monkeypatch):
