@@ -26,7 +26,8 @@ from app.core.model_values import as_text
 #    截短值,升版让它们在读取时失效、按需重生成。
 # 4:所有文字字段(tldr/problem/method/contributions/unit/dataset name)的截短也
 #    数字安全:v3 卡片的散文字段可能在数字中间被切(85.23% 存成 85),读取时失效。
-PAPER_CARD_VERSION = 4
+# 5:上标指数(10⁵)按 ``^5`` 接地、截短时整体保留;v4 卡片可能把 ``105`` 错接到 ``10⁵``。
+PAPER_CARD_VERSION = 5
 
 # 示例里不写 null、空列表只给字符串列表字段(本 hint 一个都没有,所以每个列表都
 # 给一个示例项):否则严格 schema 投影整体回落 JSON 模式(json-hint-strict-alignment)。
@@ -168,9 +169,16 @@ def _canonical_number(token: str) -> str:
     return f"{whole}.{frac}" if frac else whole
 
 
+_SUPERSCRIPT_RUN_RE = re.compile("[⁺⁻⁰¹²³⁴-⁹]+")
+_SUPERSCRIPT_DIGITS = str.maketrans(
+    "⁺⁻⁰¹²³⁴⁵⁶⁷⁸⁹", "+-0123456789")
+
+
 def _normalize_numeric_text(text: str) -> str:
-    """全角转半角(NFKC)、统一减号并去千分位逗号。"""
-    normalized = unicodedata.normalize("NFKC", text or "")
+    """上标指数写成 ``^`` 形式(NFKC 会把 ``10⁵`` 直接并成 ``105``,既让 ``3×10^5`` 对不上、
+    又让 ``105`` 错接到 ``10⁵``),再全角转半角(NFKC)、统一减号并去千分位逗号。"""
+    text = _SUPERSCRIPT_RUN_RE.sub(lambda m: "^" + m.group(0).translate(_SUPERSCRIPT_DIGITS), text or "")
+    normalized = unicodedata.normalize("NFKC", text)
     for dash in ("\u2212", "\u2013", "\u2014"):
         normalized = normalized.replace(dash, "-")
     return _THOUSANDS_RE.sub("", normalized)
@@ -315,13 +323,17 @@ def _cap(text: str, limit: int) -> str:
 
 
 _SPAN_NUMBER = r"(?:\d[\d,]*(?:\.\d+)?|\.\d+)"
+# 上标指数(10⁵、10⁻³):与 ``^5`` 同义,截断时同样属于整个数。
+_SUPERSCRIPT_EXPONENT = "[⁺⁻]?[⁰¹²³⁴-⁹]+"
 # 一个完整的数值表达式:普通数、科学计数法(1.2e-3)、乘幂(3×10^5、10^-5)、
 # 正负误差(85.2±0.3)。截断时整段视为一个数,切点落在里面就退到整段之前。
 _NUMBER_SPAN_RE = re.compile(
     rf"[-+−]?{_SPAN_NUMBER}"
     rf"(?:\s*(?:[eE][-+−]?\d+"
     rf"|[×xX*·]\s*10\s*(?:\^|\*\*)\s*[-+−]?\d+"
+    rf"|[×xX*·]\s*10\s*{_SUPERSCRIPT_EXPONENT}"
     rf"|\^\s*[-+−]?\d+"
+    rf"|{_SUPERSCRIPT_EXPONENT}"
     rf"|±\s*{_SPAN_NUMBER}))*"
 )
 

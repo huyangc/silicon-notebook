@@ -307,8 +307,9 @@ def test_prompt_keeps_metrics_to_the_papers_own_method():
 def test_the_card_version_follows_the_number_safe_prose_rule():
     """v3: a metric value is bounded (number-safe) before it is grounded; v4:
     every prose field is bounded number-safe too, so v3 cards that may hold a
-    cut prose number are invalidated on read."""
-    assert PAPER_CARD_VERSION == 4
+    cut prose number are invalidated on read; v5: superscript exponents ground
+    as ``^n`` and are kept whole when clipping."""
+    assert PAPER_CARD_VERSION == 5
 
 
 def test_prompt_carries_the_input_block():
@@ -461,6 +462,32 @@ def test_cap_number_safe_never_splits_a_numeric_expression(value, limit, expecte
     ("-.5", "delta of 0.5", "value_not_in_anchor"),
 ])
 def test_leading_dot_decimals_are_numbers(value, text, verdict):
+    from app.services.paper_cards import ground_prose_numbers, ground_value
+
+    assert ground_value(value, text) == verdict
+    assert ground_prose_numbers(value, text) == verdict
+
+
+
+@pytest.mark.parametrize(("value", "limit", "expected"), [
+    ("error 3\u00d710\u2075 units", 10, "error"),          # codex round 11 repro
+    ("error 3\u00d710\u2075 units", 11, "error 3\u00d710\u2075"),
+    ("lr 10\u207b\u00b3 used", 5, "lr"),
+    ("lr 10\u207b\u00b3 used", 7, "lr 10\u207b\u00b3"),
+])
+def test_cap_number_safe_keeps_superscript_exponents_whole(value, limit, expected):
+    from app.services.paper_cards import cap_number_safe
+
+    assert cap_number_safe(value, limit) == expected
+
+
+@pytest.mark.parametrize(("value", "text", "verdict"), [
+    ("3\u00d710^5", "error 3\u00d710\u2075 units", ""),
+    ("10^-3", "lr 10\u207b\u00b3", ""),
+    ("105", "error 10\u2075 units", "value_not_in_anchor"),   # NFKC alone would merge 10\u2075 into 105
+    ("3\u00d710^6", "error 3\u00d710\u2075", "value_not_in_anchor"),
+])
+def test_superscript_exponents_ground_as_powers(value, text, verdict):
     from app.services.paper_cards import ground_prose_numbers, ground_value
 
     assert ground_value(value, text) == verdict
