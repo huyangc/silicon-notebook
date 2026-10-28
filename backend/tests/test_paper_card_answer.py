@@ -300,8 +300,41 @@ def test_pages_of_one_request_are_not_counted_twice_but_two_requests_are_merged(
         handles=("p3",))
     paper = _evidence(_tools(finds=[page1, page2, other],
                              cards=[_card_outcome("nb", "s1", "A", _card("s1"))]))
-    # 3(第一种请求,两页共用计数)+ 1(第二种)- 1(s1 两边都出现)。
-    assert "共找到 3 篇相关论文（强相关 3 篇、相关 0 篇）" in paper.coverage
+    # 第一种请求两页共用计数(3 篇,只取回 2 篇):未取全时各次的重叠未知,
+    # 不把 3 + 1 当精确值,只报下界与各次计数。
+    assert paper.coverage.startswith(
+        "> 至少找到 3 篇相关论文（2 次检索分别找到 3、1 篇，彼此可能重叠），")
+    assert "共找到" not in paper.coverage
+
+
+def _other_request(items, *, query="另一个主题", strong=None, related=None, next_cursor=""):
+    base = _find(items, strong=strong, related=related, next_cursor=next_cursor)
+    return FoundSourcesOutcome(request=FindSourcesRequest(query=query),
+                               result=base.result, handles=base.handles)
+
+
+def test_two_requests_overlapping_past_their_fetched_pages_report_a_lower_bound():
+    # 两次检索都命中同样的 30 篇、都只取回前 20 篇:相加减去已见重叠会报 40,
+    # 真实只有 30 篇。
+    first20 = [_found("nb", f"s{i}", f"论文{i}") for i in range(20)]
+    one = _find(first20, strong=30, related=0, next_cursor="c")
+    two = _other_request(first20, strong=30, related=0, next_cursor="c")
+    paper = _evidence(_tools(finds=[one, two],
+                             cards=[_card_outcome("nb", "s1", "论文1", _card("s1"))]))
+    assert paper.coverage.startswith(
+        "> 至少找到 30 篇相关论文（2 次检索分别找到 30、30 篇，彼此可能重叠），")
+    assert "40" not in paper.coverage
+    assert "后续页" in paper.coverage
+
+
+def test_two_requests_fetched_whole_report_their_exact_union_under_the_best_tier():
+    one = _find([_found("nb", "s1", "A"), _found("nb", "s2", "B", tier="related")])
+    two = _other_request([_found("nb", "s2", "B"), _found("nb", "s3", "C", tier="related")])
+    paper = _evidence(_tools(finds=[one, two],
+                             cards=[_card_outcome("nb", "s1", "A", _card("s1"))]))
+    # s2 两边都有、按最好的档位(strong)算一次:并集 3 篇 = 强相关 2 + 相关 1。
+    assert paper.coverage == ("> 共找到 3 篇相关论文（强相关 2 篇、相关 1 篇），"
+                              "其中 1 篇展开了要点。")
 
 
 def test_prose_layout_registers_without_a_table_and_leaves_the_answer_alone():

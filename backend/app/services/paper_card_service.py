@@ -574,9 +574,11 @@ class PaperCardService:
                 continue
             outcome = flight.result
             if outcome is not None and outcome.status in _TERMINAL_WITHOUT_CARD:
+                # The leader's reservation is the leader's: this waiter made no
+                # call, so its run budget is not charged (``calls=0``).
                 results[plan.key] = dataclasses.replace(
                     outcome, notebook_id=plan.notebook_id, source_id=plan.source_id,
-                    elapsed_ms=_ms(started[plan.key]),
+                    elapsed_ms=_ms(started[plan.key]), calls=0,
                 )
             else:
                 recheck.setdefault(plan.notebook_id, []).append(plan)

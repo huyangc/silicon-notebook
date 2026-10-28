@@ -45,6 +45,12 @@ test_semantic_tiers_use_the_configured_lines = (
 test_the_lexical_only_lane_needs_two_passages_and_ignores_the_lines = (
     cases.test_the_lexical_only_lane_needs_two_passages_and_ignores_the_lines)
 test_the_order_is_total_and_deterministic = cases.test_the_order_is_total_and_deterministic
+test_a_semantic_lane_without_vectors_tiers_like_the_lexical_only_lane = (
+    cases.test_a_semantic_lane_without_vectors_tiers_like_the_lexical_only_lane)
+test_only_passages_with_a_vector_similarity_reach_the_relevance_lines = (
+    cases.test_only_passages_with_a_vector_similarity_reach_the_relevance_lines)
+test_an_unembedded_query_on_the_small_library_lane_is_not_strong = (
+    cases.test_an_unembedded_query_on_the_small_library_lane_is_not_strong)
 test_a_pure_filter_lists_every_source_strong_by_year = (
     cases.test_a_pure_filter_lists_every_source_strong_by_year)
 test_the_cursor_pages_and_dies_with_any_parameter_change = (

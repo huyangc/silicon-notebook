@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 import pytest
 
 from app.core.config import Settings
-from app.domain.retrieval import RetrievedChunk
+from app.domain.retrieval import RetrievalSupport, RetrievedChunk
 from app.domain.vector_index import encode_vector
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
@@ -70,11 +70,17 @@ def repo(tmp_path, monkeypatch):
 
 
 class FakeRetrieval:
-    """``retrieve_chunks_in_sources`` with scripted relevances per source."""
+    """``retrieve_chunks_in_sources`` with scripted relevances per source.
 
-    def __init__(self, lane: str = "baseline", relevance=None):
+    Like the real producers, a passage carries a ``semantic`` support when a
+    vector similarity contributed to its relevance: on every lane but the
+    FTS-degraded one, unless ``vectors`` is false or names the sources whose
+    passages had one."""
+
+    def __init__(self, lane: str = "baseline", relevance=None, *, vectors=True):
         self.lane = lane
         self.relevance = dict(relevance or {})
+        self.vectors = vectors
         self.calls: list = []
         self.flags: list = []
 
@@ -89,12 +95,21 @@ class FakeRetrieval:
                 text=f"passage {index} of {source_id}",
                 element_ids=[f"el-{source_id}-{index}"],
                 score=value, relevance=value,
+                retrieval_supports=(RetrievalSupport(
+                    "semantic" if self._vector(source_id) else "lexical",
+                    "chunk", f"{source_id}-c{index}", value,
+                ),),
             )
             for source_id in allowed
             for index, value in enumerate(self.relevance.get(source_id, ()))
         ]
         out.sort(key=lambda chunk: (-chunk.relevance, chunk.chunk_id))
         return out[:recall], self.lane
+
+    def _vector(self, source_id: str) -> bool:
+        if self.lane == "fts_degraded" or not self.vectors:
+            return False
+        return self.vectors is True or source_id in self.vectors
 
 
 def _finder(instance, retrieval=None, *, enumeration=None, sources=None,
@@ -246,6 +261,47 @@ def test_the_lexical_only_lane_needs_two_passages_and_ignores_the_lines(repo):
         query="diffusion", terms=("diffusion",), kind="all"))
     # One high-relevance passage is not "strong" without a semantic signal.
     assert _tiers(result) == {"s-meta": "strong", "s-two": "related"}
+
+
+def test_a_semantic_lane_without_vectors_tiers_like_the_lexical_only_lane(repo):
+    instance, nb, *_ = repo
+    for sid in ("s-one", "s-two", "s-meta"):
+        _source(instance, nb, sid)
+    _meta(instance, nb, "s-meta", keywords=["gan"])
+    fake = FakeRetrieval("baseline", {
+        "s-one": [1.0], "s-two": [BELOW, BELOW], "s-meta": [ABOVE],
+    }, vectors=False)
+    result = _finder(instance, fake).find(nb, FindSourcesRequest(
+        query="GAN", terms=("gan",), kind="all"))
+    # A keyword-only relevance of 1.0 is not semantic support.
+    assert _tiers(result) == {"s-meta": "strong", "s-two": "related"}
+    assert result.lanes == {nb: "baseline:lexical_only"}
+
+
+def test_only_passages_with_a_vector_similarity_reach_the_relevance_lines(repo):
+    instance, nb, *_ = repo
+    for sid in ("s-vec", "s-novec", "s-novec-two"):
+        _source(instance, nb, sid)
+    fake = FakeRetrieval("ann", {
+        "s-vec": [BETWEEN], "s-novec": [1.0], "s-novec-two": [ABOVE, ABOVE],
+    }, vectors={"s-vec"})
+    result = _finder(instance, fake).find(
+        nb, FindSourcesRequest(query="GAN", kind="all"))
+    assert _tiers(result) == {"s-vec": "related", "s-novec-two": "related"}
+    assert result.lanes == {nb: "ann"}         # some passages had vectors
+
+
+def test_an_unembedded_query_on_the_small_library_lane_is_not_strong(repo, monkeypatch):
+    # The real baseline lane with the query embedding unavailable: one passage
+    # mentioning "GAN" scores keyword coverage 1.0 alone.
+    instance, nb, *_ = repo
+    _source(instance, nb, "s-once", title="training notes",
+            texts=["we compare our method against a GAN on faces " * 4])
+    monkeypatch.setattr(instance.retrieval.candidates, "_embed_query", lambda _q: None)
+    result = _finder(instance).find(nb, FindSourcesRequest(query="GAN", kind="all"))
+    assert result.lanes == {nb: "baseline:lexical_only"}
+    # One lexical passage: no semantic support, below the two-passage rule.
+    assert _tiers(result) == {}
 
 
 def test_the_order_is_total_and_deterministic(repo):

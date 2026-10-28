@@ -643,8 +643,13 @@ def _tier_rank(tier: str) -> int:
 def coverage_line(tools: Any, paper: PaperCardEvidence) -> str:
     """The line that leads a paper-table answer (spec §7.3).
 
-    Counts: each distinct request's last page (pages share their counts); a
-    paper listed by two requests is counted once, under its best tier.
+    Counts: each distinct request's last page (pages share their counts).
+    One request: its exact counts.  Several requests: when every one of them
+    was fetched whole (its listed papers are all its counted papers), the exact
+    union, a paper listed twice counted once under its best tier; otherwise
+    their overlap beyond the fetched pages is unknown, so the line says "至少
+    N 篇" -- N the larger of the largest single count and the fetched union --
+    and names each request's own count instead of an inexact sum.
     "展开" counts the inline rows find_sources listed; rows read straight from
     a source are named apart.  Extracted fields past the table width are named
     rather than dropped silently."""
@@ -658,35 +663,38 @@ def coverage_line(tools: Any, paper: PaperCardEvidence) -> str:
         return (f"> 本表展开了 {len(inline)} 篇文档的要点（本轮没有做文档级检索，"
                 "不代表已列全）。" + overflow)
     groups = _find_groups(finds)
-    strong = sum(int(group[-1].result.strong or 0) for group in groups)
-    related = sum(int(group[-1].result.related or 0) for group in groups)
+    totals = [
+        int(group[-1].result.strong or 0) + int(group[-1].result.related or 0)
+        for group in groups
+    ]
     sightings: dict = {}
-    for group in groups:
+    whole = True
+    for group, group_total in zip(groups, totals):
         tiers: dict = {}
         for outcome in group:
             for item in outcome.result.items:
                 tiers.setdefault((item.notebook_id, item.source_id), item.tier)
+        whole = whole and len(tiers) >= group_total
         for key, tier in tiers.items():
             sightings.setdefault(key, []).append(tier)
-    for tiers in sightings.values():
-        if len(tiers) < 2:
-            continue
-        # Take every sighting out of its own tier, then count the paper once
-        # under the best one.
-        for tier in tiers:
-            if tier == "strong":
-                strong -= 1
-            else:
-                related -= 1
-        if min(_tier_rank(t) for t in tiers) == 0:
-            strong += 1
-        else:
-            related += 1
-    strong, related = max(0, strong), max(0, related)
-    total = max(strong + related, len(sightings))
+    noun = "文档" if any(getattr(o.request, "kind", "") == "all" for o in finds) else "论文"
+    if len(groups) == 1:
+        strong = int(groups[0][-1].result.strong or 0)
+        related = int(groups[0][-1].result.related or 0)
+        found = f"共找到 {strong + related} 篇相关{noun}（强相关 {strong} 篇、相关 {related} 篇）"
+    elif whole:
+        strong = sum(
+            1 for tiers in sightings.values()
+            if min(_tier_rank(t) for t in tiers) == 0
+        )
+        related = len(sightings) - strong
+        found = f"共找到 {len(sightings)} 篇相关{noun}（强相关 {strong} 篇、相关 {related} 篇）"
+    else:
+        least = max(max(totals), len(sightings))
+        found = (f"至少找到 {least} 篇相关{noun}（{len(groups)} 次检索分别找到 "
+                 + "、".join(str(total) for total in totals) + " 篇，彼此可能重叠）")
     expanded = sum(1 for row in inline if (row.notebook_id, row.source_id) in sightings)
     direct = len(inline) - expanded
-    noun = "文档" if any(getattr(o.request, "kind", "") == "all" for o in finds) else "论文"
     gaps: list[str] = []
     for outcome in finds:
         for gap in find_coverage_gaps(outcome.result):
@@ -694,7 +702,7 @@ def coverage_line(tools: Any, paper: PaperCardEvidence) -> str:
                 gaps.append(gap)
     if any(group[-1].result.next_cursor for group in groups):
         gaps.append("检索结果还有后续页没有取回")
-    line = (f"> 共找到 {total} 篇相关{noun}（强相关 {strong} 篇、相关 {related} 篇），"
+    line = (f"> {found}，"
             f"其中 {expanded} 篇展开了要点"
             + (f"（另有 {direct} 篇直接按来源读取）" if direct else "") + "。")
     if gaps:
