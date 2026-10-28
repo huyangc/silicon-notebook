@@ -68,7 +68,23 @@ CONVERTER_CASES = [
     # fractions
     ("frac_bar", [frac(r("a"), r("b"))], r"\frac{a}{b}"),
     ("frac_linear", [frac(r("a"), r("b"), kind="lin")], "a/b"),
-    ("frac_skewed", [frac(r("x+1"), r("2"), kind="skw")], "{x+1}/2"),
+    # linear / skewed fractions: compound operands keep a *visible* group
+    # (`{x+1}/2` would render as x+1/2); bare operands stay bare
+    ("frac_skewed", [frac(r("x+1"), r("2"), kind="skw")], r"\left(x+1\right)/2"),
+    ("frac_linear_compound_denominator", [frac(r("a"), r("b+c"), kind="lin")], r"a/\left(b+c\right)"),
+    ("frac_linear_both_compound", [frac(r("a-b"), r("2c"), kind="lin")], r"\left(a-b\right)/\left(2c\right)"),
+    ("frac_skewed_numbers", [frac(r("12"), r("7.5"), kind="skw")], "12/7.5"),
+    ("frac_linear_command", [frac(r("α"), r("2"), kind="lin")], r"\alpha/2"),
+    (
+        "frac_linear_already_bracketed",
+        [frac(delim(r("x+1")), r("2"), kind="lin")],
+        r"\left( x+1 \right)/2",
+    ),
+    (
+        "frac_linear_two_groups_get_brackets",
+        [frac(delim(r("a")) + delim(r("b")), r("2"), kind="lin")],
+        r"\left(\left( a \right)\left( b \right)\right)/2",
+    ),
     ("frac_no_bar", [frac(r("n"), r("k"), kind="noBar")], r"\genfrac{}{}{0pt}{}{n}{k}"),
     # scripts
     ("superscript", [ssup(r("x"), r("2"))], "x^{2}"),
@@ -750,3 +766,67 @@ def test_math_free_documents_never_reach_the_math_machinery(tmp_path, monkeypatc
     # The raw-XML path must decide on the part bytes alone.
     monkeypatch.setattr(parsers_module, "contains_omml", boom)
     assert [el.text for el in parse_pptx_basic("s1", pptx)] == ["Costs $5", "Speaker note"]
+
+
+# --- follow-up: self-closing math roots ---------------------------------------
+
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+@pytest.mark.parametrize("root", ["<m:oMath/>", "<m:oMath />", "<m:oMathPara/>", "<m:oMathPara />"])
+@pytest.mark.parametrize("closer", ["</w:p>", "</w:tc>", "</w:body>", "</w:hyperlink>"])
+def test_self_closing_math_root_before_a_closing_tag_keeps_the_part_well_formed(root, closer):
+    """Expat's index for a self-closing root points past it, at whatever comes
+    next; when that is a closing tag it must not be taken for the root's own."""
+    from app.services.omml import _rewrite_docx_part
+
+    real = "<w:p><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></w:p>"
+    bodies = {
+        "</w:p>": f"<w:p><w:r><w:t>a</w:t></w:r>{root}</w:p>{real}",
+        "</w:tc>": f"<w:tbl><w:tr><w:tc><w:p/>{root}</w:tc></w:tr></w:tbl>{real}",
+        "</w:body>": f"{real}{root}",
+        "</w:hyperlink>": f"<w:p><w:hyperlink><w:r><w:t>l</w:t></w:r>{root}</w:hyperlink></w:p>{real}",
+    }
+    xml = f'<w:document xmlns:w="{_W_NS}" xmlns:m="{M_NS}"><w:body>{bodies[closer]}</w:body></w:document>'
+    formulas: list = []
+    rewritten = _rewrite_docx_part(xml.encode(), formulas, "\ue000")
+    ElementTree.fromstring(rewritten)  # well-formed
+    assert [formula.inline for formula in formulas] == ["$x$"]
+    assert root.encode() in rewritten  # the empty root itself is left alone
+
+
+@pytest.mark.parametrize("root_tag", ["oMath", "oMathPara"])
+@pytest.mark.parametrize("where", ["paragraph", "cell", "body"])
+def test_docx_with_a_self_closing_math_root_stays_on_the_mammoth_path(tmp_path, root_tag, where):
+    from docx.oxml import parse_xml
+
+    path = docx_with(tmp_path / "selfclosing.docx", [
+        ("heading", "Chapter"),
+        ["lead text"],
+        ("table", [[["H1"], ["H2"]], [["v1"], ["v2"]]]),
+        [("math", omath_para(frac(r("a"), r("b"))))],
+    ])
+    from docx import Document
+
+    document = Document(str(path))
+    empty = parse_xml(f'<m:{root_tag} xmlns:m="{M_NS}"/>')
+    if where == "paragraph":
+        document.paragraphs[1]._p.append(empty)  # last child: right before </w:p>
+    elif where == "cell":
+        document.tables[0].rows[0].cells[0]._tc.append(empty)  # right before </w:tc>
+    else:
+        document.element.body.append(empty)  # right before </w:body>
+    document.save(str(path))
+    with zipfile.ZipFile(path) as archive:
+        assert f"<m:{root_tag}/></w:{ {'paragraph': 'p', 'cell': 'tc', 'body': 'body'}[where]}>".encode() in archive.read(
+            "word/document.xml"
+        )
+
+    elements = _parse_docx(path)
+    assert {el.metadata["parser"] for el in elements} == {"mammoth"}
+    assert [(el.element_type, el.text) for el in elements if el.element_type != "paragraph"] == [
+        ("heading", "Chapter"),
+        ("table", "H1 | H2 ; v1 | v2"),
+        ("formula", r"\frac{a}{b}"),
+    ]
+    assert "lead text" in [el.text for el in elements]

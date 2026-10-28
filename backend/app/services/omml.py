@@ -172,6 +172,9 @@ _TRAILING_COMMAND = re.compile(r"\\[A-Za-z]+$")
 #: A fragment whose last group may be a superscript: `x^{2}`, `f^{\prime}`.
 _ENDS_WITH_SCRIPT = re.compile(r"(?:\^\{.*\}|\^.|')$")
 _SINGLE_TOKEN = re.compile(r"^(?:[A-Za-z0-9]|\\[A-Za-z]+)$")
+#: Operands a linear / skewed fraction can show bare: one letter, one control
+#: word, or a plain number.
+_BARE_FRACTION_OPERAND = re.compile(r"^(?:[A-Za-z]|\\[A-Za-z]+|[0-9]+(?:\.[0-9]+)?)$")
 _FALSE_VALUES = frozenset({"0", "off", "false"})
 
 
@@ -267,6 +270,22 @@ def _join(parts: Sequence[str]) -> str:
             out.append("{}")
         out.append(part)
     return "".join(out)
+
+
+def _fraction_operand(latex: str) -> str:
+    """One side of a linear / skewed fraction, grouped *visibly*.
+
+    LaTeX braces are invisible, so `{x+1}/2` renders as x+1/2 — a different
+    expression. On a baseline the only visible grouping is a bracket, which is
+    also what OMML's linear format writes for a compound operand. A bare
+    letter, control word or number, or an operand that already is one
+    `\\left…\\right` group, needs none.
+    """
+    if not latex or _BARE_FRACTION_OPERAND.match(latex):
+        return latex
+    if latex.startswith(r"\left") and latex.endswith(")") and latex.count(r"\left") == 1:
+        return latex
+    return r"\left(" + latex + r"\right)"
 
 
 def _base(latex: str) -> str:
@@ -415,7 +434,10 @@ class _Converter:
         denominator = self._argument(element, "den")
         kind = _property(element, "fPr", "type")
         if kind in ("lin", "skw"):
-            return _base(numerator) + "/" + _base(denominator)
+            # lin: numerator / denominator on the baseline; skw: the same pair
+            # with a diagonal bar. Both are one fraction object whose operands
+            # are units — kept as such with visible brackets when compound.
+            return _fraction_operand(numerator) + "/" + _fraction_operand(denominator)
         if kind == "noBar":
             return r"\genfrac{}{}{0pt}{}{" + numerator + "}{" + denominator + "}"
         return r"\frac{" + numerator + "}{" + denominator + "}"
@@ -795,6 +817,25 @@ _W_BLOCK_CONTAINERS = frozenset(
 #: parts mammoth reads (images and other payloads become empty members), so
 #: in practice it stays small.
 _PACKAGE_SPOOL_BYTES = 16 * 1024 * 1024
+_TAG_NAME = re.compile(rb"<([^\s/>]+)")
+
+
+def _start_tag_end(data: bytes, start: int) -> int:
+    """Index just past the start tag beginning at `start` (quoted attribute
+    values may contain `>`)."""
+    quote = 0
+    for index in range(start + 1, len(data)):
+        byte = data[index]
+        if quote:
+            if byte == quote:
+                quote = 0
+        elif byte in (0x22, 0x27):
+            quote = byte
+        elif byte == 0x3E:
+            return index + 1
+    raise ValueError("unterminated start tag")
+
+
 _NON_UTF8_DECLARATION = re.compile(
     rb"^\s*<\?xml[^>]*encoding\s*=\s*[\"'](?!utf-?8[\"'])", re.IGNORECASE
 )
@@ -853,6 +894,8 @@ class _DocxMathScanner:
         self.builder: TreeBuilder | None = None
         self.depth = 0
         self.start_index = 0
+        self.root_self_closing = False
+        self.root_end_tag = b""
         self.needs_paragraph = False
         self.spans: List[Tuple[int, int, Any, bool]] = []
 
@@ -870,6 +913,10 @@ class _DocxMathScanner:
             self.builder = TreeBuilder()
             self.depth = 1
             self.start_index = self.parser.CurrentByteIndex
+            tag_end = _start_tag_end(self.data, self.start_index)
+            self.root_self_closing = self.data[tag_end - 2:tag_end] == b"/>"
+            tag_name = _TAG_NAME.match(self.data, self.start_index)
+            self.root_end_tag = b"</" + (tag_name.group(1) if tag_name else b"")
             self.needs_paragraph = not self.containers or self.containers[-1] != "p"
             self.builder.start(_clark(name), {_clark(k): v for k, v in attrs.items()})
             return
@@ -884,8 +931,16 @@ class _DocxMathScanner:
                 element = self.builder.close()
                 self.builder = None
                 index = self.parser.CurrentByteIndex
-                # An empty `<m:oMath/>` has no end tag and nothing to say: leave it.
-                if self.data.startswith(b"</", index):
+                # A self-closing `<m:oMath/>` has no end tag and nothing to say:
+                # leave it. Expat's index then points *past* it — at whatever
+                # comes next, often the paragraph's own `</w:p>` — so it must be
+                # recognised from its start tag, never from what follows.
+                if self.root_self_closing:
+                    return
+                end_tag = self.root_end_tag
+                if self.data.startswith(end_tag, index) and self.data[index + len(end_tag):index + len(end_tag) + 1] in (
+                    b">", b" ", b"\t", b"\n", b"\r"
+                ):
                     end = self.data.index(b">", index) + 1
                     self.spans.append((self.start_index, end, element, self.needs_paragraph))
             return
