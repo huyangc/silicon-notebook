@@ -46,15 +46,16 @@ _RUN_KINDS = frozenset({
     "report_planning",
 })
 #: The run kinds that keep a chunk-recall memo (``keep_chunk_recall``): the
-#: ones whose retrieval searches raw elements, the memo's only reader
-#: (reasoning's ``search_elements``, a report's element probes, the plugin
-#: element seam). ``ask_chunk`` never searches elements, so it keeps nothing;
-#: an unknown kind keeps nothing either.
+#: ones whose element searches can read back a recall the same run made
+#: (reasoning's ``search_elements``, a report section's element searches, the
+#: plugin element seam). ``ask_chunk`` never searches elements; a report's
+#: planning probes were measured to read nothing back (their element and
+#: passage probes never share a text), so planning keeps nothing either; an
+#: unknown kind keeps nothing.
 _CHUNK_RECALL_MEMO_RUN_KINDS = frozenset({
     "ask_reasoning",
     "ask_plugin_engine",
     "report_generation",
-    "report_planning",
 })
 #: How many chunk recalls one run keeps at most, least recently used out
 #: first. The row bound the caller passes (``keep_chunk_recall``) is the
@@ -125,6 +126,7 @@ class RetrievalRunState:
         self._chunk_recall_rows = 0
         self.chunk_recall_hits = 0
         self.chunk_recall_stores = 0
+        self.chunk_recall_evictions = 0
         self.embedding_requests = 0
         self.embedding_hits = 0
         self.embedding_errors = 0
@@ -330,6 +332,7 @@ class RetrievalRunState:
                    or len(self._chunk_recalls) > CHUNK_RECALL_MEMO_MAX_ENTRIES):
                 _stale, dropped = self._chunk_recalls.popitem(last=False)
                 self._chunk_recall_rows -= len(dropped.rows)
+                self.chunk_recall_evictions += 1
 
     def forget_chunk_recall(self, key: Hashable, entry: ChunkRecallEntry) -> None:
         """Drop ``key`` only while it still holds THIS ``entry``: a reader
@@ -426,9 +429,12 @@ class RetrievalRunState:
         model requests actually sent: a miss the query-vector hand-over
         (``shared_query_vector``) answers is counted without a request, and
         Memory recall's own embeds never pass the memo at all.
-        ``chunk_recall_hits``/``chunk_recall_stores`` count the chunk recalls
-        the raw-element arm read back from the run's recall memo instead of
-        recalling again, and the recalls kept for it (``chunk_recall_memo``)."""
+        ``chunk_recall_hits`` counts the chunk recalls the raw-element arm read
+        back from the run's recall memo instead of recalling again;
+        ``chunk_recall_stores`` counts every write into that memo, a write
+        that replaces the entry kept under the same key included (so it is
+        not the number of entries held); ``chunk_recall_evictions`` counts the
+        entries the row/entry bound pushed out (``chunk_recall_memo``)."""
         with self._lock:
             event = {
                 "kind": "retrieval_run_stats",
@@ -448,6 +454,7 @@ class RetrievalRunState:
                 "kg_lexical_circuit_skips": self.kg_lexical_circuit_skips,
                 "chunk_recall_hits": self.chunk_recall_hits,
                 "chunk_recall_stores": self.chunk_recall_stores,
+                "chunk_recall_evictions": self.chunk_recall_evictions,
             }
             if self.fanout_limit is not None:
                 event["fanout_limit"] = self.fanout_limit

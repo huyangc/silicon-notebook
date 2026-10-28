@@ -485,15 +485,25 @@ window, at least four times the element cap) and then reads elements from them, 
 been recalled for exactly that text under the same source ceiling in this run -- by the passage search (the
 first-round seed, `search_chunks`, a direction's passages), by the empty-first-round top-up or by an earlier element
 search -- the leg reuses that recall's ranking instead of searching again. The same holds in a single-notebook ask
-whenever its element search takes the passage route (a large notebook, or a run whose ceiling binds a source list),
-in a Deep Report's element probes and on the plugin element seam. The candidates, their order and the answer are
-exactly what a fresh recall gives; the passage search itself never reuses anything (it needs the vectors for its
-diversity selection). What a run keeps is only each recalled passage's identity, element ids and scores -- no text,
-no vectors -- at most `CHUNK_FEDERATION_MAX_PARTICIPANTS` x `CHUNK_RECALL` passages and 64 recalls, least recently
-used out first; a recall during which any lane failed open (a model error, a full-text timeout or failure) is not
-kept, a ceiling-drift flip (a source outside the run's frozen ceiling seen on read) drops that library's recalls that
-were read without the source list, and `chunk` runs keep nothing. The run's closing `retrieval_run_stats` counts the
-reuses as `chunk_recall_hits` and the kept recalls as `chunk_recall_stores`. Each call of the arm emits one content-free `ask_stage` event,
+whenever its element search takes the passage route (a large notebook, or a run whose ceiling binds a source list)
+and in a Deep Report section's element searches; the plugin element seam passes its own source list, so it can in
+practice only reuse an earlier element search of its own. A reused recall is a snapshot of an earlier moment of
+the same run: when nothing is written in between, the candidates, their order and the answer are exactly what a
+fresh recall gives; a source written, deleted or folded into a new scale-index generation mid-run can make a fresh
+recall differ, and the reused one stays inside the run's frozen source ceiling either way. The passage search
+itself never reuses anything (it needs the vectors for its diversity selection). What a run keeps is only each
+recalled passage's identity, element ids and scores -- no text, no vectors -- at most
+`CHUNK_FEDERATION_MAX_PARTICIPANTS` x `CHUNK_RECALL` passages and 64 recalls, least recently used out first, and
+only recalls an element search could read back (a copyable notebook searched without a source list scans its
+elements whole, so its recalls are not kept). A recall during which any lane failed open is not kept: a model
+error, a full-text timeout or failure (the ANN-plus-full-text lane's included, whatever its banner role), an ANN
+handle that did not open, a failed language or drift probe, a failed sidecar coverage probe, and a contributor or
+question-index supplement that failed, timed out, was blocked or whose admission read failed. A ceiling-drift flip
+(a source outside the run's frozen ceiling seen on read) drops that library's recalls that were read without the
+source list. `chunk` runs and Deep Report planning keep nothing. The run's closing `retrieval_run_stats` counts the
+reuses as `chunk_recall_hits`, every write into the memo as `chunk_recall_stores` (a write replacing the recall
+already kept under the same key included, so it is not the number held) and the recalls the bound pushed out as
+`chunk_recall_evictions`. Each call of the arm emits one content-free `ask_stage` event,
 `stage: "global_element_arm"`, with participant, notebooks-with-hits, merged and failed-notebook counts and latency.
 `GLOBAL_ASK_ELEMENT_ARM_ENABLED` (default `true`) is the rollback switch: `false` returns global runs to the
 pre-federation behaviour — `search_elements` is not in the action catalog (a model that names it anyway gets the

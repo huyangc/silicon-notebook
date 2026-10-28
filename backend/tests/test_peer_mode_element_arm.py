@@ -60,6 +60,11 @@ class ElementProbe:
     _peer_retrieve_elements = _borrow("_peer_retrieve_elements")
     _peer_element_leg = _borrow("_peer_element_leg")
     _retrieve_elements = _borrow("_retrieve_elements")
+    _element_chunk_recall = _borrow("_element_chunk_recall")
+
+    def _chunk_recall_slot(self, *args, **kwargs):
+        # This double has no ceiling machinery: no run-level recall memo.
+        return None
 
     def __init__(self, participants=("nb-a",), *, hits=None, visible=None,
                  enabled=True, max_participants=8):

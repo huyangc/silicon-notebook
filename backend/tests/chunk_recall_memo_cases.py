@@ -13,6 +13,7 @@ physical recalls, which is what the memo exists to cut.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import threading
 import time
@@ -36,15 +37,24 @@ QUESTION = "低温性能怎么样"
 ANSWER = {"next_action": "answer", "sufficient": True}
 
 
+#: The two recall lanes a world can be built for: ``bruteforce`` (no scale
+#: index: small libraries score their gathered chunks, a large one takes the
+#: FTS-degraded lane) and ``ann`` (every library's scale index built, so the
+#: chunk lane is ANN + full text).
+LANES = ("bruteforce", "ann")
+
+
 @dataclass
 class World:
     repo: Any
     notebook_ids: list
+    lane: str = "bruteforce"
 
 
-def build(repo, *, libraries: int = LIBRARIES) -> World:
+def build(repo, *, libraries: int = LIBRARIES, lane: str = "bruteforce") -> World:
     """``libraries`` notebooks, one markdown source each, chunked and embedded
-    through the production ingestion path."""
+    through the production ingestion path; with ``lane="ann"`` each also gets
+    its scale index (chunk ANN with its row-to-source sidecar)."""
     bind_all_embedding_clients(repo, FakeEmbedder(dim=EMBED_DIM))
     repo.settings.graph_ppr_enabled = False
     notebook_ids = []
@@ -59,8 +69,11 @@ def build(repo, *, libraries: int = LIBRARIES) -> World:
             file_name=f"doc-{index}.md", content_type="text/markdown",
             content=body.encode("utf-8"))], scheduler=lambda _source_id: None)[0]
         repo.process_source(source.id)
+        if lane == "ann":
+            repo.rebuild_unified_kg(notebook.id)
+            repo.build_scale_index(notebook.id)
         notebook_ids.append(notebook.id)
-    return World(repo, notebook_ids)
+    return World(repo, notebook_ids, lane)
 
 
 class _Agent:
@@ -115,9 +128,16 @@ REFLECTS = (
 )
 
 
+#: Inside the element arm's chunk recall: the semantic recalls the cases
+#: compare are the ones made anywhere else.
+_IN_ELEMENT_ARM: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "chunk_recall_memo_cases_in_element_arm", default=False)
+
+
 @dataclass
 class Observed:
     recalls: int
+    ann_recalls: int
     elements: list
     chunk_recalls: list
     answer: Any
@@ -146,17 +166,33 @@ def observe(monkeypatch, run, *, memo: bool) -> Observed:
     original_elements = CandidateRetrievalService._retrieve_elements
     original_event = RetrievalRunState.event
 
+    ann_recalls: list = []
+    original_ann = CandidateRetrievalService._retrieve_chunks_ann
+
+    def ann(self, *args, **kwargs):
+        result = original_ann(self, *args, **kwargs)
+        if result is not None:
+            with lock:
+                ann_recalls.append(args[:1])
+        return result
+
     def once(self, *args, **kwargs):
         with lock:
             recalls.append(args[:2])
         return original_once(self, *args, **kwargs)
 
-    def chunks(self, *args, **kwargs):
-        from app.services import chunk_recall_memo
+    original_element_recall = CandidateRetrievalService._element_chunk_recall
 
-        light = chunk_recall_memo.serves_light()
+    def element_recall(self, *args, **kwargs):
+        token = _IN_ELEMENT_ARM.set(True)
+        try:
+            return original_element_recall(self, *args, **kwargs)
+        finally:
+            _IN_ELEMENT_ARM.reset(token)
+
+    def chunks(self, *args, **kwargs):
         result = original_chunks(self, *args, **kwargs)
-        if not light:
+        if not _IN_ELEMENT_ARM.get():
             with lock:
                 chunk_recalls.append((args[:2], _chunk_bytes(result)))
         return result
@@ -174,7 +210,10 @@ def observe(monkeypatch, run, *, memo: bool) -> Observed:
 
     with monkeypatch.context() as patch:
         patch.setattr(CandidateRetrievalService, "_retrieve_chunks_once", once)
+        patch.setattr(CandidateRetrievalService, "_retrieve_chunks_ann", ann)
         patch.setattr(CandidateRetrievalService, "_retrieve_chunks", chunks)
+        patch.setattr(CandidateRetrievalService, "_element_chunk_recall",
+                      element_recall)
         patch.setattr(CandidateRetrievalService, "_retrieve_elements",
                       element_search)
         patch.setattr(RetrievalRunState, "event", event)
@@ -183,7 +222,8 @@ def observe(monkeypatch, run, *, memo: bool) -> Observed:
                           lambda self: False)
         answer = run()
     return Observed(
-        len(recalls), sorted(elements, key=repr), sorted(chunk_recalls, key=repr),
+        len(recalls), len(ann_recalls), sorted(elements, key=repr),
+        sorted(chunk_recalls, key=repr),
         answer, stats,
     )
 
@@ -236,6 +276,15 @@ def _assert_same(on, off, path="answer"):
     assert on == off, (path, on, off)
 
 
+def _assert_lane(world: World, off: Observed, on: Observed) -> None:
+    """The world's lane is the one that answered: every ANN recall the run made
+    went through the chunk ANN in the ``ann`` world, none in the other."""
+    if world.lane == "ann":
+        assert off.ann_recalls == off.recalls and on.ann_recalls == on.recalls
+    else:
+        assert off.ann_recalls == on.ann_recalls == 0
+
+
 def global_run_reuses_the_recall_byte_identically(world: World, monkeypatch) -> None:
     """8 libraries: the element searches of Q read back the semantic legs'
     recall of Q (seed and ``search_chunks``) instead of recalling again."""
@@ -256,6 +305,7 @@ def global_run_reuses_the_recall_byte_identically(world: World, monkeypatch) -> 
     # each; with the memo the two element searches of Q recall nothing.
     assert off.recalls == 5 * libraries
     assert on.recalls == 3 * libraries
+    _assert_lane(world, off, on)
     assert sum(event.get("chunk_recall_hits", 0) for event in on.stats) == (
         2 * libraries)
     assert sum(event.get("chunk_recall_hits", 0) for event in off.stats) == 0
@@ -286,5 +336,6 @@ def single_library_run_is_byte_identical(world: World, monkeypatch) -> None:
     assert on.chunk_recalls == off.chunk_recalls and on.chunk_recalls
     _assert_same(on.answer, off.answer)
     assert on.recalls < off.recalls
+    _assert_lane(world, off, on)
     assert off.recalls - on.recalls == sum(
         event.get("chunk_recall_hits", 0) for event in on.stats)

@@ -13,6 +13,7 @@ from app.domain.extensions import (
     lane_is_dormant,
 )
 from app.services.cancellation import AskCancelled
+from app.services.chunk_lane import note_recall_failure
 from app.services.retrieval import RetrievedChunk, est_tokens
 from app.services.retrieval_run import current_retrieval_run
 from app.services.source_scope import current_source_scope
@@ -172,6 +173,7 @@ class GeneratedQuestionContributionCall:
             except AskCancelled:
                 raise
             except Exception:
+                note_recall_failure("contribution_cancellation_probe")
                 return self._baseline
             try:
                 _rows, final_ids, final_matrix = self._matrix_hydrate(
@@ -197,6 +199,7 @@ class GeneratedQuestionContributionCall:
             except AskCancelled:
                 raise
             except Exception:
+                note_recall_failure("contribution_cancellation_probe")
                 return self._baseline
         else:
             final_ids, final_matrix = evaluated_ids, evaluated_matrix
@@ -322,6 +325,9 @@ class _AdmissionSource:
                     self._notebook_id, self._actor_id, missing
                 )
             except Exception:
+                # The admission read failed: every contribution of this call
+                # loses its candidates, so the chunk recall is degraded.
+                note_recall_failure("contribution_admission")
                 return ()
             if type(hydrated) not in (list, tuple):
                 return ()

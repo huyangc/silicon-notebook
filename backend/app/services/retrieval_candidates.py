@@ -1367,6 +1367,7 @@ class CandidateRetrievalService(_RetrievalState):
                 return None
             return self._notebook_langs(notebook_id)
         except Exception as exc:  # noqa: BLE001 — a hint must never break retrieval
+            chunk_recall_memo.note_recall_failure("lexical_language_probe")
             self.event_log.emit({
                 "kind": "lexical_language_probe_failed",
                 "notebook_id": notebook_id,
@@ -1421,7 +1422,6 @@ class CandidateRetrievalService(_RetrievalState):
                 corpus_langs=corpus_langs,
             )
         except ChunkLexicalSearchTimeout:
-            chunk_recall_memo.note_recall_failure("chunk_fts")
             if (run is not None and trip_circuit
                     and not _CHUNK_SUPPLEMENT_LEG.get()):
                 run.note_chunk_fts_timeout(notebook_id)
@@ -1438,7 +1438,6 @@ class CandidateRetrievalService(_RetrievalState):
             })
             raise
         except Exception:
-            chunk_recall_memo.note_recall_failure("chunk_fts")
             elapsed_ms = round((time.perf_counter() - started) * 1000)
             self.event_log.emit({
                 "kind": "ask_stage",
@@ -3372,28 +3371,27 @@ class CandidateRetrievalService(_RetrievalState):
             )
             # Only the chunks' element routing is read below, so the recall may
             # be the one this run already made for this library and text
-            # (``chunk_recall_memo``): a semantic leg's, the empty-seed top-up's
-            # or an earlier element search's.
-            with chunk_recall_memo.element_recall():
-                chunks, _ids, _matrix = self._retrieve_chunks(
-                    notebook_id,
-                    query,
-                    # Direct-element fallback needs the configured broad chunk
-                    # candidate pool too: a smaller limit-derived pool lets legacy
-                    # repeated headers consume every upstream slot before content
-                    # diversity can run.  ``chunk_recall`` is already the single
-                    # deployment-owned quality/cost rail for this candidate family.
-                    recall=max(self.settings.chunk_recall, limit * 4, limit),
-                    allowed_source_ids=allowed_source_ids,
-                    # See the docstring above: only a genuinely producer-explicit
-                    # caller gets ``producer_explicit=True`` spelled out here; the
-                    # contextual-ceiling path (scope-materialized OR the plugin
-                    # seam's declared-``False`` live enumeration) leaves it
-                    # unpassed so ``_retrieve_chunks``'s own ``False`` default
-                    # applies and existing test doubles standing in for it need
-                    # no knowledge of this parameter at all.
-                    **chunk_kwargs,
-                )
+            # (``_element_chunk_recall``): a semantic leg's, the empty-seed
+            # top-up's or an earlier element search's.
+            chunks = self._element_chunk_recall(
+                notebook_id,
+                query,
+                # Direct-element fallback needs the configured broad chunk
+                # candidate pool too: a smaller limit-derived pool lets legacy
+                # repeated headers consume every upstream slot before content
+                # diversity can run.  ``chunk_recall`` is already the single
+                # deployment-owned quality/cost rail for this candidate family.
+                recall=max(self.settings.chunk_recall, limit * 4, limit),
+                allowed_source_ids=allowed_source_ids,
+                # See the docstring above: only a genuinely producer-explicit
+                # caller gets ``producer_explicit=True`` spelled out here; the
+                # contextual-ceiling path (scope-materialized OR the plugin
+                # seam's declared-``False`` live enumeration) leaves it
+                # unpassed so ``_retrieve_chunks``'s own ``False`` default
+                # applies and existing test doubles standing in for it need
+                # no knowledge of this parameter at all.
+                chunk_kwargs=chunk_kwargs,
+            )
             elements = self._retrieve_elements_from_chunks(
                 query, chunks, limit=limit, notebook_id=notebook_id,
             )
@@ -3409,6 +3407,43 @@ class CandidateRetrievalService(_RetrievalState):
             # Reached only with no ceiling: any list returned above.
             elements = self._gather_elements(db, notebook_id, with_vectors=True)
         return score_elements(query, elements, query_vector, limit=limit)
+
+    def _element_chunk_recall(self, notebook_id: str, query: str, *, recall: int,
+                              allowed_source_ids, chunk_kwargs: dict):
+        """The element arm's chunk recall: the run's memo first
+        (``chunk_recall_memo``), else ``_retrieve_chunks`` exactly as before.
+
+        Only the chunks are returned -- the element arm reads nothing else of
+        a recall -- so a hit is the light projection rebuilt as text-less
+        chunks.  On a miss the drift verdict the memo key had to resolve is
+        handed down through the arm's own ``_CHUNK_ARM_DRIFTED`` (the
+        once-per-arm-entry channel), so the recall does not probe again; the
+        recall itself keeps what it read for the next reader."""
+        slot = self._chunk_recall_slot(
+            notebook_id, query, recall, allowed_source_ids,
+            bool(chunk_kwargs.get("producer_explicit", False)), None,
+        )
+        if slot is not None:
+            served = chunk_recall_memo.serve(
+                slot, lambda: self._chunk_source_ceiling(
+                    notebook_id, allowed_source_ids) is None,
+            )
+            if served is not None:
+                return served
+        handed_down = (
+            slot is not None and slot.drifted is not None
+            and _CHUNK_ARM_DRIFTED.get() is None
+        )
+        token = _CHUNK_ARM_DRIFTED.set(slot.drifted) if handed_down else None
+        try:
+            chunks, _ids, _matrix = self._retrieve_chunks(
+                notebook_id, query, recall=recall,
+                allowed_source_ids=allowed_source_ids, **chunk_kwargs,
+            )
+        finally:
+            if token is not None:
+                _CHUNK_ARM_DRIFTED.reset(token)
+        return chunks
 
     def _navigation_element_ids(
         self, notebook_id: str, chunks, element_ids
@@ -3608,9 +3643,8 @@ class CandidateRetrievalService(_RetrievalState):
 
         Inside a retrieval run every verified, failure-free recall is also
         kept, as a light projection, for the raw-element arm
-        (``chunk_recall_memo``), which this call serves from it when the arm
-        made it (``chunk_recall_memo.element_recall``): ``(chunks, [], None)``
-        with text-less chunks.  No other caller is ever served."""
+        (``chunk_recall_memo``); only ``_element_chunk_recall`` reads it, so
+        no caller of this method is ever served from it."""
         from app.services.retrieval import observed_chunk_candidates
         from app.services.source_scope import unbound_ceiling, verify_unbound_read
 
@@ -3623,10 +3657,6 @@ class CandidateRetrievalService(_RetrievalState):
         def still_unbound() -> bool:
             return self._chunk_source_ceiling(notebook_id, allowed_source_ids) is None
 
-        if slot is not None and chunk_recall_memo.serves_light():
-            served = chunk_recall_memo.serve(slot, still_unbound)
-            if served is not None:
-                return served, [], None
         with observed_chunk_candidates() as candidate_sources, \
                 chunk_recall_memo.computing() as failures:
             result = self._retrieve_chunks_once(
@@ -3643,9 +3673,26 @@ class CandidateRetrievalService(_RetrievalState):
                 notebook_id, query, recall,
                 producer_explicit=producer_explicit, drifted=drifted,
             )
-        if slot is not None and not failures:
+        if (slot is not None and not failures
+                and self._recall_readable_by_element_arm(notebook_id, allowed_source_ids)):
             chunk_recall_memo.keep(slot, result[0], still_unbound)
         return result
+
+    def _recall_readable_by_element_arm(self, notebook_id, allowed_source_ids) -> bool:
+        """Whether an element search could ever read this recall back, so that
+        keeping it can pay off.  A recall made with a list matches the element
+        arm's own list (a peer leg, a producer's list).  One made without a list
+        only matches an element search that has none either, and that search
+        takes the chunk route only for a library that is not copyable or whose
+        ceiling hands it a list (``_retrieve_elements``); otherwise it scans the
+        library's elements whole and the recall would only be held."""
+        if allowed_source_ids is not None:
+            return True
+        if not self.notebook_copy_stats(notebook_id)["copyable"]:
+            return True
+        from app.services.source_scope import scoped_allowed_source_ids
+
+        return scoped_allowed_source_ids(notebook_id, None) is not None
 
     def _chunk_recall_slot(self, notebook_id, query, recall, allowed_source_ids,
                            producer_explicit, drifted):
@@ -3662,6 +3709,7 @@ class CandidateRetrievalService(_RetrievalState):
         return chunk_recall_memo.recall_slot(
             self, notebook_id, query, recall, ceiling,
             producer_explicit=producer_explicit, drifted=drifted,
+            ceiling_is_frozen=allowed_source_ids is None,
         )
 
     def _retrieve_chunks_once(
@@ -3808,20 +3856,28 @@ class CandidateRetrievalService(_RetrievalState):
                 allowed_source_ids=allowed_source_ids,
             ),
             matrix_hydrate=self._hydrate_chunk_candidates,
-            matrix_failure_event=lambda: self._emit_generated_question_query_event({
-                "kind": "retrieval_contributor_matrix_rebuild",
-                "mode": mode,
-                "status": "failed_open",
-                "baseline_hits": len(scored),
-            }),
+            # The call swallows its own failures; each hook first marks the
+            # recall being computed as degraded (``chunk_recall_memo``).
+            matrix_failure_event=chunk_recall_memo.noting(
+                "generated_question_matrix",
+                lambda: self._emit_generated_question_query_event({
+                    "kind": "retrieval_contributor_matrix_rebuild",
+                    "mode": mode,
+                    "status": "failed_open",
+                    "baseline_hits": len(scored),
+                }),
+            ),
             cancel_event=getattr(run, "cancel_event", None),
-            failure_event=lambda: self._emit_generated_question_query_event({
-                "kind": "chunk_question_index_query",
-                "notebook_id": notebook_id,
-                "mode": mode,
-                "status": "failed_open",
-                "baseline_hits": len(scored),
-            }),
+            failure_event=chunk_recall_memo.noting(
+                "generated_question",
+                lambda: self._emit_generated_question_query_event({
+                    "kind": "chunk_question_index_query",
+                    "notebook_id": notebook_id,
+                    "mode": mode,
+                    "status": "failed_open",
+                    "baseline_hits": len(scored),
+                }),
+            ),
         )
         try:
             admission_hydrate = self.hydrate_retrieval_contribution_chunks
@@ -3855,7 +3911,11 @@ class CandidateRetrievalService(_RetrievalState):
                 call_context=call_context,
                 baseline_identity=lambda chunk: chunk.chunk_id,
                 cancellation=call_context.cancellation,
-                event_sink=getattr(self.event_log, "emit", None),
+                # A contributor that timed out, failed or was blocked leaves
+                # only an event; the recall is degraded all the same.
+                event_sink=chunk_recall_memo.noting_contribution_events(
+                    getattr(self.event_log, "emit", None),
+                ),
                 disabled_capabilities=(
                     frozenset()
                     if generated_enabled
@@ -4453,6 +4513,10 @@ class CandidateRetrievalService(_RetrievalState):
         ann = self._open_scale_ann(idx, "chunk")
         t_open = time.perf_counter()
         if ann is None:
+            # The index has rows but no handle opened (the catalog's open
+            # failed, or this call followed a failed open): the lane falls
+            # back, so this recall is not what a healthy repeat gives.
+            chunk_recall_memo.note_recall_failure("chunk_ann_open")
             return None
         source_filter_mode = "none" if allowed is None else "filtered"
         try:
@@ -4687,12 +4751,14 @@ class CandidateRetrievalService(_RetrievalState):
                 # ANN 臂产出。挂成 model_error 会显示成没有服务身份的「模型服务调用
                 # 失败」(生产 7 天 34 条横幅里 27 条是它),把一条补召回臂的缺席说成
                 # 答案不完整。只有真的影响结果的失败才显示给用户。
-                pass
+                chunk_recall_memo.note_recall_failure("chunk_ann_union_fts_timeout")
             except (AskCancelled, RetrievalControlError):
                 raise
             except Exception as exc:  # noqa: BLE001 — 词法失败不拖垮检索
                 # 其它词法失败是否上横幅,要等下方水合拿到 delta chunk 的来源
-                # 后才能判断,见 ``_note_ann_union_lexical_failure``。
+                # 后才能判断,见 ``_note_ann_union_lexical_failure``;这次召回
+                # 缺了词法半,不论横幅与否都不留给元素臂复用。
+                chunk_recall_memo.note_recall_failure("chunk_ann_union_fts")
                 lexical_failure = exc
         t_fts = time.perf_counter()
 

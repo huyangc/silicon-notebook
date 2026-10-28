@@ -15,8 +15,8 @@ pytestmark = [
 ]
 
 
-@pytest.fixture
-def world(postgres_settings):
+@pytest.fixture(params=cases.LANES)
+def world(request, postgres_settings):
     from app.services.postgres_repository import PostgresRepository
 
     repository = PostgresRepository(
@@ -28,7 +28,7 @@ def world(postgres_settings):
         model_provider=RecordingModelProvider(),
     )
     try:
-        yield cases.build(repository)
+        yield cases.build(repository, lane=request.param)
     finally:
         repository.close()
 
