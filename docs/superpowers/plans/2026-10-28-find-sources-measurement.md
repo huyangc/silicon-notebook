@@ -133,7 +133,7 @@ Readings:
    for 44k rows, and the finder no longer copies them; the page alone is hydrated (5-10 ms).
 2. **A narrowed scope binds the term legs**: 49 ids -> the UNION ALL drops from 21-36 ms to 0.4-1.8 ms.
    Binding a large share does not pay: with an earlier 50% cut, the 12.8k-id `year>=2020` scope (26%)
-   made the UNION ALL 21 -> 52 ms, so the cut is 10% (`find_sources_rows.TERM_LEG_BIND_MAX_SHARE`).
+   made the UNION ALL 21 -> 52 ms, so the cut is 10% (`source_find_terms.NARROW_SCOPE_MAX_SHARE`, also the `producer_explicit` cut).
 3. **The counts statement costs ~11 ms on 49k** (visible ∧ allow-list ∧ pending counts over the
    visible sources). It is what makes `meta_pending_excluded` and the "filters narrowed the list"
    attestation possible; it is skipped for `kind=all` without filters or list. The pure-filter case
@@ -149,3 +149,33 @@ Readings:
    the driver's repeated executions (best of three on one connection), which points at psycopg's
    auto-prepare switching the unbound term statement to a generic plan for a term too short for
    trigrams. Not introduced here; flagged for the T10/hotpath follow-up.
+
+## Term legs and the generic plan (re-review item 5)
+
+The term-leg statement's text depends only on the number of terms, so on a pooled connection
+psycopg's auto-prepare (5th execution) shares ONE prepared statement across different terms and
+PostgreSQL may switch it to a generic plan (from about the 11th). Confirmed on a freshly regenerated
+bench (same seed, 0048 indexes present, batch 8 absent) with `PREPARE` + `SET plan_cache_mode =
+force_generic_plan` + `EXPLAIN (ANALYZE) EXECUTE` (the `maintenance.py` precedent), whole term-leg
+statement, planning + execution:
+
+| notebook | term | custom plan | forced generic plan |
+|---|---|---|---|
+| nb-mid (10k) | `wu` (2 chars) | 12.4 ms | 158.2 ms |
+| nb-big (49k) | `wu` | 104.2 ms | 182.1 ms |
+| nb-mid | `diffusion` | 10.0 ms | 9.6 ms |
+
+The generic plan still uses the trigram GINs but with an opaque pattern -- harmless for a selective
+term, 1.7-13x slower for a term too short for trigrams. Fifteen consecutive store calls on one
+psycopg connection (`prepare_threshold` default), ms:
+
+- **before** (`3591db68b`, unbound term legs auto-prepared): nb-big `wu` 216-231 for calls 1-10,
+  then **296-306 from call 11 on** (the generic plan taking over); nb-mid `wu` 32-44 (on this
+  regeneration the planner's generic choice for nb-mid was not the slow one).
+- **after** (term legs always `prepare=False`): nb-big `wu` 212-232 for all fifteen calls; nb-mid `wu`
+  32-43; nb-mid `diffusion` 22-32 either way (planning a custom plan per call is not measurable here).
+
+The ~450 ms nb-mid `wu` of the first re-measurement did not reproduce on this regeneration (its
+planner statistics differ); the call-11 step on nb-big is the same mechanism observed directly.
+`tests/test_find_sources_pg_prepare_unit.py` pins `prepare=False` on the term-leg execute, with and
+without a bound scope list.
