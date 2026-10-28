@@ -32,6 +32,7 @@ from app.api.deps import (
 from app.api.ask_routes import public_router as public_conversation_router
 from app.api.knowhow_agent_routes import agent_router as knowhow_agent_router
 from app.api.report_routes import public_router as public_report_router
+from app.api.notebook_transfer_routes import download_router as notebook_transfer_download_router
 from app.api.mcp_server import (
     create_memory_mcp,
     mcp_public_tools,
@@ -581,6 +582,11 @@ def create_app() -> FastAPI:
         agent_mcp_onboarding_router(mcp_public_url, public_agent_tools),
         prefix="/api",
     )
+    # 网页导出的一次性票据下载:浏览器带着票据直接导航过去,没有 session,所以同样
+    # 不能挂在下面那个带 router 级 get_current_user 的主 router 上;票据即全部授权
+    # (app.services.notebook_transfer.jobs)。挂在主 router **之前**:主 router 的
+    # `/notebook-transfers/{job_id}` 会先把 `download` 当成作业 id 匹配走。
+    app.include_router(notebook_transfer_download_router, prefix="/api")
     app.include_router(
         router, prefix="/api", dependencies=[Depends(get_current_user)]
     )  # 其余全部需登录（router 级依赖：零逐路由遗漏）

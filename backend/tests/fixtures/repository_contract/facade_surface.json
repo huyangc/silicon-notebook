@@ -1602,6 +1602,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
+        "scope": "<module>.notebook_transfer_jobs",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
         "scope": "<module>.pending_actions_service",
         "target": "_runtime"
       },
@@ -5527,6 +5533,12 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/notebook_transfer_routes.py",
+        "scope": "<module>.import_notebook_route",
+        "target": "effective_document_limit"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
         "scope": "<module>._document_capacity_limit",
         "target": "effective_document_limit"
@@ -7488,14 +7500,63 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/services/notebook_transfer/jobs.py",
+        "scope": "<module>.NotebookTransferJobs._request_index",
+        "target": "maybe_auto_index"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.__init__.<lambda>",
+        "target": "maybe_auto_index"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/notebook_transfer_web_cases.py",
+        "scope": "<module>.check_a_failed_reembed_builds_no_index",
+        "target": "maybe_auto_index"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/notebook_transfer_web_cases.py",
+        "scope": "<module>.check_an_import_without_legs_still_asks_for_the_index",
+        "target": "maybe_auto_index"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/notebook_transfer_web_cases.py",
+        "scope": "<module>.check_export_download_import_round_trip",
         "target": "maybe_auto_index"
       }
     ],
     "kind": "method",
     "owner": "ScaleArtifactRuntime",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "world.repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/notebook_transfer_web_cases.py",
+        "scope": "<module>.check_a_failed_reembed_builds_no_index",
+        "target": "maybe_auto_index"
+      },
+      {
+        "base": "world.repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/notebook_transfer_web_cases.py",
+        "scope": "<module>.check_an_import_without_legs_still_asks_for_the_index",
+        "target": "maybe_auto_index"
+      },
+      {
+        "base": "world.repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/notebook_transfer_web_cases.py",
+        "scope": "<module>.check_export_download_import_round_trip",
+        "target": "maybe_auto_index"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'None'"
   },

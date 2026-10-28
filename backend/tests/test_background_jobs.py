@@ -220,6 +220,9 @@ def test_submit_keeps_job_active_until_pending_notification_finishes(
         ("knowhow-asset-sweep:nb-private123", "knowhow-asset-sweep"),
         ("index-pipeline-nb-private123", "index-pipeline"),
         ("notebook-reembed-nb-private123", "notebook-reembed"),
+        ("notebook-export-xfer-private123", "notebook-export"),
+        ("notebook-import-xfer-private123", "notebook-import"),
+        ("notebook-transfer-watch-xfer-private123", "notebook-transfer-watch"),
         ("ask-reasoning", "ask-reasoning"),
         ("ask-auto", "ask-auto"),
         ("ask-follow", "ask-follow"),
@@ -345,6 +348,8 @@ HEAVY_JOB_NAMES = (
     "mergereview-nb-a",
     "index-pipeline-nb-a",
     "notebook-reembed-nb-a",
+    "notebook-export-xfer-a",
+    "notebook-import-xfer-a",
 )
 LIGHT_JOB_NAMES = (
     "papermeta-nb-a",
@@ -360,7 +365,9 @@ LIGHT_JOB_NAMES = (
 )
 # 批 3·W1 PR-3(D-2):第三个独立池——量级既非 LLM 扇出型重活,也非秒级轻活。
 DELETE_JOB_NAMES = ("deletenb-nb-a",)
-UNGATED_JOB_NAMES = ("ask-chunk", "ask-reasoning", "ask-graph",
+# The thread that only waits for an import's re-embedding run: holding a pool slot
+# while the run it waits for queues in the same pool would deadlock at capacity one.
+UNGATED_JOB_NAMES = ("notebook-transfer-watch-xfer-a", "ask-chunk", "ask-reasoning", "ask-graph",
                      "report-plan-r1", "report-gen-r1")
 
 

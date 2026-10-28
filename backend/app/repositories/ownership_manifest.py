@@ -645,6 +645,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_read_authority', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_sharing_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_store_port', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_transfer_jobs', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.pending_actions_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.retrieval_experience_jobs_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.wish_repository', kind='attribute', target='_runtime'),
@@ -1807,6 +1808,7 @@ SURFACE_MEMBERS = (
         owner='IdentityStore',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/notebook_transfer_routes.py', scope='<module>.import_notebook_route', kind='attribute', target='effective_document_limit'),
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>._document_capacity_limit', kind='attribute', target='effective_document_limit'),
         ),
         patches=(
@@ -2533,9 +2535,16 @@ SURFACE_MEMBERS = (
         owner='ScaleArtifactRuntime',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/services/notebook_transfer/jobs.py', scope='<module>.NotebookTransferJobs._request_index', kind='attribute', target='maybe_auto_index'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='maybe_auto_index'),
+            ConsumerSite(path='backend/tests/notebook_transfer_web_cases.py', scope='<module>.check_a_failed_reembed_builds_no_index', kind='patch', target='maybe_auto_index'),
+            ConsumerSite(path='backend/tests/notebook_transfer_web_cases.py', scope='<module>.check_an_import_without_legs_still_asks_for_the_index', kind='patch', target='maybe_auto_index'),
+            ConsumerSite(path='backend/tests/notebook_transfer_web_cases.py', scope='<module>.check_export_download_import_round_trip', kind='patch', target='maybe_auto_index'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/notebook_transfer_web_cases.py', scope='<module>.check_a_failed_reembed_builds_no_index', kind='patch', target='maybe_auto_index'),
+            ConsumerSite(path='backend/tests/notebook_transfer_web_cases.py', scope='<module>.check_an_import_without_legs_still_asks_for_the_index', kind='patch', target='maybe_auto_index'),
+            ConsumerSite(path='backend/tests/notebook_transfer_web_cases.py', scope='<module>.check_export_download_import_round_trip', kind='patch', target='maybe_auto_index'),
         ),
     ),
     SurfaceMember(

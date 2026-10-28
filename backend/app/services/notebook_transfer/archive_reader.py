@@ -174,6 +174,31 @@ def check_directory(archive: zipfile.ZipFile, archive_bytes: int) -> None:
         raise ArchiveError("导出文件缺少 manifest.json（导出未完成或文件已损坏）")
 
 
+class ArchiveTooLarge(ArchiveError):
+    """The archive would inflate beyond the caller's bound (``check_inflated_size``)."""
+
+
+def check_inflated_size(
+    archive: zipfile.ZipFile, limit: int, manifest: "ArchiveManifest | None" = None
+) -> None:
+    """Refuse an archive whose entries add up to more than ``limit`` bytes once
+    decompressed, read off the zip directory alone -- before a single entry is
+    decompressed (the zip reader never yields more than an entry's recorded
+    size). With ``manifest``, its declared sizes (every table, the file index and
+    the files) are held to the same bound. The protocol's own limits
+    (``MAX_TOTAL_UNCOMPRESSED_BYTES``) are an operator's; a caller that must bound
+    the work an untrusted upload can cause (the web import) passes its own."""
+    inflated = sum(info.file_size for info in archive.infolist())
+    if manifest is not None:
+        inflated = max(
+            inflated,
+            sum(entry.bytes for entry in manifest.tables.values())
+            + manifest.files.bytes + manifest.files.index_bytes,
+        )
+    if inflated > limit:
+        raise ArchiveTooLarge("导出文件解压后的总量超过本次导入允许的上限")
+
+
 def read_manifest(archive: zipfile.ZipFile) -> ArchiveManifest:
     info = archive.getinfo(MANIFEST_NAME)
     if info.file_size > MAX_MANIFEST_BYTES:

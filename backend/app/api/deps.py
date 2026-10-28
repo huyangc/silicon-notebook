@@ -63,6 +63,13 @@ def notebook_delete_repository():
     `services/notebook_delete.py` 模块 docstring）。"""
     return repository()._runtime.notebook_delete  # type: ignore[attr-defined]
 
+def notebook_transfer_jobs():
+    """The web notebook export / import job registry
+    (``app.services.notebook_transfer.jobs.NotebookTransferJobs``): process-local
+    state of the one API process plus its sidecar files. Not on the facade: its
+    public surface only shrinks."""
+    return repository()._runtime.notebook_transfers  # type: ignore[attr-defined]
+
 def notebook_access_repository() -> NotebookAccessRepository:
     return repository()._runtime.sharing  # type: ignore[attr-defined]
 
@@ -470,6 +477,11 @@ async def require_notebook_read(
 # 块是只读渲染还是可编辑。它随本表自动跟随(不是第二份手写判定),但翻转这一格时
 # 仍要记得:判定放宽而投影不动,新获授权的成员会在这个面板上只看到只读的共享块
 # ——与上面 `can_manage_content` 同一类失配。
+#
+# `notebook:export`(网页导出单本笔记本,计划 docs/superpowers/plans/2026-10-22-
+# notebook-export-import.md §7/§9)恒 **owner**:导出文件带走整本库的原文件、知识图谱
+# 与向量,可以在别的部署里导入成一本归导入者所有的新笔记本——这是 owner 对本库的对外
+# 处置,与链接分享(`notebook:configure`)同一理由,不随内容管理权翻给组管理员。
 _CAPABILITY_LEVELS: dict[str, str] = {
     "sources:write": "admin",
     "kg:write": "admin",
@@ -484,6 +496,7 @@ _CAPABILITY_LEVELS: dict[str, str] = {
     "notebook:mount": "owner",
     "notebook:delete": "owner",
     "agent_profile:write": "admin",
+    "notebook:export": "owner",
 }
 
 
@@ -530,13 +543,16 @@ _CAPABILITY_LEVELS: dict[str, str] = {
 #     体内单独应用。这一格留在表里是为了让「删库在镜像上也被挡」这件事在表上可见,
 #     并让键集合保持与 `_CAPABILITY_LEVELS` 相等。
 #
-# 放行(False)的五格:
+# 放行(False)的六格:
 #   * `notebook:grant` —— 目标端自己的可见性由目标端管理(§5 明文放行);
 #   * `notebook:configure` —— 链接分享的 `share_token` 是目标端自有列,不随同步走;
 #   * `scale_index:write` —— 检索索引是目标端自有的派生产物,不在同步闭包里(设计 §6),
 #     镜像必须能重建它,否则索引会永远停在导入那一刻且无从修复;
 #   * `reports:write` —— 报告是交互数据,不同步(§1 的非同步清单);
-#   * `agent_profile:write` —— 理解底座是目标端用户用出来的,同样不在同步闭包里。
+#   * `agent_profile:write` —— 理解底座是目标端用户用出来的,同样不在同步闭包里;
+#   * `notebook:export` —— 网页导出单本笔记本(`POST /notebooks/{id}/export`,恒 owner)
+#     只**读**这本库、写的是请求者自己的导出作业,不改同步层内容;导出镜像得到的是
+#     一份文件,导入它会成为一本独立的新笔记本(计划 §0、§9 推荐默认「镜像也允许导出」)。
 #
 # ⚠ 新增能力名时这张表**必须同时加一格**,否则 `require_notebook_capability` 当场
 # KeyError——与能力表同一条「响亮失败,不许落到宽松默认值」的口径。
@@ -556,6 +572,7 @@ _CAPABILITY_MIRROR_FENCE: dict[str, bool] = {
     "notebook:mount": True,
     "notebook:delete": True,
     "agent_profile:write": False,
+    "notebook:export": False,
 }
 
 

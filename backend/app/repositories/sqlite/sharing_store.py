@@ -1070,6 +1070,28 @@ class SharingStore:
         return (owner["username"] if owner and owner["username"] else "", titles)
 
     # ----------------------------------------------------- mirror provenance
+    def notebook_lifecycle_status(self, notebook_id: str) -> "str | None":
+        """The notebook row's ``status`` with no lifecycle filter (``None``: no
+        row) -- whether a web import a crash interrupted had published its
+        notebook (``importing`` is its hidden sentinel)."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT status FROM notebooks WHERE id = ?", (notebook_id,)
+            ).fetchone()
+        return None if row is None else str(row["status"] or "")
+
+    def exportable_file_bytes(self, notebook_id: str) -> int:
+        """Bytes of the source files an export of ``notebook_id`` carries: every
+        source but a Memory one (an export never carries Memory). The web
+        export's pre-check (``POST /notebooks/{id}/export``)."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT COALESCE(SUM(file_size), 0) AS n FROM sources "
+                f"WHERE notebook_id = ? AND NOT ({memory_sql.memory_source_type_predicate()})",
+                (notebook_id,),
+            ).fetchone()
+        return int(row["n"])
+
     def notebook_sync_origin(self, notebook_id: str) -> str:
         """这本笔记本的镜像来源标识;本地库(以及不存在的行)返回 ''。
 

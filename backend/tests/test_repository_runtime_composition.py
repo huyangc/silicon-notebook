@@ -107,6 +107,7 @@ RUNTIME_ATTRIBUTES = [
     "notebook_delete_jobs",
     "notebook_import",
     "notebook_store",
+    "notebook_transfers",
     "notebook_summaries",
     "on_source_vectors_written",
     "parser_provider_chain",

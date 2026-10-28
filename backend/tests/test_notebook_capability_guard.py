@@ -88,6 +88,9 @@ EXPECTED_CAPABILITY_LEVELS = {
     "notebook:mount": "owner",
     "notebook:delete": "owner",
     "agent_profile:write": "admin",
+    # 网页导出单本笔记本:导出文件可在别处导入成导入者的新笔记本——owner 对本库的
+    # 对外处置,与链接分享同理,恒 owner。
+    "notebook:export": "owner",
 }
 
 #: 镜像写入围栏的**逐格**期望值(跨环境增量同步,docs/incremental-sync-design.md §5)。
@@ -118,6 +121,8 @@ EXPECTED_MIRROR_FENCE = {
     "notebook:mount": True,
     "notebook:delete": True,
     "agent_profile:write": False,
+    # 导出只读这本库、写的是请求者自己的作业:镜像也允许导出(计划 §9 推荐默认)。
+    "notebook:export": False,
 }
 
 
@@ -605,6 +610,22 @@ def test_group_admin_still_cannot_delete_the_notebook(tmp_path, monkeypatch):
     assert client.get(f"/api/notebooks/{nb}", headers=w["deputy"]).status_code == 200
     # 批 3·W1 PR-3:DELETE 现在是 202(tombstone CAS 立即返回,清理异步进行)。
     assert client.delete(f"/api/notebooks/{nb}", headers=w["owner"]).status_code == 202
+
+
+def test_group_admin_cannot_export_the_notebook(tmp_path, monkeypatch):
+    """``notebook:export`` 恒 owner:组管理员管得了内容,却拿不走整本库的导出文件
+    (那份文件能在别处导入成他自己的笔记本)。"""
+    client = _client(tmp_path, monkeypatch)
+    w = _group_admin_world(client, "x")
+    nb = w["notebook"]
+    jobs = deps.repository()._runtime.notebook_transfers
+    monkeypatch.setattr(jobs, "_submit", lambda *args, **kwargs: None)
+
+    assert _manage_probe(client, nb, w["deputy"]).status_code == 200
+    for who in ("deputy", "plain", "stranger"):
+        resp = client.post(f"/api/notebooks/{nb}/export", headers=w[who])
+        assert resp.status_code == 404, (who, resp.status_code, resp.text)
+    assert client.post(f"/api/notebooks/{nb}/export", headers=w["owner"]).status_code == 202
 
 
 def test_revoking_the_admin_grant_takes_effect_immediately(tmp_path, monkeypatch):

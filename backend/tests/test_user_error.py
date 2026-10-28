@@ -310,6 +310,29 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "test_upload_over_configured_single_file_limit_is_authoritatively_rejected 覆盖"
         "(断言 413 + X-User-Message 头 + detail 同时含「1 MB」与字节数)。"
     ),
+    "app/api/notebook_transfer_routes.py::_upload_too_large": (
+        "detail 是纯中文的导入文件大小上限模板，只插入一个整数：Settings."
+        "notebook_transfer_web_max_bytes 折回的 MB 数(字段约束 1..1024 的整数)。真实响应由 "
+        "tests/test_notebook_transfer_web.py::test_413_for_export_and_upload 覆盖"
+        "(断言 413 + 文案含「命令行」)。"
+    ),
+    "app/api/notebook_transfer_routes.py::export_notebook_route": (
+        "唯一的动态实参是网页导出上限的中文模板，只插入 Settings.notebook_transfer_web_max_bytes "
+        "折回的 MB 整数；不拼路径与异常原文。tests/test_notebook_transfer_web.py::"
+        "test_413_for_export_and_upload 覆盖(413 + 文案含「命令行」)。"
+    ),
+    "app/api/notebook_transfer_routes.py::import_notebook_route": (
+        "动态实参只有文档数量上限的中文模板，插入一个整数：导入者的有效上限"
+        "(effective_document_limit；文件里的计数一过上限就停，所以不报具体篇数)；其余 "
+        "user_error 都是中文字面量或 _busy()。tests/test_notebook_transfer_web.py::"
+        "test_non_admins_are_held_to_the_document_limit 覆盖(409 + X-User-Message 头 + "
+        "文案含上限与「命令行」)。"
+    ),
+    "app/api/notebook_transfer_routes.py::_busy": (
+        "中文模板只插入模块常量 MAX_ACTIVE_JOBS_PER_USER(整数)。tests/"
+        "test_notebook_transfer_web.py::test_each_user_has_at_most_two_active_jobs 覆盖"
+        "(409 + 文案)。"
+    ),
     "app/api/source_routes.py::_parse_source_upload": (
         "该函数里唯一的动态实参是「单次最多上传 N 个来源文件。请减少本批文件数量后重试。」，"
         "N 是模块常量 SOURCE_UPLOAD_MAX_FILES_PER_BATCH(整数)，同函数其余 user_error 文案都是"

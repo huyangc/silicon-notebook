@@ -62,6 +62,11 @@ _SAFE_JOB_PREFIXES = (
     ("index-pipeline-", "index-pipeline"),
     # Missing-vector fill of one notebook: ``app.services.notebook_reembed``.
     ("notebook-reembed-", "notebook-reembed"),
+    # Web export / import of one notebook and the thread that waits for the
+    # import's re-embedding run: ``app.services.notebook_transfer.jobs``.
+    ("notebook-export-", "notebook-export"),
+    ("notebook-import-", "notebook-import"),
+    ("notebook-transfer-watch-", "notebook-transfer-watch"),
     ("deletenb-", "deletenb"),
     # The own-Memory merge backstop (startup pass, or one notebook after a
     # follow-up timed out): ``SourceIngestionService.heal_memory_merges``.
@@ -117,6 +122,12 @@ _HEAVY_MAINTENANCE_OPERATIONS = frozenset({
     # 一本笔记本的缺失向量补齐(`services/notebook_reembed.py`):跨导入整本重嵌时是
     # 全库量级的模型扇出(chunk/element/KG 对象/关系四条腿),与 index-pipeline 同档。
     "notebook-reembed",
+    # 网页导出/导入单本笔记本(`services/notebook_transfer/jobs.py`):整本库的流式读写
+    # (导出在一个读事务里读完全部表并压缩全部文件,导入逐表写入并重投影 Knowhow),
+    # 与 notebook-reembed 同档。等待重嵌完成的那条线程(notebook-transfer-watch)只是
+    # 等,不进任何池:占着池位等另一个池内作业,池容量为 1 时会互相等死。
+    "notebook-export",
+    "notebook-import",
 })
 _LIGHT_MAINTENANCE_OPERATIONS = frozenset({
     "papermeta",

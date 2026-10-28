@@ -859,3 +859,33 @@ def test_sync_ask_publishes_on_the_request_thread_so_the_two_snapshots_cannot_in
     ask_service_module.AskService.ask_current(fake, "nb-1", SimpleNamespace(mode="chunk"))
 
     assert threads == [threading.get_ident(), threading.get_ident()]
+
+
+def test_pending_actions_carry_the_users_transfer_jobs(repo, monkeypatch):
+    """网页导出/导入作业:进行中的只呈现、不计数;导出完成未下载与失败的计数;
+    别人的作业看不到;读注册表失败只丢这一类。"""
+    jobs = repo._runtime.notebook_transfers
+    monkeypatch.setattr(jobs, "_submit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(jobs, "_timer", lambda delay, action: None)
+    live = jobs._jobs
+    running = jobs.start_export(notebook_id="nb-1", notebook_name="一", user_id="user-a")
+    jobs._claim(live[running["id"]], "writing")
+    ready = jobs.start_export(notebook_id="nb-2", notebook_name="二", user_id="user-a")
+    jobs._finish(live[ready["id"]], "succeeded", phase="done")
+    failed = jobs.start_export(notebook_id="nb-3", notebook_name="三", user_id="user-a")
+    jobs._finish(live[failed["id"]], "failed", error={"code": "export_failed", "message": "x"})
+    jobs.start_export(notebook_id="nb-4", notebook_name="四", user_id="user-b")
+
+    out = repo.pending_actions("user-a")
+    items = {it["job_id"]: it for it in out["items"] if it["type"] == "notebook_transfer"}
+    assert {job_id: it["state"] for job_id, it in items.items()} == {
+        running["id"]: "running", ready["id"]: "succeeded", failed["id"]: "failed",
+    }
+    assert items[ready["id"]]["notebook_name"] == "二" and items[ready["id"]]["kind"] == "export"
+    assert out["count"] == 2
+
+    live[ready["id"]].downloaded = True
+    assert repo.pending_actions("user-a")["count"] == 1
+
+    monkeypatch.setattr(jobs, "pending_items", lambda user_id: 1 / 0)
+    assert repo.pending_actions("user-a") == {"count": 0, "items": []}

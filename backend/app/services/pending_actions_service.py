@@ -26,7 +26,7 @@ class PendingActionsService:
     """
 
     def __init__(
-        self, projections, *, scale_runtime, source_ingestion=None, now=None
+        self, projections, *, scale_runtime, source_ingestion=None, now=None, transfers=None
     ) -> None:
         self.projections = projections
         self.scale_runtime = scale_runtime
@@ -34,6 +34,20 @@ class PendingActionsService:
         # The repository clock seam; the deletion-window notices compare
         # ``delete_after`` against it (``app.domain.notebook_delete_grace``).
         self.now = now
+        # The web notebook export/import jobs (``NotebookTransferJobs``): their
+        # entries come from the registry in memory, not from a projection.
+        self.transfers = transfers
+
+    def _bell_transfer_items(self, user_id: str) -> list[dict[str, Any]]:
+        """The user's export/import jobs for the bell; a failure drops only this
+        kind (logged by class), as ``_bell_deletion_notices`` does."""
+        if self.transfers is None:
+            return []
+        try:
+            return self.transfers.pending_items(user_id)
+        except Exception as exc:  # noqa: BLE001 - one kind must not hide the others
+            _log.warning("pending actions: reading the transfer jobs failed (%s)", type(exc).__name__)
+            return []
 
     def deletion_notices(self, user_id: str) -> list[dict[str, Any]]:
         """The notebooks inside a deletion window that concern ``user_id``
@@ -121,6 +135,9 @@ class PendingActionsService:
                     }
                 )
 
+        # 网页导出/导入作业:进行中的只呈现不计数(与 ask / index building 同理——用户
+        # 自己刚发起的);导出完成待下载、作业失败计入 count(等用户处理)。
+        items.extend(self._bell_transfer_items(user_id))
         count = sum(
             1
             for item in items
@@ -129,6 +146,10 @@ class PendingActionsService:
             or (
                 item["type"] == "index"
                 and item["state"] in ("stale", "suggested")
+            )
+            or (
+                item["type"] == "notebook_transfer"
+                and item["state"] in ("succeeded", "failed")
             )
             # type "ask"(进行中的提问)同样不计入 count:它是**状态展示**,不是
             # 「待你确认」的动作——用户几秒前刚发起它,让它响铃就是每问一个问题
