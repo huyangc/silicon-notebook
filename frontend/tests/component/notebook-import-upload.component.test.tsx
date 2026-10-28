@@ -28,7 +28,7 @@ vi.mock("../../app/page-reload.ts", () => ({
 const {
   importUpload, useImportUpload, useImportUploadBusy, IMPORT_UPLOAD_UNSURE_TEXT, IMPORT_STOP_UNSURE_TEXT,
   IMPORT_PRECHECK_STOP_UNSURE_TEXT, IMPORT_RESPONSE_UNSURE_TEXT, IMPORT_NOT_CREATED_TEXT,
-  RECONCILE_INTERVAL_MS, RECONCILE_WINDOW_MS,
+  RECONCILE_INTERVAL_MS, RECONCILE_WINDOW_MS, RECONCILE_GIVE_UP_AFTER_FAILURES, IMPORT_RECONCILE_UNREADABLE_TEXT,
 } = await import("../../app/notebook-import-upload.ts");
 const { IMPORT_UPLOAD_CUT_TEXT, IMPORT_UPLOAD_FAILED_TEXT, TRANSFER_BUSY_TEXT } = await import(
   "../../app/notebook-transfer-api.ts"
@@ -718,6 +718,82 @@ test("登出、或这一串开始新的一次尝试:后台对账停下", async (
     await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 3);
     expect(api.listNotebookTransfers.mock.calls.length).toBe(calls);
     expect(outcomes).toHaveLength(1);
+    stop();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+
+test("对账一直读不到:到时限也不说没建出来——仍是说不准、标识留着;接着核对时读得到了就认领", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const { outcomes, stop } = collect();
+    const chosen = file();
+    const uploadId = await leaveUnsure(chosen);
+    api.listNotebookTransfers.mockRejectedValue(new TypeError("offline"));
+    await vi.advanceTimersByTimeAsync(RECONCILE_WINDOW_MS + RECONCILE_INTERVAL_MS * (RECONCILE_GIVE_UP_AFTER_FAILURES + 2));
+    expect(outcomes.some((outcome) => (outcome as { kind: string }).kind === "not_created")).toBe(false);
+    expect(outcomes.at(-1)).toEqual({ kind: "unsure", text: IMPORT_RECONCILE_UNREADABLE_TEXT });
+    // 先停下了:不再读。
+    const calls = api.listNotebookTransfers.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 5);
+    expect(api.listNotebookTransfers.mock.calls.length).toBe(calls);
+    // 打开弹窗接着核对:读得到了,作业在。
+    api.listNotebookTransfers.mockResolvedValue([active("found-later", "import", uploadId)]);
+    importUpload.resumeReconcile();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(outcomes.at(-1)).toEqual({ kind: "uploaded", job: active("found-later", "import", uploadId), fileName: "库.snbk" });
+    stop();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("读不到时标识留着:下一次重传带的还是同一个(预检本身也按标识对账)", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const { outcomes, stop } = collect();
+    const chosen = file();
+    const uploadId = await leaveUnsure(chosen);
+    api.listNotebookTransfers.mockRejectedValue(new TypeError("offline"));
+    await vi.advanceTimersByTimeAsync(RECONCILE_WINDOW_MS + RECONCILE_INTERVAL_MS * (RECONCILE_GIVE_UP_AFTER_FAILURES + 2));
+    expect(outcomes.at(-1)).toMatchObject({ kind: "unsure" });
+    api.listNotebookTransfers.mockReset();
+    api.listNotebookTransfers.mockResolvedValue([]);
+    const retry = controllableUpload();
+    const again = importUpload.start(chosen, "", 1024);
+    await vi.waitFor(() => expect(retry.uploadId).not.toBe(""));
+    expect(retry.uploadId).toBe(uploadId);
+    retry.resolve(active("dedup", "import", uploadId));
+    await again;
+    stop();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("「没建出来」只有一条路:服务端检查窗口过后发出的一次读取成功、且没有这个标识的作业", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const { outcomes, stop } = collect();
+    await leaveUnsure(file());
+    // 窗口之内一直读得到、一直没有:还不能下结论(只说明还没登记)。
+    api.listNotebookTransfers.mockResolvedValue([]);
+    await vi.advanceTimersByTimeAsync(RECONCILE_WINDOW_MS - RECONCILE_INTERVAL_MS);
+    expect(outcomes.some((outcome) => (outcome as { kind: string }).kind === "not_created")).toBe(false);
+    // 窗口过后:读失败两次(没到停下的次数),然后成功一次、没有——这才是「没建出来」。
+    api.listNotebookTransfers.mockReset();
+    api.listNotebookTransfers.mockRejectedValueOnce(new TypeError("offline"))
+      .mockRejectedValueOnce(new TypeError("offline"))
+      .mockResolvedValue([]);
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 2);
+    expect(outcomes.some((outcome) => (outcome as { kind: string }).kind === "not_created")).toBe(false);
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 3);
+    expect(outcomes.at(-1)).toEqual({ kind: "not_created", text: IMPORT_NOT_CREATED_TEXT });
     stop();
   } finally {
     vi.useRealTimers();

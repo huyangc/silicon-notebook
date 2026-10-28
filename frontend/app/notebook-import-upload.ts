@@ -119,6 +119,10 @@ export const IMPORT_STOP_UNSURE_TEXT = "已停止上传，但文件可能已经�
 
 /** 说不准之后对账到时限、还是没看到作业时那句话。 */
 export const IMPORT_NOT_CREATED_TEXT = "服务器没有建出这次的导入，可以重传。";
+/** 对账一直读不到作业列表、没法确认时那句话:不说没建出来,标识留着。 */
+export const IMPORT_RECONCILE_UNREADABLE_TEXT = "暂时无法确认这次导入是否已被接收；稍后打开导入窗口会再次核对。";
+/** 过了时限之后,连续读不到这么多次就先停下(等打开弹窗或下一次尝试时再接着核对)。 */
+export const RECONCILE_GIVE_UP_AFTER_FAILURES = 3;
 /** 说不准之后,每隔多久按上传标识对一次账。 */
 export const RECONCILE_INTERVAL_MS = 4000;
 /**
@@ -142,10 +146,17 @@ export const IMPORT_PRECHECK_STOP_UNSURE_TEXT = "已停止。上一次上传可�
  * 时的停止都**不是**确定的结局——那时请求还没发出,而上一次带这个标识的尝试(`unresolved`)
  * 可能已经建出作业、正占着名额;换了标识,下一次重传就会多出一本。
  */
-let chain: { file: File; uploadId: string; unresolved: boolean } | null = null;
+type Chain = {
+  file: File;
+  uploadId: string;
+  unresolved: boolean;
+  /** 最近一次「说不准」之后,服务端检查窗口结束的时刻(之后读到「没有」才算确定没建出来)。 */
+  windowEnd: number;
+};
+let chain: Chain | null = null;
 
-function chainFor(file: File): { file: File; uploadId: string; unresolved: boolean } {
-  if (chain?.file !== file) chain = { file, uploadId: newClientRequestId(), unresolved: false };
+function chainFor(file: File): Chain {
+  if (chain?.file !== file) chain = { file, uploadId: newClientRequestId(), unresolved: false, windowEnd: 0 };
   return chain;
 }
 
@@ -154,15 +165,26 @@ function endChain(file: File): void {
   if (chain?.file === file) chain = null;
 }
 
-/** 这一串尝试的结局说不准:标识留着,下一次(哪怕被打断)也不能当作确定没导入。 */
+/** 这一串尝试的结局说不准:标识留着,下一次(哪怕被打断)也不能当作确定没导入。服务端的
+ *  检查窗口从这一刻重新算起。 */
 function leaveUnresolved(file: File): void {
-  if (chain?.file === file) chain.unresolved = true;
+  if (chain?.file !== file) return;
+  chain.unresolved = true;
+  chain.windowEnd = Date.now() + RECONCILE_WINDOW_MS;
 }
 
 /**
- * 说不准之后的后台对账:每隔 `RECONCILE_INTERVAL_MS` 按上传标识读一次作业,直到认领到
- * (交出 `uploaded`)、到了 `RECONCILE_WINDOW_MS`(交出 `not_created`,标识留着)、这一串
- * 又开始了一次新的尝试、换了文件,或登出。弹窗开不开都在跑:它不住在 React 里。
+ * 说不准之后的后台对账:每隔 `RECONCILE_INTERVAL_MS` 按上传标识读一次作业。
+ *
+ * * 认领到:交出 `uploaded`。
+ * * 「确定没建出来」(`not_created`,标识留着)只有一条路:一次**在服务端检查窗口结束之后
+ *   才发出**的读取成功了,且里面没有这个标识的作业。窗口之内读到「没有」只说明还没登记。
+ * * 读不到不等于没有:过了窗口仍连续 `RECONCILE_GIVE_UP_AFTER_FAILURES` 次读不到,就交出
+ *   「暂时无法确认」(仍是 `unsure`,标识留着)并先停下;打开导入弹窗(`resumeReconcile`)
+ *   或下一次尝试的预检(它本来就按标识对账)会接着核对。
+ * * 这一串开始新的一次尝试、换了文件、或登出,就停。
+ *
+ * 弹窗开不开都在跑:它不住在 React 里。
  */
 let reconciler: { timer: ReturnType<typeof setTimeout> | null } | null = null;
 
@@ -171,17 +193,18 @@ function stopReconcile(): void {
   reconciler = null;
 }
 
-function startReconcile(file: File): void {
+function startReconcile(file: File, firstDelay: number = RECONCILE_INTERVAL_MS): void {
   stopReconcile();
   const own = chain;
-  if (own === null || own.file !== file) return;
+  if (own === null || own.file !== file || !own.unresolved) return;
   const handle: { timer: ReturnType<typeof setTimeout> | null } = { timer: null };
   reconciler = handle;
-  const deadline = Date.now() + RECONCILE_WINDOW_MS;
   const alive = () => reconciler === handle && chain === own;
+  let failuresAfterWindow = 0;
   const tick = async () => {
     handle.timer = null;
     if (!alive()) return;
+    const readStartedAt = Date.now();
     const job = await jobOfUpload(own.uploadId);
     if (!alive()) return;
     if (job) {
@@ -190,15 +213,27 @@ function startReconcile(file: File): void {
       deliver({ kind: "uploaded", job, fileName: file.name });
       return;
     }
-    if (Date.now() >= deadline) {
-      // 没建出来:标识照旧留着——再传一次用的还是它,服务端那边即便晚到也只会认成同一个。
+    const afterWindow = readStartedAt >= own.windowEnd;
+    if (job === null && afterWindow) {
+      // 窗口过后读到了、确实没有:没建出来。标识照旧留着——再传一次用的还是它,服务端那边
+      // 即便晚到也只会认成同一个。
       reconciler = null;
       deliver({ kind: "not_created", text: IMPORT_NOT_CREATED_TEXT });
       return;
     }
+    if (job === undefined && afterWindow) {
+      failuresAfterWindow += 1;
+      if (failuresAfterWindow >= RECONCILE_GIVE_UP_AFTER_FAILURES) {
+        reconciler = null;
+        deliver({ kind: "unsure", text: IMPORT_RECONCILE_UNREADABLE_TEXT });
+        return;
+      }
+    } else {
+      failuresAfterWindow = 0;
+    }
     handle.timer = setTimeout(() => { void tick(); }, RECONCILE_INTERVAL_MS);
   };
-  handle.timer = setTimeout(() => { void tick(); }, RECONCILE_INTERVAL_MS);
+  handle.timer = setTimeout(() => { void tick(); }, firstDelay);
 }
 
 /** 交出一个「说不准」:标识留着,并在后台接着按标识对账。 */
@@ -268,6 +303,14 @@ export const importUpload = {
   },
   busy(): boolean {
     return snapshot !== null;
+  },
+  /**
+   * 接着核对一串结果未定、对账已经停下的上传(打开导入弹窗时调用):马上读一次。没有未定
+   * 的串、对账还在跑、或有上传在进行,就什么都不做。
+   */
+  resumeReconcile(): void {
+    if (chain === null || !chain.unresolved || reconciler !== null || snapshot !== null) return;
+    startReconcile(chain.file, 0);
   },
   /** 接收上传的结局;先把挂载前就落定、还没人拿走的那些交出来。 */
   consumeOutcomes(consumer: (outcome: UploadOutcome) => void): () => void {

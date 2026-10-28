@@ -446,9 +446,12 @@ export function useNotebookImport(options: {
     }
   }), [announce]);
 
-  // 弹窗一打开,失败原因就在「开始导入」旁边了:工具栏上的「导入失败」撤掉。
+  // 弹窗一打开,失败原因就在「开始导入」旁边了:工具栏上的「导入失败」撤掉。结果未定、
+  // 后台对账已经停下(一直读不到作业)的那一串,这时接着核对。
   useEffect(() => {
-    if (open) setUploadAttention("");
+    if (!open) return;
+    setUploadAttention("");
+    importUpload.resumeReconcile();
   }, [open]);
 
   // 弹窗打开:读上限与导入记录。
