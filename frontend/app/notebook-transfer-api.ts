@@ -597,8 +597,4 @@ export function forgetTransferLimit(): void {
 }
 
 export const IMPORT_UPLOAD_FAILED_TEXT = "上传没有完成，请检查网络后重试。";
-/** 上传进行中连接被服务器提前关掉、而事后查不出原因时:服务器在读完请求体之前就会拒绝
- *  名额已满(409)与超过上限(413),浏览器那一侧只看得到一次网络中断。 */
-export const IMPORT_UPLOAD_CUT_TEXT =
-  "上传没有完成：可能是同时进行的导出或导入已满，或文件超过了上限；也可能是网络中断。请稍后重试。";
 export const TRANSFER_BUSY_TEXT = "你已有两个导出或导入正在进行，请等其中一个完成后再试。";

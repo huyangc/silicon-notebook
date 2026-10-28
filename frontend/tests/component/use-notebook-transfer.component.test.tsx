@@ -31,7 +31,8 @@ const {
 } = await import("../../app/use-notebook-transfer.ts");
 const { forgetTransferLimit } = await import("../../app/notebook-transfer-api.ts");
 const {
-  importUpload, RECONCILE_INTERVAL_MS, IMPORT_RECONCILE_UNREADABLE_TEXT,
+  importUpload, RECONCILE_INTERVAL_MS, IMPORT_RECONCILE_UNREADABLE_TEXT, IMPORT_UPLOAD_UNSURE_TEXT,
+  IMPORT_STOP_UNSURE_TEXT, NONE_CONFIRM_MS,
 } = await import("../../app/notebook-import-upload.ts");
 
 const LIMIT = 8 * 1024 * 1024;
@@ -252,7 +253,7 @@ test("导入:没变化的轮询不换数组、不重渲 Home", async () => {
   expect(result.current.view.jobs).toBe(jobs);
 });
 
-test("导入:上传失败的原因留在按钮旁、文件仍选着;主动停止说清没有导入任何内容", async () => {
+test("导入:断开的说不准留在按钮旁、文件仍选着;请求发出后停止先说「正在确认」,服务端确认没有才说没有导入任何内容", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   const { result } = renderImport();
   await waitFor(() => expect(result.current.view.limitBytes).toBe(LIMIT));
@@ -260,7 +261,7 @@ test("导入:上传失败的原因留在按钮旁、文件仍选着;主动停止
   act(() => result.current.chooseFile(file));
   api.uploadNotebookImport.mockRejectedValueOnce(new TypeError("Failed to fetch"));
   act(() => result.current.start());
-  await waitFor(() => expect(result.current.view.uploadError).toBe("上传没有完成，请检查网络后重试。"));
+  await waitFor(() => expect(result.current.view.uploadError).toBe(IMPORT_UPLOAD_UNSURE_TEXT));
   expect(result.current.view.file).toBe(file);
 
   api.uploadNotebookImport.mockImplementationOnce((_file: File, options: { signal: AbortSignal }) => new Promise((_, reject) => {
@@ -269,8 +270,30 @@ test("导入:上传失败的原因留在按钮旁、文件仍选着;主动停止
   act(() => result.current.start());
   await waitFor(() => expect(importUpload.getSnapshot()?.stage).toBe("uploading"));
   act(() => result.current.stopUpload());
-  await waitFor(() => expect(result.current.view.uploadNotice).toBe("已停止上传，没有导入任何内容。"));
+  await waitFor(() => expect(result.current.view.uploadError).toBe(IMPORT_STOP_UNSURE_TEXT));
+  expect(result.current.view.uploadNotice).toBe("");
   expect(importUpload.getSnapshot()).toBeNull();
+  api.getImportUploadStatus.mockResolvedValue({ status: "none" });
+  await tick(RECONCILE_INTERVAL_MS + 10);
+  expect(result.current.view.uploadError).toBe(IMPORT_STOP_UNSURE_TEXT);
+  await tick(NONE_CONFIRM_MS + RECONCILE_INTERVAL_MS);
+  expect(result.current.view.uploadNotice).toBe("已停止上传，没有导入任何内容。");
+  expect(result.current.view.uploadError).toBe("");
+  expect(result.current.view.file).toBe(file);
+});
+
+test("导入:请求发出前(预检时)停止,当即说没有导入任何内容", async () => {
+  const { result } = renderImport();
+  await waitFor(() => expect(result.current.view.limitBytes).toBe(LIMIT));
+  act(() => result.current.chooseFile(new File([new Uint8Array(10)], "a.snbk")));
+  api.listNotebookTransfers.mockImplementationOnce((signal?: AbortSignal) => new Promise((_, reject) => {
+    signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+  }));
+  act(() => result.current.start());
+  await waitFor(() => expect(importUpload.getSnapshot()?.stage).toBe("precheck"));
+  act(() => result.current.stopUpload());
+  await waitFor(() => expect(result.current.view.uploadNotice).toBe("已停止上传，没有导入任何内容。"));
+  expect(api.uploadNotebookImport).not.toHaveBeenCalled();
 });
 
 test("导入:Home 卸载时上传不断,结局交给重新挂载的状态机", async () => {

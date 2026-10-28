@@ -31,7 +31,7 @@ const {
   IMPORT_PRECHECK_STOP_UNSURE_TEXT, IMPORT_RESPONSE_UNSURE_TEXT, IMPORT_NOT_CREATED_TEXT,
   RECONCILE_INTERVAL_MS, NONE_CONFIRM_MS, RECONCILE_GIVE_UP_AFTER_FAILURES, IMPORT_RECONCILE_UNREADABLE_TEXT,
 } = await import("../../app/notebook-import-upload.ts");
-const { IMPORT_UPLOAD_CUT_TEXT, IMPORT_UPLOAD_FAILED_TEXT, TRANSFER_BUSY_TEXT } = await import(
+const { TRANSFER_BUSY_TEXT } = await import(
   "../../app/notebook-transfer-api.ts"
 );
 
@@ -85,7 +85,7 @@ function collect() {
 test("名额已满(进行中的导出与导入一起算)就不上传,原因说清楚", async () => {
   api.listNotebookTransfers.mockResolvedValue([active("a"), active("b", "export")]);
   const { outcomes, stop } = collect();
-  await importUpload.start(file(), "", null);
+  await importUpload.start(file(), "");
   expect(api.uploadNotebookImport).not.toHaveBeenCalled();
   expect(outcomes).toEqual([{ kind: "failed", text: TRANSFER_BUSY_TEXT }]);
   expect(importUpload.getSnapshot()).toBeNull();
@@ -102,7 +102,7 @@ test("进度只在整数百分比变化时通知;传完进入「正在检查文�
   const listener = vi.fn();
   const unsubscribe = importUpload.subscribe(listener);
   const { outcomes, stop } = collect();
-  const running = importUpload.start(file(), "名字", null);
+  const running = importUpload.start(file(), "名字");
   await vi.waitFor(() => expect(importUpload.getSnapshot()?.stage).toBe("uploading"));
   const base = listener.mock.calls.length;
   for (let sent = 0; sent <= 1000; sent += 1) progress(sent, 100_000);
@@ -125,7 +125,7 @@ test("上传中挂 beforeunload 提示,结束就摘掉", async () => {
   let finish: (job: NotebookTransferJob) => void = () => undefined;
   api.uploadNotebookImport.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
   const { stop } = collect();
-  const running = importUpload.start(file(), "", null);
+  const running = importUpload.start(file(), "");
   expect(add.mock.calls.some(([type]) => type === "beforeunload")).toBe(true);
   await vi.waitFor(() => expect(importUpload.getSnapshot()?.stage).toBe("uploading"));
   const event = new Event("beforeunload", { cancelable: true });
@@ -140,27 +140,18 @@ test("上传中挂 beforeunload 提示,结束就摘掉", async () => {
   stop();
 });
 
-test("中途网络断开、请求体没传完(确定没被接收):名额满了就照实说;确定没超上限就只是网络;否则说出可能的几种原因", async () => {
+test("中途网络断开、哪怕进度事件只到一成:证明不了没被接收——说不准,按标识对账,不再猜名额或上限", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   const { outcomes, stop } = collect();
-  for (const [after, limit] of [
-    [[active("a"), active("b", "export")], null],
-    [[], 1024],
-    [[], null],
-  ] as const) {
-    const upload = controllableUpload();
-    api.listNotebookTransfers.mockResolvedValueOnce([]).mockResolvedValueOnce([...after]).mockResolvedValueOnce([...after]);
-    const running = importUpload.start(file(), "", limit);
-    await vi.waitFor(() => expect(upload.uploadId).not.toBe(""));
-    upload.progress(10, 100);
-    upload.reject(new TypeError("Failed to fetch"));
-    await running;
-  }
-  expect(outcomes).toEqual([
-    { kind: "failed", text: TRANSFER_BUSY_TEXT },
-    { kind: "failed", text: IMPORT_UPLOAD_FAILED_TEXT },
-    { kind: "failed", text: IMPORT_UPLOAD_CUT_TEXT },
-  ]);
+  const upload = controllableUpload();
+  // 预检时名额空着;断开之后名额满了——旧的写法会据此说「名额满了」,其实这一次可能已经被接收。
+  api.listNotebookTransfers.mockResolvedValueOnce([]).mockResolvedValueOnce([active("a"), active("b", "export")]);
+  const running = importUpload.start(file(), "");
+  await vi.waitFor(() => expect(upload.uploadId).not.toBe(""));
+  upload.progress(10, 100);
+  upload.reject(new TypeError("Failed to fetch"));
+  await running;
+  expect(outcomes).toEqual([{ kind: "unsure", text: IMPORT_UPLOAD_UNSURE_TEXT }]);
   stop();
 });
 
@@ -168,7 +159,7 @@ test("服务器已经接收、连接才断:按上传标识认领到的那个作�
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   const upload = controllableUpload();
   const { outcomes, stop } = collect();
-  const running = importUpload.start(file(), "", 1024);
+  const running = importUpload.start(file(), "");
   await vi.waitFor(() => expect(upload.uploadId).not.toBe(""));
   api.listNotebookTransfers.mockResolvedValueOnce([active("accepted", "import", upload.uploadId), active("old")]);
   upload.bodySent();
@@ -183,15 +174,15 @@ test("别的标签页同时开始的导入不会被当成这一次的", async ()
   const { outcomes, stop } = collect();
   // 请求体传完后断开:列表里多了一个导入,可它带的是别的上传标识。
   const sent = controllableUpload();
-  const first = importUpload.start(file(), "", 1024);
+  const first = importUpload.start(file(), "");
   await vi.waitFor(() => expect(sent.uploadId).not.toBe(""));
   api.listNotebookTransfers.mockResolvedValueOnce([active("other-tab", "import", "up-other-tab-1")]);
   sent.bodySent();
   sent.reject(new TypeError("Failed to fetch"));
   await first;
-  // 请求体没传完就断开:同样不认,说清没被接收的原因。
+  // 没收到任何进度就断开:同样不认,也同样说不准(进度事件证明不了没被接收)。
   const partial = controllableUpload();
-  const second = importUpload.start(file(), "", 1024);
+  const second = importUpload.start(file(), "");
   await vi.waitFor(() => expect(partial.uploadId).not.toBe(""));
   api.listNotebookTransfers.mockResolvedValueOnce([active("other-tab", "import", "up-other-tab-1")])
     .mockResolvedValueOnce([active("other-tab", "import", "up-other-tab-1")]);
@@ -199,7 +190,7 @@ test("别的标签页同时开始的导入不会被当成这一次的", async ()
   await second;
   expect(outcomes).toEqual([
     { kind: "unsure", text: IMPORT_UPLOAD_UNSURE_TEXT },
-    { kind: "failed", text: IMPORT_UPLOAD_FAILED_TEXT },
+    { kind: "unsure", text: IMPORT_UPLOAD_UNSURE_TEXT },
   ]);
   stop();
 });
@@ -209,7 +200,7 @@ test("判断不了有没有被接收:说「可能已被接收」,不叫人马上
   const { outcomes, stop } = collect();
   // 一、请求体已经传完,作业却还没出现(服务器可能还在检查文件)。
   const sent = controllableUpload();
-  const first = importUpload.start(file(), "", 1024);
+  const first = importUpload.start(file(), "");
   await vi.waitFor(() => expect(sent.uploadId).not.toBe(""));
   api.listNotebookTransfers.mockResolvedValueOnce([]);
   sent.bodySent();
@@ -217,7 +208,7 @@ test("判断不了有没有被接收:说「可能已被接收」,不叫人马上
   await first;
   // 二、断开之后作业读不到(哪怕请求体没传完,也说不准)。
   const unread = controllableUpload();
-  const second = importUpload.start(file(), "", 1024);
+  const second = importUpload.start(file(), "");
   await vi.waitFor(() => expect(unread.uploadId).not.toBe(""));
   api.listNotebookTransfers.mockRejectedValueOnce(new TypeError("offline"));
   unread.reject(new TypeError("Failed to fetch"));
@@ -236,7 +227,7 @@ test("说不准之后再传同一个文件,用的是同一个上传标识(服务
   const { outcomes, stop } = collect();
   const chosen = file();
   const first = controllableUpload();
-  const attempt = importUpload.start(chosen, "", 1024);
+  const attempt = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(first.uploadId).not.toBe(""));
   api.listNotebookTransfers.mockResolvedValueOnce([]);
   first.bodySent();
@@ -245,7 +236,7 @@ test("说不准之后再传同一个文件,用的是同一个上传标识(服务
   expect(outcomes.at(-1)).toMatchObject({ kind: "unsure" });
   // 重传同一个文件:同一个标识;服务端认出它,回已经建出的那个作业(不读请求体)。
   const retry = controllableUpload();
-  const again = importUpload.start(chosen, "", 1024);
+  const again = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(retry.uploadId).not.toBe(""));
   expect(retry.uploadId).toBe(first.uploadId);
   retry.resolve(active("existing", "import", first.uploadId));
@@ -253,14 +244,14 @@ test("说不准之后再传同一个文件,用的是同一个上传标识(服务
   expect(outcomes.at(-1)).toEqual({ kind: "uploaded", job: active("existing", "import", first.uploadId), fileName: "库.snbk" });
   // 有了确定结局:同一个文件再传是新的一串,换新标识。
   const fresh = controllableUpload();
-  const third = importUpload.start(chosen, "", 1024);
+  const third = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(fresh.uploadId).not.toBe(""));
   expect(fresh.uploadId).not.toBe(first.uploadId);
   fresh.resolve(active("second", "import", fresh.uploadId));
   await third;
   // 换了文件:新标识。
   const other = controllableUpload();
-  const fourth = importUpload.start(file(), "", 1024);
+  const fourth = importUpload.start(file(), "");
   await vi.waitFor(() => expect(other.uploadId).not.toBe(""));
   expect(other.uploadId).not.toBe(fresh.uploadId);
   expect(other.uploadId).toMatch(/^[A-Za-z0-9_-]{8,64}$/);
@@ -275,14 +266,14 @@ test("同一个标识的上一次上传还在服务端处理(409):说不准,标�
   const { outcomes, stop } = collect();
   const chosen = file();
   const first = controllableUpload();
-  const attempt = importUpload.start(chosen, "", 1024);
+  const attempt = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(first.uploadId).not.toBe(""));
   api.uploadStillInProgress.mockReturnValueOnce(true);
   first.reject(humanizedError("上一次上传的这个文件还在处理中，请稍后查看导入记录。", 409));
   await attempt;
   expect(outcomes).toEqual([{ kind: "unsure", text: "上一次上传的这个文件还在处理中，请稍后查看导入记录。" }]);
   const retry = controllableUpload();
-  const again = importUpload.start(chosen, "", 1024);
+  const again = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(retry.uploadId).not.toBe(""));
   expect(retry.uploadId).toBe(first.uploadId);
   retry.resolve(active("x", "import", first.uploadId));
@@ -292,7 +283,7 @@ test("同一个标识的上一次上传还在服务端处理(409):说不准,标�
 
 test("没人接的结局先存着,下一个接收者一挂上就拿到(且只拿一次)", async () => {
   api.uploadNotebookImport.mockResolvedValueOnce(active("imp-2"));
-  await importUpload.start(file(), "", null);
+  await importUpload.start(file(), "");
   const first = collect();
   expect(first.outcomes).toEqual([{ kind: "uploaded", job: active("imp-2"), fileName: "库.snbk" }]);
   first.stop();
@@ -301,20 +292,20 @@ test("没人接的结局先存着,下一个接收者一挂上就拿到(且只拿
   second.stop();
 });
 
-test("同一时刻只有一次上传;停止得到 stopped;登出丢掉一切", async () => {
+test("同一时刻只有一次上传;请求发出后停止只说「正在向服务器确认」;登出丢掉一切", async () => {
   api.uploadNotebookImport.mockImplementation((_file: File, options: { signal: AbortSignal }) => new Promise((_, reject) => {
     options.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
   }));
   const { outcomes, stop } = collect();
-  const running = importUpload.start(file(), "", null);
+  const running = importUpload.start(file(), "");
   await vi.waitFor(() => expect(importUpload.getSnapshot()?.stage).toBe("uploading"));
-  await importUpload.start(file(), "", null);
+  await importUpload.start(file(), "");
   expect(api.uploadNotebookImport).toHaveBeenCalledTimes(1);
   importUpload.stop();
   await running;
-  expect(outcomes).toEqual([{ kind: "stopped" }]);
+  expect(outcomes).toEqual([{ kind: "unsure", text: IMPORT_STOP_UNSURE_TEXT }]);
   stop();
-  const again = importUpload.start(file(), "", null);
+  const again = importUpload.start(file(), "");
   await vi.waitFor(() => expect(importUpload.getSnapshot()?.stage).toBe("uploading"));
   importUpload.reset();
   await again;
@@ -333,7 +324,7 @@ test("useImportUpload 只在快照变化时重渲订阅它的组件", async () =
   let renders = 0;
   const { result } = renderHook(() => { renders += 1; return useImportUpload(); });
   const { stop } = collect();
-  act(() => { void importUpload.start(file(), "", null); });
+  act(() => { void importUpload.start(file(), ""); });
   await vi.waitFor(() => expect(result.current?.stage).toBe("uploading"));
   const before = renders;
   act(() => { for (let sent = 0; sent < 900; sent += 1) progress(sent, 100_000); });
@@ -356,7 +347,7 @@ test("传完之后(正在检查文件)停不下来:stop 什么都不做,结局�
     return new Promise((resolve) => { finish = resolve; });
   });
   const { outcomes, stop } = collect();
-  const running = importUpload.start(file(), "", null);
+  const running = importUpload.start(file(), "");
   await vi.waitFor(() => expect(importUpload.getSnapshot()?.stage).toBe("uploading"));
   progress(100, 100);
   expect(importUpload.getSnapshot()?.stage).toBe("checking");
@@ -371,7 +362,7 @@ test("传完之后(正在检查文件)停不下来:stop 什么都不做,结局�
 test("停止与服务端接收抢跑:请求体已经传完、又没认领到作业——说不准,不说「没有导入任何内容」", async () => {
   const upload = controllableUpload();
   const { outcomes, stop } = collect();
-  const running = importUpload.start(file(), "", null);
+  const running = importUpload.start(file(), "");
   await vi.waitFor(() => expect(upload.uploadId).not.toBe(""));
   // 「请求体已传完」先到,进度事件还没来得及到 100%:这时按钮仍在(阶段已是 checking 则不在)。
   upload.progress(99, 100);
@@ -386,7 +377,7 @@ test("停止与服务端接收抢跑:请求体已经传完、又没认领到作�
 test("停止与服务端接收抢跑:认领到了这一次的作业就照实交出", async () => {
   const upload = controllableUpload();
   const { outcomes, stop } = collect();
-  const running = importUpload.start(file(), "", null);
+  const running = importUpload.start(file(), "");
   await vi.waitFor(() => expect(upload.uploadId).not.toBe(""));
   api.listNotebookTransfers.mockResolvedValueOnce([active("mine", "import", upload.uploadId)]);
   importUpload.stop();
@@ -395,23 +386,110 @@ test("停止与服务端接收抢跑:认领到了这一次的作业就照实交�
   stop();
 });
 
-test("请求体没传完就停止、也没认领到作业:确定没导入", async () => {
-  const upload = controllableUpload();
+test("请求发出后停止、一个进度事件都没到:正在向服务器确认;之后服务端说「有作业」就认领它", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const upload = controllableUpload();
+    const { outcomes, stop } = collect();
+    const running = importUpload.start(file(), "");
+    await vi.waitFor(() => expect(upload.uploadId).not.toBe(""));
+    // 浏览器可能已经把最后的字节发出去,进度/load 事件却还没跑:停止。
+    api.listNotebookTransfers.mockResolvedValueOnce([]);
+    importUpload.stop();
+    await running;
+    expect(outcomes).toEqual([{ kind: "unsure", text: IMPORT_STOP_UNSURE_TEXT }]);
+    expect(IMPORT_STOP_UNSURE_TEXT).toBe("已停止上传，正在向服务器确认这次是否已被接收…");
+    answers("receiving", active("landed", "import", upload.uploadId));
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 2 + 10);
+    expect(api.getImportUploadStatus).toHaveBeenLastCalledWith(upload.uploadId);
+    expect(outcomes.at(-1)).toEqual({ kind: "uploaded", job: active("landed", "import", upload.uploadId), fileName: "库.snbk" });
+    stop();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("请求发出后停止:服务端隔开两次都说「没有」,这才说没有导入任何内容", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const upload = controllableUpload();
+    const { outcomes, stop } = collect();
+    const running = importUpload.start(file(), "");
+    await vi.waitFor(() => expect(upload.uploadId).not.toBe(""));
+    upload.progress(30, 100);
+    api.listNotebookTransfers.mockResolvedValueOnce([]);
+    importUpload.stop();
+    await running;
+    expect(outcomes).toEqual([{ kind: "unsure", text: IMPORT_STOP_UNSURE_TEXT }]);
+    api.getImportUploadStatus.mockResolvedValue({ status: "none" });
+    // 第一次「没有」只记下:还不下结论。
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS + 10);
+    expect(outcomes).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(NONE_CONFIRM_MS + RECONCILE_INTERVAL_MS);
+    expect(outcomes).toEqual([{ kind: "unsure", text: IMPORT_STOP_UNSURE_TEXT }, { kind: "stopped" }]);
+    // 下结论就停:不再问。
+    const calls = api.getImportUploadStatus.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 3);
+    expect(api.getImportUploadStatus.mock.calls.length).toBe(calls);
+    stop();
+  } finally {
+    api.getImportUploadStatus.mockReset();
+    api.getImportUploadStatus.mockResolvedValue({ status: "receiving" });
+    vi.useRealTimers();
+  }
+});
+
+test("请求发出前(预检时)停止:这一次什么都没发出,当即说没有导入任何内容,也不问服务端", async () => {
   const { outcomes, stop } = collect();
-  const running = importUpload.start(file(), "", null);
-  await vi.waitFor(() => expect(upload.uploadId).not.toBe(""));
-  upload.progress(30, 100);
-  api.listNotebookTransfers.mockResolvedValueOnce([]);
+  api.listNotebookTransfers.mockImplementationOnce((signal?: AbortSignal) => new Promise((_, reject) => {
+    signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+  }));
+  const running = importUpload.start(file(), "");
+  await vi.waitFor(() => expect(importUpload.getSnapshot()?.stage).toBe("precheck"));
   importUpload.stop();
   await running;
   expect(outcomes).toEqual([{ kind: "stopped" }]);
+  expect(api.uploadNotebookImport).not.toHaveBeenCalled();
+  expect(api.getImportUploadStatus).not.toHaveBeenCalled();
   stop();
+});
+
+test("先停止(说不准)、重传又被白名单确定拒绝:后台对账确认「没有」时按拒绝说没建出来,不沿用「停止」", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const { outcomes, stop } = collect();
+    const chosen = file();
+    const upload = controllableUpload();
+    const running = importUpload.start(chosen, "");
+    await vi.waitFor(() => expect(upload.uploadId).not.toBe(""));
+    api.listNotebookTransfers.mockResolvedValueOnce([]);
+    importUpload.stop();
+    await running;
+    expect(outcomes.at(-1)).toEqual({ kind: "unsure", text: IMPORT_STOP_UNSURE_TEXT });
+    const retry = controllableUpload();
+    const again = importUpload.start(chosen, "");
+    await vi.waitFor(() => expect(retry.uploadId).toBe(upload.uploadId));
+    api.uploadRefusedForSure.mockReturnValueOnce(true);
+    answers("receiving");
+    retry.reject(new Error("refused"));
+    await again;
+    expect(outcomes.at(-1)).toMatchObject({ kind: "failed" });
+    api.getImportUploadStatus.mockResolvedValue({ status: "none" });
+    await vi.advanceTimersByTimeAsync(NONE_CONFIRM_MS + RECONCILE_INTERVAL_MS * 3);
+    expect(outcomes.at(-1)).toEqual({ kind: "not_created", text: IMPORT_NOT_CREATED_TEXT });
+    stop();
+  } finally {
+    api.getImportUploadStatus.mockReset();
+    api.getImportUploadStatus.mockResolvedValue({ status: "receiving" });
+    vi.useRealTimers();
+  }
 });
 
 test("页面自己发起的重载(401、换了登录)不被「离开此页」挡住", async () => {
   api.uploadNotebookImport.mockImplementationOnce(() => new Promise(() => undefined));
   const { stop } = collect();
-  void importUpload.start(file(), "", null);
+  void importUpload.start(file(), "");
   await vi.waitFor(() => expect(importUpload.getSnapshot()?.stage).toBe("uploading"));
   const asked = new Event("beforeunload", { cancelable: true });
   window.dispatchEvent(asked);
@@ -431,7 +509,7 @@ test("等着解释断线原因的时候登出了:迟到的结局不再交出去"
   api.listNotebookTransfers.mockResolvedValueOnce([])
     .mockImplementationOnce(() => new Promise((resolve) => { explain = resolve; }));
   const { outcomes, stop } = collect();
-  const running = importUpload.start(file(), "", null);
+  const running = importUpload.start(file(), "");
   await vi.waitFor(() => expect(api.listNotebookTransfers).toHaveBeenCalledTimes(2));
   importUpload.reset();
   explain([active("a"), active("b")]);
@@ -449,7 +527,7 @@ test("useImportUploadBusy 只在「有没有上传」翻转时重渲", async () 
   let renders = 0;
   const { result } = renderHook(() => { renders += 1; return useImportUploadBusy(); });
   const { stop } = collect();
-  act(() => { void importUpload.start(file(), "", null); });
+  act(() => { void importUpload.start(file(), ""); });
   await vi.waitFor(() => expect(importUpload.getSnapshot()?.stage).toBe("uploading"));
   expect(result.current).toBe(true);
   const before = renders;
@@ -467,7 +545,7 @@ test("上传被 413 拒绝:忘掉记住的上限,下次重新读", async () => {
   api.uploadNotebookImport.mockRejectedValueOnce(humanizedError("文件超过网页导入上限", 413));
   api.uploadRefusedForSure.mockReturnValueOnce(true);
   const { outcomes, stop } = collect();
-  await importUpload.start(file(), "", null);
+  await importUpload.start(file(), "");
   expect(api.forgetTransferLimit).toHaveBeenCalledOnce();
   expect(outcomes).toHaveLength(1);
   stop();
@@ -477,7 +555,7 @@ test("上传被 413 拒绝:忘掉记住的上限,下次重新读", async () => {
 /** 让同一个文件先落一次「说不准」(请求体传完、连接断了、还没看到作业),交回那次的上传标识。 */
 async function leaveUnsure(chosen: File): Promise<string> {
   const first = controllableUpload();
-  const attempt = importUpload.start(chosen, "", 1024);
+  const attempt = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(first.uploadId).not.toBe(""));
   api.listNotebookTransfers.mockResolvedValueOnce([]);
   first.bodySent();
@@ -494,7 +572,7 @@ test("说不准之后重传:原来那次的作业已经在、正占着名额—�
   expect(outcomes.at(-1)).toMatchObject({ kind: "unsure" });
   // 两个名额都占着,其中一个正是原来那次上传建出的作业。
   api.listNotebookTransfers.mockResolvedValueOnce([active("original", "import", uploadId), active("other", "export")]);
-  await importUpload.start(chosen, "", 1024);
+  await importUpload.start(chosen, "");
   expect(api.uploadNotebookImport).toHaveBeenCalledTimes(1);
   expect(outcomes.at(-1)).toEqual({ kind: "uploaded", job: active("original", "import", uploadId), fileName: "库.snbk" });
   stop();
@@ -506,11 +584,11 @@ test("说不准之后重传被名额挡住:标识留着,再下一次重传带的
   const chosen = file();
   const uploadId = await leaveUnsure(chosen);
   api.listNotebookTransfers.mockResolvedValueOnce([active("a"), active("b", "export")]);
-  await importUpload.start(chosen, "", 1024);
+  await importUpload.start(chosen, "");
   expect(outcomes.at(-1)).toEqual({ kind: "failed", text: TRANSFER_BUSY_TEXT });
   expect(api.uploadNotebookImport).toHaveBeenCalledTimes(1);
   const later = controllableUpload();
-  const again = importUpload.start(chosen, "", 1024);
+  const again = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(later.uploadId).not.toBe(""));
   expect(later.uploadId).toBe(uploadId);
   later.resolve(active("dedup", "import", uploadId));
@@ -529,7 +607,7 @@ test("说不准之后:预检时停止、或这一次半截就断开,都还是说
     releaseList = resolve;
     signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
   }));
-  const prechecking = importUpload.start(chosen, "", 1024);
+  const prechecking = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(importUpload.getSnapshot()?.stage).toBe("precheck"));
   importUpload.stop();
   await prechecking;
@@ -537,7 +615,7 @@ test("说不准之后:预检时停止、或这一次半截就断开,都还是说
   expect(outcomes.at(-1)).toEqual({ kind: "unsure", text: IMPORT_PRECHECK_STOP_UNSURE_TEXT });
   // 这一次请求体没传完就断开、也没认领到作业:不能据此说上一次没导入。
   const partial = controllableUpload();
-  const cut = importUpload.start(chosen, "", 1024);
+  const cut = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(partial.uploadId).not.toBe(""));
   expect(partial.uploadId).toBe(uploadId);
   api.listNotebookTransfers.mockResolvedValueOnce([]);
@@ -546,7 +624,7 @@ test("说不准之后:预检时停止、或这一次半截就断开,都还是说
   await cut;
   expect(outcomes.at(-1)).toEqual({ kind: "unsure", text: IMPORT_UPLOAD_UNSURE_TEXT });
   const next = controllableUpload();
-  const third = importUpload.start(chosen, "", 1024);
+  const third = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(next.uploadId).not.toBe(""));
   expect(next.uploadId).toBe(uploadId);
   next.resolve(active("x", "import", uploadId));
@@ -561,7 +639,7 @@ test("说不准之后被服务端明确拒绝:先按标识对账,认领到就交
   const chosen = file();
   const uploadId = await leaveUnsure(chosen);
   const refused = controllableUpload();
-  const attempt = importUpload.start(chosen, "", 1024);
+  const attempt = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(refused.uploadId).not.toBe(""));
   api.getImportUploadStatus.mockResolvedValueOnce({ status: "job", job: active("found", "import", uploadId) });
   api.uploadRefusedForSure.mockReturnValueOnce(true);
@@ -579,7 +657,7 @@ test("请求体传完后服务器回 504 / 502 / 500(不是认得出的确定拒
     const { outcomes, stop } = collect();
     const chosen = file();
     const first = controllableUpload();
-    const attempt = importUpload.start(chosen, "", 1024);
+    const attempt = importUpload.start(chosen, "");
     await vi.waitFor(() => expect(first.uploadId).not.toBe(""));
     api.listNotebookTransfers.mockResolvedValueOnce([]);
     first.bodySent();
@@ -587,7 +665,7 @@ test("请求体传完后服务器回 504 / 502 / 500(不是认得出的确定拒
     await attempt;
     expect(outcomes).toEqual([{ kind: "unsure", text: IMPORT_RESPONSE_UNSURE_TEXT }]);
     const retry = controllableUpload();
-    const again = importUpload.start(chosen, "", 1024);
+    const again = importUpload.start(chosen, "");
     await vi.waitFor(() => expect(retry.uploadId).not.toBe(""));
     expect(retry.uploadId).toBe(first.uploadId);
     retry.resolve(active(`after-${status}`, "import", first.uploadId));
@@ -601,14 +679,14 @@ test("不认得的回答(未知状态码)也是说不准;按标识认领到作�
   const { humanizedError } = await import("../../app/errors.ts");
   const { outcomes, stop } = collect();
   const unknown = controllableUpload();
-  const attempt = importUpload.start(file(), "", 1024);
+  const attempt = importUpload.start(file(), "");
   await vi.waitFor(() => expect(unknown.uploadId).not.toBe(""));
   api.listNotebookTransfers.mockResolvedValueOnce([]);
   unknown.reject(humanizedError("操作失败，请重试", 418));
   await attempt;
   expect(outcomes.at(-1)).toEqual({ kind: "unsure", text: IMPORT_RESPONSE_UNSURE_TEXT });
   const gateway = controllableUpload();
-  const second = importUpload.start(file(), "", 1024);
+  const second = importUpload.start(file(), "");
   await vi.waitFor(() => expect(gateway.uploadId).not.toBe(""));
   api.listNotebookTransfers.mockResolvedValueOnce([active("created", "import", gateway.uploadId)]);
   gateway.reject(humanizedError("服务暂时不可用，请稍后再试", 504));
@@ -627,7 +705,7 @@ test("认得出的确定拒绝(409 名额满、413),第一次尝试:失败,去�
     const { outcomes, stop } = collect();
     const chosen = file();
     const first = controllableUpload();
-    const attempt = importUpload.start(chosen, "", 1024);
+    const attempt = importUpload.start(chosen, "");
     await vi.waitFor(() => expect(first.uploadId).not.toBe(""));
     // 服务端的去向接口说这个标识 `none`:第一次尝试的拒绝这才结束这一串。
     api.getImportUploadStatus.mockResolvedValueOnce({ status: "none" });
@@ -636,7 +714,7 @@ test("认得出的确定拒绝(409 名额满、413),第一次尝试:失败,去�
     await attempt;
     expect(outcomes).toEqual([{ kind: "failed", text }]);
     const next = controllableUpload();
-    const again = importUpload.start(chosen, "", 1024);
+    const again = importUpload.start(chosen, "");
     await vi.waitFor(() => expect(next.uploadId).not.toBe(""));
     expect(next.uploadId).not.toBe(first.uploadId);
     next.resolve(active(`fresh-${status}`, "import", next.uploadId));
@@ -650,7 +728,7 @@ test("第一次尝试就被确定拒绝:换标识之前也先按标识对账(有
   const { humanizedError } = await import("../../app/errors.ts");
   const { outcomes, stop } = collect();
   const first = controllableUpload();
-  const attempt = importUpload.start(file(), "", 1024);
+  const attempt = importUpload.start(file(), "");
   await vi.waitFor(() => expect(first.uploadId).not.toBe(""));
   api.getImportUploadStatus.mockResolvedValueOnce({ status: "job", job: active("already", "import", first.uploadId) });
   api.uploadRefusedForSure.mockReturnValueOnce(true);
@@ -728,7 +806,7 @@ test("服务端隔开两次都说「没有」才算没建出来:可以重传,重
     expect(outcomes.at(-1)).toEqual({ kind: "not_created", text: IMPORT_NOT_CREATED_TEXT });
     expect(outcomes.filter((outcome) => (outcome as { kind: string }).kind === "not_created")).toHaveLength(1);
     const retry = controllableUpload();
-    const again = importUpload.start(chosen, "", 1024);
+    const again = importUpload.start(chosen, "");
     await vi.waitFor(() => expect(retry.uploadId).not.toBe(""));
     expect(retry.uploadId).toBe(uploadId);
     retry.resolve(active("x", "import", uploadId));
@@ -777,7 +855,7 @@ test("问不到时标识留着:下一次重传带的还是同一个", async () =
     await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * (RECONCILE_GIVE_UP_AFTER_FAILURES + 1));
     expect(outcomes.at(-1)).toMatchObject({ kind: "unsure" });
     const retry = controllableUpload();
-    const again = importUpload.start(chosen, "", 1024);
+    const again = importUpload.start(chosen, "");
     await vi.waitFor(() => expect(retry.uploadId).not.toBe(""));
     expect(retry.uploadId).toBe(uploadId);
     retry.resolve(active("dedup", "import", uploadId));
@@ -800,7 +878,7 @@ test("登出:后台对账停下;换了文件开始新的上传:旧的一串照�
     // 换成 B 上传(成功)。
     const fileB = new File([new Uint8Array(50)], "乙.snbk");
     const uploadB = controllableUpload();
-    const runningB = importUpload.start(fileB, "", 1024);
+    const runningB = importUpload.start(fileB, "");
     await vi.waitFor(() => expect(uploadB.uploadId).not.toBe(""));
     expect(uploadB.uploadId).not.toBe(uploadIdA);
     uploadB.resolve(active("b-job", "import", uploadB.uploadId));
@@ -834,7 +912,7 @@ test("重传被 413 拒绝,而原来那次请求服务端还在接收:标识留�
     const chosen = file();
     const uploadId = await leaveUnsure(chosen);
     const retry = controllableUpload();
-    const attempt = importUpload.start(chosen, "", 1024);
+    const attempt = importUpload.start(chosen, "");
     await vi.waitFor(() => expect(retry.uploadId).not.toBe(""));
     expect(retry.uploadId).toBe(uploadId);
     api.getImportUploadStatus.mockResolvedValue({ status: "receiving" });
@@ -860,7 +938,7 @@ test("第一次尝试被白名单拒绝、去向接口问不到:标识留着,再
   const { outcomes, stop } = collect();
   const chosen = file();
   const first = controllableUpload();
-  const attempt = importUpload.start(chosen, "", 1024);
+  const attempt = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(first.uploadId).not.toBe(""));
   api.getImportUploadStatus.mockRejectedValueOnce(new TypeError("offline"));
   api.uploadRefusedForSure.mockReturnValueOnce(true);
@@ -868,7 +946,7 @@ test("第一次尝试被白名单拒绝、去向接口问不到:标识留着,再
   await attempt;
   expect(outcomes.at(-1)).toEqual({ kind: "failed", text: "请上传笔记本导出文件（.snbk）。" });
   const next = controllableUpload();
-  const again = importUpload.start(chosen, "", 1024);
+  const again = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(next.uploadId).not.toBe(""));
   expect(next.uploadId).toBe(first.uploadId);
   next.resolve(active("x", "import", first.uploadId));
@@ -882,14 +960,14 @@ test("第一次尝试被白名单拒绝、去向接口说还在接收:标识留�
   const { stop } = collect();
   const chosen = file();
   const first = controllableUpload();
-  const attempt = importUpload.start(chosen, "", 1024);
+  const attempt = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(first.uploadId).not.toBe(""));
   api.getImportUploadStatus.mockResolvedValueOnce({ status: "receiving" });
   api.uploadRefusedForSure.mockReturnValueOnce(true);
   first.reject(humanizedError("请上传笔记本导出文件（.snbk）。", 415));
   await attempt;
   const next = controllableUpload();
-  const again = importUpload.start(chosen, "", 1024);
+  const again = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(next.uploadId).not.toBe(""));
   expect(next.uploadId).toBe(first.uploadId);
   next.resolve(active("y", "import", first.uploadId));
@@ -897,19 +975,19 @@ test("第一次尝试被白名单拒绝、去向接口说还在接收:标识留�
   stop();
 });
 
-test("作业列表里「没看到」不是结束一串的凭据:请求体没传完就断开,说没导入,但标识留着", async () => {
+test("作业列表里「没看到」不是结束一串的凭据:请求体没传完就断开,说不准,标识留着", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   const { stop } = collect();
   const chosen = file();
   const partial = controllableUpload();
-  const attempt = importUpload.start(chosen, "", 1024);
+  const attempt = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(partial.uploadId).not.toBe(""));
   partial.progress(10, 100);
   api.listNotebookTransfers.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
   partial.reject(new TypeError("Failed to fetch"));
   await attempt;
   const next = controllableUpload();
-  const again = importUpload.start(chosen, "", 1024);
+  const again = importUpload.start(chosen, "");
   await vi.waitFor(() => expect(next.uploadId).not.toBe(""));
   expect(next.uploadId).toBe(partial.uploadId);
   next.resolve(active("z", "import", partial.uploadId));
