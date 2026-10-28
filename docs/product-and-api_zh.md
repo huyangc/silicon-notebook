@@ -3054,6 +3054,42 @@ V2 实验协议与布局已退役。Ask、Deep Report 和 Knowhow 均使用 Lega
 
 部署插件的 reflect 动作如果叫 `browse_sections` 或 `read_section`，启动即被拒：这两个名字是核心动作 id，属保留名（见 [Reflect 插件动作](#reflect-插件动作askreflect_action) 的注册红线）。
 
+### 论文检索、论文卡片与逐篇抽取（`find_sources` / `get_paper_cards` / `extract_from_sources`）
+
+**用途。**「列出这个笔记本里所有与 X 相关的论文，并给出主要技术指标和关键创新点」靠对段落排序答不好：名录每轮最多只给 20 个标题，段落检索每次只返回固定数量的段落。三个 reflect 动作（仅逐步推理；chunk 模式行为不变）加一种回答版式解决这件事。每个动作有自己的部署闸（`REASONING_FIND_SOURCES_ENABLED`、`REASONING_PAPER_CARDS_ENABLED`、`REASONING_EXTRACT_ENABLED`），闸关掉时 prompt 行、schema 分支、白名单三处一起消失；`answer_layout` 字段只在卡片闸或抽取闸开着时才存在。部署插件不得使用这几个动作 id 与 `answer_layout`（见[Reflect 插件动作](#reflect-插件动作askreflect_action)的注册红线）。
+
+**`find_sources`：按主题找文档。** 参数：`query`（自然语言描述，供语义腿）、`terms`（至多 6 个字面词、别名或缩写，每个至多 64 字，最字面的在前；reflect 执行器截掉多余的词并在账本里说明）、`year_from` / `year_to`、`venue`、`author`（子串过滤）、`kind`（`papers` 默认，或 `all`；`papers` 还包含元数据尚未抽取但类型合格的文档，标为 `meta_pending`）、`scope`（`all` 或 `current_notebook`，与枚举动作同义）、`cursor`。`query`、`terms` 与过滤条件至少给一个。来源集合就是本次运行冻结的来源天花板与参与库（与枚举动作同一集合），可见性谓词与来源面板一致，所以别的成员的 Memory 投影不会出现。两条腿并行：元数据腿（对标题、文件名、摘要、论文标题、会议、关键词、作者做大小写不敏感的子串匹配，`%` 与 `_` 已转义；记录每篇命中哪些字段、是否词边界命中）和语义腿（每个库至多召回 `FIND_SOURCES_CHUNK_RECALL` 个片段，按文档分组，保留每篇的最佳融合相关度与片段数）。每篇落到一个档位：`strong`（标题、论文标题或关键词词边界命中，或最佳相关度达到 `FIND_SOURCES_STRONG_RELEVANCE`）、`related`（其他字段命中、非词边界命中，或最佳相关度达到 `FIND_SOURCES_RELATED_RELEVANCE`）或丢弃。FTS 降级车道上，或片段没有向量相似度贡献时，相关度线不适用，只靠片段的文档至少要 2 个片段才算 `related`。排序完全确定（档位、命中字段数、最佳相关度、片段数、发表年份降序、来源 id）；纯过滤请求全部算 `strong`，按年份新到旧。每页 20 篇，每翻一页都计入本次运行的 `find_sources` 次数。每项带运行内句柄 `p1…`、来源 id、标题、年份、会议、至多 3 位作者、档位、命中原因 `reasons`、最佳片段（至多 240 字）与卡片状态。响应还带 `counts`（强相关、相关、范围总数、元数据尚缺的论文数）与 `coverage`：`lexical_complete` 为 false 表示年份/会议/作者过滤排除了元数据尚未抽取的论文，或 `terms` 对这类论文只能核对标题与摘要，或有参与库被跳过（列在 `skipped_libraries`）；`semantic_recall_capped` 为 true 表示最后一个召回片段仍高于相关线。**任一标志表示可能不完整时，回答必须说明，不得声称已列全。** 游标带参数指纹与范围内论文元数据的摘要：两页之间有论文元数据被抽取，旧游标被拒（「从第一页重新检索」），因为次序可能已变；已发出的句柄不受影响。非当前库沿用联邦检索「只看暖索引」的规则（不冷加载、不全表扫描）；档位线在校准前是临时值（见 `docs/deployment-and-configuration_zh.md`）。
+
+**论文卡片（`get_paper_cards`）。** 卡片是逐篇的结构化要点：`tldr`、`problem`、`method`、至多 5 条贡献、至多 12 条指标（名称、数值、单位、设定、`compared_to`）和至多 8 个数据集，每个字段都引用来源元素。只有论文元数据判定为论文的来源才有卡片，其他文档用 `extract_from_sources`。卡片是**懒生成**：入库时不生成、不做回填，调用方第一次用到时才生成，缓存在 `source_paper_cards`。模型读到的是至多 `PAPER_CARD_INPUT_CHARS` 字的确定性采样（先开头，再至多 6 张表格，再均匀取样其余元素，含最后一个）。**接地靠代码不靠信任：**每个引用的元素 id 必须出现在采样里；文字字段清掉非法引用后一个都不剩就整条丢弃；指标只有在归一化后的数值（全角转半角、去千分位与小数尾零、必须是完整数字 token、负号与 ±/指数写法整体比对）出现在它所引元素的文本里才保留，只有个位整数的值一律不算接地。数值按数字安全的方式截短，不会切出半个数。被丢弃的条目与原因写进审计信封。**有效性在读取时判定：**缓存的卡片只有在内容基线（来源元素生成见证）、卡片版本与论文判定都仍然匹配时才算命中，所以重新解析、重新分类、升级 prompt 都不用清理代码，下次请求即重新生成；来源被重新分类为非论文时删除其卡片。**失败冷却：**内容失败（回复不合格、校验后卡片全空、元数据抽取失败）或对该文档确定性的失败，在 `PAPER_CARD_RETRY_SECONDS` 内不重试（连续 3 次失败后固定 24 小时）；鉴权或配置错误不写任何行；暂时性错误（队列满或等待超时、熔断、429、5xx、超时）返回 `deferred`，不算失败。每次请求里元数据抽取与卡片生成合计最多花本次运行的生成预算，超出的返回 `deferred`，回答里写明有多少篇未展开。各篇状态：`ready`、`generated`、`not_paper`、`meta_pending`（元数据未抽取，或笔记本是只读镜像无法写入）、`failed`、`deferred`、`not_found`。读者可以为自己有读权的挂载库/引用库写入缓存，缓存里没有提问者的任何信息；缓存不跨环境同步，也不随笔记本导出或复制（用到时重新生成）。`PAPER_CARD_ENABLED=false` 只停止生成新卡片，仍返回已缓存的有效卡片，不影响抽取。
+
+**`extract_from_sources`：临时字段抽取。** 参数 `sources`（句柄或来源 id）与 `fields`（至多 4 条，每条至多 80 字，如「在 COCO 上的 mAP」）。适用于任何文档（不限论文），不缓存。每篇对每个字段分别取最相似的 4 个片段（去重后至多 12 个；该篇没有向量时回落到全文检索；大纲扫描至多 4000 行，超出时注明），加上开头的元素，调用一次 `paper_metadata` 模型。含数字的值，每组数字都必须出现在所引元素的文本里才保留（整个值只是个位整数时拒绝），每个保留的值带自己的引用。各篇结果：`extracted`、`no_text`、`deferred`、`failed`、`not_found`；每个字段给值或说明缺失原因。
+
+**引用。**卡片与抽取的引用使用独立的证据号段 `k9001`–`k9999`（至多 40 张卡 × 24 个元素），位于 `read_document` 号段之上。所有被引元素登记进引用卡，不占提示词预算；模型看到的是每篇一段紧凑摘要（标题、年份/会议、TL;DR、前 2 条贡献、前 3 条指标，各带 key），以及本轮调用过 `find_sources` 时的检索结果块（覆盖说明加上没有卡片行的命中文档）。卡片缓存之后来源被删除或重新解析，对应元素登记不上，建立在它之上的说法不会写出。
+
+**确定性论文表（`answer_layout`）。**任何一轮 reflect 都可以写可选顶层字段 `answer_layout`，取 `prose`（默认）或 `paper_table`，取最后一次写的值；只有本次运行确实有卡片或抽取值时才接受 `paper_table`，否则回落 `prose` 并在账本里写明。选 `paper_table` 时，模型正文写完之后由系统（不是模型）拼出最终文本：一行**覆盖说明**（「共找到 N 篇相关论文（强相关 a 篇、相关 b 篇），其中 M 篇展开了要点」；`semantic_recall_capped`、元数据缺失或有库被跳过时附「可能还有更多」；多次不同的 `find_sources` 请求且重叠未知时写「至少 N 篇」），然后是模型写的综述与跨论文对比（被告知不要重复列表），然后是**表格**（论文、年份 / 会议、主要技术指标、关键创新点，以及一列「补充字段」放抽取值；每格带 `[kN]`；每格至多 3 条指标、2 条创新点、240 字，`|` 与换行已转义），最后是**未展开清单**（其余相关论文，只列标题，至多 100 个）。内联行数由检索档位决定；表里至多显示本轮前 4 个补充字段，其余在覆盖说明里点名。只渲染已登记进引用卡的 key；一条说法都没剩下的论文不进表，并计入覆盖说明。覆盖说明只有与论文表一起渲染时才算回答的完整性声明；`prose` 回答里仍会追加通用的「本次回答未验证完整性」提示。没有 `find_sources` 命中的来源用存储标题展示，不显示原始 id。按节合成时，摘要与表格只在第 0 节出现一次。
+
+**档位预算（`AskRetrievalLimits`）。**每次运行：
+
+| 档位 | `find_sources` 次数（含翻页） | 卡片读取篇数 | 卡片生成篇数（元数据+卡片合计） | 抽取篇数 | 表格内联行数 |
+| --- | --- | --- | --- | --- | --- |
+| overview | 1 | 6 | 3 | 0 | 6 |
+| standard | 2 | 12 | 6 | 6 | 12 |
+| deep | 3 | 20 | 10 | 8 | 20 |
+| thorough | 3 | 30 | 16 | 12 | 30 |
+| exhaustive | 4 | 40 | 24 | 16 | 40 |
+
+单次 `get_paper_cards` 最多读 10 篇，单次 `extract_from_sources` 最多 8 篇。生成走有界线程池（`PAPER_CARD_MAX_WORKERS`，再与 `paper_metadata` 服务的并发取小），沿用调用方的交互优先级，响应取消，对同一来源的重复请求等待第一个结果。卡片摘要占用结构化侧的提示词预算（顺序：Knowhow、枚举预览、卡片、文档读取）。`REASONING_MAX_DOCUMENT_READS × DOCUMENT_OVERVIEW_MAX_ELEMENTS` 超过 2000 时 `read_document` 动作被整体关闭，启动时记一条警告。轨迹、经验与画像词表增加 `find_documents`、`paper_cards`、`extract_fields` 步骤。
+
+**MCP 工具。**`find_sources`、`get_paper_cards`、`extract_from_sources` 都是 `read` 档（工具总数 24）。**后两个会在 `read` 档凭证上消耗模型配额**（产品裁决）；每次调用重读凭证、白名单与主人当下的读权，并显式传入来源集合（MCP 没有运行作用域）：全部可见来源，加上主人自己的隐藏来源——**仅当凭证带 `memory:read`**（与 `search` 同一开关）；没有它时只加入 Knowhow 投影，所以只读凭证读不到主人的私人 Memory（经最佳片段或抽取都不行），别的成员的 Memory 也不会出现在结果里。MCP 上的抽取只由 `read` 档控制（`REASONING_EXTRACT_ENABLED` 只管 reasoning 动作）；`PAPER_CARD_ENABLED` 对两条路径都生效。
+
+- `find_sources(notebook_id?, query?, terms?, year_from?, year_to?, venue?, author?, kind="papers", cursor?, limit=20)`：参数同上（无 `scope`），翻页只用 `cursor` 与 `limit`（1–20），不用裸偏移（偏移会绕过游标失效检查）。返回条目、`counts`、`coverage`（`lexical_complete`、`semantic_recall_capped`、`skipped_libraries` 与 `lanes`，即各库所走的检索车道）、顶层 `next_cursor` 与顶层 `refs` 表。游标失效时给出可读的句子（「从第一页重新检索」）；带游标时改动其他参数同样被拒。
+- `get_paper_cards(source_ids, notebook_id?)`：每次至多 3 篇，至多 3 次模型调用（元数据与卡片合计），其余返回 `deferred`，再调一次即可。每篇返回状态与卡片。
+- `extract_from_sources(source_ids, fields, notebook_id?)`：至多 3 篇、4 个字段。
+- 响应仍在共享的 12000 字节护栏内。每个被引元素只在顶层 `refs` 列表里出现一次（可交给 `read_reference` 解析），字段里只写序号：`tldr` / `problem` / `method` 用 `refs`，每个列表条目（贡献、指标、数据集，取其首个锚点，因为嵌套深度有限）与抽取值用 `ref`；片段的 `ref` 是该片段首个元素的 ref。响应超出预算时按 `detail` 档位逐级收缩（少锚点、短文本、少条目，最后才少篇数），不会把数字从中间切断；被裁掉的写进 `truncation`；`find_sources` 末尾条目被裁时，`next_cursor` 从第一个未送达的条目续上。
+- 同一凭证主人最多同时有 2 个 `get_paper_cards` / `extract_from_sources` 调用在跑（跨其全部凭证，按进程计），超出返回 `busy`；`find_sources` 不调模型，不计入这个上限。上限一览：`get_paper_cards` / `extract_from_sources` 每次至多 3 篇，`get_paper_cards` 每次至多 3 次模型调用（其余篇返回 `deferred`），至多 4 个字段，`find_sources` 的 `limit` 为 1–20。调用带进度通知与停止事件：客户端取消会停止工作，未完成的来源不返回结果。
+- `list_sources` 每项新增 `authors`（至多 3 个名字）、`pub_year`、`venue`。
+- 服务端 `instructions` 说明工作流：先 `find_sources`，再每批 3 篇 `get_paper_cards`，卡片没有的字段用 `extract_from_sources`，用 `read_reference` 复核关键数字，`coverage` 表示可能不完整时不得声称已列全。
+
 ### AI 对这个库的理解
 
 Agent 维护一份低成本、经 LLM 巡固的、关于笔记本的理解摘要——「AI 对这个库的理解」——以五个固定 label 块的形式，作为 prompt 脚手架注入逐步推理的规划与反思上下文（深度报告每节的深挖检索同样注入，形态逐字一致）。它绝不是证据：`ReasoningResult` 不为它新增任何字段，因此它永远不会进入答案合成、不能被 `[k]` 引用，也不会出现在深度报告正文里。
@@ -3245,7 +3281,7 @@ not-found 分支）**仍然留一行**。两个理由都是刻意的。一是它
 | 每个情境展示的已有相似条目数 | 3，相似度 ≥ 0.5 |
 | 计数分桶边界（`entity_count`/`topic_count`） | `none`=0，`few`≤2，`many`>2 |
 | 情境键词表 | 8 个键（mode、result_scope、retrieval_effort、completeness_required、entity_count、topic_count、has_constraints、has_exclusions） |
-| 动作词表 | 12 个词（`enumerate` 是两个枚举动作的通配；`browse_sections`、`read_section` 追加在最后） |
+| 动作词表 | 15 个词（`enumerate` 是两个枚举动作的通配；`browse_sections`、`read_section` 追加其后，再追加论文工具的 `find_documents`、`paper_cards`、`extract_fields`） |
 | 极性词表 | 2 个（`good`/`bad`） |
 | 注入——送达条目数 | ≤3，相似度地板 0.5 |
 | 注入——整块字符上限 | 600（表头+框定语+行；装不下的行整行丢弃） |
@@ -4000,7 +4036,7 @@ provider 返回 Markdown 和按顺序排列的已签发句柄。核心对每个�
 
 **MCP**：`ask` 的 `anchors` 与 `citations` 携带与 HTTP 端点相同的 `url` 字段，只在 `tier` 为 `external` 的行上出现（`exclude_if` 空串，没有外部证据的既有 payload 因此逐字节不变）。
 
-**注册红线（启动期，响亮失败）**：动作名必须匹配 `^[a-z][a-z0-9_]{2,31}$`，且不得与 16 个核心 reflect 动作 id、或 13 个 reflect schema 顶层字段名中的任何一个相撞（两者的并集是 `RESERVED_REFLECT_KEYS`）——否则一个插件动作要么与核心动作同名，要么会把自己的参数写进一个核心 schema 槽位（文档内章节导航上线后，`browse_sections` 与 `read_section` 既是核心动作 id 也是顶层 schema 字段，所以升级前已经部署的插件如果动作叫这两个名字，升级后启动即失败，需先改名）。参数名不得是 `name` 或 `reason`，数量至多 `REFLECT_ACTION_PARAMETERS_MAX`（4）个；`enum` 参数的取值数必须在 2 到 `REFLECT_ACTION_ENUM_VALUES_MAX`（8）个之间——下界为 2 是因为 schema hint 校验层靠有没有 `|` 字符判定「这是个枚举」，单值枚举会让模型看到一个封闭选项，校验层却把它当自由文本放行。每一段插件写的字符串——动作描述、每个参数描述、来源标签——只校验、绝不静默夹取：超长或带控制字符（含换行）直接注册失败（`ExtensionRegistryError`，启动失败），因为描述符是启动期就该审过的部署配置，不是运行期可以夹一刀的用户数据。
+**注册红线（启动期，响亮失败）**：动作名必须匹配 `^[a-z][a-z0-9_]{2,31}$`，且不得与 19 个核心 reflect 动作 id、或 17 个 reflect schema 顶层字段名中的任何一个相撞（两者的并集是 `RESERVED_REFLECT_KEYS`）——否则一个插件动作要么与核心动作同名，要么会把自己的参数写进一个核心 schema 槽位（文档内章节导航上线后，`browse_sections` 与 `read_section` 既是核心动作 id 也是顶层 schema 字段，所以升级前已经部署的插件如果动作叫这两个名字，升级后启动即失败，需先改名；论文工具的 `find_sources`、`get_paper_cards`、`extract_from_sources` 三个动作 id 与顶层字段 `answer_layout` 同理）。参数名不得是 `name` 或 `reason`，数量至多 `REFLECT_ACTION_PARAMETERS_MAX`（4）个；`enum` 参数的取值数必须在 2 到 `REFLECT_ACTION_ENUM_VALUES_MAX`（8）个之间——下界为 2 是因为 schema hint 校验层靠有没有 `|` 字符判定「这是个枚举」，单值枚举会让模型看到一个封闭选项，校验层却把它当自由文本放行。每一段插件写的字符串——动作描述、每个参数描述、来源标签——只校验、绝不静默夹取：超长或带控制字符（含换行）直接注册失败（`ExtensionRegistryError`，启动失败），因为描述符是启动期就该审过的部署配置，不是运行期可以夹一刀的用户数据。
 
 | 上限 | 取值 |
 | --- | ---: |

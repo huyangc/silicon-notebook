@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-10-23（新增 §64 图谱分析「问题清单」：面板改为带证据、可处置的问题清单，概念合并种子归一，主题板块划分稳定，大库 cluster-map 写代分页；此前 2026-10-21 新增 §62 MCP 读取本人的问答记录与深度报告：四个只读工具并入读取档、发起方读时推导；此前 2026-10-19 新增 §61 剩余待办收尾：reasoning 原文段引用卡复用装配期读取；全局问答参与笔记本被删后对所有者留存与全局 run 事件标记；全局问答 👍/👎 进提问分析与知识分析看板；§60 MCP 提问的全部笔记本写法与限时回答链接、模型 JSON 按严格 schema 对齐；此前 2026-10-15 新增 §59 技术债整改程序：全局回答读法、取样通道批量读、Knowhow 面板怪癖、门面退役；此前 2026-10-08 新增 §55 知识图谱里的 Memory 只属于本人；§56 会话公开分享先告知个人记忆，公开页每次打开复核用到的库；§57 晋升对象由公共知识库自己承载出处；§58 挂载只对能读被挂库的人生效；此前 2026-10-07 新增 §54 检索各腿按本次运行的来源天花板取数；此前 2026-09-30 新增 §52 笔记本拷贝不带 Memory；§53 成员退出与 Memory 的彻底删除；此前 2026-09-29 新增 §47 当前库保底席位与原文段下限；§48 全局问答引用核对：部分失败照常交付；§49 KG 对象定义的来源归因与 KG 详情按查看者过滤；§50 全局问答集合枚举引用按冻结参与集；§51 集合枚举与按篇读取原文认本次勾选的来源）
+更新日期：2026-10-29（新增 §66 论文卡片、文档级检索与逐篇抽取：「列出所有与 X 相关的论文」给出带引用的论文表，MCP 增加三个只读档工具；此前 2026-10-23 新增 §64 图谱分析「问题清单」：面板改为带证据、可处置的问题清单，概念合并种子归一，主题板块划分稳定，大库 cluster-map 写代分页；此前 2026-10-21 新增 §62 MCP 读取本人的问答记录与深度报告：四个只读工具并入读取档、发起方读时推导；此前 2026-10-19 新增 §61 剩余待办收尾：reasoning 原文段引用卡复用装配期读取；全局问答参与笔记本被删后对所有者留存与全局 run 事件标记；全局问答 👍/👎 进提问分析与知识分析看板；§60 MCP 提问的全部笔记本写法与限时回答链接、模型 JSON 按严格 schema 对齐；此前 2026-10-15 新增 §59 技术债整改程序：全局回答读法、取样通道批量读、Knowhow 面板怪癖、门面退役；此前 2026-10-08 新增 §55 知识图谱里的 Memory 只属于本人；§56 会话公开分享先告知个人记忆，公开页每次打开复核用到的库；§57 晋升对象由公共知识库自己承载出处；§58 挂载只对能读被挂库的人生效；此前 2026-10-07 新增 §54 检索各腿按本次运行的来源天花板取数；此前 2026-09-30 新增 §52 笔记本拷贝不带 Memory；§53 成员退出与 Memory 的彻底删除；此前 2026-09-29 新增 §47 当前库保底席位与原文段下限；§48 全局问答引用核对：部分失败照常交付；§49 KG 对象定义的来源归因与 KG 详情按查看者过滤；§50 全局问答集合枚举引用按冻结参与集；§51 集合枚举与按篇读取原文认本次勾选的来源）
 
 对照依据：[产品方案](silicon_notebook_fangan.md)。章节号指向原方案；“扩展”表示交付时延伸能力，不冒称原方案已有独立条款。
 
@@ -626,6 +626,17 @@ Agent profile、opaque token、scope/allowlist/过期与撤销、公开 onboardi
 - **R4 对比焦点。** 按存储名解析出的焦点簇，还必须有一个写法等于焦点键的天花板内成员，否则按未解析处理（同一条路径、同一个事件）；拒绝型天花板入口直接返回空、不发事件；每个库只解析一次焦点；焦点簇的成员复用 R3 的有界成员读，按扫过的成员翻页（8、16、…，封顶 512），名字在 Python 里只折叠 ASCII 比较，与 `resolve_focal` 的 `lower(canonical_name)` 同一口径。PostgreSQL 上有 EXPLAIN 钉子：8000 成员的枢纽簇逐页走索引，不出现顺序扫描、位图扫描或排序节点；随之 `comparison_peer_members` 去掉了外层 `ORDER BY`，改在 Python 里按同一顺序排。
 - **行为变化。** 非成员以簇 id 打开概念详情得 404（以前 200）；所有读者在焦点被隐藏时，邻居都与未知 id 同形；无天花板的对比题在社区回退路径上少调一次 `resolve_focal`。
 - 当前合同见[产品/API][product]「KG 详情读取」「隔离」两段、库级收窄一段，以及[开发规范][dev]可见性边界一节。残余登记在[待办账本](fangan_todo.md)第二节「知识图谱」：按查看者过滤的邻居读，预算翻倍循环每轮都探测预览；对比焦点只按存储名解析，且 Unicode 与 ASCII 两种小写折叠口径不一。回归入口：[挂载读按成员作答](backend/tests/test_kg_mount_read_member_answers.py)、[PostgreSQL 孪生](backend/tests/postgres/test_kg_mount_read_member_answers_pg.py)、[直接读者 R1](backend/tests/test_kg_service_readers.py)、[对比兄弟名用例集](backend/tests/comparison_peer_names_cases.py)、[SQLite 兄弟名](backend/tests/test_comparison_peer_ceiling_names.py)、[PostgreSQL 兄弟名](backend/tests/postgres/test_comparison_peer_ceiling_names_pg.py)、[焦点翻页计划钉子](backend/tests/postgres/test_comparison_peer_members_plan_pin_pg.py)、[对比天花板](backend/tests/test_comparison_peer_ceiling.py)。
+
+## 66. 论文卡片、文档级检索与逐篇抽取（2026-10-28～29）
+
+**已交付，PR #1037（存储、服务、Agent 与合成）及随后的 MCP 与文档 PR；阈值校准（T10）未做，见[待办账本](fangan_todo.md)第二节「检索」。** 起因是用户常问「列出这个笔记本中所有与 X 相关的论文，包括主要技术指标和关键创新点」，旧路径只能靠 ≤20 个标题的名录和固定条数的段落检索，答得不全也不准。设计与实施计划见 `docs/superpowers/specs/2026-10-28-paper-cards-find-sources-design_zh.md` 与同目录 plans 下的 `2026-10-28-paper-cards-find-sources-plan_zh.md`。
+
+- **文档级检索 `find_sources`。** 元数据腿（标题/摘要/论文标题/会议/关键词/作者）加语义腿，按来源天花板与参与库取数，分 strong/related 两档，附覆盖标志（`lexical_complete`、`semantic_recall_capped`、被跳过的库）；游标带元数据摘要，两页之间有论文元数据被抽取则旧游标失效。
+- **论文卡片。** `source_paper_cards`（SQLite v104 / PG 0085）缓存逐篇要点；懒生成、不回填、不跨环境同步；指标数值必须在所引原文里出现；有效性在读取时按内容基线与卡片版本判定；失败冷却 1 小时、连续 3 次后 24 小时。复用 `paper_metadata` 绑定，不新增 workload。
+- **逐篇抽取 `extract_from_sources`。** 临时字段、按字段取片段、含数字的值逐组接地，不缓存，适用于非论文。
+- **确定性论文表。** reflect 顶层 `answer_layout="paper_table"` 时，代码拼出覆盖说明、论文表与未展开清单，模型只写综述；证据号段 `k9001–k9999`。三个动作 id 与 `answer_layout` 成为保留名，同名的部署插件动作启动即被拒。
+- **MCP。** 工具总数 21 → 24：`find_sources`、`get_paper_cards`、`extract_from_sources`（均为 `read` 档，后两个会消耗模型配额，同一凭证主人至多 2 个并发，超出 `busy`）；响应用顶层去重的 `refs` 表适配 12KB 护栏；`list_sources` 增加 `authors`、`pub_year`、`venue`。
+- 当前合同见[产品/API][product]「论文检索、论文卡片与逐篇抽取」一节，部署开关与容量提示见[部署][deploy]。阈值（`FIND_SOURCES_STRONG_RELEVANCE` / `FIND_SOURCES_RELATED_RELEVANCE`）目前是保守的临时值。
 
 [product]: docs/product-and-api_zh.md
 [flow]: docs/product-and-api_zh.md#产品流程

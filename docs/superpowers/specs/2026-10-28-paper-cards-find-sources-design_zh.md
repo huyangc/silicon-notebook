@@ -245,7 +245,7 @@ CardResult.status ∈ ready | generated | not_paper | meta_pending | failed | de
 - 可见性谓词与 `list_sources_page` 一致：用户可见类型、提升来源规则、他人 Memory/Knowhow 投影不可见
   （`postgres/source_store.py:470-482`）。
 - **MCP 没有运行作用域**（`_chunk_source_ceiling` 与 `filter_retrieval_items` 在无作用域时不收窄），所以 MCP 路径
-  必须显式传 `allowed_source_ids = all_visible_source_ids(nb) ∪ hidden_source_ids(nb, 凭证主人)`，
+  必须显式传 `allowed_source_ids = all_visible_source_ids(nb) ∪ hidden_source_ids(nb, viewer)`，其中 `viewer` 仅当凭证带 `memory:read`（与 `search` 同一开关）时为凭证主人，否则为空串（只加 Knowhow 投影，只读凭证读不到主人的私人 Memory），
   否则别人的 Memory 投影片段会出现在 `best_passage` 里。`extract_from_sources` 同样适用。
 
 **元数据腿**（每个库一条 SQL，PG 为规范定义）：在 `sources.title/file_name/summary`、
@@ -437,7 +437,7 @@ MCP 侧的集合 = 凭证白名单内、主人当下可读的单个笔记本的�
 | 工具 | 档位 | 参数 | 说明 |
 |---|---|---|---|
 | `list_sources` | read | 不变 | 每项新增 `authors`（≤3 个名字）、`pub_year`、`venue`；复用 `sources_from_rows` 已经填好的字段，不加查询 |
-| `find_sources` | read | `notebook_id`、§5.1 全部参数（`scope` 除外）、`offset`、`limit≤20` | 返回 §5.4；`best_passage` 带 `ref`，可传给 `read_reference` |
+| `find_sources` | read | `notebook_id`、§5.1 全部参数（`scope` 除外）、`cursor`、`limit`（1–20，不用裸 `offset`：偏移会绕过 §5.4 的游标失效检查） | 返回 §5.4；`next_cursor` 在顶层，`coverage` 另带 `lanes`；`best_passage` 带 `ref`，可传给 `read_reference` |
 | `get_paper_cards` | read | `notebook_id`、`source_ids`（≤3） | 返回每篇状态与卡片；单次最多 3 次模型调用（元数据 + 卡片合计），其余 `deferred` |
 | `extract_from_sources` | read | `notebook_id`、`source_ids`（≤3）、`fields`（≤4） | 返回每篇每字段的值与 ref 序号 |
 
@@ -445,7 +445,7 @@ MCP 侧的集合 = 凭证白名单内、主人当下可读的单个笔记本的�
 - 会调模型的两个工具：在 `_run_with_progress` 里执行，客户端取消时置 stop 事件；同一凭证主人最多 2 个并发
   生成调用，超出返回 `busy`。现有 `_waiter_slot` 是按（主人，幂等键）计数的，这里要**新增按主人计数**的槽。
 - **12KB 预算**（`TOTAL_TEXT_LIMIT=12000` 字符）：一个元素 ref 约 100–150 字符，按 anchor 逐个附 ref 会超。
-  响应改为顶层去重的 `refs` 表 + 字段里只写序号；每次最多 3 篇；仍超预算时按 `_budget_response` 逐级收缩并报告截断。
+  响应改为顶层去重的 `refs` 表 + 字段里只写序号（因 `OUTPUT_DEPTH_LIMIT`，贡献/指标/数据集条目只带一个 `ref`＝首个 anchor，`tldr/problem/method` 带 `refs` 列表）；每次最多 3 篇；超预算时按 `detail` 档位逐级收缩、绝不从数字中间切断；仍超预算时按 `_budget_response` 逐级收缩并报告截断。
 - MCP 路径的来源集合按 §5.2 显式传入（无运行作用域）。
 - 资源不存在的错误名登记 `mcp_tool_host._NOT_FOUND_RESOURCE`。
 - 服务端 `instructions` 增加一段工作流说明：先 `find_sources`，再分批 `get_paper_cards`，必要时
