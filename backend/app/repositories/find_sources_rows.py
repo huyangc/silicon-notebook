@@ -11,18 +11,10 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping, Sequence
 
 from app.domain.promotion_source import presented_source_title
-from app.domain.source_find_terms import field_match, merge_match
+from app.domain.source_find_terms import field_match, merge_match, really_narrowed
 
 #: The kinds ``find_sources_metadata_rows`` accepts.
 FIND_SOURCES_KINDS = ("papers", "all")
-#: The term legs are bound to the filtered scope's ids only when the filters
-#: (or the allow list) really narrowed the library AND the scope is at most this
-#: share of the library's visible sources.  Measured on the 49k-source bench
-#: (``docs/superpowers/plans/2026-10-28-find-sources-measurement.md``): a 49-id
-#: scope cuts the UNION ALL from 21 ms to 1-2 ms, while a 12.8k-id scope (26%)
-#: makes it slower (21 -> 52 ms: one list parameter and an ``= ANY`` filter per
-#: leg cost more than the hits they drop).
-TERM_LEG_BIND_MAX_SHARE = 0.1
 
 
 def check_kind(kind: str) -> str:
@@ -43,10 +35,9 @@ def _year(value: Any) -> int | None:
 
 def bind_term_legs(scope_size: int, visible_total: int) -> bool:
     """Should the term legs carry ``member_of(scope ids)``?  Only for a scope
-    the filters / allow list actually narrowed, and narrowed enough."""
-    return 0 < scope_size < visible_total and (
-        scope_size <= visible_total * TERM_LEG_BIND_MAX_SHARE
-    )
+    the filters / allow list REALLY narrowed (``really_narrowed``: binding a
+    large share costs more than the hits it drops)."""
+    return really_narrowed(scope_size, visible_total)
 
 
 def scope_rows_dicts(

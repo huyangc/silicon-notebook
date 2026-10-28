@@ -219,13 +219,16 @@ def assert_plural_keeps_a_short_term_on_the_word_boundary(env: Env) -> None:
     env.seed()
     env.source("s-plural", title="Training GANs at scale")
     env.source("s-es", title="Two VAEes compared")
+    env.source("s-gates", title="logic gates and nodes")
     env.source("s-organ", title="Organ printing")
     env.source("s-organs", title="organs on chips")
     env.source("s-gansu", title="Gansu province survey")
-    got = env.matches(["gan", "vae"])
+    got = env.matches(["gan", "vae", "gat", "nod"])
     assert got == {
         "s-plural": {"title": True},
-        "s-es": {"title": True},
+        # ``es`` is not a plural ending here: GAT/nod must not match gates/nodes.
+        "s-es": {"title": False},
+        "s-gates": {"title": False},
         "s-organ": {"title": False},
         "s-organs": {"title": False},
         "s-gansu": {"title": False},

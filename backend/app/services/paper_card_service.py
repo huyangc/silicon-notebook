@@ -52,7 +52,11 @@ from app.services.paper_cards import (
     verify_paper_card,
 )
 from app.services.paper_meta import paper_meta_doc_type_eligible
-from app.services.retrieval_run import holding_fanout_slot, retrieval_fanout_slot
+from app.services.retrieval_run import (
+    holding_fanout_slot,
+    note_paper_meta_written,
+    retrieval_fanout_slot,
+)
 
 CARD_STATUSES = (
     "ready", "generated", "not_paper", "meta_pending", "failed", "deferred", "not_found",
@@ -420,6 +424,8 @@ class PaperCardService:
         status = self._ingestion.extract_paper_metadata_cancellable(
             source, cancel_event=cancel_event, client=self._models.chat(_WORKLOAD),
         )
+        if status in ("stored", "not_paper"):
+            note_paper_meta_written()  # a run's find_sources memo re-ranks
         if status == "skipped":
             # gate 已在 _classify 判过,这里的 skipped 是「别人刚抽完」:按落库结果判。
             with retrieval_fanout_slot():
