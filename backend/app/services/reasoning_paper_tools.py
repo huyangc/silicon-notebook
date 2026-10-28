@@ -281,6 +281,65 @@ def _year_text(value: Any) -> str:
     return as_text(value)
 
 
+#: Each paper tool's argument names: the keys of its nested object, and the
+#: only top-level keys the flat-arguments fallback may read for it.
+PAPER_TOOL_ARGUMENT_KEYS: Dict[str, Tuple[str, ...]] = {
+    FIND_SOURCES_ACTION: (
+        "query", "terms", "year_from", "year_to", "venue", "author", "kind",
+        "scope", "cursor",
+    ),
+    GET_PAPER_CARDS_ACTION: ("sources",),
+    EXTRACT_FROM_SOURCES_ACTION: ("sources", "fields"),
+}
+
+
+def _argument_written(value: Any) -> bool:
+    """A value the model actually wrote: not null, not an empty / blank
+    string, not an empty list or object."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, Mapping)):
+        return bool(value)
+    return True
+
+
+def paper_tool_request(
+    data: Mapping[str, Any], action: str, next_action: str,
+) -> Tuple[Any, bool]:
+    """``(request, from_top_level)``: the argument object of paper tool
+    ``action``.
+
+    The nested ``data[action]`` object wins whenever it carries any argument.
+    Only when it is missing or empty AND ``next_action`` is this very action
+    are the same-named top-level keys read instead (T7 rerun: the model wrote
+    ``"next_action": "find_sources", "query": ..., "terms": [...]`` flat; only
+    one reading of that exists, so it is an acceptable deviation, not a
+    refusal).  Other actions' top-level keys are never consulted -- a flat
+    ``query`` means nothing to ``find_sources`` unless ``find_sources`` was
+    chosen -- and a key that is not this action's argument is never read."""
+    keys = PAPER_TOOL_ARGUMENT_KEYS[action]
+    nested = data.get(action)
+    if isinstance(nested, Mapping) and any(
+            _argument_written(nested.get(key)) for key in keys):
+        return nested, False
+    if next_action == action:
+        flat = {key: data[key] for key in keys if _argument_written(data.get(key))}
+        if flat:
+            return flat, True
+    return nested, False
+
+
+def note_top_level_arguments(log: List[str], decision: Any) -> None:
+    """Append the ledger line for a call whose arguments were read off the top
+    level; nothing when they were nested as the schema shows."""
+    action = getattr(decision, "paper_arguments_top_level", "")
+    if action:
+        log.append(f"{action} 的参数写在了顶层,这次按顶层的同名键执行;"
+                   f"下次请把参数放进 \"{action}\": {{…}} 对象里")
+
+
 def parse_paper_tool_arguments(
     decision: Any,
     data: Mapping[str, Any],
@@ -290,6 +349,7 @@ def parse_paper_tool_arguments(
     extract: bool,
     enumerate_scope: bool,
     answer_layout: bool = False,
+    next_action: str = "",
 ) -> None:
     """Fill the paper-tool fields of a ``ReflectDecision`` from the payload.
 
@@ -297,8 +357,13 @@ def parse_paper_tool_arguments(
     whitelist either).  Enum values outside their set fall back to the
     default, never raise; free text is NOT cut here -- the fail-closed
     2000-character gate must see it, and the services refuse over-long input
-    themselves (``FindSourcesError`` / ``ExtractionRequestError``)."""
-    request = data.get(FIND_SOURCES_ACTION)
+    themselves (``FindSourcesError`` / ``ExtractionRequestError``).  The
+    argument object of the chosen tool may come off the top level
+    (``paper_tool_request``); ``decision.paper_arguments_top_level`` then
+    names the action so the executor says so in the ledger."""
+    request, flat = paper_tool_request(data, FIND_SOURCES_ACTION, next_action)
+    if find_sources and flat:
+        decision.paper_arguments_top_level = FIND_SOURCES_ACTION
     if find_sources and isinstance(request, Mapping):
         decision.find_sources_query = as_text(request.get("query"))
         decision.find_sources_terms = _text_list(request.get("terms"))
@@ -317,11 +382,15 @@ def parse_paper_tool_arguments(
             scope if scope in ("all", "current_notebook") else FIND_SOURCES_SCOPE_DEFAULT
         )
         decision.find_sources_cursor = as_text(request.get("cursor"))
-    request = data.get(GET_PAPER_CARDS_ACTION)
+    request, flat = paper_tool_request(data, GET_PAPER_CARDS_ACTION, next_action)
     if paper_cards and isinstance(request, Mapping):
+        if flat:
+            decision.paper_arguments_top_level = GET_PAPER_CARDS_ACTION
         decision.paper_card_sources = _text_list(request.get("sources"))
-    request = data.get(EXTRACT_FROM_SOURCES_ACTION)
+    request, flat = paper_tool_request(data, EXTRACT_FROM_SOURCES_ACTION, next_action)
     if extract and isinstance(request, Mapping):
+        if flat:
+            decision.paper_arguments_top_level = EXTRACT_FROM_SOURCES_ACTION
         decision.extract_sources = _text_list(request.get("sources"))
         decision.extract_fields = _text_list(request.get("fields"))
     if answer_layout or paper_cards or extract:
@@ -636,6 +705,7 @@ __all__ = [
     "FoundSourcesOutcome",
     "GET_PAPER_CARDS_ACTION",
     "PAPER_TOOL_ACTIONS",
+    "PAPER_TOOL_ARGUMENT_KEYS",
     "PaperCardOutcome",
     "PaperExtractionItem",
     "PaperExtractionOutcome",
@@ -651,6 +721,8 @@ __all__ = [
     "extraction_value_count",
     "find_coverage_gaps",
     "missing_paper_tool_argument",
+    "note_top_level_arguments",
+    "paper_tool_request",
     "paper_tool_text_fields",
     "paper_tools_note",
     "parse_paper_tool_arguments",

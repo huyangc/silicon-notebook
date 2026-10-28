@@ -134,6 +134,7 @@ from app.services.document_read_answer import document_read_block_reserve
 from app.services.paper_card_answer import (
     PaperCardEvidence,
     compose_paper_answer,
+    coverage_line_rendered,
     paper_digest_block,
     paper_digest_reserve,
     registered_keys as paper_registered_keys,
@@ -9130,6 +9131,10 @@ class AskService:
         #
         # 四条都过时,每张卡自己的 coverage 徽章已经承担「完整/部分」的披露,
         # 再前置一句免责反而会让「明明列出了公式清单」的回答开头像在道歉。
+        #
+        # 另一条独立的抑制:回答带着论文表与它的覆盖说明时,覆盖说明就是这份
+        # 回答唯一的完整性声明(有缺口时它自己写「可能还有更多」,没做文档级
+        # 检索时写「不代表已列全」),不再在表后追加一句口径不同的免责(T7 复跑 B)。
         has_complete_collection_result = any(
             row.coverage.complete and row.coverage.returned_total > 0
             for row in typed_collection_result_sets
@@ -9143,7 +9148,7 @@ class AskService:
             intent_contract.result_scope != "aggregate"
             and not has_scoping_predicate
             and has_complete_collection_result
-        )
+        ) or coverage_line_rendered(answer, run.ready("paper_evidence"))
         warning = ""
         if completeness_unavailable and not suppress_completeness_warning:
             warning = "本次回答未验证完整性，不能视为全部结果。"
