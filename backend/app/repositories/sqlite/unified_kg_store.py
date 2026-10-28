@@ -76,10 +76,7 @@ from app.domain.kg_analysis_contracts import (
     check_artifact_payloads,
     check_mark_kind,
 )
-from app.domain.concept_description_rewrite import (
-    CONCEPT_DESC_REWRITE_STAGE,
-    REBUILD_DESC_CHECKPOINT_STAGE,
-)
+from app.domain.concept_description_rewrite import CONCEPT_DESC_REWRITE_STAGE
 from app.domain.kg_merge_seed import check_concept_seed_version
 from app.domain.knowledge_contracts import (
     COMMUNITY_OVERVIEW_MAX,
@@ -503,11 +500,13 @@ class UnifiedKgStore:
     @staticmethod
     def concept_description_publish_rows(
         db: sqlite3.Connection, notebook_id: str, generation: int,
-        canonical_ids: Sequence[str],
+        canonical_ids: Sequence[str], *, lock_rows: bool = True,
     ) -> list:
-        """The rows of ``canonical_ids`` in ``generation`` (PostgreSQL twin locks
-        them with SKIP LOCKED; here the caller's write transaction already
-        excludes every other writer)."""
+        """The rows of ``canonical_ids`` in ``generation`` (the PostgreSQL twin
+        locks them with SKIP LOCKED when ``lock_rows``; here a write
+        transaction already excludes every other writer, so ``lock_rows``
+        changes nothing)."""
+        del lock_rows
         ids = list(canonical_ids)
         if not ids:
             return []
@@ -540,24 +539,56 @@ class UnifiedKgStore:
         ids = list(row_ids)
         if not ids:
             return 0
-        # The row ids drive the update: one primary-key seek each.
+        # The row ids drive the update: one primary-key seek each. ``+`` keeps
+        # the notebook term a filter -- without it the planner (no statistics
+        # on a fresh table) walks the notebook's whole slice through
+        # idx_clusters_nb_canonical_name_lower for every batch (measured: a
+        # 2,000-row hub batch took 4.6 s on a 120k-row notebook).
         bound = bind_ids(ids)
         cursor = db.execute(
             "UPDATE concept_clusters SET canonical_description=?, canonical_desc_sig=? "
-            f"WHERE notebook_id=? AND {drive_by('id', bound)} "
+            f"WHERE +notebook_id=? AND {drive_by('id', bound)} "
             "AND (canonical_description<>? OR canonical_desc_sig<>?)",
             (description, sig, notebook_id, bound.param, description, sig),
         )
         return int(cursor.rowcount or 0)
 
     @staticmethod
-    def drop_description_checkpoints(db: sqlite3.Connection, notebook_id: str) -> None:
-        """SQLite twin: drop the rebuild description stage's checkpoint (every
-        version) in the caller's transaction."""
-        db.execute(
-            "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=? AND stage=?",
-            (notebook_id, REBUILD_DESC_CHECKPOINT_STAGE),
-        )
+    def concept_description_row_counts(
+        db: sqlite3.Connection, notebook_id: str, generation: int,
+        canonical_ids: Sequence[str],
+    ) -> Dict[str, int]:
+        """SQLite twin: rows per canonical in ``generation``."""
+        ids = list(canonical_ids)
+        if not ids:
+            return {}
+        # The canonical ids drive the count: one index seek each.
+        bound = bind_ids(ids)
+        rows = db.execute(
+            "SELECT cc.canonical_id, COUNT(*) AS n FROM concept_clusters cc "
+            "WHERE cc.notebook_id=? AND cc.object_type='concept' AND cc.generation=? "
+            f"AND {drive_by('cc.canonical_id', bound)} GROUP BY cc.canonical_id",
+            (notebook_id, int(generation), bound.param),
+        ).fetchall()
+        return {str(row["canonical_id"]): int(row["n"]) for row in rows}
+
+    @staticmethod
+    def lock_concept_cluster_rows(
+        db: sqlite3.Connection, notebook_id: str, row_ids: Sequence[str],
+    ) -> List[str]:
+        """SQLite twin: the given rows that still exist (the write transaction
+        already excludes every other writer)."""
+        ids = list(row_ids)
+        if not ids:
+            return []
+        # The row ids drive the read: one primary-key seek each.
+        bound = bind_ids(ids)
+        rows = db.execute(
+            "SELECT cc.id FROM concept_clusters cc WHERE +cc.notebook_id=? "
+            f"AND {drive_by('cc.id', bound)}",
+            (notebook_id, bound.param),
+        ).fetchall()
+        return [str(row["id"]) for row in rows]
 
     @staticmethod
     def canonical_relation_seed_rows(db: sqlite3.Connection, notebook_id: str):
@@ -1211,12 +1242,19 @@ class UnifiedKgStore:
                 (notebook_id, CONCEPT_DESC_REWRITE_STAGE))
 
     def checkpoint_prune_stage(
-        self, notebook_id: str, stage: str, keep_version: str, drop_keys: Sequence[str],
+        self, notebook_id: str, stage: str, keep_version: "str | None",
+        drop_keys: Sequence[str],
     ) -> None:
-        """SQLite twin:删掉该阶段其它版本的全部行,以及 ``keep_version`` 下的
-        ``drop_keys``(一个写事务)。"""
+        """SQLite twin:删掉该阶段 ``keep_version`` 以外各版本的全部行,以及
+        ``keep_version`` 下的 ``drop_keys``(一个写事务);``keep_version`` 为 None
+        时删掉该阶段的全部行。"""
         keys = list(drop_keys)
         with self.database.write() as db:
+            if keep_version is None:
+                db.execute(
+                    "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=? AND stage=?",
+                    (notebook_id, stage))
+                return
             db.execute(
                 "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=? AND stage=? "
                 "AND input_version<>?",

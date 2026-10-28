@@ -22,6 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from psycopg import errors, sql
 
 from app.core.json_safety import validate_finite_json
+from app.domain.concept_description_rewrite import CONCEPT_DESC_REWRITE_STAGE
 from app.domain.kg_merge_seed import CONCEPT_SEED_VERSION
 from app.domain.knowledge_contracts import (
     NODE_CONTEXT_CLUSTER_MEMBER_PROBE, NODE_CONTEXT_DEFINES_SCAN,
@@ -135,7 +136,8 @@ _GRAPH_RESET_TABLES = frozenset({
 # the dead tuples, ~5M extra sync-capture log rows for a delete with no
 # rebuild — a performance regression the read gate makes unnecessary.
 # Also kept: kg_rebuild_checkpoint (only the rebuild reads it, version-GC'd
-# before every read), concept_whitelist (user configuration) and the two
+# before every read) -- except the rewrite command's concept_desc_rewrite rows,
+# which delete_notebook_graph_rows drops with the graph they were written from, concept_whitelist (user configuration) and the two
 # per-run scratch tables (a concurrent run would read an empty input).
 
 # K1: drain steps that take part in the drain and in the final pass's
@@ -146,7 +148,12 @@ _GRAPH_RESET_TABLES = frozenset({
 # so a row landing between commit and re-check is not a doc-graph survivor and
 # must not spend a reset attempt (three such rounds would turn a successful
 # delete into a reported failure).
-_GRAPH_DRAIN_SETTLE_EXEMPT = frozenset({"kg_conflict_candidates", "merge_review_jobs"})
+_GRAPH_DRAIN_SETTLE_EXEMPT = frozenset(
+    {"kg_conflict_candidates", "merge_review_jobs", "kg_rebuild_checkpoint"}
+)
+# The rewrite command's staged descriptions (the only kg_rebuild_checkpoint rows
+# a graph delete takes; user ruling 2026-10-28).
+_REWRITE_STAGED_PREDICATE = f"notebook_id=%s AND stage='{CONCEPT_DESC_REWRITE_STAGE}'"
 
 
 # K1: merge_review_jobs is keyed by notebook_id (at most one row per
@@ -903,6 +910,11 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int, bool], ...] = (
         2,
         True,
     ),
+    # User ruling 2026-10-28: the rewrite command's staged descriptions go
+    # with the graph; the rebuild's own checkpoint rows stay (K1). Exempt from
+    # the post-commit survivor check: a rewrite run beside the delete may
+    # stage a result after the commit.
+    ("kg_rebuild_checkpoint", _REWRITE_STAGED_PREDICATE, 1, True),
 )
 
 
@@ -1203,6 +1215,15 @@ class KnowledgeStore:
             (notebook_id, notebook_id),
         )
         counts["extraction_runs"] = cur.rowcount
+        # The rewrite command's staged descriptions (``kg rewrite-descriptions``,
+        # stage concept_desc_rewrite) are text generated from this graph's
+        # evidence: they go with it (user ruling 2026-10-28). The rebuild's own
+        # checkpoint rows stay, as the comment at _GRAPH_RESET_TABLES says.
+        db.execute(
+            "DELETE FROM kg_rebuild_checkpoint WHERE "
+            f"{_REWRITE_STAGED_PREDICATE}",
+            (notebook_id,),
+        )
         # unified_kg_state: RESET in place to its birth-row shape, never
         # deleted (design doc batch-3-W1 Sec 3.3 option C, D-3). Dropping the
         # row (the pre-PR-2 behaviour) made a delete+reingest re-climb

@@ -323,6 +323,10 @@ _REGISTRY: dict[str, dict[str, str]] = {
         # evidence never becomes a quote (same filter as stream_seed_rows)
         "UnifiedKgStore.concept_description_member_page": BUILD_READER,
         "UnifiedKgStore.concept_description_publish_rows": BUILD_READER,
+        # ... and, by the canonical / row ids the publish already holds, how
+        # many rows each canonical has and which of the given rows it can lock
+        "UnifiedKgStore.concept_description_row_counts": KEY_BOUNDED,
+        "UnifiedKgStore.lock_concept_cluster_rows": KEY_BOUNDED,
         "_not_memory_object_ref": MEMORY_SIDE,
         # derived layer
         "UnifiedKgStore.cluster_member_rows": DERIVED_LAYER,

@@ -18,6 +18,7 @@ import json
 import sqlite3
 from typing import Dict, Iterable, List, Optional, Sequence
 
+from app.domain.concept_description_rewrite import CONCEPT_DESC_REWRITE_STAGE
 from app.domain.kg_merge_seed import CONCEPT_SEED_VERSION
 from app.domain.knowledge_contracts import (
     NODE_CONTEXT_CLUSTER_MEMBER_PROBE, NODE_CONTEXT_DEFINES_SCAN,
@@ -473,7 +474,10 @@ def _completion_generation_is_current(
 
 # K1: drain steps excluded from the threshold-0 post-commit survivor check —
 # PostgreSQL twin's comment.
-_GRAPH_DRAIN_SETTLE_EXEMPT = frozenset({"kg_conflict_candidates", "merge_review_jobs"})
+_GRAPH_DRAIN_SETTLE_EXEMPT = frozenset(
+    {"kg_conflict_candidates", "merge_review_jobs", "kg_rebuild_checkpoint"}
+)
+_REWRITE_STAGED_PREDICATE = f"notebook_id=? AND stage='{CONCEPT_DESC_REWRITE_STAGE}'"
 
 
 # K1: merge_review_jobs is keyed by notebook_id (at most one row per
@@ -634,6 +638,8 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int, bool], ...] = (
         2,
         True,
     ),
+    # The rewrite command's staged descriptions (PostgreSQL twin's comment).
+    ("kg_rebuild_checkpoint", _REWRITE_STAGED_PREDICATE, 1, True),
 )
 
 
@@ -1022,6 +1028,11 @@ class KnowledgeStore:
             (notebook_id, notebook_id),
         )
         counts["kg_objects_fts"] = cur.rowcount
+        # The rewrite command's staged descriptions go with the graph (PG twin).
+        db.execute(
+            f"DELETE FROM kg_rebuild_checkpoint WHERE {_REWRITE_STAGED_PREDICATE}",
+            (notebook_id,),
+        )
         # unified_kg_state: RESET in place to its birth-row shape, never
         # deleted — see the PostgreSQL twin's matching UPSERT comment
         # (design doc batch-3-W1 Sec 3.3 option C, D-3; R1 P0-2) for the

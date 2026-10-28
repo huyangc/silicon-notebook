@@ -3027,7 +3027,8 @@ class UnifiedKgStorePort(Protocol):
     def checkpoint_clear(self, notebook_id: str) -> None: ...
     def checkpoint_load(self, notebook_id: str, input_version: str, stage: str) -> dict[str, dict]: ...
     def checkpoint_prune_stage(
-        self, notebook_id: str, stage: str, keep_version: str, drop_keys: Sequence[str]
+        self, notebook_id: str, stage: str, keep_version: "str | None",
+        drop_keys: Sequence[str],
     ) -> None: ...
     # ---------------------------- concept-description rewrite (kg rewrite-descriptions)
     @staticmethod
@@ -3039,14 +3040,21 @@ class UnifiedKgStorePort(Protocol):
     def lock_published_concept_clusters(db: object, notebook_id: str) -> tuple[int, int]: ...
     @staticmethod
     def concept_description_publish_rows(
-        db: object, notebook_id: str, generation: int, canonical_ids: Sequence[str]
+        db: object, notebook_id: str, generation: int, canonical_ids: Sequence[str],
+        *, lock_rows: bool = True,
     ) -> list[Any]: ...
+    @staticmethod
+    def concept_description_row_counts(
+        db: object, notebook_id: str, generation: int, canonical_ids: Sequence[str]
+    ) -> dict[str, int]: ...
+    @staticmethod
+    def lock_concept_cluster_rows(
+        db: object, notebook_id: str, row_ids: Sequence[str]
+    ) -> list[str]: ...
     @staticmethod
     def rewrite_concept_description(
         db: object, notebook_id: str, row_ids: Sequence[str], description: str, sig: str
     ) -> int: ...
-    @staticmethod
-    def drop_description_checkpoints(db: object, notebook_id: str) -> None: ...
     # ---------------------------------------- KG 质量分析的只读聚合(T1)
     # 与上面的 community-peer 原语同形:**自开只读连接**,绝不写库。
     #

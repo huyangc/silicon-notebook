@@ -1383,21 +1383,27 @@ def test_kg_delete_leaves_derived_tables_until_the_next_rebuild(repo, monkeypatc
     )
 
 
-def test_drain_registry_keeps_derived_tables_and_exempts_two_steps():
-    """K1:两端登记表——复查豁免恰好是冲突候选与合并预审两步且都在登记表里;
-    派生表(裁决 11)与重建检查点、白名单、两张 scratch 表都不在。"""
+def test_drain_registry_keeps_derived_tables_and_exempts_three_steps():
+    """K1:两端登记表——复查豁免恰好是冲突候选、合并预审与描述重写暂存三步且都在
+    登记表里;派生表(裁决 11)、白名单、两张 scratch 表都不在;重建检查点只删描述
+    重写命令的暂存阶段(用户裁决 2026-10-28),重建自己的各阶段保留。"""
     from app.repositories.postgres import knowledge_store as pg
     from app.repositories.sqlite import knowledge_store as sq
 
     for module in (pg, sq):
         registry = [t for t, _p, _n, m in module._GRAPH_DRAIN_STEPS if m]
         assert module._GRAPH_DRAIN_SETTLE_EXEMPT == {
-            "kg_conflict_candidates", "merge_review_jobs",
+            "kg_conflict_candidates", "merge_review_jobs", "kg_rebuild_checkpoint",
         }
         assert module._GRAPH_DRAIN_SETTLE_EXEMPT <= set(registry)
-        for kept in (*_DERIVED, "kg_rebuild_checkpoint", "concept_whitelist",
+        for kept in (*_DERIVED, "concept_whitelist",
                      "kg_cluster_scratch", "kg_canonical_scratch"):
             assert kept not in registry, f"{kept} 不得进入删除清单"
+        checkpoint = [p for t, p, _n, m in module._GRAPH_DRAIN_STEPS
+                      if m and t == "kg_rebuild_checkpoint"]
+        assert checkpoint and all(
+            p.endswith("AND stage='concept_desc_rewrite'") for p in checkpoint
+        ), checkpoint
 
 
 def _reextract(repo, notebook_id, canonical_id, name, member, source_id):

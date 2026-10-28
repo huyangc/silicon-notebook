@@ -16,9 +16,12 @@ under its own stage, ``CONCEPT_DESC_REWRITE_STAGE``, with the generation origin
 as the version: ``rewrite_checkpoint_version`` of the description model label
 and a fingerprint of the description prompt. A staged row says "for input
 signature S (the item key), the model and prompt of this origin produced the
-text in the payload". The rebuild's own checkpoint GC and ``--fresh`` clear
-leave this stage alone (the rebuild never reads it); deleting a notebook or
-its knowledge graph removes it with every other checkpoint row.
+text in the payload" (plus one completion record, item ``~complete``). The
+rebuild's own checkpoint GC and ``--fresh`` clear leave this stage alone (the
+rebuild never reads it). Deleting the notebook's knowledge graph removes this
+stage only -- the texts were written from that graph's evidence (user ruling
+2026-10-28) -- while the rebuild's own checkpoint rows stay, as before;
+deleting the notebook removes every checkpoint row.
 
 Pure: only ``hashlib`` and ``json``.
 """
