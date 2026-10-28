@@ -644,6 +644,21 @@ def memoized_retrieval_value(key: Hashable, compute: Callable[[], T]) -> T:
     return state.memoized_value(key, compute) if state is not None else compute()
 
 
+_HOLDING_FANOUT_SLOT: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "holding_retrieval_fanout_slot", default=False
+)
+
+
+def holding_fanout_slot() -> bool:
+    """Whether this context is inside ``retrieval_fanout_slot`` right now.
+
+    The slot's semaphore is not reentrant: code that fans out to worker threads
+    which take slots themselves must not be entered while holding one (with a
+    fan-out limit of 1 that is a deadlock). Such entry points check this.
+    """
+    return _HOLDING_FANOUT_SLOT.get()
+
+
 @contextmanager
 def retrieval_fanout_slot() -> Iterator[None]:
     state = current_retrieval_run()
@@ -651,7 +666,11 @@ def retrieval_fanout_slot() -> Iterator[None]:
         yield
         return
     with state.fanout_slot():
-        yield
+        token = _HOLDING_FANOUT_SLOT.set(True)
+        try:
+            yield
+        finally:
+            _HOLDING_FANOUT_SLOT.reset(token)
 
 
 __all__ = [
@@ -659,6 +678,7 @@ __all__ = [
     "RetrievalRunState",
     "current_retrieval_run",
     "current_viewer_id",
+    "holding_fanout_slot",
     "memoized_query_embedding",
     "memoized_retrieval_value",
     "offering_query_vectors",

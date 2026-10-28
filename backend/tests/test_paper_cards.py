@@ -19,6 +19,7 @@ from app.services.paper_cards import (
     TLDR_MAX_CHARS,
     CardInputElement,
     card_is_empty,
+    ground_value,
     number_tokens,
     paper_card_prompt,
     render_card_input,
@@ -40,28 +41,59 @@ def _metric(value: str, anchor: str = "e2") -> dict:
 # ------------------------------------------------------------------ numbers
 
 
-@pytest.mark.parametrize(("value", "text", "grounded"), [
-    ("85.2", "top-1 85.20 %", True),                 # trailing zero
-    ("85.20", "top-1 85.2", True),
-    ("85.2%", "top-1 85.2", True),                   # unit separated from number
-    ("８５．２", "top-1 85.2", True),                 # full-width digits
-    ("85.2", "top-1 ８５．２％", True),
-    ("1,234", "runs 1234 steps", True),              # thousands separator
-    ("1234", "runs 1,234 steps", True),
-    ("3.1x", "cuts compute by 3.1× overall", True),
-    ("85.2", "top-1 185.23", False),                 # whole-token match only
-    ("85.2", "top-1 85.23", False),
-    ("5", "top-1 85.2", False),
-    ("SOTA", "SOTA everywhere", False),              # no number to ground
-    ("85.2 / 90.1", "85.2 and 90.1", True),          # every number must appear
-    ("85.2 / 90.1", "85.2 only", False),
+@pytest.mark.parametrize(("value", "text", "verdict"), [
+    ("85.2", "top-1 85.20 %", ""),                    # trailing zero
+    ("85.20", "top-1 85.2", ""),
+    ("85.2%", "top-1 85.2", ""),                      # unit separated from number
+    ("８５．２", "top-1 85.2", ""),                    # full-width digits
+    ("85.2", "top-1 ８５．２％", ""),
+    ("1,234", "runs 1234 steps", ""),                 # thousands separator
+    ("1234", "runs 1,234 steps", ""),
+    ("3.1x", "cuts compute by 3.1× overall", ""),
+    ("85.2", "top-1 185.23", "value_not_in_anchor"),  # whole-token match only
+    ("85.2", "top-1 85.23", "value_not_in_anchor"),
+    ("SOTA", "SOTA everywhere", "no_number"),
+    # sign is kept: a leading - or U+2212 must match
+    ("-0.5", "BLEU delta -0.5", ""),
+    ("−0.5", "BLEU delta -0.5", ""),
+    ("-0.5", "BLEU delta −0.5", ""),
+    ("-0.5", "BLEU delta 0.5", "value_not_in_anchor"),
+    ("0.5", "BLEU delta -0.5", "value_not_in_anchor"),
+    ("12", "top-12 accuracy", ""),                     # a hyphen after a letter is not a sign
+    # multi-token values must be contiguous (only joiners in between)
+    ("1.2e-3", "learning rate 1.2e-3", ""),
+    ("1.2e-3", "learning rate 1.2e3", "value_not_in_anchor"),   # exponent sign kept
+    ("1.2e-3", "lr 1.2 for 3 epochs", "value_not_in_anchor"),
+    ("85.2±0.3", "85.2 ± 0.3 over 5 seeds", ""),
+    ("85.2±0.3", "85.2 (seed 0.3)", "value_not_in_anchor"),
+    ("3×10^5", "trained for 3 × 10^5 steps", ""),
+    ("3×10^5", "3 GPUs and 10^5 steps", "value_not_in_anchor"),
+    ("85.2 / 90.1", "85.2/90.1", ""),
+    ("85.2 / 90.1", "85.2 and 90.1", "value_not_in_anchor"),
+    ("85.2 / 90.1", "85.2 only", "value_not_in_anchor"),
+    # single-digit integers alone are too ambiguous to ground
+    ("3", "3 runs", "ambiguous_value"),
+    ("3x", "3x faster", "ambiguous_value"),
+    ("-1", "delta -1", "ambiguous_value"),
+    ("5", "top-1 85.2", "ambiguous_value"),
+    # known limitation (documented): section / version numbers can match
+    ("2.1", "see Section 2.1", ""),
 ])
-def test_value_grounding(value, text, grounded):
-    assert value_grounded(value, text) is grounded
+def test_value_grounding(value, text, verdict):
+    assert ground_value(value, text) == verdict
+    assert value_grounded(value, text) is (verdict == "")
+
+
+def test_an_ambiguous_metric_is_dropped_with_its_reason():
+    card, dropped = verify_paper_card({"metrics": [_metric("3", anchor="e1")]},
+                                      (CardInputElement("e1", "el-a", "text", "", "we use 3 seeds"),))
+    assert card["metrics"] == []
+    assert dropped["metrics"][0]["reason"] == "ambiguous_value"
 
 
 def test_number_tokens_are_canonical():
     assert number_tokens("v1.2.3 got 007 and 2.50") == ["1.2.3", "7", "2.5"]
+    assert number_tokens("delta −0.5, top-1, 10-20, 1.2e-3") == ["-0.5", "1", "10", "20", "1.2", "-3"]
 
 
 # ------------------------------------------------------------------ verify

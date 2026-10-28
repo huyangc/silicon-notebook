@@ -7,10 +7,14 @@ from __future__ import annotations
 import json
 import re
 import threading
-from typing import Any, Callable
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator
 
 from app.repositories.ports import SourceElementWrite
+from app.services.model_provider import RuntimeModelProvider
+from app.services.model_registry import ModelServiceDefinition, SystemModelServiceRegistry
 from app.services.paper_meta import PAPER_META_SCHEMA_HINT
+from tests.model_testkit import bind_chat_client
 
 TITLE = "Gated Widgets for Sparse Vision"
 OPENING = (
@@ -98,6 +102,8 @@ class FakePaperModel:
         self.card_calls = 0
         self.cancel_events: list[Any] = []
         self.on_card: Callable[[str], None] | None = None
+        self.on_meta: Callable[[str], None] | None = None
+        self.meta_reply: Callable[[str], Any] | None = None
         self.reply: Callable[[str], Any] = card_reply
         self._lock = threading.Lock()
 
@@ -110,6 +116,11 @@ class FakePaperModel:
             else:
                 self.card_calls += 1
         if schema_hint == PAPER_META_SCHEMA_HINT:
+            if self.on_meta is not None:
+                self.on_meta(prompt)
+            if self.meta_reply is not None:
+                reply = self.meta_reply(prompt)
+                return reply if isinstance(reply, str) else json.dumps(reply)
             return json.dumps({
                 "is_paper": self.is_paper, "title": TITLE if self.is_paper else None,
                 "authors": [], "venue": None, "year": None, "doi": None, "keywords": [],
@@ -118,3 +129,35 @@ class FakePaperModel:
             self.on_card(prompt)
         reply = self.reply(prompt)
         return reply if isinstance(reply, str) else json.dumps(reply)
+
+
+class StatusError(Exception):
+    """A transport error carrying an HTTP status (429 / 5xx / 401 …)."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
+@contextmanager
+def scheduled_paper_model(repo: Any, fake: Any, *, max_concurrency: int = 4) -> Iterator[Any]:
+    """Bind ``fake`` behind the real scheduled adapter (``RuntimeModelProvider``):
+    every failure the fake raises reaches the service wrapped in a
+    ``ModelInvocationError`` with a stable ``.code``, exactly as in production."""
+    definition = ModelServiceDefinition(
+        id="paper", display_name="论文测试服务", kind="chat", protocol="openai",
+        base_url="https://paper.example/v1", model="fake-paper",
+        api_key_env="PAPER_TEST_KEY", api_key="test", max_concurrency=max_concurrency,
+        fingerprint="paper-test",
+        context_window_tokens=1048576, max_output_tokens=131072,
+    )
+    provider = RuntimeModelProvider(
+        repo.settings, repo._runtime.event_log,
+        registry=SystemModelServiceRegistry({"paper": definition}, {"paper_metadata": "paper"}),
+        chat_factory=lambda _service: fake,
+    )
+    try:
+        bind_chat_client(repo, "paper_metadata", provider.chat("paper_metadata"))
+        yield provider
+    finally:
+        provider.close()

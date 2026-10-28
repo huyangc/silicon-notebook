@@ -120,12 +120,26 @@ def paper_card_prompt(input_block: str) -> str:
 
 
 # ---------------------------------------------------------------- numbers
+#
+# 指标值接地(规格 §4.2):值与元素文本各自切成「数字 token 序列」,值的序列必须作为
+# **连续子序列**出现在元素文本的序列里。
+#
+# - 全角转半角(NFKC),U+2212 减号视同 ``-``,去千分位逗号;
+# - token 是完整数字串:前后都不是数字,点号连接的数字串整体算一个 token(185.23、
+#   1.2.3),所以 85.2 不会命中 185.23 或 85.23;字母、%、×、x、^ 等都是边界;
+# - 单个小数点的 token 去小数尾零与整数前导零(85.20 == 85.2);
+# - 符号保留:``-`` 紧跟在非字母数字字符(或开头)之后才是负号,所以 -0.5 不命中 0.5,
+#   而 top-1、10-20 里的 ``-`` 只是分隔(科学计数法 1.2e-3 的指数符号保留);
+# - 多 token 的值(科学计数法 1.2e-3、85.2±0.3、3×10^5)要求这些 token 在元素文本里
+#   连续出现、彼此之间只隔着连接符(e、×、^、±、/ 等),不能东一个西一个凑齐;
+# - 只由一位整数组成的值(``3``、``3x``、``-1``)太含糊,一律拒绝(``ambiguous_value``)。
+#
+# 已知限制:token 不看上下文,值 ``2.1`` 会命中元素里的「Section 2.1」这类章节号 /
+# 版本号。引用的元素是模型自己选的、又必须含这个数,残余误判可接受。
 
 # 千分位:逗号两侧都是数字,且右侧恰好三位后不再接数字。
 _THOUSANDS_RE = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
-# 完整数字 token:前后都不是数字;点号连接的数字串整体算一个 token(185.23、1.2.3),
-# 所以 85.2 不会命中 185.23 或 85.23。字母、%、×、x 等都是 token 边界。
-_NUMBER_RE = re.compile(r"(?<![\d.])\d+(?:\.\d+)*(?!\d)")
+_NUMBER_RE = re.compile(r"(?<![\d.])(-?)(\d+(?:\.\d+)*)(?!\d)")
 
 
 def _canonical_number(token: str) -> str:
@@ -140,23 +154,70 @@ def _canonical_number(token: str) -> str:
 
 
 def _normalize_numeric_text(text: str) -> str:
-    """全角转半角(NFKC)并去千分位逗号。"""
-    return _THOUSANDS_RE.sub("", unicodedata.normalize("NFKC", text or ""))
+    """全角转半角(NFKC)、统一减号并去千分位逗号。"""
+    normalized = unicodedata.normalize("NFKC", text or "").replace("\u2212", "-")
+    return _THOUSANDS_RE.sub("", normalized)
+
+
+def _number_spans(text: str) -> tuple[str, list[tuple[str, int, int]]]:
+    """规范化后的文本,以及其中每个数字 token 的 ``(规范形, 起点, 终点)``。"""
+    normalized = _normalize_numeric_text(text)
+    spans = []
+    for match in _NUMBER_RE.finditer(normalized):
+        sign, digits = match.group(1), match.group(2)
+        start = match.start()
+        # ``-`` 前面是字母数字(top-1、10-20)就只是分隔符,不是负号;科学计数法的
+        # 指数(1.2e-3:``e`` 前是数字)例外,符号保留。
+        before = normalized[start - 1] if sign and start > 0 else ""
+        exponent = before in "eE" and start > 1 and normalized[start - 2].isdigit()
+        if before.isalnum() and not exponent:
+            sign = ""
+            start += 1
+        spans.append((sign + _canonical_number(digits), start, match.end()))
+    return normalized, spans
 
 
 def number_tokens(text: str) -> list[str]:
-    """文本里全部完整数字 token 的规范形(按出现顺序)。"""
-    return [_canonical_number(m.group(0)) for m in _NUMBER_RE.finditer(_normalize_numeric_text(text))]
+    """文本里全部完整数字 token 的规范形(按出现顺序,负数带 ``-``)。"""
+    return [token for token, _start, _end in _number_spans(text)[1]]
+
+
+# 多 token 值里相邻两个数之间允许的连接符(去空白后):科学计数法、误差、乘幂、
+# 比值与区间。夹着文字(and、steps、%)的两个数不算同一个值。
+_JOINER_CHARS = frozenset("eE×xX*^±+-/()·.:")
+_MAX_JOINER = 4
+
+
+def _joined(text: str, end: int, start: int) -> bool:
+    gap = "".join(text[end:start].split())
+    return len(gap) <= _MAX_JOINER and all(ch in _JOINER_CHARS for ch in gap)
+
+
+def _is_ambiguous(tokens: list[str]) -> bool:
+    return all(len(token.lstrip("-")) == 1 for token in tokens)
+
+
+def ground_value(value: str, element_text: str) -> str:
+    """指标值接地,返回 ``""`` 表示通过,否则是丢弃原因码:``no_number``、
+    ``ambiguous_value`` 或 ``value_not_in_anchor``。"""
+    wanted = number_tokens(value)
+    if not wanted:
+        return "no_number"
+    if _is_ambiguous(wanted):
+        return "ambiguous_value"
+    text, spans = _number_spans(element_text)
+    width = len(wanted)
+    for i in range(len(spans) - width + 1):
+        window = spans[i:i + width]
+        if [token for token, _s, _e in window] == wanted and all(
+            _joined(text, window[k][2], window[k + 1][1]) for k in range(width - 1)
+        ):
+            return ""
+    return "value_not_in_anchor"
 
 
 def value_grounded(value: str, element_text: str) -> bool:
-    """指标值接地:值里至少有一个数字 token,且每个数字 token(规范形)都以完整
-    token 出现在元素文本里。单位与符号不参与比对(``85.2%`` 与 ``85.2`` 相同)。"""
-    wanted = number_tokens(value)
-    if not wanted:
-        return False
-    present = set(number_tokens(element_text))
-    return all(token in present for token in wanted)
+    return ground_value(value, element_text) == ""
 
 
 # ---------------------------------------------------------------- verify
@@ -258,8 +319,9 @@ def _metric_item(raw: Any, resolver: _AnchorResolver, dropped: dict) -> dict | N
             dropped.setdefault("invalid_anchors", []).append(_scalar_text(anchor_raw)[:80])
         _note(dropped, "metrics", "no_valid_anchor", value)
         return None
-    if not value_grounded(value, element.text):
-        _note(dropped, "metrics", "value_not_in_anchor", value)
+    verdict = ground_value(value, element.text)
+    if verdict:
+        _note(dropped, "metrics", verdict, value)
         return None
     return {
         "name": _cap(name, METRIC_NAME_MAX_CHARS),
