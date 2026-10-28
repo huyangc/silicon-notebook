@@ -45,6 +45,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from app.services.citation_markers import neutralize_markers
 from app.services.context_spans import Glue, concat, entry_lines, joined
+from app.services.paper_cards import cap_number_safe
 from app.services.reasoning_paper_tools import (
     ANSWER_LAYOUT_PAPER_TABLE,
     ANSWER_LAYOUT_PROSE,
@@ -556,7 +557,7 @@ def _digest_entry(row: PaperRow, keys: Mapping[str, str]) -> tuple[str, list[str
         if len(line) > room:
             if room - len(key) - 3 < 40:
                 break
-            line = line[:room - 1] + "…"
+            line = cap_number_safe(line, room - 1) + "…"
         lines.append(line)
         used += len(line) + 1
         shown.append(key)
@@ -706,7 +707,8 @@ def _cell(items: Sequence[tuple[str, str]]) -> str:
         if not out:
             keep = room - (len(markers) + 1 if markers else 0) - 1
             if keep > 0:
-                cut = text[:keep].rstrip("\\")
+                # 截断不许切进数字:表格里显示半个数就是另一个数。
+                cut = cap_number_safe(text, keep).rstrip("\\")
                 out = f"{cut}… {markers}" if markers else f"{cut}…"
         break
     return out or _EMPTY_CELL

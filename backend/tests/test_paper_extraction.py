@@ -726,3 +726,27 @@ def test_an_extraction_failure_logs_only_the_class_and_code(repo, nb, service, m
     assert (result.status, result.reason) == ("failed", "error:RuntimeError")
     assert calls and all(method != "exception" and not kwargs.get("exc_info") for method, _t, kwargs in calls)
     assert not any("LEAK" in text or "user:pw" in text for _m, text, _k in calls)
+
+
+
+@pytest.mark.parametrize("handle_kind", ["e", "c"])
+def test_extraction_input_never_ends_inside_a_number(repo, nb, service, model, monkeypatch, handle_kind):
+    """A number crossing the opening-element / passage limit must not be cut into a
+    different number the model could cite and grounding would then accept."""
+    import app.services.paper_extraction as extraction
+
+    text = "Our model reaches top-1 accuracy of 85.23 on the benchmark."
+    cut_at = text.index("85.23") + 4          # a plain slice would end in "85.2"
+    monkeypatch.setattr(extraction, "EXTRACT_OPENING_MAX_CHARS", cut_at)
+    monkeypatch.setattr(extraction, "EXTRACT_PASSAGE_MAX_CHARS", cut_at)
+    _plain_source(repo, nb, "num", [text, "Second paragraph about top-1 accuracy."])
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb)
+
+    def reply(excerpts):
+        handle = next(h for h, t in excerpts.items() if h.startswith(handle_kind) and "accuracy of" in t)
+        assert "85.2" not in excerpts[handle]
+        return {"values": [{"field_index": 0, "value": "85.2", "anchor": handle}]}
+
+    model.reply = _fixed(reply)
+    [result] = _extract(service, nb, ["num"], ["top-1 accuracy"])
+    assert (result.fields[0].value, result.fields[0].missing) == ("", "value_not_in_anchor")
