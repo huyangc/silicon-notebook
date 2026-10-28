@@ -20,6 +20,8 @@ vi.mock("../../app/notebook-transfer-api.ts", async (importOriginal) => ({
 }));
 const system = vi.hoisted(() => ({ fetchSystemConfiguration: vi.fn() }));
 vi.mock("../../app/system-api.ts", () => system);
+const memories = vi.hoisted(() => ({ exportDeletedNotebookMemories: vi.fn() }));
+vi.mock("../../app/notebook-deletion-api.ts", () => memories);
 
 const {
   useNotebookExport, useNotebookImport, importFileProblem, TRANSFER_POLL_MS,
@@ -495,4 +497,15 @@ test("弹窗关着时上传失败:工具栏上的「导入失败」一直挂着,
   act(() => result.current.start());
   await waitFor(() => expect(importUpload.busy()).toBe(false));
   expect(result.current.view.uploadFailedUnseen).toBe(false);
+});
+
+
+test("导出记忆的请求本身抛错:结果落在那几个字旁边,不悄悄回到原样", async () => {
+  const { result } = renderHook(() => useNotebookExport("nb1"));
+  await waitFor(() => expect(result.current.view.loading).toBe(false));
+  memories.exportDeletedNotebookMemories.mockRejectedValueOnce(new TypeError("body stream broke"));
+  await act(async () => { await result.current.exportMemories(); });
+  expect(result.current.view.memoryExporting).toBe(false);
+  expect(result.current.view.memoryResult).toBe("failed");
+  expect(result.current.view.memoryText).toBe("记忆没有导出，请重试。");
 });
