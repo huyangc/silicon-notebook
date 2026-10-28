@@ -132,18 +132,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       条目的 `adopted` 计数看采纳率（`adopted` 只在条目真正送达且模型那一轮点名了该动作时
       递增），需要生产上跑够量才谈得上。觉得每 reflect 轮重复注入的 token 不划算的部署把
       注入闸设回 false 即逐字回到「只蒸馏不注入」。
-- [ ] **单库请求级收窄的空范围判据：勾了任何挂载库即算非空**（来源：PR #922 评审存疑，当时判为既有
-      同形、不在该 PR 范围；2026-10-28 按 master 核实仍成立）。`backend/app/api/ask_routes.py` 的
-      `_scope_is_empty`（Ask 与报告入口经 `_require_non_empty_scope` 共用，409「当前检索范围为空」）对
-      本地维度按真实证据宇宙判（`local_universe_non_empty`：可见来源，或 `local_evidence_available` 的
-      chunk / 可用 KG / 本人已确认 Memory），对参考库维度却只看 `bool(resolved_base_scope.notebook_ids)`
-      ——勾了就算有。而 `ask_available` 的参考库那一半（`notebook_catalog._base_evidence_available`）按
-      证据判：带可用图谱，或在联邦 chunk 通道上界内有可见原文。于是本地全部取消勾选、只留一个既无可用
-      图谱又无可见 chunk（或排在 `CHUNK_FEDERATION_MAX_PARTICIPANTS` 之外、或联邦通道关闭）的参考库时，
-      请求照样放行，检索宇宙为空，用户拿到无证据回答而不是 409；不收窄时同一状态会被 `ask_available`
-      拦下。全局问答的准入已按冻结天花板逐库判非空（PR #924）。要改成逐库按证据判，参考库维度就得为
-      勾选的库补一次 `_base_evidence_available` 同口径的探测（目前零查询），并决定报告入口是否同改
-      （报告入口刻意不走 `ask_available`）；是可见行为变化，改前先问用户。
 
 ### 知识图谱
 

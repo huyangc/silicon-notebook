@@ -172,7 +172,9 @@ def _report_scope_recheck(repo, notebook_id: str, understanding: dict):
                 BaseNotebookScope.model_validate(persisted_base_scope),
             )
             updated["base_scope"] = resolved_base_scope.model_dump()
-        _require_non_empty_scope(notebook, resolved_scope, resolved_base_scope)
+        _require_non_empty_scope(
+            notebook, resolved_scope, resolved_base_scope, repo
+        )
     except Exception:  # noqa: BLE001 — any rejection means "stay at the gate"
         return None
     return {
@@ -238,7 +240,9 @@ def create_report(notebook_id: str, payload: ReportCreate) -> dict:
     # and (the reason this check exists at all) must not let the plan job burn
     # model calls producing a zero-evidence report. Deliberately NOT the
     # ask_available gate -- only the scope-emptiness half.
-    _require_non_empty_scope(notebook, resolved_source_scope, resolved_base_scope)
+    _require_non_empty_scope(
+        notebook, resolved_source_scope, resolved_base_scope, repo
+    )
     depth = max(1, min(16, int(payload.depth)))
     try:
         rid = repo.create_report(
@@ -314,7 +318,9 @@ def confirm_report_intent(notebook_id: str, report_id: str,
         # non-empty at create time (every selected source deleted, every
         # selected library unmounted), so the emptiness check must run again
         # here -- this is the last gate before planning is claimed and launched.
-        _require_non_empty_scope(notebook, resolved_scope, resolved_base_scope)
+        _require_non_empty_scope(
+            notebook, resolved_scope, resolved_base_scope, repo
+        )
     # Shared with the automatic direct-run confirmation: one implementation of
     # "freeze exactly what the owner reviewed", so both paths claim the same
     # contract.  Only the rejection transport differs (422 here, fail-open
@@ -467,7 +473,9 @@ def _report_followup_scope(repo, notebook_id: str, report_id: str, row: dict) ->
     the very rule ``/ask`` applies, on the narrowed dimensions as reduced and
     the notebook's real evidence for the one that was not narrowed (a notebook
     with only mounted libraries has no local evidence to stand on once its
-    ticked library is gone) -- or when the reduced selection fits no request
+    ticked library is gone; a ticked library that still exists but holds no
+    evidence retrieval can reach counts as gone too) -- or when the reduced
+    selection fits no request
     (``_followup_source_scope``). Everything is always a selection the user
     sees and can change, and it covers whatever the report used. Reads only.
     """
@@ -502,7 +510,9 @@ def _report_followup_scope(repo, notebook_id: str, report_id: str, row: dict) ->
                 mode="include", notebook_ids=kept_libraries, narrowed=True
             )
             base_scope = BaseNotebookScope(mode="include", notebook_ids=kept_libraries)
-        fell_back = fell_back or _scope_is_empty(notebook, reduced_sources, reduced_libraries)
+        fell_back = fell_back or _scope_is_empty(
+            notebook, reduced_sources, reduced_libraries, repo
+        )
     if fell_back:
         source_scope = SourceScope(mode="exclude", source_ids=[])
         base_scope = BaseNotebookScope(mode="exclude", notebook_ids=[])
@@ -692,7 +702,9 @@ def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateReq
         # Same emptiness gate as create/confirm: sources or libraries may have
         # gone away since the outline was approved, and generation is by far
         # the most expensive phase to run against an empty universe.
-        _require_non_empty_scope(notebook, resolved_scope, resolved_base_scope)
+        _require_non_empty_scope(
+            notebook, resolved_scope, resolved_base_scope, repo
+        )
     depth = max(1, min(16, int(payload.depth or cur.get("depth", 2))))
     if not repo.claim_report_generation(
         notebook_id,

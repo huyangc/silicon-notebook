@@ -61,7 +61,7 @@ from app.repositories.sqlite.memory_sql import (
     own_memory_source,
     no_memory_member_cluster,
 )
-from app.repositories.sqlite.id_binding import bind_ids, drive_by
+from app.repositories.sqlite.id_binding import bind_ids, drive_by, member_of
 from app.repositories.sqlite.mount_sql import (
     MOUNT_EFFECTIVE_FOR_VIEWER,
     MOUNT_ORDER,
@@ -509,19 +509,34 @@ class QueryStore:
 
     @staticmethod
     def notebook_has_usable_base_kg(
-        db: sqlite3.Connection, notebook_id: str, *, viewer_id: str | None
+        db: sqlite3.Connection,
+        notebook_id: str,
+        *,
+        viewer_id: str | None,
+        among: list[str] | None = None,
     ) -> bool:
         """本库挂载的参考库中是否有任一含**可用状态** KG。对齐检索口径:base_kg_available
         (mounted_bases_row 的 has_kg)含 deprecated,ask_available 改用这个 usable 版
         (codex PR#334 第4轮 P2-1)。
         ``viewer_id`` 是必填关键字(M3:挂载只对挂载人或自己能读被挂库的人生效);
-        ``None``/空串 = 无查看者,只剩公共库与 ``everyone``。"""
+        ``None``/空串 = 无查看者,只剩公共库与 ``everyone``。
+
+        ``among`` 给出时只问这几本挂载库(单库请求勾选的参考库,见
+        ``NotebookSummaryQuery._base_evidence_available``);挂载有效性照旧由同一段
+        join 判,名单只是过滤(``member_of``,不让它驱动计划),绑成一个参数。省略时
+        语句与参数逐字不变。"""
         placeholders = ",".join("?" for _ in USABLE_STATUSES)
+        bound = None if among is None else bind_ids(among)
         row = db.execute(
             "SELECT EXISTS(SELECT 1 " + MOUNT_VIEWER_JOIN + MOUNT_EFFECTIVE_FOR_VIEWER
+            + ("" if bound is None else f" AND {member_of('b.id', bound)}")
             + " AND EXISTS(SELECT 1 FROM knowledge_objects ko "
             f"WHERE ko.notebook_id = b.id AND ko.status IN ({placeholders})))",
-            (viewer_id, notebook_id, *USABLE_STATUSES),
+            (
+                viewer_id, notebook_id,
+                *(() if bound is None else (bound.param,)),
+                *USABLE_STATUSES,
+            ),
         ).fetchone()
         return bool(row[0])
 

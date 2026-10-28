@@ -1,6 +1,6 @@
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from app.models.groups import GrantedGroupRef
 from app.models.kg import KgBuildJobStatus
@@ -188,6 +188,11 @@ class NotebookSummary(BaseModel):
     # 可见来源数>0」,所以 False 就等于回落到旧判据、只增不减;默认 True 反而会让列表投影
     # 凭空放行一次空范围检索。同 ask_available:仅单库 get() 精确回填,列表投影保持默认。
     local_evidence_available: bool = False
+    # ask_available 的**参考库那一半**,按「全部有效挂载」求出的值——仅当单库 get() 因本地
+    # 证据为假而真的求过它时才有值,否则 None(本地为真时短路,从没求过)。不进响应、不进
+    # schema:它只是同一次 get() 已付过的那条探测的结果,留给路由的空范围判据
+    # (``ask_routes._scope_is_empty``)在「参考库没收窄」时直接复用,不再查第二遍。
+    _mounted_base_evidence: Optional[bool] = PrivateAttr(default=None)
     # 已解析但尚未抽取 KG 的 source 数,驱动前端「补抽 N 篇」
     kg_pending_sources: int = 0
     # Phase 2 只读共享:本用户对该库的访问权。"owner" = 自有(可写);

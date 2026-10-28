@@ -72,6 +72,27 @@ def extra_source(world: World, label: str) -> str:
     return source_id
 
 
+def library_text(world: World, library: str) -> None:
+    """One visible document with one chunk in ``library``: evidence the
+    federated passage lane reaches, so a ticked library holds up a retrieval
+    scope (the empty-scope refusal judges reference libraries by evidence)."""
+    from app.repositories.ports import ChunkWrite
+
+    source_id = f"src-library-{next(_KEYS)}"
+    world.repo._runtime.source_ingestion.sources.insert_source(
+        source_id=source_id, notebook_id=library, title="参考原文",
+        source_type="upload", status="active", parse_status="parsed",
+        file_name="lib.md", file_path="", file_size=1, file_hash="h",
+        summary="", doc_type="",
+    )
+    world.repo._runtime.chunk_store.replace_source_chunks(
+        source_id, library,
+        [ChunkWrite(id=f"chunk-{source_id}", text="参考原文", section_path="",
+                    element_ids=())],
+        created_at="2026-10-28T00:00:00+00:00",
+    )
+
+
 def durable_counts(world: World) -> dict[str, int]:
     """Row counts of everything an Ask turn leaves behind."""
     counts: dict[str, int] = {}
@@ -571,6 +592,8 @@ def case_followup_falls_back_when_a_library_only_notebook_loses_its_ticked_libra
     create = lambda name: world.client.post(  # noqa: E731 - three one-line creates
         "/api/notebooks", json={"name": name}, headers=headers).json()["id"]
     bare, first, second = create("只挂参考库"), create("库甲"), create("库乙")
+    library_text(world, first)
+    library_text(world, second)
     local = replace(world, notebook=bare)
 
     def mount_for_alice(libraries: list[str]) -> None:

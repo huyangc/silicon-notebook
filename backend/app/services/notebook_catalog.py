@@ -703,8 +703,14 @@ class NotebookSummaryQuery:
                 )
             )
             summary.local_evidence_available = local_evidence
-            summary.ask_available = local_evidence or self._base_evidence_available(
-                db, summary, user_id
+            if not local_evidence:
+                # 记下这次已付过的参考库那一半,路由的空范围判据在「参考库没收窄」
+                # 时直接复用(见 selected_base_evidence_available),不查第二遍。
+                summary._mounted_base_evidence = self._base_evidence_available(
+                    db, summary, user_id
+                )
+            summary.ask_available = local_evidence or bool(
+                summary._mounted_base_evidence
             )
             # paper_meta_missing:「补全论文信息」按钮的显示门(见字段注释)。已在手的
             # 可见来源数是合规候选的严格超集(两者同排 memory/knowhow 合成源),为 0
@@ -728,7 +734,11 @@ class NotebookSummaryQuery:
         return summary
 
     def _base_evidence_available(
-        self, db: object, summary: NotebookSummary, user_id: "str | None"
+        self,
+        db: object,
+        summary: NotebookSummary,
+        user_id: "str | None",
+        selection: "list[str] | None" = None,
     ) -> bool:
         """ask_available 的**参考库那一半**:对这位查看者生效的挂载库里,有没有本次
         检索真能取到的证据。两条判据,任一即真:
@@ -751,17 +761,71 @@ class NotebookSummaryQuery:
         私有库根本不在名单里;原文只数可见来源,与联邦同行腿的天花板同口径。
 
         成本:只在本地证据为假(空库)时才走到这里;没有挂载库、或联邦通道关掉时
-        零新增查询;否则至多一条与挂载数无关的 EXISTS。列表投影不经过这里。"""
-        if summary.base_kg_available and self.queries.notebook_has_usable_base_kg(
-            db, summary.id, viewer_id=user_id
+        零新增查询;否则至多一条与挂载数无关的 EXISTS。列表投影不经过这里。
+
+        ``selection``(``_base_selection`` 的结果)是同一判据收窄到**这次勾选**的参考库:
+        单库请求的空范围判据(``ask_routes._scope_is_empty``,问答与报告共用)经
+        ``selected_base_evidence_available`` 走到这里,两处不各写一份。``None`` = 全部
+        有效挂载,即 ``ask_available`` 自己那一问,语句逐字不变;收窄时图谱那条只问
+        勾选集里已在手 ``base_kg_notebook_ids`` 标着有图的库(同一次挂载读取,仍是可用
+        图谱的严格超集),原文那条按勾选集套联邦上界。"""
+        if selection is None:
+            graphed: object = summary.base_kg_available
+            among: dict = {}
+        else:
+            with_kg = set(summary.base_kg_notebook_ids)
+            graphed = [base_id for base_id in selection if base_id in with_kg]
+            among = {"among": graphed}
+        if graphed and self.queries.notebook_has_usable_base_kg(
+            db, summary.id, viewer_id=user_id, **among
         ):
             return True
-        base_ids = self._chunk_lane_base_ids(summary)
+        base_ids = self._chunk_lane_base_ids(summary, selection)
         return bool(base_ids) and self.queries.notebooks_have_visible_chunk(
             db, base_ids
         )
 
-    def _chunk_lane_base_ids(self, summary: NotebookSummary) -> list[str]:
+    @staticmethod
+    def _base_selection(
+        summary: NotebookSummary, notebook_ids: "Sequence[str] | None"
+    ) -> "list[str] | None":
+        """把一次请求勾选的参考库规整成 ``_base_evidence_available`` 的 ``selection``。
+
+        ``None``(没提交库维度)或勾选覆盖了全部有效挂载 → ``None``:那就是
+        ``ask_available`` 已经问过的那一问。否则按 ``summary.base_notebooks`` 的
+        ``MOUNT_ORDER`` 重排、只留确实挂着的库——提交顺序不是检索顺序,联邦上界截的
+        是检索座位的顺序(``_retrieval_participants``:挂载序,先按勾选过滤、后截上界)。"""
+        if notebook_ids is None:
+            return None
+        chosen = set(notebook_ids)
+        mounted = [ref.id for ref in summary.base_notebooks]
+        if chosen.issuperset(mounted):
+            return None
+        return [base_id for base_id in mounted if base_id in chosen]
+
+    def selected_base_evidence_available(
+        self,
+        summary: NotebookSummary,
+        notebook_ids: "Sequence[str] | None",
+        *,
+        user_id: "str | None",
+    ) -> bool:
+        """这次勾选的参考库里有没有检索真能取到的证据(``_base_evidence_available``
+        收窄到勾选集)。``summary`` 必须是 ``get()`` 为同一位查看者出的单库摘要。
+
+        没收窄、且 ``get()`` 已经求过这一半(本地证据为假时)→ 直接复用那次的结果,
+        零查询;勾选为空 → 假,零查询;其余至多两条 EXISTS(与 ``ask_available`` 同)。"""
+        selection = self._base_selection(summary, notebook_ids)
+        if selection is None and summary._mounted_base_evidence is not None:
+            return summary._mounted_base_evidence
+        if selection is not None and not selection:
+            return False
+        with self.database.connect() as db:
+            return self._base_evidence_available(db, summary, user_id, selection)
+
+    def _chunk_lane_base_ids(
+        self, summary: NotebookSummary, selection: "list[str] | None" = None
+    ) -> list[str]:
         """联邦 chunk 通道这次**真会搜**的参考库 id,按挂载顺序。
 
         开关与上界不在这里另写一份:``app.domain.chunk_lane.chunk_lane_bound`` 是
@@ -769,12 +833,18 @@ class NotebookSummaryQuery:
         的名单(当前库打头,其后是 ``MOUNT_ORDER`` 的有效挂载)。``CHUNK_FEDERATION_
         ENABLED`` 关掉时只剩当前库一本,参考库原文根本不进召回;否则截到
         ``CHUNK_FEDERATION_MAX_PARTICIPANTS``——排在上界之外的库检索不到,也就不能替
-        这个库撑起可用性。零查询:名单就是已在手的 ``summary.base_notebooks``。"""
+        这个库撑起可用性。零查询:名单就是已在手的 ``summary.base_notebooks``。
+
+        ``selection``(已按挂载序排好的勾选集)给出时,上界套在**勾选之后**的名单上:
+        检索座位先用 ``notebook_in_scope`` 滤掉没勾的库、再截上界,所以只勾一个排在第
+        九位的库时它就在上界之内。"""
         if not chunk_lane_reads_mounts(self.settings):
             return []
-        kept, _mounted_total = chunk_lane_bound(
-            self.settings, [summary.id, *(ref.id for ref in summary.base_notebooks)]
+        bases = (
+            [ref.id for ref in summary.base_notebooks]
+            if selection is None else list(selection)
         )
+        kept, _mounted_total = chunk_lane_bound(self.settings, [summary.id, *bases])
         return list(kept[1:])
 
     def list_for_user(self, user_id: str) -> list[NotebookSummary]:
@@ -976,6 +1046,21 @@ class NotebookCatalogService:
                 user_id=viewer_id or None,
             ),
             notebook_id,
+        )
+
+    def base_evidence_available(
+        self, notebook: NotebookSummary, notebook_ids: "Sequence[str] | None"
+    ) -> bool:
+        """Does the request's checked reference-library selection hold evidence
+        retrieval can actually reach?  The reference-library half of
+        ``ask_available``, narrowed to ``notebook_ids`` (``None`` = every
+        effective mount) -- the one definition the single-library empty-scope
+        refusal (``ask_routes._scope_is_empty``, Ask and reports alike) asks.
+
+        ``notebook`` is the summary ``get_notebook`` returned in this same
+        request, and the viewer is resolved the same way it was there."""
+        return self._summaries.selected_base_evidence_available(
+            notebook, notebook_ids, user_id=current_viewer_id() or None
         )
 
     def update_notebook(
