@@ -767,7 +767,14 @@ class SourceStore:
                 if bind_term_legs(len(rows), visible_total) else None
             )
             statement, leg_params = _find_sources_term_legs(notebook_id, folded, scope)
-            hit_rows = execute_bound(connection, statement, leg_params, scope).fetchall()
+            # ALWAYS a custom plan, list or no list: the statement text depends
+            # only on the number of terms, so psycopg's auto-prepare (5th
+            # execution) would share one prepared statement across different
+            # terms and PostgreSQL would settle on a generic plan -- the
+            # trigram GIN driven by an opaque pattern, ~450 ms for a 2-character
+            # term on a 10k library where the custom plan takes ~20 ms (the
+            # measurement doc).  Planning per call costs well under 1 ms here.
+            hit_rows = execute_ids(connection, statement, leg_params).fetchall()
         return assemble_scope(
             rows, hit_rows, folded, scope_total=scope_total,
             visible_total=visible_total, meta_pending_excluded=excluded,

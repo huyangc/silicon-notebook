@@ -564,13 +564,13 @@ def test_lexical_complete_reports_the_unjudgeable_papers(repo):
 class TwoLibraries:
     """``source_scope`` over the active notebook plus one mounted library."""
 
-    def __init__(self, instance, nb, ref):
-        self.instance, self.nb, self.ref = instance, nb, ref
+    def __init__(self, instance, nb, *refs):
+        self.instance, self.nb, self.refs = instance, nb, refs
 
     def source_scope(self, db, active, *, ceiling_binds, local_only=False):
         from types import SimpleNamespace
 
-        ids = (self.nb,) if local_only else (self.nb, self.ref)
+        ids = (self.nb,) if local_only else (self.nb, *self.refs)
         store = self.instance._runtime.source_store
         entries = [
             SimpleNamespace(notebook_id=notebook_id, source_id=source_id)
@@ -596,7 +596,9 @@ class FailingStore:
     one library (``fail``: raise; ``stall``: sleep, then read)."""
 
     def __init__(self, store, notebook_id, *, fail=None, stall=0.0):
-        self._store, self._nb = store, notebook_id
+        self._store = store
+        self._nb = notebook_id
+        self._stalled = set(notebook_id) if isinstance(notebook_id, tuple) else {notebook_id}
         self._fail, self._stall = fail, stall
         self.calls = 0
 
@@ -604,7 +606,7 @@ class FailingStore:
         self.calls += 1
         if notebook_id == self._nb and self._fail is not None:
             raise self._fail
-        if notebook_id == self._nb and self._stall:
+        if notebook_id in self._stalled and self._stall:
             import time
 
             time.sleep(self._stall)
@@ -650,7 +652,9 @@ def test_a_peer_library_that_fails_is_skipped_and_reported(repo):
     instance, nb, *_ = repo
     ref = _reference_library(instance)
     _source(instance, nb, "s-local", title="kalman filter")
-    _source(instance, ref, "s-ref", title="kalman smoother")
+    _meta(instance, nb, "s-local", year=2020)       # nothing pending: only the
+    _source(instance, ref, "s-ref", title="kalman smoother")    # skip decides
+    _meta(instance, ref, "s-ref", year=2021)
     events = Events()
     store = FailingStore(instance._runtime.source_store, ref, fail=RuntimeError("x"))
     result = _finder(
@@ -659,6 +663,7 @@ def test_a_peer_library_that_fails_is_skipped_and_reported(repo):
     ).find(nb, FindSourcesRequest(terms=("kalman",), kind="all"))
     assert [item.source_id for item in result.items] == ["s-local"]
     assert result.skipped_libraries == {ref: "unavailable"}
+    assert result.meta_pending_unchecked == 0
     assert result.lexical_complete is False
     assert [e for e in events.events if e["kind"] == "find_sources_library_skipped"] == [{
         "kind": "find_sources_library_skipped", "notebook_id": ref,
@@ -710,12 +715,17 @@ def test_a_page_turn_inside_a_run_only_slices_the_ranking(repo):
     assert (len(fake.calls), store.calls) == (3, 3)
 
 
-def test_only_a_filter_narrowed_list_is_attested_explicit(repo):
+def test_only_a_really_narrow_filtered_list_is_attested_explicit(repo):
+    """``producer_explicit`` switches the lexical corpus-language gate off, so
+    it is attested only for a scope a year / venue / author filter or an
+    explicit list made REALLY narrow (<= 10% of the library) -- never for
+    ``kind`` dropping a few non-papers from a near-whole library (ASK-1)."""
     instance, nb, *_ = repo
     _source(instance, nb, "s-new")
     _meta(instance, nb, "s-new", year=2023)
-    _source(instance, nb, "s-old")
-    _meta(instance, nb, "s-old", year=2012)
+    for index in range(10):
+        _source(instance, nb, f"s-old-{index}")
+        _meta(instance, nb, f"s-old-{index}", year=2012)
     _source(instance, nb, "s-manual", doc_type="manual")
     fake = FakeRetrieval()
     finder = _finder(instance, fake)
@@ -724,13 +734,15 @@ def test_only_a_filter_narrowed_list_is_attested_explicit(repo):
     cases = [
         (FindSourcesRequest(query="q", kind="all"), None, False),
         (FindSourcesRequest(query="q", kind="all"), whole, False),
-        (FindSourcesRequest(query="q", kind="all"), ["s-new", "s-old"], False),
-        (FindSourcesRequest(query="q", kind="all", year_from=2020), whole, True),
-        (FindSourcesRequest(query="q"), None, True),          # kind drops s-manual
+        (FindSourcesRequest(query="q"), None, False),        # kind drops s-manual only
+        (FindSourcesRequest(query="q"), whole, False),
+        (FindSourcesRequest(query="q", kind="all", year_to=2015), whole, False),  # 10/12
+        (FindSourcesRequest(query="q", kind="all", year_from=2020), None, True),  # 1/12
+        (FindSourcesRequest(query="q", kind="all"), ["s-new"], True),  # explicit 1/12
     ]
     for request, allowed, narrowed in cases:
         finder.find(nb, request, allowed_source_ids=allowed)
-        assert fake.flags[-1] == {"peer": False, "narrowed": narrowed}, request
+        assert fake.flags[-1] == {"peer": False, "narrowed": narrowed}, (request, allowed)
 
 
 def test_a_filter_narrowed_fts_degraded_search_keeps_its_lexical_candidates(
@@ -741,7 +753,7 @@ def test_a_filter_narrowed_fts_degraded_search_keeps_its_lexical_candidates(
     instance, nb, *_ = repo
     _source(instance, nb, "s-zh", title="zh", texts=[f"锁相环抖动分析与时钟恢复电路设计 第{i}部分 " * 40 for i in range(3)])
     _meta(instance, nb, "s-zh", year=2023)
-    for index in range(3):
+    for index in range(10):          # the 2020+ filter keeps 1 of 11 (<= 10%)
         _source(instance, nb, f"s-en-{index}", title=f"en {index}",
                 texts=[f"gardening notes about tomatoes and soil {index} " * 6])
         _meta(instance, nb, f"s-en-{index}", year=2012)
@@ -791,3 +803,164 @@ def test_an_explicit_subset_never_shows_a_hit_outside_it(repo):
     assert [item.source_id for item in result.items] == ["s-in"]
     assert result.filtered_scope_total == 2
     assert set(fake.calls[0][3]) == {"s-in", "s-other"}
+
+
+# ------------------------------------------- cancellation / semantic failure
+class CancellingStore(FailingStore):
+    """Sets the run's cancel event in the middle of one library's read, then
+    reads (the read budget then raises ``ReadBudgetExceeded``)."""
+
+    def __init__(self, store, notebook_id, cancel):
+        super().__init__(store, notebook_id)
+        self._cancel = cancel
+
+    def find_sources_metadata_rows(self, db, notebook_id, **kwargs):
+        if notebook_id == self._nb:
+            self._cancel.set()
+        return super().find_sources_metadata_rows(db, notebook_id, **kwargs)
+
+
+def test_a_stop_during_a_peer_read_is_a_cancellation_not_a_timeout(repo):
+    import threading
+
+    from app.services.cancellation import AskCancelled
+    from app.services.retrieval_run import retrieval_run
+
+    instance, nb, *_ = repo
+    ref = _reference_library(instance)
+    _source(instance, nb, "s-local", title="kalman filter")
+    _source(instance, ref, "s-ref", title="kalman smoother")
+    cancel = threading.Event()
+    store = CancellingStore(instance._runtime.source_store, ref, cancel)
+    events = Events()
+    finder = _finder(instance, enumeration=TwoLibraries(instance, nb, ref), sources=store,
+                     event_log=events)
+    request = FindSourcesRequest(terms=("kalman",), kind="all")
+    with retrieval_run(run_kind="ask_reasoning"):
+        with pytest.raises(AskCancelled):
+            finder.find(nb, request, cancel_event=cancel)
+        # No "timeout" skip receipt for a user's own stop.
+        assert events.events == []
+        # Nothing was memoized: a resumed search reads both libraries again.
+        cancel.clear()
+        plain = FailingStore(instance._runtime.source_store, "none")
+        result = _finder(instance, enumeration=TwoLibraries(instance, nb, ref),
+                         sources=plain).find(nb, request, cancel_event=cancel)
+    assert result.skipped_libraries == {}
+    assert {item.source_id for item in result.items} == {"s-local", "s-ref"}
+
+
+def test_a_cancellation_raised_inside_a_peer_read_propagates(repo):
+    from app.services.cancellation import AskCancelled
+
+    instance, nb, *_ = repo
+    ref = _reference_library(instance)
+    _source(instance, nb, "s-local", title="kalman filter")
+    _source(instance, ref, "s-ref", title="kalman smoother")
+    store = FailingStore(instance._runtime.source_store, ref, fail=AskCancelled())
+    with pytest.raises(AskCancelled):
+        _finder(instance, enumeration=TwoLibraries(instance, nb, ref),
+                sources=store).find(nb, FindSourcesRequest(terms=("kalman",)))
+
+
+class SemanticFailsFor(FakeRetrieval):
+    def __init__(self, notebook_id, relevance):
+        super().__init__("baseline", relevance)
+        self._nb = notebook_id
+
+    def retrieve_chunks_in_sources(self, notebook_id, *args, **kwargs):
+        if notebook_id == self._nb:
+            raise RuntimeError("vector store down")
+        return super().retrieve_chunks_in_sources(notebook_id, *args, **kwargs)
+
+
+def test_a_peer_semantic_failure_keeps_its_metadata_hits(repo):
+    instance, nb, *_ = repo
+    ref = _reference_library(instance)
+    _source(instance, nb, "s-local", title="kalman filter")
+    _meta(instance, nb, "s-local", year=2020)
+    _source(instance, ref, "s-ref", title="kalman smoother")
+    _meta(instance, ref, "s-ref", year=2021)
+    fake = SemanticFailsFor(ref, {"s-local": [BETWEEN]})
+    result = _finder(instance, fake, enumeration=TwoLibraries(instance, nb, ref)).find(
+        nb, FindSourcesRequest(query="state estimation", terms=("kalman",), kind="all"))
+    assert {item.source_id for item in result.items} == {"s-local", "s-ref"}
+    assert result.skipped_libraries == {ref: "semantic:unavailable"}
+    assert result.lexical_complete is True          # the metadata leg was complete
+    assert result.semantic_recall_capped is True    # semantic recall unknown
+    assert result.lanes == {nb: "baseline"}
+
+
+# ------------------------------------------------- run memo freshness
+def test_a_paper_meta_write_inside_the_run_re_ranks(repo):
+    from app.services.retrieval_run import note_paper_meta_written, retrieval_run
+
+    instance, nb, *_ = repo
+    _source(instance, nb, "s-a", title="graph a")
+    _source(instance, nb, "s-b", title="graph b")
+    finder = _finder(instance, FakeRetrieval())
+    request = FindSourcesRequest(terms=("graph",), year_from=2020)
+    with retrieval_run(run_kind="ask_reasoning"):
+        before = finder.find(nb, request)
+        _meta(instance, nb, "s-b", year=2024)        # a card's lazy extraction
+        unchanged = finder.find(nb, request)         # no write noted: memo holds
+        note_paper_meta_written()
+        after = finder.find(nb, request)
+    assert [i.source_id for i in before.items] == []
+    assert [i.source_id for i in unchanged.items] == []
+    assert [i.source_id for i in after.items] == ["s-b"]
+
+
+# ------------------------------------------------- lane flags are restored
+@pytest.mark.parametrize("fails", [False, True])
+def test_find_restores_the_federation_lane_flags(repo, monkeypatch, fails):
+    from app.services.chunk_lane import _CHUNK_PEEK_ONLY, _CHUNK_PEER_LEG
+
+    instance, nb, *_ = repo
+    ref = _reference_library(instance)
+    body = "phase locked loop jitter analysis "
+    for notebook_id, sid in ((nb, "s-local"), (ref, "s-ref")):
+        _source(instance, notebook_id, sid, title=f"{sid} doc",
+                texts=[f"{body} {sid} part {i} " * 6 for i in range(3)])
+    candidates = instance.retrieval.candidates
+    monkeypatch.setattr(candidates, "notebook_copy_stats",
+                        lambda notebook_id: {"copyable": notebook_id != ref, "size": {}})
+    seen: list = []
+    original = candidates._retrieve_chunks
+
+    def spy(notebook_id, *args, **kwargs):
+        seen.append((notebook_id, _CHUNK_PEEK_ONLY.get(), _CHUNK_PEER_LEG.get()))
+        if fails and notebook_id == ref:
+            raise ZeroDivisionError("boom")   # raised INSIDE the peer lane
+        return original(notebook_id, *args, **kwargs)
+
+    monkeypatch.setattr(candidates, "_retrieve_chunks", spy)
+    defaults = (_CHUNK_PEEK_ONLY.get(), _CHUNK_PEER_LEG.get())
+    finder = _finder(instance, enumeration=TwoLibraries(instance, nb, ref))
+    request = FindSourcesRequest(query="phase locked loop", kind="all")
+    result = finder.find(nb, request)
+    assert (_CHUNK_PEEK_ONLY.get(), _CHUNK_PEER_LEG.get()) == defaults
+    assert (ref, True, True) in seen              # the peer did run under the flags
+    assert (nb, False, False) in seen             # and the subject did not
+    if fails:
+        assert result.skipped_libraries == {ref: "semantic:unavailable"}
+
+
+def test_peers_without_a_run_plan_share_one_budget(repo, monkeypatch):
+    """Without a run plan all peers of one call share ``timeout × 2``: each of
+    three peers would fit its own budget, the third does not fit the shared
+    one."""
+    instance, nb, *_ = repo
+    refs = tuple(_reference_library(instance, f"ref-{i}") for i in range(3))
+    _source(instance, nb, "s-local", title="kalman filter")
+    for index, ref in enumerate(refs):
+        _source(instance, ref, f"s-ref-{index}", title="kalman smoother")
+    monkeypatch.setattr(instance.settings, "global_ask_notebook_timeout_seconds", 0.3)
+    store = FailingStore(instance._runtime.source_store, refs, stall=0.25)
+    result = _finder(
+        instance, enumeration=TwoLibraries(instance, nb, *refs), sources=store,
+    ).find(nb, FindSourcesRequest(terms=("kalman",), kind="all"))
+    assert {item.source_id for item in result.items} == {"s-local", "s-ref-0", "s-ref-1"}
+    assert result.skipped_libraries in (
+        {refs[2]: "timeout"}, {refs[2]: "queue_deadline"},
+    )

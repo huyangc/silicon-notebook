@@ -138,6 +138,14 @@ class RetrievalRunState:
         self.chunk_fts_circuit_skips = 0
         self.kg_lexical_timeouts = 0
         self.kg_lexical_circuit_skips = 0
+        # Bumped whenever paper metadata is written inside this run
+        # (``note_paper_meta_written``); run memos of rankings built on that
+        # metadata key on it, so a write mid-run re-ranks.
+        self.paper_meta_generation = 0
+
+    def note_paper_meta_written(self) -> None:
+        with self._lock:
+            self.paper_meta_generation += 1
 
     def peek_embedding(self, key: Hashable):
         """Read a completed query embedding without waiting or submitting work."""
@@ -639,6 +647,21 @@ def _shares(embedder: Any) -> bool:
         return False
 
 
+def note_paper_meta_written() -> None:
+    """Record that paper metadata was just written within the current run
+    (no-op without one).  Called by the writers (``PaperCardService``)."""
+    state = current_retrieval_run()
+    if state is not None:
+        state.note_paper_meta_written()
+
+
+def paper_meta_write_generation() -> int:
+    """How many paper-metadata writes the current run has seen (0 without a
+    run); a run memo over that metadata puts it in its key (``find_sources``)."""
+    state = current_retrieval_run()
+    return 0 if state is None else int(state.paper_meta_generation)
+
+
 def memoized_retrieval_value(key: Hashable, compute: Callable[[], T]) -> T:
     state = current_retrieval_run()
     return state.memoized_value(key, compute) if state is not None else compute()
@@ -681,8 +704,10 @@ __all__ = [
     "holding_fanout_slot",
     "memoized_query_embedding",
     "memoized_retrieval_value",
+    "note_paper_meta_written",
     "offering_query_vectors",
     "offers_query_vectors",
+    "paper_meta_write_generation",
     "retrieval_fanout_slot",
     "retrieval_run",
     "drop_query_vectors",

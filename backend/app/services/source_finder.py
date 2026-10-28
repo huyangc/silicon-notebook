@@ -57,13 +57,17 @@ from app.domain.source_find_terms import (
     STRONG_FIELDS,
     fold_term,
     ordered_fields,
+    really_narrowed,
 )
 from app.repositories.read_budget import classify_read_failure, read_budget
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.chunk_federation import is_peer_library
 from app.services.federated_run import current_federated_run_plan
 from app.services.retrieval_participants import federated_ask_active
-from app.services.retrieval_run import memoized_retrieval_value
+from app.services.retrieval_run import (
+    memoized_retrieval_value,
+    paper_meta_write_generation,
+)
 from app.services.source_scope import (
     scoped_allowed_source_ids,
     subjectless_run_active,
@@ -91,6 +95,11 @@ LEXICAL_ONLY_LANE = "fts_degraded"
 LEXICAL_LANE_MIN_HITS = 2
 
 _CURSOR_PREFIX = "fs1."
+#: Without a run plan, all peer libraries of one call share one budget of
+#: this many per-library timeouts.
+PEER_BUDGET_LIBRARIES = 2
+#: ``skipped_libraries`` reasons with this prefix lost only the semantic leg.
+SEMANTIC_SKIP_PREFIX = "semantic:"
 
 
 class FindSourcesError(ValueError):
@@ -155,7 +164,9 @@ class FindSourcesResult:
     #: ``terms`` were given (only title / file name / summary could be checked).
     meta_pending_unchecked: int = 0
     #: ``{notebook_id: reason}`` of the participant libraries skipped in this
-    #: call (``timeout`` / ``saturated`` / ``queue_deadline`` / ``unavailable``).
+    #: call (``timeout`` / ``saturated`` / ``queue_deadline`` / ``unavailable``;
+    #: prefixed ``semantic:`` when only the semantic leg failed and the
+    #: library's metadata hits are still in the result).
     skipped_libraries: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -179,6 +190,13 @@ class _Candidate:
     hits: int = 0
     passage: Optional[RetrievedChunk] = None
     tier: str = ""
+
+
+@dataclass(frozen=True)
+class _MetadataRead:
+    rows: Tuple[Dict[str, Any], ...]
+    excluded: int
+    narrowed: bool
 
 
 @dataclass(frozen=True)
@@ -440,6 +458,9 @@ class SourceFinder:
         ranking = memoized_retrieval_value(
             (
                 "find_sources_ranking", fingerprint,
+                # Paper metadata written earlier in this run (a card's lazy
+                # extraction) changes years / venues / pending: re-rank.
+                paper_meta_write_generation(),
                 int(self._settings.find_sources_chunk_recall),
                 float(self._settings.find_sources_strong_relevance),
                 float(self._settings.find_sources_related_relevance),
@@ -458,7 +479,10 @@ class SourceFinder:
             lexical_complete=(bool(request.terms) or not request.query)
             and not ranking.meta_pending_excluded
             and not ranking.meta_pending_unchecked
-            and not ranking.skipped,
+            and not any(
+                not reason.startswith(SEMANTIC_SKIP_PREFIX)
+                for reason in ranking.skipped.values()
+            ),
             semantic_recall_capped=ranking.capped,
             next_cursor=encode_cursor(offset + request.limit, fingerprint) if more else "",
             lanes=dict(ranking.lanes),
@@ -525,61 +549,81 @@ class SourceFinder:
     ) -> _Ranking:
         """Both legs over every library, tiered and totally ordered.
 
-        A PEER library (``is_peer_library``) is read under its own budget --
-        ``min(phase deadline, now + per-library timeout)`` with a run plan
-        (the federation's ``_budgeted_retrieve_for`` bound), else ``now +
-        GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS`` (the same per-library knob the
-        plan is built from) -- and in isolation: its failure skips it alone.
-        The subject library outside peer mode fails the call, as the
-        single-library chunk path does."""
+        A PEER library (``is_peer_library``) is read under its own budget and
+        in isolation: its failure skips it alone.  With a run plan the budget
+        is the federation's ``_budgeted_retrieve_for`` bound, ``min(phase
+        deadline, now + per-library timeout)``.  Without one it is ``now +
+        GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS`` capped by ONE budget for all the
+        peers together (that timeout × ``min(peers, 2)``), so a call over
+        eight slow peers cannot take eight timeouts.  A peer whose metadata
+        leg fails is skipped (``reason``); one whose SEMANTIC leg fails keeps
+        its metadata rows and is reported as ``semantic:<reason>`` -- the
+        lexical coverage is intact, the semantic recall is unknown (reported
+        capped).  The subject library outside peer mode fails the call, as
+        the single-library chunk path does.  Cancellation is never a skip: it
+        is re-checked after every failure and before the ranking is returned
+        (and so before the run memo keeps it)."""
         plan = current_federated_run_plan() if federated_ask_active() else None
         timeout = float(
             plan.notebook_timeout_seconds if plan is not None
             else self._settings.global_ask_notebook_timeout_seconds
         )
-        phase_deadline = (
-            time.monotonic() + float(plan.phase_timeout_seconds)
-            if plan is not None else None
+        peers = sum(
+            1 for library in libraries
+            if is_peer_library(active_notebook_id, library.notebook_id)
+        )
+        phase_deadline = time.monotonic() + (
+            float(plan.phase_timeout_seconds) if plan is not None
+            else timeout * min(peers, PEER_BUDGET_LIBRARIES)
         )
         cancel = plan.cancel if plan is not None else cancel_event
         reads: Dict[str, _LibraryRead] = {}
         skipped: Dict[str, str] = {}
+        semantic_unknown = False
         for library in libraries:
             raise_if_cancelled(cancel_event)
             notebook_id = library.notebook_id
-            peer = is_peer_library(active_notebook_id, notebook_id)
-            if not peer:
-                reads[notebook_id] = self._read_library(library, request, peer=False)
+            if not is_peer_library(active_notebook_id, notebook_id):
+                read = self._metadata_read(library, request)
+                reads[notebook_id] = self._semantic_read(library, request, read, peer=False)
                 continue
-            started = time.perf_counter()
-            if phase_deadline is not None and phase_deadline - time.monotonic() <= 0:
+            if phase_deadline - time.monotonic() <= 0:
                 skipped[notebook_id] = "queue_deadline"
                 self._emit_skipped(notebook_id, "queue_deadline", "", 0)
                 continue
-            deadline = time.monotonic() + timeout
-            if phase_deadline is not None:
-                deadline = min(deadline, phase_deadline)
+            deadline = min(time.monotonic() + timeout, phase_deadline)
+            started = time.perf_counter()
             # A run already cancelled must not open a connection, and the
             # answer is ``AskCancelled`` -- entering a budget whose token is
             # set would raise ``ReadBudgetExceeded`` and read as a timeout.
             raise_if_cancelled(cancel)
             try:
                 with read_budget(deadline, cancel):
-                    reads[notebook_id] = self._read_library(library, request, peer=True)
+                    read = self._metadata_read(library, request)
             except (AskCancelled, RetrievalControlError):
                 raise
             except Exception as exc:  # noqa: BLE001 - one library must not fail the call
-                reason = classify_read_failure(exc) or (
-                    "timeout" if time.monotonic() >= deadline else "unavailable"
-                )
-                skipped[notebook_id] = reason
-                self._emit_skipped(
-                    notebook_id, reason, type(exc).__name__,
-                    round((time.perf_counter() - started) * 1000),
-                )
+                self._skip(notebook_id, exc, deadline, started, skipped, "",
+                           cancel, cancel_event)
+                continue
+            reads[notebook_id] = _LibraryRead(read.rows, read.excluded)
+            try:
+                with read_budget(deadline, cancel):
+                    reads[notebook_id] = self._semantic_read(
+                        library, request, read, peer=True)
+            except (AskCancelled, RetrievalControlError):
+                raise
+            except Exception as exc:  # noqa: BLE001 - keep the lexical rows
+                self._skip(notebook_id, exc, deadline, started, skipped,
+                           SEMANTIC_SKIP_PREFIX, cancel, cancel_event)
+                semantic_unknown = True
+        # A stop that landed during the last read must not be published -- or
+        # memoized for the rest of the run -- as a ranking with skips in it.
+        raise_if_cancelled(cancel)
+        raise_if_cancelled(cancel_event)
         candidates: Dict[str, _Candidate] = {}
         lanes: Dict[str, str] = {}
-        capped = False
+        capped = semantic_unknown
         for notebook_id, read in reads.items():
             for row in read.rows:
                 candidates[row["source_id"]] = _Candidate(row=row)
@@ -612,35 +656,73 @@ class SourceFinder:
             ) if request.terms else 0,
         )
 
-    def _read_library(
-        self, library: _Library, request: FindSourcesRequest, *, peer: bool,
-    ) -> _LibraryRead:
-        """One library's metadata leg and, with a ``query``, its semantic leg
-        over the filtered scope (the filters decide the allow list first)."""
+    def _skip(
+        self, notebook_id: str, exc: BaseException, deadline: float, started: float,
+        skipped: Dict[str, str], prefix: str, cancel: Any, cancel_event: CancelEvent,
+    ) -> None:
+        """Record one peer's failed read -- unless the run was stopped: a set
+        cancel token makes the read budget raise ``ReadBudgetExceeded``, which
+        would otherwise classify as ``timeout``."""
+        raise_if_cancelled(cancel)
+        raise_if_cancelled(cancel_event)
+        reason = prefix + (classify_read_failure(exc) or (
+            "timeout" if time.monotonic() >= deadline else "unavailable"
+        ))
+        skipped[notebook_id] = reason
+        self._emit_skipped(
+            notebook_id, reason, type(exc).__name__,
+            round((time.perf_counter() - started) * 1000),
+        )
+
+    def _metadata_read(
+        self, library: _Library, request: FindSourcesRequest,
+    ) -> "_MetadataRead":
         with self._database.connect() as db:
-            rows, excluded, narrowed = self._metadata_rows(db, library, request)
+            return self._metadata_rows(db, library, request)
+
+    def _semantic_read(
+        self, library: _Library, request: FindSourcesRequest,
+        read: "_MetadataRead", *, peer: bool,
+    ) -> _LibraryRead:
+        """With a ``query``, the semantic leg over the filtered scope (the
+        filters decide the allow list first)."""
+        rows = tuple(read.rows)
         if not request.query or not rows:
-            return _LibraryRead(tuple(rows), excluded)
+            return _LibraryRead(rows, read.excluded)
         recall = int(self._settings.find_sources_chunk_recall)
         chunks, lane = self._retrieval.retrieve_chunks_in_sources(
             library.notebook_id, request.query, recall,
             [row["source_id"] for row in rows],
-            peer=peer, narrowed=narrowed,
+            peer=peer, narrowed=read.narrowed,
         )
         capped = len(chunks) >= recall and (
             lane == LEXICAL_ONLY_LANE
             or min(float(chunk.relevance) for chunk in chunks)
             >= float(self._settings.find_sources_related_relevance)
         )
-        return _LibraryRead(tuple(rows), excluded, lane, capped, tuple(chunks))
+        return _LibraryRead(rows, read.excluded, lane, capped, tuple(chunks))
 
     def _metadata_rows(
         self, db: Any, library: _Library, request: FindSourcesRequest,
-    ) -> Tuple[List[Dict[str, Any]], int, bool]:
-        """``(rows, meta_pending_excluded, narrowed)``: ``narrowed`` -- the
-        filters (kind / year / venue / author) really dropped a source of the
-        unfiltered scope, so the semantic leg's list is a genuinely narrower
-        universe than the library's visible set (``producer_explicit``)."""
+    ) -> "_MetadataRead":
+        """The metadata leg of one library, cut to the run plan.
+
+        ``narrowed`` (the ``producer_explicit`` attestation for the semantic
+        leg) only when the narrowing came from a year / venue / author filter
+        or an explicit (MCP) list -- never from ``kind`` alone or the run's
+        contextual ceiling -- AND the scope is really narrow
+        (``source_find_terms.really_narrowed``): the attestation switches the
+        lexical corpus-language gate off, which on a near-whole-library scan
+        is the ASK-1 pathology.
+
+        ``excluded`` is the store's SQL count over the library's (visible ∧
+        allowed) sources; a read without a list is not cut to the plan here
+        (a count cannot be), so it may include a source added after the run
+        froze its ceiling -- a coverage hint, never an id."""
+        meta_filtered = (
+            request.year_from is not None or request.year_to is not None
+            or bool(request.venue) or bool(request.author)
+        )
         scope = self._sources.find_sources_metadata_rows(
             db, library.notebook_id,
             terms=list(request.terms),
@@ -652,7 +734,9 @@ class SourceFinder:
             with_titles=not request.query and not request.terms,
         )
         rows = scope["rows"]
-        narrowed = len(rows) < int(scope["scope_total"])
+        narrowed = (meta_filtered or library.plan_ids is None) and really_narrowed(
+            len(rows), int(scope["visible_total"]),
+        )
         # A read without the run's list is verified against the ceiling taken
         # before it (a source outside flips the verdict for later reads); every
         # read is then cut to the plan ``enumerate_sources`` lists, so the two
@@ -661,13 +745,10 @@ class SourceFinder:
             library.notebook_id, library.unbound,
             (row["source_id"] for row in rows),
         )
-        excluded = int(scope["meta_pending_excluded"])
-        if library.plan_ids is None:
-            return rows, excluded, narrowed
-        return (
-            [row for row in rows if row["source_id"] in library.plan_ids],
-            excluded, narrowed,
-        )
+        excluded = max(0, int(scope["meta_pending_excluded"]))
+        if library.plan_ids is not None:
+            rows = [row for row in rows if row["source_id"] in library.plan_ids]
+        return _MetadataRead(tuple(rows), excluded, narrowed)
 
     def _emit_skipped(
         self, notebook_id: str, reason: str, error_type: str, latency_ms: int,

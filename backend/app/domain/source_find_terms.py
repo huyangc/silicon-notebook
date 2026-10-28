@@ -15,8 +15,8 @@ Word boundary (design §5.2): a short ASCII term such as ``GAN`` matching inside
 ``organ`` is a substring match, not a word match.  For an ASCII alphanumeric
 term of at most ``WORD_BOUNDARY_TERM_MAX_CHARS`` characters the match counts as
 word-boundary only when the characters on both sides are not ASCII letters or
-digits (a trailing plural ``s`` / ``es`` is allowed: ``GAN`` matches ``GANs``
-as a word, ``organ`` stays a substring); any other term (non-ASCII, contains punctuation/space, or longer)
+digits (a trailing plural ``s`` is allowed: ``GAN`` matches ``GANs`` as a word,
+``organ`` stays a substring; ``es`` is not -- ``GAT`` must not match ``gates``); any other term (non-ASCII, contains punctuation/space, or longer)
 counts every substring match as a boundary match -- CJK has no case and no
 spaces, and a long term rarely hides inside an unrelated word.
 """
@@ -38,6 +38,28 @@ WORD_BOUNDARY_TERM_MAX_CHARS = 6
 _ASCII_ALNUM = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 )
+
+
+#: A filtered scope counts as REALLY narrowed only when it is non-empty and at
+#: most this share of the library's visible sources.  Two consumers, one rule:
+#: the metadata leg binds its term legs to the scope's ids only then
+#: (``find_sources_rows.bind_term_legs``), and ``find_sources`` attests its
+#: semantic leg's list as a producer's own narrow universe
+#: (``producer_explicit``, which turns the lexical corpus-language gate off)
+#: only then.  Measured on the 49k-source bench
+#: (``docs/superpowers/plans/2026-10-28-find-sources-measurement.md``): a 49-id
+#: scope cuts the term legs' UNION ALL from 21 ms to 1-2 ms while a 26% scope
+#: makes it slower (21 -> 52 ms); and a near-whole-library scan with the
+#: language gate off is the ASK-1 pathology (64 probe terms, 29.7 s cold).
+NARROW_SCOPE_MAX_SHARE = 0.1
+
+
+def really_narrowed(scope_size: int, visible_total: int) -> bool:
+    """Is a scope of ``scope_size`` out of ``visible_total`` visible sources
+    narrow enough to be treated as bounded (see ``NARROW_SCOPE_MAX_SHARE``)?"""
+    return 0 < scope_size < visible_total and (
+        scope_size <= visible_total * NARROW_SCOPE_MAX_SHARE
+    )
 
 
 def fold_term(term: str) -> str:
@@ -84,13 +106,15 @@ def term_match(folded_term: str, value: object) -> bool | None:
 
 
 def _ends_a_word(text: str, end: int) -> bool:
-    """Does the match ending at ``end`` end a word, allowing an English plural?
+    """Does the match ending at ``end`` end a word, allowing a plural ``s``?
 
-    ``GAN`` in ``GANs`` / ``GANes`` is still the term (a short acronym is most
-    often written in the plural), so a trailing ``s`` or ``es`` followed by a
-    non-alphanumeric is a boundary too; ``organ``-style hits stay substring
-    matches because the character BEFORE them is a letter."""
-    for suffix in ("", "s", "es"):
+    ``GAN`` in ``GANs`` is still the term (a short acronym is most often
+    written in the plural), so a trailing ``s`` followed by a non-alphanumeric
+    is a boundary too.  ``es`` is deliberately NOT accepted: it turns ordinary
+    words into false strong hits (``GAT`` in ``gates``, ``nod`` in ``nodes``).
+    ``organ``-style hits stay substring matches because the character BEFORE
+    them is a letter."""
+    for suffix in ("", "s"):
         if suffix and not text.startswith(suffix, end):
             continue
         after = end + len(suffix)
