@@ -185,3 +185,7 @@ def test_a_sweep_never_removes_the_files_of_a_deleted_running_export_pg(world):
 
 def test_a_notebook_with_an_empty_knowhow_table_round_trips_pg(world):
     cases.check_a_notebook_with_an_empty_knowhow_table_round_trips(world)
+
+
+def test_refusals_say_whether_to_upgrade_or_retry_pg(world):
+    cases.check_refusals_say_whether_to_upgrade_or_retry(world)

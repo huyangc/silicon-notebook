@@ -119,6 +119,7 @@ from app.services.notebook_transfer.archive_reader import (
     ArchiveError,
     ArchiveRowSource,
     ArchiveTooLarge,
+    ArchiveTooNewError,
     archive_errors,
     check_columns,
     check_file_paths,
@@ -145,6 +146,26 @@ _INCOMPLETE = "文件内容不完整：引用了文件中不存在的行，或�
 class NotebookImportError(RuntimeError):
     """The import did not happen and nothing of it remains in this deployment.
     The message is for the operator and never quotes archive content."""
+
+
+class NotebookImportTooNew(NotebookImportError):
+    """Refused: the archive was written by a newer build (``ArchiveTooNewError``:
+    a newer format version, or a column this deployment lacks). The file is not
+    damaged; this deployment needs an upgrade."""
+
+
+class NotebookImportReaped(NotebookImportError):
+    """The run stopped because its sentinel was reaped (the heartbeat lapsed,
+    ``sweep_stale_imports``). Says nothing about the file: importing it again
+    may succeed."""
+
+
+def _archive_refusal(exc: "ArchiveError") -> NotebookImportError:
+    """The import's refusal for an archive the reader refused, keeping the one
+    distinction a caller acts on: a newer build's file is not a damaged one."""
+    if isinstance(exc, ArchiveTooNewError):
+        return NotebookImportTooNew(str(exc))
+    return NotebookImportError(str(exc))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -487,7 +508,7 @@ class _ImportStore:
         if not self._armed or self._clock() - self._last_beat < self._interval:
             return
         if not self._inner.touch_import(self._notebook_id):
-            raise NotebookImportError("导入中途被收割（心跳超时），本次导入已作废")
+            raise NotebookImportReaped("导入中途被收割（心跳超时），本次导入已作废")
         self._last_beat = self._clock()
 
 
@@ -664,7 +685,7 @@ class NotebookImportService:
         try:
             archive = open_archive(Path(path))
         except ArchiveError as exc:
-            raise NotebookImportError(str(exc)) from None
+            raise _archive_refusal(exc) from None
         with archive:
             if max_inflated_bytes is not None:
                 try:
@@ -675,7 +696,7 @@ class NotebookImportService:
             try:
                 checked = self._preflight(Path(path), archive)
             except ArchiveError as exc:
-                raise NotebookImportError(str(exc)) from None
+                raise _archive_refusal(exc) from None
             if dry_run:
                 return self._rehearse(archive, checked, owner_id=owner_id, name=new_name)
             return self._run(archive, checked, owner_id=owner_id, name=new_name, report=report)
@@ -876,7 +897,7 @@ class NotebookImportService:
                 self._chunks.clear_question_index_marks(new_id, sorted(run.question_dropped_chunks))
             report(ImportProgress(stage="publish", notebook_id=new_id))
             if not self._store.publish_import(new_id, _published_status(checked)):
-                raise NotebookImportError("导入中途被收割（心跳超时），本次导入已作废")
+                raise NotebookImportReaped("导入中途被收割（心跳超时），本次导入已作废")
         except BaseException as exc:
             self._compensate(new_id, store.written, trees)
             if isinstance(exc, Exception) and _is_rejection(exc):
@@ -1129,7 +1150,7 @@ def check_web_archive(path: Path, *, max_inflated_bytes: int) -> None:
     except ArchiveTooLarge as exc:
         raise NotebookImportTooLarge(str(exc)) from None
     except ArchiveError as exc:
-        raise NotebookImportError(str(exc)) from None
+        raise _archive_refusal(exc) from None
 
 
 def archive_document_count(
@@ -1181,7 +1202,7 @@ def archive_document_count(
     except ArchiveTooLarge as exc:
         raise NotebookImportTooLarge(str(exc)) from None
     except ArchiveError as exc:
-        raise NotebookImportError(str(exc)) from None
+        raise _archive_refusal(exc) from None
 
 
 def reembed_legs(written: Mapping[str, int]) -> tuple[str, ...]:
@@ -1237,7 +1258,7 @@ def _rejection(exc: Exception) -> Exception:
     if isinstance(exc, NotebookImportError):
         return exc
     if isinstance(exc, ArchiveError):
-        return NotebookImportError(str(exc))
+        return _archive_refusal(exc)
     if isinstance(exc, CopyRowRejected):
         return NotebookImportError(f"文件内容不完整：{exc}")
     if _is_rejection(exc):
