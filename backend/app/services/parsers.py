@@ -22,6 +22,7 @@ from app.services.omml import (
     docx_math_package,
     drawingml_inline_text,
     drawingml_segments,
+    join_inline,
     wordprocessing_paragraph_text,
 )
 from app.services.parser_registry import PARSER_ENGINES, builtin_parser_id
@@ -1015,7 +1016,18 @@ def _docx_expand_math_blocks(
 
     def inline(match: "re.Match[str]") -> str:
         formula = docx_math.formula(match)
-        return match.group(0) if formula is None else formula.inline
+        if formula is None:
+            return match.group(0)
+        text = formula.inline
+        # Keep neighbouring formulas (or a literal `$`) from fusing into `$$`,
+        # which Markdown reads as a display formula. A neighbour token still
+        # ends in the sentinel in the source string.
+        source, start, end = match.string, match.start(), match.end()
+        if text and start and source[start - 1] in ("$", docx_math.sentinel):
+            text = " " + text
+        if text and end < len(source) and source[end] in ("$", docx_math.sentinel):
+            text += " "
+        return text
 
     def inline_text(text: str) -> str:
         return " ".join(docx_math.token.sub(inline, text).split())
@@ -1297,7 +1309,7 @@ def _pptx_math_units(text_body: Any) -> List[tuple[str, str]]:
     pending: List[str] = []
 
     def flush() -> None:
-        text = " ".join("".join(pending).split())
+        text = " ".join(join_inline(pending).split())
         pending.clear()
         if text:
             units.append(("text", text))

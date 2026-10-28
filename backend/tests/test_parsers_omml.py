@@ -17,9 +17,11 @@ import pytest
 
 from app.services.omml import (
     docx_math_package,
+    drawingml_inline_text,
     inline_math_for,
     omml_display_lines,
     omml_to_latex,
+    wordprocessing_paragraph_text,
 )
 from app.services.parsers import parse_builtin_source_file, parse_docx_basic, parse_pptx_basic
 from tests.omml_testkit import (
@@ -112,9 +114,9 @@ CONVERTER_CASES = [
     ("lim_upp", [lim_upp(r("="), r("def"))], r"\overset{def}{=}"),
     # accents / bars / group characters
     ("accent_default_hat", [acc(r("x"))], r"\hat{x}"),
-    ("accent_vector", [acc(r("v"), "⃗")], r"\vec{v}"),
-    ("accent_tilde", [acc(r("n"), "̃")], r"\tilde{n}"),
-    ("accent_dot", [acc(r("x"), "̇")], r"\dot{x}"),
+    ("accent_vector", [acc(r("v"), "\u20d7")], r"\vec{v}"),
+    ("accent_tilde", [acc(r("n"), "\u0303")], r"\tilde{n}"),
+    ("accent_dot", [acc(r("x"), "\u0307")], r"\dot{x}"),
     ("accent_unknown", [acc(r("x"), "★")], r"\overset{★}{x}"),
     ("bar_bottom_default", [bar(r("x"))], r"\underline{x}"),
     ("bar_top", [bar(r("x"), pos="top")], r"\overline{x}"),
@@ -132,7 +134,7 @@ CONVERTER_CASES = [
     ("latex_specials_escaped", [r("$5 50% a_b {x} #")], r"\$5 50\% a\_b \{x\} \#"),
     ("ampersand_outside_array", [r("A&B")], r"A\&B"),
     ("math_italic_letters_fold", [r("𝑥+𝛼")], r"x+\alpha"),
-    ("invisible_function_application_dropped", [r("f⁡x")], "fx"),
+    ("invisible_function_application_dropped", [r("f\u2061x")], "fx"),
     ("unicode_minus", [r("a−b")], "a-b"),
     ("normal_text_run", [r("if x>0", nor=True)], r"\text{if x>0}"),
     ("cjk_text_run", [r("速度", nor=False)], r"\text{速度}"),
@@ -143,6 +145,30 @@ CONVERTER_CASES = [
     # degradation: unknown constructs keep their text
     ("unknown_element_keeps_text", [wrap("futureThing", r("q"), r("=1"))], "q=1"),
     ("unknown_element_wraps_known", [wrap("futureThing", frac(r("1"), r("2")))], r"\frac{1}{2}"),
+    # superscript-like symbols never stack on an existing superscript
+    ("degree_after_superscript", [ssup(r("x"), r("2")), r("°")], r"x^{2}{}^{\circ}"),
+    ("prime_after_superscript", [ssup(r("x"), r("2")), r("′")], r"x^{2}{}^{\prime}"),
+    ("prime", [r("f′")], r"f^{\prime}"),
+    ("double_prime_then_parens", [r("f″(x)")], r"f^{\prime\prime}(x)"),
+    ("two_primes_in_a_row", [r("f′′")], r"f^{\prime}{}^{\prime}"),
+    # combining marks typed after a base character
+    ("combining_hat_on_previous", [r("x\u0302")], r"\hat{x}"),
+    ("combining_underline", [r("a\u0332b")], r"\underline{a}b"),
+    ("isolated_combining_dropped", [r("\u0302y")], "y"),
+    ("unmapped_combining_dropped", [r("q\u0327")], "q"),
+    # plain-text delimiter fallback uses a plain separator (no \middle)
+    ("unknown_bracket_plain_separator", [delim(r("a"), r("b"), beg="«", end="»")], "«a | b»"),
+    # a matrix's & inside an equation array is not an alignment point
+    (
+        "eq_array_matrix_ampersand_is_text",
+        [eq_arr(matrix((r("a&b"), r("c"))))],
+        r"\begin{gathered} \begin{matrix} a\&b & c \end{matrix} \end{gathered}",
+    ),
+    (
+        "eq_array_alignment_beside_matrix",
+        [eq_arr(r("M&="), matrix((r("1"),)))],
+        r"\begin{aligned} M&= \\ \begin{matrix} 1 \end{matrix} \end{aligned}",
+    ),
 ]
 
 
@@ -296,7 +322,7 @@ def test_docx_footnote_math_is_converted(tmp_path):
 def test_docx_text_that_looks_like_a_token_is_left_alone(tmp_path):
     """The sentinel is chosen absent from every text part, so private-use text
     shaped like a token can never be mistaken for one."""
-    first_private_use = ""
+    first_private_use = "\ue000"
     lookalike = f"{first_private_use}0{first_private_use}"
     path = docx_with(tmp_path / "pua.docx", [[f"odd {lookalike} text"], ["v ", ("math", omath(r("y")))]])
     assert [el.text for el in _parse_docx(path)] == [f"odd {lookalike} text", "v $y$"]
@@ -546,3 +572,180 @@ def test_math_free_pptx_output_is_unchanged(tmp_path):
         ("slide_text", "PPTX slide 2 shape 1", "Second slide",
          {"parser": "python-pptx", "slide_number": 2, "shape_index": 1}),
     ]
+
+
+# --- review round 1 -----------------------------------------------------------
+
+
+def _tiny_png() -> bytes:
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(b"\0\0\0\0")) + chunk(b"IEND", b"")
+
+
+def test_docx_math_package_never_reads_image_payloads(tmp_path):
+    """mammoth never opens image bytes (`convert_image` ignores them), so the
+    rewritten package must not either: a corrupt member would raise on read and
+    a zip-bomb member would be inflated into memory / the temp file."""
+    import tracemalloc
+
+    path = docx_with(tmp_path / "payload.docx", [["a ", ("math", omath(ssup(r("x"), r("2"))))]])
+    marker = b"CORRUPT-PAYLOAD-"
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.writestr(zipfile.ZipInfo("word/media/corrupt.bin"), marker * 64)
+        archive.writestr("word/media/bomb.bin", b"\0" * (64 * 1024 * 1024), compress_type=zipfile.ZIP_DEFLATED)
+    raw = bytearray(path.read_bytes())
+    raw[raw.index(marker)] = ord("X")
+    path.write_bytes(bytes(raw))
+    with zipfile.ZipFile(path) as archive, pytest.raises(zipfile.BadZipFile):
+        archive.read("word/media/corrupt.bin")  # premise: reading it fails
+
+    tracemalloc.start()
+    try:
+        docx_math = docx_math_package(path)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert docx_math is not None
+    try:
+        with zipfile.ZipFile(docx_math.package) as package:
+            assert package.getinfo("word/media/bomb.bin").file_size == 0
+            assert package.getinfo("word/media/corrupt.bin").file_size == 0
+            assert package.getinfo("word/styles.xml").file_size > 0
+    finally:
+        docx_math.close()
+    assert peak < 16 * 1024 * 1024, peak
+    assert [el.text for el in _parse_docx(path)] == ["a $x^{2}$"]
+
+
+def test_docx_picture_reads_the_same_with_math_present(tmp_path):
+    import io
+
+    from docx import Document
+    from docx.oxml import parse_xml
+
+    def build(name: str, with_math: bool) -> Path:
+        document = Document()
+        document.add_paragraph("before")
+        run = document.add_paragraph().add_run()
+        run.add_picture(io.BytesIO(_tiny_png()))
+        run._r.xpath(".//wp:docPr")[0].set("descr", "diagram alt")
+        document.add_paragraph("after")
+        if with_math:
+            document.add_paragraph()._p.append(parse_xml(omath_para(r("z"))))
+        path = tmp_path / name
+        document.save(str(path))
+        return path
+
+    plain = _rows(_parse_docx(build("plain.docx", False)))
+    with_math = _rows(_parse_docx(build("math.docx", True)))
+    assert any("diagram alt" in row[2] for row in plain)
+    assert with_math == plain + [
+        ("formula", "DOCX formula 1", "z", {"parser": "mammoth", "formula_index": 1, "text_format": "latex"})
+    ]
+
+
+def test_pick_sentinel_is_one_linear_pass_and_sees_every_reference_spelling():
+    import time
+
+    from app.services.omml import _pick_sentinel
+
+    assert _pick_sentinel([b"&#x0E000; &#057345;"]) == "\ue002"
+    every = "".join(chr(code) for code in range(0xE000, 0xF900)).encode()
+    start = time.perf_counter()
+    assert _pick_sentinel([b"x" * (5 * 1024 * 1024) + every]) is None
+    assert time.perf_counter() - start < 2.0
+
+
+def test_docx_without_a_free_sentinel_keeps_formulas_as_inline_text(tmp_path):
+    every = "".join(chr(code) for code in range(0xE000, 0xF900))
+    path = docx_with(tmp_path / "full.docx", [
+        [every],
+        ["v ", ("math", omath(r("y")))],
+        [("math", omath_para(frac(r("1"), r("2"))))],
+    ])
+    assert [el.text for el in _parse_docx(path)] == [every, "v $y$", r"$\frac{1}{2}$"]
+
+
+def test_adjacent_formulas_never_fuse_into_display_markers(tmp_path):
+    parts = [("math", omath(r("a"))), ("math", omath(r("b"))), "$5"]
+    docx = docx_with(tmp_path / "adjacent.docx", [parts])
+    assert [el.text for el in _parse_docx(docx)] == ["$a$ $b$ $5"]
+    assert [el.text for el in parse_docx_basic("s1", docx)] == ["$a$ $b$ $5"]
+    pptx = pptx_with(tmp_path / "adjacent.pptx", [[
+        ("equation", [pptx_paragraph(("math", omath(r("a"))), ("math", omath(r("b"))), "$5")]),
+        ("notes_math", pptx_paragraph("N ", ("math", omath_para(r("a"), r("b"))))),
+    ]])
+    elements = _parse_pptx(pptx)
+    assert [el.text for el in elements if el.element_type == "slide_text"] == ["$a$ $b$ $5"]
+    assert [el.text for el in elements if el.element_type == "speaker_notes"] == [
+        r"N $\begin{gathered} a \\ b \end{gathered}$"
+    ]
+
+
+def test_non_utf8_declared_parts_are_left_alone():
+    from app.services.omml import _rewrite_docx_part
+
+    w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    body = f'<w:document xmlns:w="{w_ns}"><w:body><w:p>{omath(r("x"))}</w:p></w:body></w:document>'
+    for declaration in ('<?xml version="1.0" encoding = "windows-1252"?>', "<?xml version='1.0' encoding='latin-1'?>"):
+        assert _rewrite_docx_part((declaration + body).encode(), [], "\ue000") is None
+    assert _rewrite_docx_part(('<?xml version="1.0" encoding = "UTF-8"?>' + body).encode(), [], "\ue000")
+
+
+def test_deeply_wrapped_drawingml_runs_do_not_raise():
+    depth = 3000
+    xml = (
+        f'<a:txBody xmlns:a="{A_NS}" xmlns:a14="{A14_NS}"><a:p>'
+        + "<a:wrap>" * depth + "<a:r><a:t>deep</a:t></a:r>" + "</a:wrap>" * depth
+        + f"<a14:m>{omath(r('q'))}</a14:m></a:p></a:txBody>"
+    )
+    assert drawingml_inline_text(ElementTree.fromstring(xml)) == "deep$q$"
+
+
+def test_wordprocessing_text_matches_python_docx_on_breaks():
+    from docx.oxml import parse_xml
+    from docx.text.paragraph import Paragraph
+
+    w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    paragraph = parse_xml(
+        f'<w:p xmlns:w="{w_ns}"><w:r><w:t>a</w:t><w:br w:type="page"/><w:t>b</w:t><w:br/>'
+        '<w:t>c</w:t><w:br w:type="column"/><w:br w:type="textWrapping"/><w:cr/><w:tab/><w:noBreakHyphen/>'
+        "</w:r></w:p>"
+    )
+    assert wordprocessing_paragraph_text(paragraph) == Paragraph(paragraph, None).text == "ab\nc\n\n\t-"
+
+
+def test_math_free_documents_never_reach_the_math_machinery(tmp_path, monkeypatch):
+    """Zero scan cost on math-free documents: past the byte / element gates,
+    none of the math code may run."""
+    from app.services import omml as omml_module
+    from app.services import parsers as parsers_module
+
+    def boom(*args, **kwargs):
+        raise AssertionError("math machinery ran on a math-free document")
+
+    for name in ("_DocxMathScanner", "_pick_sentinel", "_rewrite_docx_part"):
+        monkeypatch.setattr(omml_module, name, boom)
+    for name in (
+        "_pptx_iter_shapes_with_math", "_pptx_math_units", "_pptx_math_notes_text",
+        "_pptx_math_cell_text", "_docx_paragraph_text", "_pptx_basic_math_text",
+    ):
+        monkeypatch.setattr(parsers_module, name, boom)
+
+    docx = _rich_math_free_docx(tmp_path / "plain.docx")
+    assert docx_math_package(docx) is None
+    assert {el.metadata["parser"] for el in _parse_docx(docx)} == {"mammoth"}
+    assert len(parse_docx_basic("s1", docx)) == 6
+    pptx = pptx_with(tmp_path / "plain.pptx", [
+        ["Costs $5", ("table", [["H1", "H2"], ["v1", "v2"]]), ("notes", "Speaker note")],
+    ])
+    assert [el.metadata["parser"] for el in _parse_pptx(pptx)] == ["python-pptx"] * 3
+    # The raw-XML path must decide on the part bytes alone.
+    monkeypatch.setattr(parsers_module, "contains_omml", boom)
+    assert [el.text for el in parse_pptx_basic("s1", pptx)] == ["Costs $5", "Speaker note"]
