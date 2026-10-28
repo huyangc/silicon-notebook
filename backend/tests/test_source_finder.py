@@ -24,6 +24,7 @@ from app.services.embedding import FakeEmbedder
 from app.services.source_finder import (
     UNTITLED_SOURCE,
     FindSourcesCursorError,
+    FindSourcesCursorStaleError,
     FindSourcesError,
     FindSourcesRequest,
     SourceDisplay,
@@ -399,6 +400,82 @@ def test_the_cursor_pages_and_dies_with_any_parameter_change(repo):
     resumed = finder.find(nb, FindSourcesRequest(
         **{**request.__dict__, "limit": 3, "cursor": second.next_cursor}))
     assert [item.source_id for item in resumed.items] == ["s-2", "s-3", "s-4"]
+
+
+def _graph_papers(instance, nb, count=5):
+    for index in range(count):
+        _source(instance, nb, f"s-{index}", title=f"graph paper {index}")
+    _meta(instance, nb, "s-0", year=2020)
+
+
+def _bump_meta(instance, sid) -> None:
+    """A re-extraction: the row stays, its ``updated_at`` moves."""
+    with instance._runtime.database.write() as db:
+        _execute(db, instance,
+                 "UPDATE source_paper_meta SET updated_at=? WHERE source_id=?",
+                 ("2099-01-01T00:00:00+00:00", sid))
+
+
+@pytest.mark.parametrize("write", ["new_row", "re_extracted"])
+def test_a_cursor_dies_when_paper_metadata_changes_between_pages(repo, write):
+    """Explicit (MCP) mode: no run memo, every page recomputes -- a page cut
+    from the ranking before a lazy extraction would skip or repeat sources."""
+    instance, nb, *_ = repo
+    _graph_papers(instance, nb)
+    finder = _finder(instance)
+    allowed = [f"s-{index}" for index in range(5)]
+    request = FindSourcesRequest(terms=("graph",), kind="all", limit=2)
+    first = finder.find(nb, request, allowed_source_ids=allowed)
+    turn = FindSourcesRequest(**{**request.__dict__, "cursor": first.next_cursor})
+    # Unchanged metadata: the cursor pages on.
+    kept = finder.find(nb, turn, allowed_source_ids=allowed)
+    assert [item.source_id for item in kept.items] == ["s-2", "s-3"]
+    if write == "new_row":
+        _meta(instance, nb, "s-3", year=2024)
+    else:
+        _bump_meta(instance, "s-0")
+    with pytest.raises(FindSourcesCursorStaleError, match="restart from the first page"):
+        finder.find(nb, turn, allowed_source_ids=allowed)
+    # A fresh first page carries the new state and pages on, without repeats
+    # (a year can move a source up: the new order is not the old one).
+    fresh = finder.find(nb, request, allowed_source_ids=allowed)
+    again = finder.find(nb, FindSourcesRequest(
+        **{**request.__dict__, "cursor": fresh.next_cursor}), allowed_source_ids=allowed)
+    shown = [item.source_id for item in fresh.items + again.items]
+    assert len(shown) == len(set(shown)) == 4
+
+
+def test_a_cursor_dies_when_the_run_writes_paper_metadata(repo):
+    from app.services.retrieval_run import note_paper_meta_written, retrieval_run
+
+    instance, nb, *_ = repo
+    _graph_papers(instance, nb)
+    finder = _finder(instance)
+    request = FindSourcesRequest(terms=("graph",), kind="all", limit=2)
+    with retrieval_run(run_kind="ask_reasoning"):
+        first = finder.find(nb, request)
+        turn = FindSourcesRequest(**{**request.__dict__, "cursor": first.next_cursor})
+        assert [i.source_id for i in finder.find(nb, turn).items] == ["s-2", "s-3"]
+        _meta(instance, nb, "s-4", year=2024)       # a card's lazy extraction
+        note_paper_meta_written()
+        with pytest.raises(FindSourcesCursorStaleError):
+            finder.find(nb, turn)
+
+
+def test_a_cursor_from_before_the_digest_is_stale_not_misread(repo):
+    import base64
+
+    instance, nb, *_ = repo
+    _graph_papers(instance, nb)
+    finder = _finder(instance)
+    request = FindSourcesRequest(terms=("graph",), kind="all", limit=2)
+    first = finder.find(nb, request)
+    body = first.next_cursor[len("fs1."):]
+    data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+    legacy = "fs1." + base64.urlsafe_b64encode(json.dumps(
+        {"o": data["o"], "f": data["f"]}).encode()).decode().rstrip("=")
+    with pytest.raises(FindSourcesCursorStaleError):
+        finder.find(nb, FindSourcesRequest(**{**request.__dict__, "cursor": legacy}))
 
 
 def test_counts_and_coverage_flags(repo, monkeypatch):

@@ -223,7 +223,8 @@ class PaperCardService:
                     break
                 leaders, waiters = self._partition(pending)
                 try:
-                    admitted = self._admit(leaders, budget, results)
+                    current = self._reclassify_leaders(leaders, results)
+                    admitted = self._admit(current, budget, results)
                     self._run_leaders(admitted, cancel_event, results)
                 finally:
                     # 无论这一轮怎么结束(包括 parallelism()/建池本身抛错),本轮占到的
@@ -337,6 +338,30 @@ class PaperCardService:
             flight, leader = self._flights.join(plan.source_id)
             (leaders if leader else waiters).append((plan, flight))
         return leaders, waiters
+
+    def _reclassify_leaders(self, leaders: list[tuple[_Plan, _Flight]],
+                            results: dict[tuple[str, str], CardResult]) -> list[tuple[_Plan, _Flight]]:
+        """占到单飞位之后、预留预算之前按库批量重读一次缓存行与见证再判:分类到占位之间,
+        别的请求可能刚生成了卡片或写下冷却行。现在已是 ready / 冷却 / not_paper 等终态的
+        直接从缓存给结论、交还单飞位(带上结论),不占预算、不再调模型。"""
+        by_notebook: dict[str, list[tuple[_Plan, _Flight]]] = {}
+        for plan, flight in leaders:
+            by_notebook.setdefault(plan.notebook_id, []).append((plan, flight))
+        kept: list[tuple[_Plan, _Flight]] = []
+        for notebook_id, group in by_notebook.items():
+            started = time.monotonic()
+            snapshot = self._snapshot(notebook_id, [plan.source_id for plan, _flight in group])
+            for plan, flight in group:
+                outcome = self._classify(notebook_id, plan.source_id, snapshot)
+                if isinstance(outcome, _Plan):
+                    kept.append((outcome, flight))
+                    continue
+                outcome = dataclasses.replace(outcome, elapsed_ms=_ms(started))
+                results[plan.key] = outcome
+                self._flights.finish(plan.source_id, flight, outcome)
+        order = {plan.key: index for index, (plan, _flight) in enumerate(leaders)}
+        kept.sort(key=lambda pair: order[pair[0].key])
+        return kept
 
     def _admit(self, leaders: list[tuple[_Plan, _Flight]], budget: _Budget,
                results: dict[tuple[str, str], CardResult]) -> list[tuple[_Plan, _Flight]]:

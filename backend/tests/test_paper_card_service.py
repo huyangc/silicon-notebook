@@ -763,6 +763,45 @@ def test_concurrent_requests_for_one_source_generate_once(repo, nb, service, mod
     assert model.card_calls == 1
 
 
+def _another_request_finishes_first(service, nb, sid, monkeypatch):
+    """Request B has classified ``sid`` as missing; before B takes the flight,
+    request A generates it end to end (deterministic: A runs inside B's
+    ``_partition``)."""
+    original = service._partition
+    ran: list = []
+    started: list = []
+
+    def partition(plans):
+        if not started:
+            started.append(True)
+            ran.append(_get(service, nb, [sid])[0])   # request A
+        return original(plans)
+
+    monkeypatch.setattr(service, "_partition", partition)
+    return ran
+
+
+def test_a_leader_after_a_finished_flight_serves_the_new_card(repo, nb, service, model, monkeypatch):
+    _paper(repo, nb, "s1")
+    ran = _another_request_finishes_first(service, nb, "s1", monkeypatch)
+    [result] = _get(service, nb, ["s1"])              # request B
+    assert ran[0].status == "generated"
+    assert (result.status, result.card, result.calls) == ("ready", ran[0].card, 0)
+    assert model.card_calls == 1                      # B made no model call
+    assert service._flights._flights == {}
+
+
+def test_a_leader_after_a_finished_flight_honours_its_cooldown(repo, nb, service, model, monkeypatch):
+    _paper(repo, nb, "s1")
+    model.reply = _malformed
+    ran = _another_request_finishes_first(service, nb, "s1", monkeypatch)
+    [result] = _get(service, nb, ["s1"], limit=1)
+    assert (ran[0].status, ran[0].reason) == ("failed", "malformed_response")
+    assert (result.status, result.reason, result.calls) == ("failed", "cooldown", 0)
+    assert model.card_calls == 1
+    assert _card_row(repo, nb, "s1")["attempts"] == 1
+
+
 def test_a_waiter_still_honours_its_own_cancellation(repo, nb, service, model):
     _paper(repo, nb, "s1")
     entered, release = _block_cards(model)

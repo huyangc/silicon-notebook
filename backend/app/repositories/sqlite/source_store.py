@@ -41,6 +41,7 @@ from app.repositories.find_sources_rows import (
     assemble_scope,
     bind_term_legs,
     check_kind,
+    paper_meta_state,
     scope_rows_dicts,
 )
 from app.repositories.paper_card_rows import paper_card_row
@@ -691,9 +692,16 @@ class SourceStore:
             )
             statement, leg_params = _find_sources_term_legs(notebook_id, folded, scope)
             hit_rows = db.execute(statement, leg_params).fetchall()
+        meta_state = paper_meta_state(db.execute(
+            "SELECT COUNT(*) AS meta_rows, MAX(m.updated_at) AS meta_latest "
+            "FROM source_paper_meta m WHERE m.notebook_id = ?"
+            + (f" AND {member_of('m.source_id', bound)}" if bound is not None else ""),
+            [notebook_id, *([bound.param] if bound is not None else [])],
+        ).fetchone())
         return assemble_scope(
             rows, hit_rows, folded, scope_total=scope_total,
             visible_total=visible_total, meta_pending_excluded=excluded,
+            meta_state=meta_state,
         )
 
     def visible_document_count(self, notebook_id: str) -> int:

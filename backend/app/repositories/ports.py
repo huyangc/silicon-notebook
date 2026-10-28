@@ -2223,7 +2223,8 @@ class SourceStorePort(Protocol):
         ``title``; keywords one element at a time).  Counts: ``scope_total``
         (visible ∧ allowed, before the filters), ``visible_total`` and
         ``meta_pending_excluded`` (eligible meta-less sources a year / venue /
-        author filter excluded).  Matching is ``lower(col) LIKE`` with
+        author filter excluded) and ``meta_state`` (``count|latest
+        updated_at`` of the scope's paper-meta rows).  Matching is ``lower(col) LIKE`` with
         ``%``/``_`` escaped, re-checked in Python with SQL's ASCII-only fold."""
         ...
 
