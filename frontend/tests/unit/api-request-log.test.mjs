@@ -13,6 +13,7 @@ import { joinGroupInvite, resolveUser } from "../../app/group-api.ts";
 import { fetchPublicReport } from "../../app/public-report.ts";
 import { fetchPublicConversation } from "../../app/public-conversation.ts";
 import { deleteNotebookObjectSchema, deleteObjectSchema, updateNotebookObjectSchema, updateObjectSchema } from "../../app/knowledge-api.ts";
+import { fetchConceptDetail, fetchKgNeighbors, fetchNodeContext } from "../../features/kg-maintenance/kg-api.ts";
 
 const originalFetch = globalThis.fetch;
 const originalDebug = console.debug;
@@ -110,4 +111,41 @@ test("loggableRequestPath:没有查询串、没有 logPath 时原样;logPath 自
   assert.equal(loggableRequestPath("/notebooks/nb-1/kg-analysis"), "/notebooks/nb-1/kg-analysis");
   assert.equal(loggableRequestPath("/a?x=1&&y=2"), "/a?x=*&y=*");
   assert.equal(loggableRequestPath("/real/secret?q=1", "/real/{id}?q=raw"), "/real/{id}?q=*");
+});
+
+test("图谱详情读(概念详情 / 邻居 / 上下文)按合并对象的 canonical id 读时,id 不进日志;对象 id 照常记;实际 URL 仍逐段编码", async () => {
+  // canonical id = 类型前缀 + 成员归一后的名字(可能含「/」),是内容;ko- 开头的对象 id 是不透明的。
+  const ids = ["K-quiet zebra/xylophone 协议", "KL-the cache is write back", "KF-e=mc^2", "KP-boot sequence"];
+  for (const id of ids) {
+    fetched = [];
+    logged = [];
+    await fetchConceptDetail("nb-1", id, "nb-lib", "ko-9");
+    await fetchKgNeighbors("nb-1", id, 50, "nb-lib");
+    await fetchNodeContext("nb-1", id, "nb-lib");
+    assert.equal(fetched.length, 3);
+    assert.equal(
+      fetched[0].url,
+      `http://127.0.0.1:8000/api/notebooks/nb-1/concepts/${encodeURIComponent(id)}/detail?source_notebook_id=nb-lib&after=ko-9`,
+    );
+    assert.equal(
+      fetched[1].url,
+      `http://127.0.0.1:8000/api/notebooks/nb-1/objects/${encodeURIComponent(id)}/neighbors?cap=50&source_notebook_id=nb-lib`,
+    );
+    for (const call of fetched) assert.equal("logPath" in call.init, false);
+    const text = logged.join("\n");
+    assert.match(text, /GET \/notebooks\/nb-1\/concepts\/\{canonical_id\}\/detail\?source_notebook_id=\*&after=\* -> 200/);
+    assert.match(text, /GET \/notebooks\/nb-1\/objects\/\{canonical_id\}\/neighbors\?cap=\*&source_notebook_id=\* -> 200/);
+    assert.match(text, /GET \/notebooks\/nb-1\/objects\/\{canonical_id\}\/context\?source_notebook_id=\* -> 200/);
+    assertAbsent(text, id);
+    for (const part of id.slice(id.indexOf("-") + 1).split(/[ /]/)) assertAbsent(text, part);
+  }
+  fetched = [];
+  logged = [];
+  await fetchConceptDetail("nb-1", "ko-1a2b");
+  await fetchKgNeighbors("nb-1", "ko-1a2b");
+  await fetchNodeContext("nb-1", "ko-1a2b");
+  const text = logged.join("\n");
+  assert.match(text, /GET \/notebooks\/nb-1\/concepts\/ko-1a2b\/detail -> 200/);
+  assert.match(text, /GET \/notebooks\/nb-1\/objects\/ko-1a2b\/neighbors\?cap=\* -> 200/);
+  assert.match(text, /GET \/notebooks\/nb-1\/objects\/ko-1a2b\/context -> 200/);
 });

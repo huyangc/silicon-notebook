@@ -1,7 +1,8 @@
 """Request paths in logs carry no content (AGENTS.md: no source content or credentials
 in logs). A few routes put content or a credential in a path segment -- the KG
 analysis finding dismissal (F4's subject key is a source-derived concept name, F2's a
-pair of source ids), invite / share tokens, custom object type names. Every place
+pair of source ids), the KG detail reads by a merged object's canonical id (``K-`` plus
+a member's normalized name), invite / share tokens, custom object type names. Every place
 that records a request path (uvicorn's access log, the ``requests`` event channel)
 keeps the route shape and replaces those segments; the request itself is untouched.
 """
@@ -20,6 +21,8 @@ from app.core.log_paths import loggable_path, loggable_target
 from tests.clock_testkit import FROZEN_DAY, FrozenDatetime
 
 CONCEPT = "tcp/ip 协议栈"
+# A merged concept's canonical id: "K-" + the minimum member seed (a normalized name).
+CANONICAL_ID = "K-quiet zebra/xylophone 协议"
 
 
 @pytest.mark.parametrize(
@@ -53,6 +56,35 @@ CONCEPT = "tcp/ip 协议栈"
         ),
         ("/api/object-schemas/芯片型号", "/api/object-schemas/{object_type}"),
         ("/api/notebooks/nb-1/object-schemas/芯片型号", "/api/notebooks/nb-1/object-schemas/{object_type}"),
+        # KG detail reads by a merged object's canonical id: the id is the prefix plus
+        # a member's normalized name (seed), so it is content; decoded ("/" kept) and
+        # percent-encoded alike, every type prefix.
+        (
+            f"/api/notebooks/nb-1/concepts/{CANONICAL_ID}/detail",
+            "/api/notebooks/nb-1/concepts/{canonical_id}/detail",
+        ),
+        (
+            f"/api/notebooks/nb-1/concepts/{quote(CANONICAL_ID, safe='')}/detail",
+            "/api/notebooks/nb-1/concepts/{canonical_id}/detail",
+        ),
+        (
+            f"/api/notebooks/nb-1/objects/{quote(CANONICAL_ID, safe='')}/neighbors",
+            "/api/notebooks/nb-1/objects/{canonical_id}/neighbors",
+        ),
+        (
+            f"/api/notebooks/nb-1/objects/{CANONICAL_ID}/context",
+            "/api/notebooks/nb-1/objects/{canonical_id}/context",
+        ),
+        (
+            "/silicon/api/notebooks/nb-1/objects/KL-the cache is write back/neighbors",
+            "/silicon/api/notebooks/nb-1/objects/{canonical_id}/neighbors",
+        ),
+        ("/api/notebooks/nb-1/concepts/KF-e=mc^2/detail", "/api/notebooks/nb-1/concepts/{canonical_id}/detail"),
+        ("/api/notebooks/nb-1/objects/KP-boot sequence/context", "/api/notebooks/nb-1/objects/{canonical_id}/context"),
+        # An object id is opaque: the same routes keep it, so logs stay useful.
+        ("/api/notebooks/nb-1/concepts/ko-1a2b/detail", "/api/notebooks/nb-1/concepts/ko-1a2b/detail"),
+        ("/api/notebooks/nb-1/objects/ko-1a2b/neighbors", "/api/notebooks/nb-1/objects/ko-1a2b/neighbors"),
+        ("/api/notebooks/nb-1/objects/ko-1a2b/context", "/api/notebooks/nb-1/objects/ko-1a2b/context"),
         # Content-free routes stay as they are.
         ("/api/notebooks/nb-1/kg-analysis/findings", "/api/notebooks/nb-1/kg-analysis/findings"),
         ("/api/notebooks/nb-1/object-schemas", "/api/notebooks/nb-1/object-schemas"),
@@ -86,6 +118,33 @@ def test_access_log_omits_the_dismissal_subject_key():
     assert "/api/notebooks/nb-1/kg-analysis/findings/F4/{subject_key}/dismissal" in message
     for form in (CONCEPT, quote(CONCEPT), quote(CONCEPT, safe=""), "tcp", "协议栈"):
         assert form not in message
+
+
+def _assert_no_canonical_seed(text: str) -> None:
+    seed = CANONICAL_ID[2:]
+    for form in (
+        CANONICAL_ID, quote(CANONICAL_ID), quote(CANONICAL_ID, safe=""),
+        seed, quote(seed), quote(seed, safe=""), "zebra", "xylophone", "协议",
+    ):
+        assert form not in text, form
+
+
+def test_access_log_omits_the_canonical_id_of_kg_detail_reads():
+    # uvicorn logs the percent-encoded target; the seed (a member's name) must not
+    # appear in either spelling, for each of the three detail reads.
+    for target, shape in (
+        (f"/api/notebooks/nb-1/concepts/{quote(CANONICAL_ID, safe='')}/detail?after=ko-9",
+         "/api/notebooks/nb-1/concepts/{canonical_id}/detail?after=ko-9"),
+        (f"/api/notebooks/nb-1/objects/{quote(CANONICAL_ID)}/neighbors?cap=50",
+         "/api/notebooks/nb-1/objects/{canonical_id}/neighbors?cap=50"),
+        (f"/api/notebooks/nb-1/objects/{quote(CANONICAL_ID, safe='')}/context",
+         "/api/notebooks/nb-1/objects/{canonical_id}/context"),
+    ):
+        record = _access_record(target)
+        assert AuthenticationAccessFilter().filter(record)
+        message = record.getMessage()
+        assert shape in message
+        _assert_no_canonical_seed(message)
 
 
 def test_access_log_omits_invite_and_share_tokens():
@@ -151,3 +210,41 @@ def test_request_event_log_omits_the_dismissal_subject_key(tmp_path, monkeypatch
     }
     for form in (CONCEPT, quote(CONCEPT), quote(CONCEPT, safe=""), "协议栈"):
         assert form not in text
+
+
+def test_request_event_log_omits_the_canonical_id_of_kg_detail_reads(tmp_path, monkeypatch):
+    log_dir = tmp_path / "logs"
+    client = _client(tmp_path, monkeypatch, log_dir=log_dir)
+    registered = client.post("/api/auth/register", json={"username": "a33333333", "password": "pw"})
+    assert registered.status_code == 200, registered.text
+    headers = {"Authorization": f"Bearer {registered.json()['token']}"}
+    created = client.post("/api/notebooks", headers=headers, json={"name": "paths"})
+    assert created.status_code == 200, created.text
+    notebook_id = created.json()["id"]
+    # No "/" in this one, so the request reaches each route (a "/" inside one
+    # segment cannot be routed at all).
+    canonical_id = "K-quiet zebra xylophone 协议"
+    encoded = quote(canonical_id, safe="")
+    for suffix in ("detail",):
+        response = client.get(
+            f"/api/notebooks/{notebook_id}/concepts/{encoded}/{suffix}", headers=headers)
+        assert response.status_code in {200, 404}, response.text
+    for suffix in ("neighbors", "context"):
+        response = client.get(
+            f"/api/notebooks/{notebook_id}/objects/{encoded}/{suffix}", headers=headers)
+        assert response.status_code in {200, 404}, response.text
+
+    text = (log_dir / f"requests-{FROZEN_DAY}.jsonl").read_text(encoding="utf-8")
+    rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+    detail_rows = [
+        row["path"] for row in rows
+        if row.get("kind") == "http"
+        and str(row.get("path", "")).endswith(("/detail", "/neighbors", "/context"))
+    ]
+    assert sorted(detail_rows) == sorted([
+        f"/api/notebooks/{notebook_id}/concepts/{{canonical_id}}/detail",
+        f"/api/notebooks/{notebook_id}/objects/{{canonical_id}}/neighbors",
+        f"/api/notebooks/{notebook_id}/objects/{{canonical_id}}/context",
+    ])
+    for form in (canonical_id, encoded, quote(canonical_id), "zebra", "xylophone", "协议"):
+        assert form not in text, form
