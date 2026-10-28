@@ -764,7 +764,7 @@ scripts/cli.sh kg rewrite-descriptions --all --dry-run
 scripts/cli.sh kg rewrite-descriptions <notebook_id>
 scripts/cli.sh kg rewrite-descriptions --all
 
-# 分批：本次最多调用 2000 次模型（--all 时是所有库合计），其余下次续跑
+# 分批：本次最多调用 2000 次模型（--all 时是所有库合计，某个库中途报错时它已发出的调用也计入），其余下次续跑
 scripts/cli.sh kg rewrite-descriptions --all --limit 2000
 ```
 

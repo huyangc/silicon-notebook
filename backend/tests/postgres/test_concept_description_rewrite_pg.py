@@ -184,3 +184,7 @@ def test_pg_rows_that_raced_a_graph_delete_are_pruned_at_the_end(repo, monkeypat
 
 def test_pg_the_record_is_read_by_key(repo, monkeypatch):
     cases.assert_the_record_is_read_by_key(repo, monkeypatch)
+
+
+def test_pg_cli_calls_of_a_failed_notebook_are_charged_to_the_limit(repo, monkeypatch, capsys):
+    cases.assert_calls_of_a_failed_notebook_are_charged_to_the_limit(repo, monkeypatch, capsys)

@@ -6706,6 +6706,7 @@ class KnowledgeLifecycleService:
         self, notebook_id: str, *, dry_run: bool = False,
         limit: Optional[int] = None,
         progress: Optional[Callable[[str, int, int], None]] = None,
+        meter=None,
     ):
         """``kg rewrite-descriptions``: rewrite this notebook's concept
         descriptions under the description model and prompt in force now,
@@ -6717,7 +6718,7 @@ class KnowledgeLifecycleService:
 
         self.get_notebook(notebook_id)
         return ConceptDescriptionRewrite(self, signature=_concept_desc_sig).run(
-            notebook_id, dry_run=dry_run, limit=limit, progress=progress)
+            notebook_id, dry_run=dry_run, limit=limit, progress=progress, meter=meter)
 
     @notebook_model_artifact_scope
     def rebuild_unified_kg(self, notebook_id: str,

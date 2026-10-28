@@ -775,3 +775,50 @@ def assert_the_record_is_read_by_key(repo, monkeypatch):
     monkeypatch.setattr(store, "checkpoint_load", counting_load)
     assert rewrite(repo, nb, dry_run=True).plans == 0
     assert loads == ["~complete"]
+
+
+# ------------------------------------------- codex #1030 P2: --limit on errors
+def assert_calls_of_a_failed_notebook_are_charged_to_the_limit(repo, monkeypatch, capsys):
+    """``--all --limit 2``: the first notebook spends both calls, then its
+    publish fails with a database error. Those two calls are spent all the
+    same: the second notebook gets no budget, and the whole command sends at
+    most two model calls."""
+    from app.scripts import rewrite_concept_descriptions
+    from app.services import maintenance_cli
+
+    first = build_notebook(repo, "first", prefix="a-")
+    second = build_notebook(repo, "second", prefix="b-")
+    model = DescModel("model-new")
+    bind_chat_client(repo, WORKLOAD, model)
+    module = _rewrite_module()
+    real_publish = module.ConceptDescriptionRewrite._publish
+
+    class LockNotAvailable(Exception):
+        pass
+
+    def failing_publish(self, notebook_id, *args, **kwargs):
+        if notebook_id == first:
+            raise LockNotAvailable("lock timeout")
+        return real_publish(self, notebook_id, *args, **kwargs)
+
+    monkeypatch.setattr(module.ConceptDescriptionRewrite, "_publish", failing_publish)
+    monkeypatch.setattr(repo, "close", lambda: None)
+    monkeypatch.setattr(maintenance_cli, "create_repository", lambda _settings: repo)
+    targets = [first, second]
+    monkeypatch.setattr(repo.maintenance, "all_notebook_ids", lambda: list(targets))
+    reports = {}
+    real_rewrite = repo._runtime.knowledge_lifecycle.rewrite_concept_descriptions
+
+    def recording_rewrite(notebook_id, **kwargs):
+        report = real_rewrite(notebook_id, **kwargs)
+        reports[notebook_id] = report
+        return report
+
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "rewrite_concept_descriptions",
+                        recording_rewrite)
+    assert rewrite_concept_descriptions.main(["--all", "--limit", "2"]) == 1
+    out = capsys.readouterr().out
+    assert f'"notebook_id": "{first}", "status": "error"' in out
+    assert '"model_calls": 2' in out  # the failed notebook's spend is reported
+    assert reports[second].model_calls == 0 and reports[second].remaining == 2
+    assert model.calls <= 2

@@ -34,7 +34,10 @@ import sys
 from typing import List, Optional, Sequence
 
 from app.core.config import get_settings
-from app.services.kg.concept_description_rewrite import ConceptDescriptionRewriteUnavailable
+from app.services.kg.concept_description_rewrite import (
+    ConceptDescriptionRewriteUnavailable,
+    ModelCallMeter,
+)
 from app.services.maintenance_cli import MaintenanceCliError, open_cli_repository
 
 #: How an interrupted run leaves: at once, without joining the model calls in
@@ -122,22 +125,32 @@ def _run(repository, args, totals: dict, incomplete: List[str], errors: List[dic
                 continue  # deleted while the run walked the list
             print(f"error: unknown notebook {notebook_id}", file=sys.stderr)
             return 2
+        meter = ModelCallMeter()
         try:
             report = lifecycle.rewrite_concept_descriptions(
                 notebook_id, dry_run=args.dry_run, limit=budget,
-                progress=None if args.dry_run else _progress(notebook_id))
+                progress=None if args.dry_run else _progress(notebook_id), meter=meter)
         except ConceptDescriptionRewriteUnavailable:
             raise
         except Exception as exc:  # noqa: BLE001 -- per notebook, reported by class name
+            # The calls this notebook already sent are spent even though it
+            # failed later (staging, publishing): charge them, or the next
+            # notebook would get the same budget again.
+            if budget is not None:
+                budget = max(0, budget - meter.calls)
             failure = {"notebook_id": notebook_id, "status": "error",
-                       "error": type(exc).__name__}
+                       "error": type(exc).__name__, "model_calls": meter.calls}
             errors.append(failure)
             incomplete.append(notebook_id)
+            totals["model_calls"] += meter.calls
             print("[rewrite-descriptions] " + json.dumps(failure, ensure_ascii=False),
                   flush=True)
             continue
         if budget is not None:
-            budget = max(0, budget - report.model_calls)
+            # A dry run sends nothing; it charges what it would send, so a
+            # dry run with --all --limit shows how the budget would spread.
+            spent = report.model_calls if args.dry_run else meter.calls
+            budget = max(0, budget - spent)
         for key in _TOTAL_KEYS:
             totals[key] += getattr(report, key)
         if report.status in ("busy", "incomplete"):

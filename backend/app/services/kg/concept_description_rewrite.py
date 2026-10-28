@@ -114,6 +114,22 @@ _COMPLETE_KEY = "~complete"
 Progress = Optional[Callable[[str, int, int], None]]
 
 
+class ModelCallMeter:
+    """Model calls this run has dispatched, counted as each call starts (a
+    worker counts an input before it sends it), so the caller still knows
+    the spend when the run raises afterwards -- the ``--limit`` budget of
+    ``kg rewrite-descriptions --all`` is charged from it, never from the
+    report a failed run does not return."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.calls = 0
+
+    def add(self, count: int = 1) -> None:
+        with self._lock:
+            self.calls += count
+
+
 class ConceptDescriptionRewriteUnavailable(RuntimeError):
     """The description stage is switched off or its workload is not bound."""
 
@@ -194,13 +210,16 @@ class ConceptDescriptionRewrite:
         self._recordable = True
         self._epoch = 0
         self._stale: List[str] = []
+        self._meter: Optional[ModelCallMeter] = None
 
     # ------------------------------------------------------------- entry
     def run(
         self, notebook_id: str, *, dry_run: bool = False,
         limit: Optional[int] = None, progress: Progress = None,
+        meter: Optional[ModelCallMeter] = None,
     ) -> ConceptDescriptionRewriteReport:
         host = self.host
+        self._meter = meter
         if not host.settings.kg_concept_desc_enabled:
             raise ConceptDescriptionRewriteUnavailable(
                 "KG_CONCEPT_DESC_ENABLED=false: the description stage is switched off")
@@ -435,6 +454,8 @@ class ConceptDescriptionRewrite:
                     number, item = jobs.get_nowait()
                 except queue.Empty:
                     return
+                if self._meter is not None:
+                    self._meter.add()  # spent from here on, whatever follows
                 try:
                     results.put((context.run(generate, number, item), None))
                 except BaseException as exc:  # noqa: BLE001 -- handed to the consumer
