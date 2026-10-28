@@ -9,6 +9,7 @@ import {
   requestJson,
   requestVoid,
 } from "../../app/api-client.ts";
+import { pageReloading } from "../../app/page-reload.ts";
 
 const storage = new Map();
 let reloads = 0;
@@ -142,9 +143,12 @@ test("default 401 policy clears the stored session and reloads", async () => {
   setToken("tok-1");
   globalThis.fetch = async () => new Response(null, { status: 401 });
 
+  assert.equal(pageReloading(), false);
   await performApiRequest("/me", { tag: "auth" });
   assert.equal(getToken(), "");
   assert.equal(reloads, 1);
+  // 经 reloadPage:先记下「页面自己要重载」,上传进行中的 beforeunload 提示就不挡它。
+  assert.equal(pageReloading(), true);
 });
 
 test("clear-and-reload 401 policy clears the token before reloading", async () => {

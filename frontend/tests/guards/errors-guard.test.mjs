@@ -223,6 +223,12 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
     count: 2,
     reason: "reconnected Ask job diagnostics pass through toUserMessage before fixed user copy",
   },
+  "notebook-transfer-api.ts|<module>.failureCodeOf|diagnostic|error": {
+    count: 1,
+    reason: "reads only NotebookTransferJob.error.code, a closed-set stable code, which "
+      + "transferFailureText maps through label() to fixed Chinese copy (unknown codes fall back to "
+      + "a neutral sentence); the backend's error.message is never read or shown",
+  },
   "use-report-workspace.ts|<module>.useReportWorkspace|diagnostic|error": {
     count: 3,
     reason: "report failure detail is condition-only and bounded-log-only",

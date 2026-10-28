@@ -33,6 +33,7 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
       source_images_enabled: false,
       agent_profile_enabled: true,
       user_search_profile_enabled: true,
+      notebook_transfer_max_bytes: 512 * 1024 * 1024,
     }), {
       status: 200,
     });
@@ -62,6 +63,7 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
       source_images_enabled: false,
       agent_profile_enabled: true,
       user_search_profile_enabled: true,
+      notebook_transfer_max_bytes: 512 * 1024 * 1024,
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -262,6 +264,32 @@ test("fetchSystemConfiguration rejects malformed or unsafe byte caps", async () 
   });
   try {
     await assert.rejects(fetchSystemConfiguration(), /系统上传配置格式无效/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
+test("fetchSystemConfiguration reads the notebook transfer limit, and treats a missing or malformed one as unknown", async () => {
+  // 旧后端不下发、或值不是正整数:按「拿不到这个上限」处理(null),界面不预检、不显示
+  // 一个猜出来的上限,由服务端 413 兜底——不能把 0 / 负数当成「什么都传不了」。
+  const originalFetch = globalThis.fetch;
+  const base = { source_upload_max_bytes: 1024, source_upload_max_files_per_batch: 2 };
+  try {
+    for (const [value, expected] of [
+      [64 * 1024 * 1024, 64 * 1024 * 1024],
+      [undefined, null],
+      [0, null],
+      [-5, null],
+      ["512", null],
+      [1.5, null],
+    ]) {
+      globalThis.fetch = async () => new Response(JSON.stringify({
+        ...base, ...(value === undefined ? {} : { notebook_transfer_max_bytes: value }),
+      }), { status: 200 });
+      const config = await fetchSystemConfiguration();
+      assert.equal(config.notebook_transfer_max_bytes, expected, String(value));
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }
