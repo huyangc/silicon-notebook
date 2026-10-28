@@ -2370,7 +2370,10 @@ or whose log is still small, can upgrade directly without this dance.
 `scripts/cli.sh notebook export` writes one notebook to one `.snbk` file (a zip archive,
 format `silicon-notebook.notebook-archive` v1, defined in `app.domain.notebook_archive`);
 `scripts/cli.sh notebook inspect` verifies such a file;
-[`scripts/cli.sh notebook import`](#single-file-notebook-import) imports it into another deployment.
+[`scripts/cli.sh notebook import`](#single-file-notebook-import) imports it into this or another
+deployment. Owners can do the same from the browser within `NOTEBOOK_TRANSFER_WEB_MAX_MB`
+([web jobs](#web-notebook-export-and-import-jobs)); the CLI has no such limit and writes the same
+format.
 
 How it differs from [cross-environment sync](#cross-environment-notebook-sync): sync moves a
 directory package between two environments that stay linked (source ids kept, usernames
@@ -2553,6 +2556,80 @@ in the table), no scale index is built for any notebook of the run (`skipped:int
 the build command), no further file is imported, and every receipt is printed, human and
 `--json`. An interruption before publish leaves nothing of that file (the import compensates);
 the receipts of the files before it are still printed.
+
+## Web notebook export and import jobs
+
+Owners export from the browser and any signed-in user imports there (contract:
+[product reference](./product-and-api.md#notebook-export-and-import-snbk)); both run as jobs
+in the API process, bounded by `NOTEBOOK_TRANSFER_WEB_MAX_MB` (deployment reference). The
+same archive format and the same importer as the CLI above are used; a web import runs beside
+the live service (no `--confirm-service-stopped`), so a notebook too large for the web limit
+is a CLI job.
+
+**State lives in the one API process.** The job registry, the one-time download tickets and the
+per-user slots (2 active jobs) are in memory; each job also has a JSON sidecar. No table, no
+migration. A second API process would see neither the other's jobs nor its tickets: run one.
+The work runs in the heavy maintenance pool (`BACKGROUND_MAINTENANCE_CONCURRENCY`) under the
+diagnostics names `notebook-export-<job>` and `notebook-import-<job>`; an import's re-embedding
+is the `notebook-reembed` job below, waited for by a thread named
+`notebook-transfer-watch-<job>` (at most 24 hours; past that the job records the re-embedding
+as still running and builds no index). Logs (`silicon_notebook.notebook_transfer`) carry job
+and notebook ids and exception class names only; the download's and the upload's query strings
+are never logged.
+
+**Files, under the storage root (`SILICON_NOTEBOOK_STORAGE_DIR`, default `.local/storage`):**
+
+```text
+transfers/jobs/<job>.json                 one sidecar per job (state, phase, ids, report, error)
+transfers/exports/<job>.snbk              a finished export, until the job expires
+transfers/exports/<job>.snbk.<random>.part   an export being written (published by rename)
+transfers/imports/<job>.upload.part       an upload being received
+transfers/imports/<job>.snbk              an admitted upload, deleted when its import ends
+```
+
+An upload is never kept after its import ends, whatever the outcome. Size the disk for, per
+user, two web-limit-sized files in flight plus the finished exports kept until expiry (one per
+notebook per user: a newer export of the same notebook replaces the older one).
+
+**Expiry sweep.** A finished job -- its record, sidecar and export file -- is kept
+`NOTEBOOK_TRANSFER_TTL_SECONDS` (default 86400). Reads drop expired jobs from memory; the sweep
+-- at server start, whenever a job is created and on one expiry timer armed for the next job
+to expire -- also removes every file under `transfers/` that no job owns and that has not been
+written to for that long (the part file of a killed export, the upload of a request that
+died). At server start every file no job owns is removed at once, since nothing can still be
+writing one. Nothing in these three directories needs removing by hand; do not put other
+files there, since the sweep removes them.
+
+**Restart recovery.** At server start the sidecars are loaded and:
+
+- a job that was `queued` or `running` is failed: `export_interrupted`, `import_interrupted`
+  (the import had not published; nothing of it stays), or `import_followup_interrupted` when the
+  database says its notebook was published (the row exists and is no longer the hidden
+  `importing` placeholder) -- that notebook stays and belongs to the importer; its files go;
+- a finished export whose file is gone is dropped; other finished jobs stay until they expire;
+- the startup log says `startup: marked N interrupted notebook transfer job(s) failed`.
+
+An import killed before it published leaves its hidden placeholder row; it is reaped at a
+server start once its heartbeat is older than `NOTEBOOK_IMPORT_STALE_SECONDS` (`startup: handed
+N abandoned notebook import(s) to the delete job`), as for the CLI. A restart sooner than that
+leaves it hidden until a later start; users never see it.
+
+**Finishing an import whose follow-up was interrupted** (`import_followup_interrupted`, or
+`import_followup_failed`). The notebook was published; the re-embedding run is **not**
+resubmitted at startup, the scale index was not requested and a Knowhow projection may have been
+cut short. Do not import the file again (that makes a second notebook). Either:
+
+- the owner deletes the notebook and imports the file again (what the job's message suggests); or
+- fill what is missing in place: the notebook's dashboard 「来源状态」 → 「补齐向量」
+  (`POST /api/notebooks/{id}/backfill-vectors`) fills chunk and element vectors while the
+  service runs; knowledge-object and relation vectors are filled by
+  `scripts/cli.sh batch embed --notebook-id <id>` and `scripts/cli.sh kg backfill-relations <id>`
+  (the commands an interrupted CLI import lists; both fill only what has no vector, and on
+  PostgreSQL both are offline maintenance tools that need the service stopped and
+  `--confirm-service-stopped`); a Knowhow table whose projection
+  failed is rebuilt from the table; then build the scale index (the notebook's retrieval-index
+  rebuild, or `scripts/build_scale_index.py build --notebook <id> --full`). Checkup H4/H5 shows
+  what is still missing.
 
 ## Filling a notebook's missing vectors (`notebook-reembed`)
 

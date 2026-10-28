@@ -1096,6 +1096,30 @@ NOTEBOOK_IMPORT_STALE_SECONDS    # 心跳早于该秒数的导入哨兵在服务
                                  # 镜像（默认 3600；60..604800）
 ```
 
+**网页导出与导入笔记本**（产品契约见[产品参考](./product-and-api_zh.md#笔记本导出与导入snbk)，文件与恢复见
+[运维文档](./operations_zh.md#网页导出与导入作业)）：
+
+```text
+NOTEBOOK_TRANSFER_WEB_MAX_MB     # 网页导出的一个文件与网页导入的一次上传的上限，单位 MB
+                                 # （1 MB = 1024 × 1024 字节；默认 512；1..1024）。笔记本原文件超过它时
+                                 # 导出在提交时就被拒（413），写入中超过它就中止；上传一超过它就被拒。
+                                 # 更大的笔记本走命令行
+NOTEBOOK_TRANSFER_TTL_SECONDS    # 已结束的作业及其导出文件保留多久，到期后连同残留的 part 文件一起
+                                 # 删除（默认 86400；600..604800）
+```
+
+- **单 API 进程。** 作业、下载票据与每人作业名额都在 API 进程的内存里（另有每个作业一份 sidecar，位于
+  `<storage>/transfers/`）。保持单 Uvicorn worker（`scripts/prod.sh` 固定 `--workers 1`），每个存储目录只跑一个
+  API 进程：第二个进程看不见第一个进程的作业与票据。
+- **Next 构建也读它。** 同源部署里 Next.js 的 rewrite 按一个上限克隆请求体，取上文「来源上传包络」与
+  `NOTEBOOK_TRANSFER_WEB_MAX_MB` + 1 MiB（一次原始 `application/zip` 请求体，`frontend/next-upload-limit.mjs`）中
+  较大者，在前端**构建**时定下。`scripts/prod.sh` 构建前导出根目录 `.env`，所以改 `NOTEBOOK_TRANSFER_WEB_MAX_MB`
+  既要重启后端，也要重新构建前端；离线包（`scripts/pack.sh`）按最大值 1024 构建，运行时 `.env` 可以取任何合法值。
+  Next 反代把上传整段缓存在内存里，这就是上限只到 1024、调大上限会多占前端内存的原因。浏览器从
+  `GET /api/system/config`（`notebook_transfer_max_bytes`）读后端解析后的值；后端的流式 413 始终是最终裁决。
+- **磁盘。** 上传与导出写在 `<storage>/transfers/` 下；按每个活跃用户「两个网页上限大小的在途文件」加上保留
+  `NOTEBOOK_TRANSFER_TTL_SECONDS` 的已完成导出预留空间。
+
 **欢迎页候选问题：**
 
 笔记本自动标题／描述也使用 `notebook_metadata` 调用类型。

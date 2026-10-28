@@ -453,7 +453,8 @@ zip 文件，范围与「复制笔记本」相同：不带 Memory、问答/报�
 归 `--owner` 所有的独立新笔记本（不是同步镜像，同一文件可重复导入）：走维护仓库写入，PostgreSQL 上需
 `--confirm-service-stopped`；`--dry-run` 只预检与预演、不写入；导入后同步重新投影 Knowhow 表、补齐需重新
 嵌入的向量（`--reembed auto|skip`），PostgreSQL 上全量重建 scale 索引（`--rebuild-scale auto|skip`，SQLite
-记为跳过）。失败不留任何残留。
+记为跳过）。失败不留任何残留。网页上的导出（笔记本设置的「导出」）与导入（首页「导入」）写的是同一种文件，
+但受 `NOTEBOOK_TRANSFER_WEB_MAX_MB` 约束；超过上限的笔记本用本命令。
 
 ```bash
 bash scripts/cli.sh notebook export --notebook nb-xxx --out ./nb-xxx.snbk
@@ -465,8 +466,9 @@ bash scripts/cli.sh notebook import ./exports/nb-a.snbk --owner alice --confirm-
 ```
 
 退出码：0 成功；1 文件校验失败、文件被拒绝或导出/导入失败；2 参数错误 / 笔记本或用户不存在 / 输出已存在 /
-PostgreSQL 写库缺 `--confirm-service-stopped`；3 库不是本构建的 schema。与 `sync` 的区别、导出时的规范化与
-运行代价见 `docs/operations_zh.md` 的「笔记本单文件导出」，导入的运行手册见「笔记本单文件导入」。
+PostgreSQL 写库缺 `--confirm-service-stopped`；3 库不是本构建的 schema；130 导入被中断（Ctrl-C）。与 `sync` 的区别、导出时的规范化与
+运行代价见 `docs/operations_zh.md` 的「笔记本单文件导出」，导入的运行手册见「笔记本单文件导入」，网页作业的
+文件布局、过期清理与重启恢复见「网页导出与导入作业」。
 
 ---
 

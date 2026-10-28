@@ -360,6 +360,15 @@ store 决定，两个后端一致。清单只有属于以下三类之一时才�
   FK/cascade/unique surface 和复制/清理分类。表特有的设计理由写在引入它的迁移旁；
   同批更新受影响的 schema/seed/snapshot fixture 与 migration manifest，不能
   重设旧兼容 fixture 的基线来掩盖升级破坏。
+- **深拷贝的闭包同时就是笔记本归档格式。** 复制闭包（任一后端的
+  `sharing_store._COPY_SNAPSHOT_QUERIES`）增删一张表，就改变了 `.snbk` 文件的含义：同一个改动里更新
+  [`app/domain/notebook_archive.py`](../backend/app/domain/notebook_archive.py) 的 `ARCHIVE_TABLES` 并提升它的
+  `FORMAT_VERSION`（新版本号进 `READABLE_FORMAT_VERSIONS`；旧版本号只在本构建仍能读它的文件时保留），并在
+  冻结表集合的守卫里补上新版本的表集合。
+  [`backend/tests/test_notebook_archive_format.py`](../backend/tests/test_notebook_archive_format.py) 的两条守卫钉住
+  这一点：`test_archive_tables_are_exactly_the_copy_closure_on_both_backends`（两个后端的闭包都等于
+  `ARCHIVE_TABLES`）与 `test_the_table_set_of_each_format_version_is_frozen`（每个格式版本永远对应一组表）。
+  新增列不需要提升格式版本：导入端拒绝带有本库没有的列的文件（判为「来自更新版本」），兼容闸是逐列的。
 - SQLite 迁移单向：数据库 `PRAGMA user_version` 超前时以
   `schema contains a future version` 拒绝启动；PostgreSQL 同样拒绝超前 ledger。
   readiness 只暴露脱敏的初始化失败。恢复使用升级前备份或兼容/更新的程序，
