@@ -38,7 +38,11 @@ from app.domain.notebook_archive import (
 from app.domain.portable_rows import DigestCounter, decode_value, json_document, json_line
 from app.services.notebook_transfer import archive_reader
 from app.services.notebook_transfer import export as export_module
-from app.services.notebook_transfer.import_ import NotebookImportError
+from app.services.notebook_transfer.import_ import (
+    NotebookImportError,
+    NotebookImportReaped,
+    NotebookImportTooNew,
+)
 from tests import copy_memory_cases as memory_cases
 from tests import notebook_archive_cases as archive_cases
 from tests import notebook_copy_characterization_cases as char_cases
@@ -200,12 +204,16 @@ def assert_no_residue(repo, before: dict) -> None:
     assert after["trees"] == before["trees"]
 
 
-def assert_refused(repo, path: Path, match: str, **kwargs) -> None:
+def assert_refused(repo, path: Path, match: str, *, error: type = NotebookImportError, **kwargs) -> None:
     ensure_importer(repo)
     before = residue(repo)
-    with pytest.raises(NotebookImportError, match=match):
+    with pytest.raises(error, match=match) as raised:
         run_import(repo, path, **kwargs)
     assert_no_residue(repo, before)
+    if error is NotebookImportError:
+        # Only an archive from a newer build is ``NotebookImportTooNew``; a damaged
+        # or crafted one must never pass for "upgrade this deployment".
+        assert not isinstance(raised.value, NotebookImportTooNew), path.name
 
 
 # --------------------------------------------------------------- comparing
@@ -946,8 +954,11 @@ def check_tampered_archives_are_refused(repo, backend: Backend, tmp: Path, monke
     tampered = [(n, d.replace(b"web page", b"WEB PAGE") if n == "rows/sources.jsonl" else d)
                 for n, d in entries]
     raw_zip(case("checksum", "校验和与清单声明不符|大小与清单声明不符"), tampered)
+    # A newer build's archive -- a newer format version, or a column this
+    # deployment lacks -- is told apart from a damaged one: the remedy is an upgrade.
+    too_new = {"extra-column", "newer-format"}
     for name, path, match in cases:
-        assert_refused(repo, path, match), name
+        assert_refused(repo, path, match, error=NotebookImportTooNew if name in too_new else NotebookImportError)
 
     # One line over the reader's line limit.
     monkeypatch.setattr(archive_reader, "MAX_JSONL_LINE_BYTES", 300)
@@ -1252,6 +1263,22 @@ def check_crash_leaves_a_sentinel_the_sweep_reaps(repo, backend, tmp, monkeypatc
     assert db_rows == 0
     with repo._runtime.database.write() as db:
         db.execute("DELETE FROM notebooks WHERE id = 'nb-sync-mirror'")
+    assert_no_residue(repo, before)
+
+
+def check_a_reaped_import_says_so(repo, backend, tmp, monkeypatch) -> None:
+    """A run whose sentinel was reaped mid-way stops with ``NotebookImportReaped``
+    -- not a refusal of the file -- and leaves nothing."""
+    notebook_id = seed_world(repo, backend, "full")
+    path = tmp / "reaped.snbk"
+    export(repo, notebook_id, path)
+    ensure_importer(repo)
+    before = residue(repo)
+    store = repo._runtime.sharing_store
+    with monkeypatch.context() as patched:
+        patched.setattr(store, "publish_import", lambda *args, **kwargs: False)
+        with pytest.raises(NotebookImportReaped, match="收割"):
+            run_import(repo, path)
     assert_no_residue(repo, before)
 
 

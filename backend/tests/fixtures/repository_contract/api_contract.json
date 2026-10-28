@@ -21287,7 +21287,7 @@
       },
       "/api/notebook-imports": {
         "post": {
-          "description": "Import one ``.snbk`` file as a new notebook owned by the caller (202 + the\njob). The body is the raw file (``Content-Type: application/zip``); ``name``\nrenames the new notebook (empty: the exported name).",
+          "description": "Import one ``.snbk`` file as a new notebook owned by the caller (202 + the\njob). The body is the raw file (``Content-Type: application/zip``); ``name``\nrenames the new notebook (empty: the exported name). A file that is not an\narchive or is damaged is 400; one written by a newer build is 400 with the\ndetail ``{\"code\": \"archive_too_new\", \"message\"}`` (upgrade this deployment).",
           "operationId": "import_notebook_route_api_notebook_imports_post",
           "parameters": [
             {

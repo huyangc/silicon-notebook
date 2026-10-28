@@ -55,6 +55,7 @@ from app.domain.notebook_archive import (
     MAX_TOTAL_UNCOMPRESSED_BYTES,
     NOTEBOOK_FILES_DIR,
     ArchiveManifest,
+    ArchiveVersionTooNewError,
     ManifestError,
     entry_kind,
     rows_entry,
@@ -73,6 +74,12 @@ _UNIX = 3
 class ArchiveError(ValueError):
     """The archive is not a valid notebook archive (or not one this build can
     read). The message says what is wrong without quoting archive content."""
+
+
+class ArchiveTooNewError(ArchiveError):
+    """The archive was written by a newer build: a newer ``format_version``, or
+    a table column this deployment does not have. Not a damaged file -- the
+    remedy is to upgrade this deployment, so callers tell it apart."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -211,6 +218,8 @@ def read_manifest(archive: zipfile.ZipFile) -> ArchiveManifest:
         raise ArchiveError("manifest.json 不是合法的 JSON") from None
     try:
         return ArchiveManifest.from_dict(raw)
+    except ArchiveVersionTooNewError as exc:
+        raise ArchiveTooNewError(str(exc)) from None
     except ManifestError as exc:
         raise ArchiveError(str(exc)) from None
 
@@ -385,7 +394,7 @@ def check_columns(
             raise ArchiveError(f"{rows_entry(table)} 的列名不合法")
         missing = sorted(set(declared) - set(target_columns.get(table, ())))
         if missing:
-            raise ArchiveError(
+            raise ArchiveTooNewError(
                 f"导出文件的 {table} 表含本部署没有的列（{len(missing)} 个）："
                 "导出端版本较新，请先升级本部署再导入"
             )

@@ -183,3 +183,11 @@ def test_a_sweep_never_removes_the_files_of_a_deleted_running_export(world):
 
 def test_a_notebook_with_an_empty_knowhow_table_round_trips(world):
     cases.check_a_notebook_with_an_empty_knowhow_table_round_trips(world)
+
+
+def test_refusals_say_whether_to_upgrade_or_retry(world):
+    cases.check_refusals_say_whether_to_upgrade_or_retry(world)
+
+
+def test_the_follow_up_messages_promise_no_button():
+    cases.check_the_follow_up_messages_promise_no_button()

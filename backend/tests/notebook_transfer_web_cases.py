@@ -30,7 +30,12 @@ from fastapi.testclient import TestClient
 
 from app.services import notebook_reembed
 from app.services.notebook_transfer import jobs as jobs_module
-from app.services.notebook_transfer.import_ import NotebookImportError, archive_document_count
+from app.services.notebook_transfer.import_ import (
+    NotebookImportError,
+    NotebookImportReaped,
+    NotebookImportTooNew,
+    archive_document_count,
+)
 from tests import notebook_archive_cases as archive_cases
 from tests import notebook_copy_characterization_cases as char_cases
 from tests import notebook_import_cases as import_cases
@@ -1116,6 +1121,12 @@ def check_a_published_import_survives_a_restart_and_a_failure(world: World) -> N
     assert failed["state"] == "failed", failed
     assert failed["error"]["code"] == "import_followup_failed"
     new_id = failed["notebook_id"]
+    # The bell carries the failure code, so it can tell this failure (the notebook
+    # exists, it can be opened) from one that left nothing.
+    bell = world.client.get("/api/me/pending-actions", headers=world.owner).json()
+    (item,) = [i for i in bell["items"] if i["type"] == "notebook_transfer"]
+    assert (item["state"], item["failure_code"], item["notebook_id"]) == (
+        "failed", "import_followup_failed", new_id), item
     assert new_id and world.client.get(
         f"/api/notebooks/{new_id}", headers=world.owner).status_code == 200
     # The process died right after publish: the sidecar as it was then.
@@ -1134,7 +1145,7 @@ def check_a_published_import_survives_a_restart_and_a_failure(world: World) -> N
     assert successor.recover_on_start() == 1
     recovered = successor.job(world.owner_id, snapshot["id"])
     assert recovered["error"]["code"] == "import_followup_interrupted", recovered["error"]
-    assert "不要重新导入" in recovered["error"]["message"]
+    assert "请不要再导入一份" in recovered["error"]["message"]
     assert recovered["notebook_id"] == new_id
     assert successor.delete(world.owner_id, snapshot["id"]) == {
         "outcome": "deleted", "kept_notebook_id": new_id}
@@ -1588,3 +1599,61 @@ def check_a_sweep_never_removes_the_files_of_a_deleted_running_export(world: Wor
         release.set()
         thread.join(timeout=60)
     assert not part.exists()
+
+
+def check_refusals_say_whether_to_upgrade_or_retry(world: World) -> None:
+    """A newer build's archive is told apart from a damaged one -- at the upload
+    (400 with ``{"code": "archive_too_new"}``) and in the job (``archive_too_new``,
+    the column check runs in the job) -- and a reaped run is ``import_reaped``,
+    which says nothing about the file. The bell carries a failed job's code; an
+    active one carries ``""``."""
+    good = world.tmp / "good.snbk"
+    good.write_bytes(archive_bytes(world))
+    newer = world.tmp / "newer.snbk"
+    import_cases.rebuild(good, newer, manifest=lambda doc: {**doc, "format_version": 99})
+    refused = upload(world, newer.read_bytes())
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["detail"] == {
+        "code": "archive_too_new", "message": "这个文件来自更新版本的部署，请先升级本部署再导入。"}
+    damaged = upload(world, b"not a zip at all")
+    assert damaged.status_code == 400 and damaged.headers.get("x-user-message") == "1", damaged.text
+    assert isinstance(damaged.json()["detail"], str)
+    assert "更新版本" not in damaged.json()["detail"]
+
+    class Refusing:
+        def __init__(self, error):
+            self.error = error
+
+        def import_notebook(self, *args, **kwargs):
+            raise self.error
+
+    for error, code in (
+        (NotebookImportTooNew("导出端版本较新"), "archive_too_new"),
+        (NotebookImportReaped("导入中途被收割"), "import_reaped"),
+        (NotebookImportError("文件内容不完整"), "invalid_archive"),
+    ):
+        with world.monkeypatch.context() as patched:
+            patched.setattr(world.jobs, "_importer", lambda error=error: Refusing(error))
+            job = upload(world, good.read_bytes()).json()
+        assert (job["state"], job["error"]["code"]) == ("failed", code), job
+        bell = world.client.get("/api/me/pending-actions", headers=world.owner).json()
+        (item,) = [i for i in bell["items"] if i.get("job_id") == job["id"]]
+        assert item["failure_code"] == code
+    assert jobs_module._MESSAGES["import_reaped"] == "导入中断了，请重新导入。"
+    running = export(world, notebook_id=second_notebook(world))
+    assert running.status_code == 202
+    bell = world.client.get("/api/me/pending-actions", headers=world.owner).json()
+    for item in bell["items"]:
+        if item["type"] == "notebook_transfer" and item["state"] != "failed":
+            assert item["failure_code"] == ""
+
+
+def check_the_follow_up_messages_promise_no_button() -> None:
+    """The two follow-up failures do not know which part of the work after publish is
+    missing, so they name no repair button: they say retrieval may be incomplete and
+    how to start over."""
+    for code in ("import_followup_failed", "import_followup_interrupted"):
+        message = jobs_module._MESSAGES[code]
+        assert "部分检索可能不全" in message and "可以删除这本笔记本后重新导入" in message, code
+        assert "「" not in message and "补齐" not in message, code
+    assert "请不要再导入一份" in jobs_module._MESSAGES["import_followup_interrupted"]

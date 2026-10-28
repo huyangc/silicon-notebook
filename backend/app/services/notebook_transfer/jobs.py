@@ -92,6 +92,8 @@ from app.services.notebook_transfer.import_ import (
     ImportProgress,
     ImportReport,
     NotebookImportError,
+    NotebookImportReaped,
+    NotebookImportTooNew,
 )
 from app.services.pending_bus import pending_bus
 
@@ -151,19 +153,29 @@ _PERSISTED = (
     "archive_bytes", "progress", "report", "reembed", "index", "error", "downloaded",
 )
 
+#: The two follow-up failures (the notebook was published, the work after it did
+#: not finish) name no repair button: which part is missing -- the chunk/element
+#: search data the dashboard's 补齐向量 refills, the KG legs, a Knowhow
+#: projection -- is not known here, and naming a button that may not be there is
+#: a promise the UI cannot keep. The frontend shows the same two sentences
+#: (``tests/test_notebook_transfer_copy_parity.py``).
 _MESSAGES = {
     "cancelled": "已取消。",
     "notebook_missing": "笔记本不存在或正在删除，无法导出。",
     "export_failed": "导出没有完成，请稍后重试。",
     "import_failed": "导入没有完成，请稍后重试。",
-    "import_followup_failed": "笔记本已经导入，但导入后的后台处理没有完成；可在笔记本里重新补全检索数据。",
+    "import_followup_failed": (
+        "笔记本已经导入，但后台处理没有完成，部分检索可能不全；可以删除这本笔记本后重新导入。"
+    ),
     "not_started": "暂时无法开始，请稍后重试。",
     "export_interrupted": "服务重启，这次导出没有完成，请重新导出。",
     "import_interrupted": "服务重启，这次导入没有完成，请重新导入。",
     "import_followup_interrupted": (
-        "服务重启时笔记本已经导入，但导入后的后台处理没有完成；请不要重新导入，"
-        "可在笔记本里重新补全检索数据。"
+        "服务重启时笔记本已经导入，但后台处理没有完成，部分检索可能不全；请不要再导入一份，"
+        "需要的话可以删除这本笔记本后重新导入。"
     ),
+    "archive_too_new": "这个文件来自更新版本的部署，请先升级本部署再导入。",
+    "import_reaped": "导入中断了，请重新导入。",
 }
 
 
@@ -513,6 +525,10 @@ class NotebookTransferJobs:
                         "notebook_id": job.notebook_id,
                         "notebook_name": job.notebook_name,
                         "progress": dict(job.progress),
+                        # A failed job's stable code (``""`` otherwise): the bell
+                        # tells an import that failed after publish (its notebook
+                        # exists) from one that left nothing, as the panel does.
+                        "failure_code": (job.error or {}).get("code", "") if job.state == FAILED else "",
                     })
             return items
 
@@ -1009,6 +1025,12 @@ class NotebookTransferJobs:
             )
         except _Stopped:
             self._finish(job, CANCELLED, error=_error("cancelled"))
+        except NotebookImportTooNew:
+            # Written by a newer build: the file is fine, this deployment is old.
+            self._finish(job, FAILED, error=_error("archive_too_new"))
+        except NotebookImportReaped:
+            # The run's sentinel was reaped mid-way: nothing is wrong with the file.
+            self._finish(job, FAILED, error=_error("import_reaped"))
         except NotebookImportError as exc:
             # The importer's own refusal: a complete sentence that names what is
             # wrong with the file and never quotes its content or a path.

@@ -19,6 +19,9 @@ download (docs/superpowers/plans/2026-10-22-notebook-export-import.md §7, §9).
   limit (413, nothing decompressed); for a user who is not an administrator the
   archive's sources are counted (``archive_document_count``) against the
   per-notebook document limit, the count stopping as soon as it passes it.
+  A file that is not an archive or is damaged is 400 (``user_error``); one
+  written by a newer build is 400 with ``{"code": "archive_too_new"}`` -- the
+  remedy is an upgrade, not another file.
 * ``GET /notebook-transfers[/{job}]``, ``DELETE /notebook-transfers/{job}`` -- the
   caller's own jobs; another user's job is 404 like a missing one. ``DELETE``
   says what became of the job (``outcome``) and names the notebook an import
@@ -59,6 +62,7 @@ from app.models.notebook_transfer import (
 from app.services.notebook_transfer.import_ import (
     NotebookImportError,
     NotebookImportTooLarge,
+    NotebookImportTooNew,
     archive_document_count,
     check_web_archive,
 )
@@ -86,6 +90,13 @@ _ARCHIVE_MEDIA_TYPE = "application/zip"
 _DOWNLOAD_REFUSED = {"detail": "Not found"}
 _DOWNLOAD_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 _JOB_NOT_FOUND = "Transfer job not found"
+#: 400 for an archive written by a newer build (a newer format version, or a
+#: column this deployment lacks): ``code`` for the client to branch on,
+#: ``message`` a complete Chinese sentence.
+_ARCHIVE_TOO_NEW = {
+    "code": "archive_too_new",
+    "message": "这个文件来自更新版本的部署，请先升级本部署再导入。",
+}
 
 
 def _megabytes(limit_bytes: int) -> int:
@@ -190,7 +201,9 @@ async def import_notebook_route(
 ) -> dict:
     """Import one ``.snbk`` file as a new notebook owned by the caller (202 + the
     job). The body is the raw file (``Content-Type: application/zip``); ``name``
-    renames the new notebook (empty: the exported name)."""
+    renames the new notebook (empty: the exported name). A file that is not an
+    archive or is damaged is 400; one written by a newer build is 400 with the
+    detail ``{"code": "archive_too_new", "message"}`` (upgrade this deployment)."""
     media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if media_type != _ARCHIVE_MEDIA_TYPE:
         raise user_error(415, "请上传笔记本导出文件（.snbk）。")
@@ -229,9 +242,13 @@ async def import_notebook_route(
             raise user_error(
                 413, "这个文件解压后过大，超出网页导入能处理的范围，请联系管理员用命令行导入。"
             ) from None
+        except NotebookImportTooNew:
+            # Not a damaged file: the remedy is an upgrade, so the client must be
+            # able to tell it apart -- a structured detail with a stable code.
+            raise HTTPException(status_code=400, detail=_ARCHIVE_TOO_NEW) from None
         except NotebookImportError:
             raise user_error(
-                400, "这个文件无法导入：它不是笔记本导出文件、已经损坏，或来自更新版本的部署。"
+                400, "这个文件无法导入：它不是笔记本导出文件，或者已经损坏。"
             ) from None
         if allowed is not None and documents > allowed:
             raise user_error(
