@@ -811,6 +811,26 @@ def test_math_root_whose_attribute_value_holds_a_slash_bracket_is_not_self_closi
     assert b"oMath" not in rewritten
 
 
+def test_self_closing_root_followed_by_a_same_named_end_tag_is_left_alone():
+    """The end-tag name check alone is not enough: a foreign element may reuse
+    the `m:` prefix, so the end tag right after a self-closing root can carry
+    the root's own name. Self-closing is decided from the start tag."""
+    from app.services.omml import _rewrite_docx_part
+
+    xml = (
+        f'<w:document xmlns:w="{_W_NS}"><w:body><w:p>'
+        '<m:oMath xmlns:m="urn:not-math">'
+        f'<m:oMath xmlns:m="{M_NS}"/>'
+        "</m:oMath>"
+        f'<m:oMath xmlns:m="{M_NS}"><m:r><m:t>z</m:t></m:r></m:oMath>'
+        "</w:p></w:body></w:document>"
+    )
+    formulas: list = []
+    rewritten = _rewrite_docx_part(xml.encode(), formulas, "\ue000")
+    ElementTree.fromstring(rewritten)
+    assert [formula.inline for formula in formulas] == ["$z$"]
+
+
 @pytest.mark.parametrize("root_tag", ["oMath", "oMathPara"])
 @pytest.mark.parametrize("where", ["paragraph", "cell", "body"])
 def test_docx_with_a_self_closing_math_root_stays_on_the_mammoth_path(tmp_path, root_tag, where):
