@@ -119,6 +119,17 @@ def test_the_group_is_charged_like_the_old_placeholder_against_the_char_budget()
         assert "(另有 5 篇未命名来源从略)" in note
         assert note.replace(_group(range(1, K + 1), 9 - K), f"《{UNNAMED_SOURCE_LABEL}》{MARK}") == legacy
         assert legacy.endswith("more)")          # 确实撞到了预算边界
+    # 恰好贴着 800 字:占位串按「《未命名来源》(无摘要)」计 12 字,12 篇 60 字标题各
+    # 62 字,第 13 篇 42 字标题补满到 800。整组只要多收哪怕一个字(比如按带序号的
+    # 占位串收费),第 13 篇就会被挤出去。
+    tight = [_Row(f"t{index}", f"{index:02d}" + "长" * 58, "摘要") for index in range(12)]
+    tight += [_Row("t-last", "末" * 42, "摘要"), _Row("t-more", "多", "摘要")]
+    assert 5 + 2 + len(MARK) + 12 * 62 + 44 == rr._ENUM_NOTE_TITLES_TOTAL_CHARS
+    note = _note(_unnamed(6) + tight)
+    assert note.endswith("《" + "末" * 42 + "》")       # 第 13 篇在,「多」被预算挡下
+    assert "《多》" not in note
+    assert note == _note(_unnamed(1) + tight).replace(
+        f"《{UNNAMED_SOURCE_LABEL}》{MARK}", _group(range(1, K + 1), 6 - K), 1)
 
 
 def test_the_group_sits_where_the_first_unnamed_row_is_and_folds_the_rest_in_order():
