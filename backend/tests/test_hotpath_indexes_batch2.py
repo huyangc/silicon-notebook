@@ -27,8 +27,8 @@ Contract under test:
      ``_NONBLANK_TEXT_SQL`` query-side literal must all trace back to the
      SAME ``PY_WHITESPACE`` constant byte-for-byte. A one-character edit to
      any of these four in isolation must fail one of the assertions here.
-  3. ``HOTPATH_INDEX_SPECS`` totals fourteen entries (eight batch-1 + two
-     batch-2 + one batch-3 + three batch-4), and the two batch-2 entries
+  3. ``HOTPATH_INDEX_SPECS`` holds the total of the per-batch table in
+     ``tests/hotpath_index_batches.py``, and the two batch-2 entries
      carry the ``using``/``ddl_columns`` fields this batch's DDL genuinely
      needs.
 
@@ -44,7 +44,7 @@ from pathlib import Path
 from app.repositories.postgres import maintenance as postgres_maintenance
 from app.repositories.postgres.hotpath_indexes import HOTPATH_INDEX_SPECS
 from app.repositories.text_whitespace import PY_WHITESPACE
-
+from tests.hotpath_index_batches import EXPECTED_SPEC_TOTAL, total_mismatch_message
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MIGRATION = (
@@ -126,10 +126,8 @@ def test_migration_file_exists_and_declares_exactly_two_statements():
 def test_batch2_specs_are_present_and_batch1_is_untouched():
     names = {spec.name for spec in HOTPATH_INDEX_SPECS}
     assert _BATCH2_NAMES <= names
-    assert len(HOTPATH_INDEX_SPECS) == 18, (
-        "expected seven batch-1 (idx_clusters_nb_canonical superseded by batch 6) plus two batch-2 plus zero batch-3 (superseded by batch 6) plus three "
-        f"batch-4 plus three batch-5 plus three batch-6 entries in HOTPATH_INDEX_SPECS, found "
-        f"{len(HOTPATH_INDEX_SPECS)}: {sorted(names)}"
+    assert len(HOTPATH_INDEX_SPECS) == EXPECTED_SPEC_TOTAL, (
+        total_mismatch_message(names)
     )
 
 

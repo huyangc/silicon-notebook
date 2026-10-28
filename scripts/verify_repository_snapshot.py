@@ -6077,5 +6077,30 @@ MIGRATION_MANIFEST[(101, 102)] = {
     "views": {},
 }
 
+# v103 (parity with PostgreSQL 0084_source_paper_meta_source_nb.sql): the
+# covering index idx_source_paper_meta_source_nb over source_paper_meta
+# (source_id, notebook_id, is_paper) for the own-notebook paper-metadata
+# probe. Index only: no table, column, trigger or view; no backfill.
+SOURCE_PAPER_META_SOURCE_NB_INDEXES = {
+    "idx_source_paper_meta_source_nb": (
+        "CREATE INDEX idx_source_paper_meta_source_nb "
+        "ON source_paper_meta(source_id, notebook_id, is_paper)"
+    ),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 103, *key[2:]): {
+        **manifest,
+        "indexes": {**manifest["indexes"], **SOURCE_PAPER_META_SOURCE_NB_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(102, 103)] = {
+    "tables": {},
+    "columns": {},
+    "indexes": SOURCE_PAPER_META_SOURCE_NB_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

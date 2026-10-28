@@ -525,7 +525,12 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # (text NOT NULL DEFAULT '', backfilled to the row's id). No table, FK, index
 # or unique-surface change; no decision rewrite (the first v2 full rebuild of a
 # library recomputes its v1 decisions in Python).
+# SQLite v103 / PostgreSQL 0084 (hot-path batch 7) add the covering index
+# idx_source_paper_meta_source_nb for the own-notebook paper-metadata probe:
+# PostgreSQL (source_id) INCLUDE (notebook_id, is_paper), SQLite (source_id,
+# notebook_id, is_paper) -- SQLite has no INCLUDE, so the two trail as keys.
+# Index only: no table, column, FK or unique-surface change, no backfill.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=102,
-    postgres_version=83,
+    sqlite_version=103,
+    postgres_version=84,
 )

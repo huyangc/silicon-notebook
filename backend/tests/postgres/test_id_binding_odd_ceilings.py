@@ -59,7 +59,7 @@ def _seams() -> RepositoryCompatibilitySeams:
 
 @pytest.fixture
 def backends(postgres_database, tmp_path, _sqlite_schema_template):
-    assert PostgresMigrator(postgres_database).migrate() == 83
+    assert PostgresMigrator(postgres_database).migrate() == 84
     with postgres_database.write() as db:
         db.execute(
             "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "

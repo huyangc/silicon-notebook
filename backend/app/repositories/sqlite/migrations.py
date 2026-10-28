@@ -353,7 +353,12 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # IMMEDIATE transaction with its stamp. Stored decisions are not rewritten
 # here (each library's first full rebuild in seed space 2 recomputes its v1
 # decisions). See ``_migration_102``.
-SCHEMA_VERSION = 102
+# v103 (paired with PostgreSQL 0084_source_paper_meta_source_nb.sql) adds
+# idx_source_paper_meta_source_nb over source_paper_meta(source_id,
+# notebook_id, is_paper): the covering index for "this source's own paper
+# metadata" (the child row's notebook_id is the source's). Index only. See
+# ``_migration_103``.
+SCHEMA_VERSION = 103
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -6277,6 +6282,28 @@ class SqliteMigrator:
                 db, "communities", "board_key", "TEXT NOT NULL DEFAULT ''")
             db.execute("UPDATE communities SET board_key = id WHERE board_key = ''")
             db.execute("PRAGMA user_version = 102")
+
+    def _migration_103(self) -> None:
+        """Covering index for "this source's own paper metadata", parity with
+        PostgreSQL ``0084_source_paper_meta_source_nb.sql``.
+
+        A ``source_paper_meta`` row counts as its source's metadata only when
+        its own ``notebook_id`` is the source's notebook (the
+        ``report_source_rows`` reading; ``source_store.PAPER_META_OWN_ROW_SQL``).
+        The missing-metadata predicate (``PAPER_META_NO_META_SQL``: the
+        backfill queue, the 「补全论文信息」 button probe, the analytics missing
+        count) and the analytics has_meta / marker counts check that per
+        source. With only the primary key on ``source_id`` every probe would
+        read the table row for ``notebook_id``; this index answers the probe
+        and the ``is_paper`` count from the index alone. Those statements name
+        it with ``INDEXED BY``: without ANALYZE statistics SQLite prefers the
+        unique primary key. Index only, no backfill.
+        """
+        with self._connect() as db:
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_source_paper_meta_source_nb "
+                "ON source_paper_meta(source_id, notebook_id, is_paper)"
+            )
 
     def migrate(self) -> list[int]:
         with self._connect() as db:

@@ -1910,6 +1910,11 @@
         "type": "index"
       },
       {
+        "name": "idx_source_paper_meta_source_nb",
+        "sql_sha256": "10bd27fc67e9ab45a7095d980dca6902ce66d4b7547be66164d82c846f721381",
+        "type": "index"
+      },
+      {
         "name": "idx_sources_memory_id",
         "sql_sha256": "d78fb168a9a353f96b63a5117d60334ba4398552d97a43ff2ec244713671c759",
         "type": "index"
@@ -3355,6 +3360,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 102
+    "user_version": 103
   }
 }

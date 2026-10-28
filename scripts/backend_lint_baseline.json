@@ -2025,18 +2025,6 @@
   "backend/tests/test_hotpath_indexes.py": {
     "I001": 1
   },
-  "backend/tests/test_hotpath_indexes_batch2.py": {
-    "I001": 1
-  },
-  "backend/tests/test_hotpath_indexes_batch3.py": {
-    "I001": 1
-  },
-  "backend/tests/test_hotpath_indexes_batch4.py": {
-    "I001": 1
-  },
-  "backend/tests/test_hotpath_indexes_batch5.py": {
-    "I001": 1
-  },
   "backend/tests/test_image_backfill_logic.py": {
     "I001": 1
   },

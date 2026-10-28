@@ -47,6 +47,10 @@ _DROPPED_NAMES = (
     "idx_clusters_nb_canonical",
 )
 
+# INCLUDE-carrying entries registered by later batches, with the test that
+# pins each shape: batch 7 (0084) -> test_hotpath_indexes_batch7.py.
+_LATER_INCLUDE_CARRYING = frozenset({"idx_source_paper_meta_source_nb"})
+
 _STATEMENT_PATTERN = re.compile(
     r"CREATE (?P<unique>UNIQUE )?INDEX IF NOT EXISTS\s+(?P<name>\w+)\s+ON\s+(?P<table>\w+)"
     r"\s*\(\s*(?P<columns>[\s\S]*?)\s*\)"
@@ -102,7 +106,12 @@ def test_unique_and_include_fields_render_ddl_and_stay_inert_elsewhere():
     for spec in HOTPATH_INDEX_SPECS:
         if spec.name in _BATCH6_NAMES:
             continue
-        assert spec.unique is False and spec.include == (), spec.name
+        assert spec.unique is False, spec.name
+        # An INCLUDE-carrying entry must be one a later batch registered on
+        # purpose (each pins its own shape in its own batch test), never a
+        # field that leaked into an unrelated entry.
+        if spec.include:
+            assert spec.name in _LATER_INCLUDE_CARRYING, spec.name
 
 
 def test_prerequisites_are_limited_to_idempotent_add_column_form():
