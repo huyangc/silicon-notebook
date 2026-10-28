@@ -6,12 +6,14 @@ names instead of the ``K-<seed>`` ids (which S1 turns into ``rmsnorm`` /
 * A name is the PUBLISHED cluster's stored ``canonical_name``, read by one
   bounded point lookup per distinct id of the response
   (``GovernanceStore.pending_merge_names``); an id no published cluster row
-  carries gets ``""`` and the browser falls back to the id.
+  carries gets ``""`` and the browser shows a placeholder, never the id.
 * The names follow the KG detail reads' cluster label rule
   (``KgViewerScope.cluster_labels``): where the notebook holds a hidden source
   the viewer may not read, a cluster that may hold a hidden member is named by
-  its first visible member, and one with no visible live member gets ``""``.
-  The rows themselves are not filtered (pending merges stay a shared tool).
+  its first visible member. A row with a side that has no visible live member
+  is left out for that viewer: the cluster does not exist for them (the KG
+  detail reads' rule), and its id carries a hidden member's seed. Every other
+  row is returned to every reader (pending merges stay a shared tool).
 
 The ``assert_*`` functions are shared with the PostgreSQL twin
 (tests/postgres/test_pending_merge_names_pg.py): both backends must answer
@@ -118,20 +120,15 @@ def assert_rows_carry_both_sides_names(repo) -> None:
 def assert_hidden_members_never_name_a_side(repo, build_scenario, as_user) -> None:
     """The pre-isolation shape (a cluster mixing a visible source and A's
     Memory) with a stored name minted from A's Memory member, plus a cluster
-    only A's Memory forms. B (a member) reads the visible member's name and
-    no name at all for the Memory-only cluster; A reads both stored names.
+    only A's Memory forms. B (a member) reads the visible member's name; A
+    reads both stored names.
 
-    What this PR decides is the NAMES only. The rows are not filtered by
-    viewer (pending merges stay a shared tool, as the product docs say), so
-    both sides' canonical ids are returned to B unchanged -- including the
-    Memory-only cluster's ``K-<seed>`` id, whose seed string is that
-    Memory member's normalised name. That is a known exposure of the
-    isolation window, not introduced here: migration 0067/v87 deletes the
-    candidates naming a Memory-minted id and an isolated rebuild never
-    writes one, but until a notebook's isolated rebuild a row like this one
-    can exist, and the browser falls back to showing that id when the name
-    is empty. The assertions below pin exactly that split: ids kept, names
-    empty or visible-only."""
+    A side with no visible live member does not exist for B -- the KG detail
+    reads' rule for such a cluster (absent from search and the graph, 404 on
+    its detail) -- so B does not get the row at all: its ``canonical_b`` is
+    ``K-<seed>``, and that seed is the Memory member's normalised name. The
+    whole response is scanned for the private spellings. A, who can read
+    every member, still gets the row, unchanged."""
     s = build_scenario(repo, b_memory=False)
     with repo._runtime.database.write() as db:
         db.execute(_sql(repo,
@@ -141,21 +138,26 @@ def assert_hidden_members_never_name_a_side(repo, build_scenario, as_user) -> No
     governance = repo._runtime.knowledge_governance
     governance.write_merge_candidate(
         s.nb, s.ids.engram_canonical, s.ids.secret_canonical, 0.88)
+    # a row whose both sides B can see: kept, named by the first visible member
+    governance.write_merge_candidate(
+        s.nb, s.ids.engram_canonical, "K-not formed yet", 0.5)
     base = {"canonical_a": s.ids.engram_canonical,
             "canonical_b": s.ids.secret_canonical,
             "score": 0.88, "status": "pending", "kind": "similarity"}
+    visible = {"canonical_a": s.ids.engram_canonical, "canonical_b": "K-not formed yet",
+               "score": 0.5, "status": "pending", "kind": "similarity"}
     member = as_user(s.b, governance.pending_merges, s.nb)
-    assert _without_ids(member) == [{**base, "name_a": "Engram", "name_b": ""}]
-    # by design: both ids come back as they are stored (rows unfiltered) ...
-    assert (member[0]["canonical_a"], member[0]["canonical_b"]) == (
-        s.ids.engram_canonical, s.ids.secret_canonical)
-    # ... and only the names are judged: neither stored name reaches B, in
-    # any letter case
-    names = (member[0]["name_a"] + " " + member[0]["name_b"]).lower()
-    assert "a-private" not in names and "secretproject" not in names
+    assert _without_ids(member) == [{**visible, "name_a": "Engram", "name_b": ""}]
+    text = repr(member).lower()
+    secret_seed = s.ids.secret_canonical[2:].lower()
+    for private in ("a-private", "secretproject", secret_seed,
+                    s.ids.secret_canonical.lower()):
+        assert private not in text, private
     owner = as_user(s.a, governance.pending_merges, s.nb)
-    assert _without_ids(owner) == [{
-        **base, "name_a": "Engram A-PRIVATE spelling", "name_b": "SecretProject"}]
+    assert sorted(_without_ids(owner), key=lambda row: -row["score"]) == [
+        {**base, "name_a": "Engram A-PRIVATE spelling", "name_b": "SecretProject"},
+        {**visible, "name_a": "Engram A-PRIVATE spelling", "name_b": ""},
+    ]
 
 
 def assert_names_cost_one_statement_per_batch(repo, monkeypatch) -> None:
@@ -193,8 +195,9 @@ def test_rows_carry_both_sides_names(repo):
 
 
 def test_hidden_members_never_name_a_side(repo):
-    """Mutation anchor: drop the ``cluster_labels`` pass -> B reads the
-    private spelling and ``SecretProject``."""
+    """Mutation anchors: drop the ``cluster_labels`` pass -> B reads the
+    private spelling and ``SecretProject``; keep the rows whose side has no
+    visible member -> B reads the Memory-minted ``K-<seed>``."""
     assert_hidden_members_never_name_a_side(repo, build_viewer_scenario, as_user)
 
 
