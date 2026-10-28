@@ -511,24 +511,23 @@ class QueryStore:
         ``among`` 给出时只问这几本挂载库(单库请求勾选的参考库);挂载有效性照旧由
         同一段 join 判,名单绑成一个参数(``id_binding``,custom plan)。省略时语句、
         参数与执行方式逐字不变。"""
-        if among is None:
-            row = db.execute(
-                "SELECT EXISTS(SELECT 1 " + MOUNT_VIEWER_JOIN
-                + MOUNT_EFFECTIVE_FOR_VIEWER
-                + " AND EXISTS(SELECT 1 FROM knowledge_objects ko "
-                "WHERE ko.notebook_id = b.id AND ko.status=ANY(%s))) AS exists",
-                (viewer_id, notebook_id, list(USABLE_STATUSES)),
-            ).fetchone()
-            return bool(row["exists"])
-        bound = bind_ids(list(among))
-        row = execute_ids(
-            db,
+        bound = None if among is None else bind_ids(list(among))
+        statement = (
             "SELECT EXISTS(SELECT 1 " + MOUNT_VIEWER_JOIN + MOUNT_EFFECTIVE_FOR_VIEWER
-            + f" AND {member_of('b.id', bound)}"
+            + ("" if bound is None else f" AND {member_of('b.id', bound)}")
             + " AND EXISTS(SELECT 1 FROM knowledge_objects ko "
-            "WHERE ko.notebook_id = b.id AND ko.status=ANY(%s))) AS exists",
-            (viewer_id, notebook_id, bound.param, list(USABLE_STATUSES)),
-        ).fetchone()
+            "WHERE ko.notebook_id = b.id AND ko.status=ANY(%s))) AS exists"
+        )
+        if bound is None:
+            row = db.execute(
+                statement, (viewer_id, notebook_id, list(USABLE_STATUSES)),
+            ).fetchone()
+        else:
+            row = execute_ids(
+                db, statement,
+                (viewer_id, notebook_id, bound.param, list(USABLE_STATUSES)),
+            )
+            row = row.fetchone()
         return bool(row["exists"])
 
     @staticmethod
