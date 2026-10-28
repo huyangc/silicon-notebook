@@ -15,6 +15,15 @@ from xml.etree import ElementTree
 
 from app.models.sources import SourceElement
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS
+from app.services.omml import (
+    OMML_MARKER,
+    DocxMath,
+    contains_omml,
+    docx_math_package,
+    drawingml_inline_text,
+    drawingml_segments,
+    wordprocessing_paragraph_text,
+)
 from app.services.parser_registry import PARSER_ENGINES, builtin_parser_id
 
 
@@ -923,7 +932,11 @@ class _MammothHtmlBlocks(HTMLParser):
             self._start_block("heading", int(tag[1]))
             return
         if tag == "li":
-            self._start_block("paragraph", 0, self._list_prefix())
+            # level = list depth (≥ 1). Element metadata never reads a
+            # paragraph's level; `_docx_expand_math_blocks` uses it to keep a
+            # display formula inside a list item inline instead of splitting
+            # the item around it.
+            self._start_block("paragraph", max(len(self._list_stack), 1), self._list_prefix())
             return
         if tag in _DOCX_PARAGRAPH_TAGS:
             self._start_block("paragraph")
@@ -976,6 +989,67 @@ def _mammoth_html_blocks(markup: str) -> List[tuple[str, int, str, str]]:
     return parser.blocks
 
 
+def _docx_math_or_none(path: Path) -> DocxMath | None:
+    """Tokenised copy of a DOCX that holds equations; None for a math-free
+    document (mammoth then reads the original file, byte for byte as before)
+    and on any failure — the equations are lost then, the rest of the document
+    is not."""
+    try:
+        return docx_math_package(path)
+    except Exception:
+        return None
+
+
+def _docx_expand_math_blocks(
+    blocks: List[tuple[str, int, str, str]], docx_math: DocxMath
+) -> List[tuple[str, int, str, str]]:
+    """Swap the sentinel tokens `docx_math_package` left in mammoth's blocks
+    back for LaTeX, following the MinerU convention:
+
+    * a display equation (`m:oMathPara`) in an ordinary paragraph becomes its own
+      `formula` block per equation line — the paragraph is split around it;
+    * everything else — inline equations, and display equations inside a
+      heading, list item or table cell, which cannot be split — stays in the
+      text as `$latex$` (HTML-escaped inside `table_html`).
+    """
+
+    def inline(match: "re.Match[str]") -> str:
+        formula = docx_math.formula(match)
+        return match.group(0) if formula is None else formula.inline
+
+    def inline_text(text: str) -> str:
+        return " ".join(docx_math.token.sub(inline, text).split())
+
+    expanded: List[tuple[str, int, str, str]] = []
+    for kind, level, text, raw in blocks:
+        if kind == "table":
+            if docx_math.token.search(raw):
+                raw = docx_math.token.sub(lambda m: html_module.escape(inline(m)), raw)
+                text = _html_table_to_text(raw)
+            if text:
+                expanded.append((kind, level, text, raw))
+            continue
+        if kind != "paragraph" or level:
+            text = inline_text(text)
+            if text:
+                expanded.append((kind, level, text, raw))
+            continue
+        cursor = 0
+        for match in docx_math.token.finditer(text):
+            formula = docx_math.formula(match)
+            if formula is None or not formula.display:
+                continue
+            before = inline_text(text[cursor:match.start()])
+            if before:
+                expanded.append(("paragraph", level, before, raw))
+            expanded.extend(("formula", 0, line, "") for line in formula.lines)
+            cursor = match.end()
+        rest = inline_text(text[cursor:])
+        if rest:
+            expanded.append(("paragraph", level, rest, raw))
+    return expanded
+
+
 def parse_docx_mammoth(
     source_id: str, path: Path, table_part_max_chars: int | None = None
 ) -> List[SourceElement]:
@@ -997,7 +1071,10 @@ def parse_docx_mammoth(
     try:
         import mammoth
 
-        with path.open("rb") as handle:
+        # Equations (OMML) are invisible to mammoth; a document that holds any
+        # is read through a tokenised copy instead (see `_docx_expand_math_blocks`).
+        docx_math = _docx_math_or_none(path)
+        with path.open("rb") if docx_math is None else docx_math.package as handle:
             # result.messages are style warnings ("unrecognized paragraph
             # style"); they never reach the user and are intentionally ignored.
             #
@@ -1011,6 +1088,8 @@ def parse_docx_mammoth(
                 handle, convert_image=mammoth.images.img_element(lambda image: {})
             )
         blocks = _mammoth_html_blocks(str(result.value or ""))
+        if docx_math is not None:
+            blocks = _docx_expand_math_blocks(blocks, docx_math)
         elements: List[SourceElement] = []
         counters: Dict[str, int] = {}
         for kind, level, text, raw in blocks:
@@ -1028,6 +1107,8 @@ def parse_docx_mammoth(
             metadata = {"parser": "mammoth", f"{kind}_index": counters[kind]}
             if kind == "heading":
                 metadata["heading_level"] = level
+            elif kind == "formula":
+                metadata["text_format"] = "latex"
             elements.append(
                 _element(
                     source_id,
@@ -1053,9 +1134,13 @@ def parse_docx_basic(source_id: str, path: Path) -> List[SourceElement]:
         raise RuntimeError("DOCX parser dependency python-docx is not installed") from exc
 
     document = Document(str(path))
+    # Last-resort path: equations survive as inline `$latex$` in the paragraph
+    # / cell text (no separate formula elements). The document-level check
+    # keeps a math-free document on python-docx's own `.text`, unchanged.
+    has_math = contains_omml(document.element.body)
     elements: List[SourceElement] = []
     for index, paragraph in enumerate(document.paragraphs, start=1):
-        text = paragraph.text.strip()
+        text = (_docx_paragraph_text(paragraph) if has_math else paragraph.text).strip()
         if not text:
             continue
         elements.append(
@@ -1071,7 +1156,14 @@ def parse_docx_basic(source_id: str, path: Path) -> List[SourceElement]:
     table_index = 1
     for table in document.tables:
         for row_index, row in enumerate(table.rows, start=1):
-            values = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+            if has_math:
+                cell_texts = [
+                    "\n".join(_docx_paragraph_text(p) for p in cell.paragraphs).strip()
+                    for cell in row.cells
+                ]
+                values = [text for text in cell_texts if text]
+            else:
+                values = [cell.text.strip() for cell in row.cells if cell.text.strip()]
             if not values:
                 continue
             elements.append(
@@ -1085,6 +1177,14 @@ def parse_docx_basic(source_id: str, path: Path) -> List[SourceElement]:
             )
         table_index += 1
     return elements
+
+
+def _docx_paragraph_text(paragraph: Any) -> str:
+    """python-docx `paragraph.text`, with the paragraph's equations kept inline."""
+    element = getattr(paragraph, "_p", None)
+    if element is not None and contains_omml(element):
+        return wordprocessing_paragraph_text(element)
+    return paragraph.text
 
 
 def parse_pptx(
@@ -1126,12 +1226,125 @@ def _pptx_iter_shapes(shapes: Any):
         yield shape
 
 
-def _pptx_table_html(table: Any) -> str:
+_PPTX_P_NS = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+_PPTX_A_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+_PPTX_MC_NS = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+_PPTX_SHAPE_TAGS = frozenset(
+    f"{_PPTX_P_NS}{local}" for local in ("sp", "grpSp", "graphicFrame", "cxnSp", "pic", "contentPart")
+)
+
+
+def _pptx_math_choice_shapes(alternate: Any) -> List[Any]:
+    """Shape elements in the `mc:Choice` of an equation's `mc:AlternateContent`.
+
+    PowerPoint wraps every text box holding an equation this way (Choice: the
+    real shape, `Requires="a14"`; Fallback: a picture of it). python-pptx's
+    shape tree only yields direct `p:sp`/`p:grpSp`/... children, so such a box
+    — text around the equation included — was never read. Only alternates
+    whose Choice actually holds math are opened: other alternates (ink, 3D
+    models, ...) stay unread, exactly as before.
+    """
+    choice = alternate.find(f"{_PPTX_MC_NS}Choice")
+    if choice is None or not contains_omml(choice):
+        return []
+    return [child for child in choice if child.tag in _PPTX_SHAPE_TAGS]
+
+
+def _pptx_iter_shapes_with_math(shapes: Any, container: Any):
+    """`_pptx_iter_shapes` for a slide that holds math: same document order and
+    group expansion, plus the equation boxes hidden in `mc:AlternateContent`
+    (wrapped through python-pptx's own shape factory, so tables / text frames
+    in them read like any other shape)."""
+    from pptx.shapes.shapetree import SlideShapeFactory
+
+    def items(collection: Any, element: Any) -> List[Any]:
+        # Map XML children to python-pptx's proxies by identity: lxml hands
+        # back the same proxy object while one is alive, and `known` keeps them.
+        known = list(collection)
+        by_element = {id(shape.element): shape for shape in known}
+        found: List[Any] = []
+        for child in element:
+            shape = by_element.pop(id(child), None)
+            if shape is not None:
+                found.append(shape)
+            elif child.tag == f"{_PPTX_MC_NS}AlternateContent":
+                found.extend(
+                    SlideShapeFactory(choice_shape, collection)
+                    for choice_shape in _pptx_math_choice_shapes(child)
+                )
+        # Safety net: a shape python-pptx yields but the walk did not meet is
+        # still read (after the others) rather than silently dropped.
+        found.extend(shape for shape in known if id(shape.element) in by_element)
+        return found
+
+    pending = items(shapes, container)
+    pending.reverse()
+    while pending:
+        shape = pending.pop()
+        if hasattr(shape, "shapes"):
+            children = items(shape.shapes, shape.element)
+            children.reverse()
+            pending.extend(children)
+            continue
+        yield shape
+
+
+def _pptx_math_units(text_body: Any) -> List[tuple[str, str]]:
+    """A text body holding math as ("text", collapsed text) / ("formula", latex)
+    units in reading order: display equations split the text around them, one
+    formula per equation line; inline equations stay in the text as `$latex$`."""
+    units: List[tuple[str, str]] = []
+    pending: List[str] = []
+
+    def flush() -> None:
+        text = " ".join("".join(pending).split())
+        pending.clear()
+        if text:
+            units.append(("text", text))
+
+    for kind, value in drawingml_segments(text_body):
+        if kind == "text":
+            pending.append(value)
+            continue
+        flush()
+        units.extend(("formula", line) for line in value)
+    flush()
+    return units
+
+
+def _pptx_math_cell_text(cell: Any) -> str:
+    text_body = getattr(getattr(cell, "_tc", None), "txBody", None)
+    if text_body is not None and contains_omml(text_body):
+        return drawingml_inline_text(text_body)
+    return cell.text
+
+
+def _pptx_math_notes_text(notes_slide: Any) -> str | None:
+    """Notes text of a notes slide that holds math: the body placeholder's text
+    (python-pptx's `notes_text_frame`), looked up in the raw XML because the
+    placeholder may itself sit in an `mc:AlternateContent`. None: no body."""
+    pending = [notes_slide.element]
+    while pending:
+        node = pending.pop()
+        if node.tag == f"{_PPTX_MC_NS}Fallback":
+            continue
+        if node.tag == f"{_PPTX_P_NS}sp":
+            placeholder = node.find(f"{_PPTX_P_NS}nvSpPr/{_PPTX_P_NS}nvPr/{_PPTX_P_NS}ph")
+            text_body = node.find(f"{_PPTX_P_NS}txBody")
+            if placeholder is not None and placeholder.get("type") == "body" and text_body is not None:
+                return drawingml_inline_text(text_body)
+            continue
+        pending.extend(reversed([child for child in node if isinstance(child.tag, str)]))
+    return None
+
+
+def _pptx_table_html(table: Any, cell_text: Any = None) -> str:
     """把 python-pptx 的表格重建成最小 HTML，与 MinerU 的 table_html 口径一致。
 
     合并单元格走 python-pptx 1.0 的公开 API：被覆盖的格（`is_spanned`）跳过，起始格
     （`is_merge_origin`）写 rowspan/colspan——否则一个跨 3 列的表头会被拍成 3 个格、
-    其中 2 个空。
+    其中 2 个空。`cell_text` 只在含公式的幻灯片上传入（`_pptx_math_cell_text`），
+    其余幻灯片仍读 `cell.text`。
     """
     rows: List[str] = []
     for row in table.rows:
@@ -1147,7 +1360,8 @@ def _pptx_table_html(table: Any) -> str:
                     attrs += f' rowspan="{span_height}"'
                 if span_width > 1:
                     attrs += f' colspan="{span_width}"'
-            cells.append(f"<td{attrs}>{html_module.escape(' '.join(cell.text.split()))}</td>")
+            text = cell.text if cell_text is None else cell_text(cell)
+            cells.append(f"<td{attrs}>{html_module.escape(' '.join(text.split()))}</td>")
         rows.append(f"<tr>{''.join(cells)}</tr>")
     return f"<table>{''.join(rows)}</table>" if rows else ""
 
@@ -1179,14 +1393,27 @@ def parse_pptx_pythonpptx(
         for slide_index, slide in enumerate(presentation.slides, start=1):
             shape_index = 0
             table_index = 0
-            for shape in _pptx_iter_shapes(slide.shapes):
+            formula_index = 0
+            # 含公式（OMML）的幻灯片走带公式的遍历与取字；不含的幻灯片逐字节保持
+            # 原路径（python-pptx 自己的形状树与 `.text`）。
+            slide_math = contains_omml(slide.element)
+            if slide_math:
+                shapes = _pptx_iter_shapes_with_math(
+                    slide.shapes, slide.element.find(f"{_PPTX_P_NS}cSld/{_PPTX_P_NS}spTree")
+                )
+            else:
+                shapes = _pptx_iter_shapes(slide.shapes)
+            for shape in shapes:
                 # per-shape 兜底：python-pptx 对畸形/未实现的形状会在属性访问处抛
                 # 异常，坏形状只丢自己，不连坐同页其他形状、更不连坐整份 deck。
                 # 这一层仍嵌在整函数的 fail-open except 之内——语义是「局部宽容、
                 # 整体兜底」。
                 try:
                     if getattr(shape, "has_table", False):
-                        html = _pptx_table_html(shape.table)
+                        if slide_math:
+                            html = _pptx_table_html(shape.table, cell_text=_pptx_math_cell_text)
+                        else:
+                            html = _pptx_table_html(shape.table)
                         table_index += 1
                         base_metadata = {
                             "parser": "python-pptx",
@@ -1228,6 +1455,43 @@ def parse_pptx_pythonpptx(
                         continue
                     if not getattr(shape, "has_text_frame", False):
                         continue
+                    text_body = shape.element.find(f"{_PPTX_P_NS}txBody") if slide_math else None
+                    if text_body is not None and contains_omml(text_body):
+                        # 独立公式（m:oMathPara）各成一个 formula 元素、把形状文本
+                        # 在它前后切开；行内公式以 `$latex$` 留在 slide_text 里。
+                        for kind, unit in _pptx_math_units(text_body):
+                            if kind == "formula":
+                                formula_index += 1
+                                elements.append(
+                                    _element(
+                                        source_id,
+                                        "formula",
+                                        f"PPTX slide {slide_index} formula {formula_index}",
+                                        unit,
+                                        {
+                                            "parser": "python-pptx",
+                                            "slide_number": slide_index,
+                                            "formula_index": formula_index,
+                                            "text_format": "latex",
+                                        },
+                                    )
+                                )
+                                continue
+                            shape_index += 1
+                            elements.append(
+                                _element(
+                                    source_id,
+                                    "slide_text",
+                                    f"PPTX slide {slide_index} shape {shape_index}",
+                                    unit,
+                                    {
+                                        "parser": "python-pptx",
+                                        "slide_number": slide_index,
+                                        "shape_index": shape_index,
+                                    },
+                                )
+                            )
+                        continue
                     text = " ".join(shape.text_frame.text.split())
                     if not text:
                         continue
@@ -1250,12 +1514,20 @@ def parse_pptx_pythonpptx(
 
             if not slide.has_notes_slide:
                 continue
-            # notes_text_frame 可以是 None（备注母版没有 body 占位符，或占位符被删
-            # 而 notesSlide part 仍在），官方文档写明了这一点。
-            notes_frame = getattr(slide.notes_slide, "notes_text_frame", None)
-            if notes_frame is None:
-                continue
-            notes = " ".join(notes_frame.text.split())
+            notes_slide = slide.notes_slide
+            if contains_omml(notes_slide.element):
+                # 备注里的公式一律行内 `$latex$`：备注只出一个元素。
+                notes_text = _pptx_math_notes_text(notes_slide)
+                if notes_text is None:
+                    continue
+            else:
+                # notes_text_frame 可以是 None（备注母版没有 body 占位符，或占位符
+                # 被删而 notesSlide part 仍在），官方文档写明了这一点。
+                notes_frame = getattr(notes_slide, "notes_text_frame", None)
+                if notes_frame is None:
+                    continue
+                notes_text = notes_frame.text
+            notes = " ".join(notes_text.split())
             # Notes placeholders often echo the bare slide number; skip those.
             if not notes or notes == str(slide_index):
                 continue
@@ -1277,6 +1549,22 @@ def parse_pptx_pythonpptx(
     return parse_pptx_basic(source_id, path)
 
 
+def _pptx_basic_math_text(node: Any) -> str:
+    """Every text body under `node` (skipping AlternateContent Fallbacks, which
+    repeat their Choice), equations inline, whitespace collapsed."""
+    texts: List[str] = []
+    pending = [node]
+    while pending:
+        current = pending.pop()
+        if current.tag == f"{_PPTX_MC_NS}Fallback":
+            continue
+        if current.tag in (f"{_PPTX_P_NS}txBody", f"{_PPTX_A_NS}txBody"):
+            texts.append(drawingml_inline_text(current))
+            continue
+        pending.extend(reversed([child for child in current if isinstance(child.tag, str)]))
+    return " ".join(" ".join(texts).split())
+
+
 def parse_pptx_basic(source_id: str, path: Path) -> List[SourceElement]:
     elements: List[SourceElement] = []
     namespace = {
@@ -1284,7 +1572,12 @@ def parse_pptx_basic(source_id: str, path: Path) -> List[SourceElement]:
         "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
     }
 
-    def shape_text(node: ElementTree.Element) -> str:
+    def shape_text(node: ElementTree.Element, part_has_math: bool = False) -> str:
+        # `part_has_math` is a byte-level pre-check of the whole part, so a
+        # math-free slide never pays for the per-shape element walk.
+        if part_has_math and contains_omml(node):
+            # Last-resort path: equations stay inline as `$latex$`.
+            return _pptx_basic_math_text(node)
         values = [
             run.text.strip()
             for run in node.findall(".//a:t", namespace)
@@ -1299,11 +1592,24 @@ def parse_pptx_basic(source_id: str, path: Path) -> List[SourceElement]:
             if name.startswith("ppt/slides/slide") and name.endswith(".xml")
         )
         for slide_index, slide_name in enumerate(slide_names, start=1):
-            root = ElementTree.fromstring(archive.read(slide_name))
+            slide_xml = archive.read(slide_name)
+            root = ElementTree.fromstring(slide_xml)
+            slide_math = OMML_MARKER in slide_xml and contains_omml(root)
             shapes = root.findall(".//p:sp", namespace)
+            if slide_math:
+                # `.//p:sp` sees both halves of an equation's AlternateContent;
+                # the Fallback copy is a picture of the Choice, so read it once.
+                hidden = {
+                    id(shape)
+                    for alternate in root.iter(f"{_PPTX_MC_NS}AlternateContent")
+                    if _pptx_math_choice_shapes(alternate)
+                    for fallback in alternate.iter(f"{_PPTX_MC_NS}Fallback")
+                    for shape in fallback.iter(f"{_PPTX_P_NS}sp")
+                }
+                shapes = [shape for shape in shapes if id(shape) not in hidden]
             shape_index = 0
             for shape in shapes:
-                text = shape_text(shape)
+                text = shape_text(shape, slide_math)
                 if not text:
                     continue
                 shape_index += 1
@@ -1322,7 +1628,7 @@ def parse_pptx_basic(source_id: str, path: Path) -> List[SourceElement]:
                 )
             if shape_index == 0:
                 # No shape-level text (e.g. minimal XML); fall back to whole slide.
-                text = shape_text(root)
+                text = shape_text(root, slide_math)
                 if text:
                     elements.append(
                         _element(
@@ -1342,8 +1648,9 @@ def parse_pptx_basic(source_id: str, path: Path) -> List[SourceElement]:
         for notes_name in notes_names:
             match = re.search(r"notesSlide(\d+)\.xml", notes_name)
             notes_number = int(match.group(1)) if match else 0
-            root = ElementTree.fromstring(archive.read(notes_name))
-            text = shape_text(root).strip()
+            notes_xml = archive.read(notes_name)
+            root = ElementTree.fromstring(notes_xml)
+            text = shape_text(root, OMML_MARKER in notes_xml).strip()
             # Notes placeholders often echo the bare slide number; skip those.
             if not text or text == str(notes_number):
                 continue
