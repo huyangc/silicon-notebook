@@ -29,7 +29,7 @@ const {
   useNotebookExport, useNotebookImport, importFileProblem, TRANSFER_POLL_MS,
 } = await import("../../app/use-notebook-transfer.ts");
 const { forgetTransferLimit } = await import("../../app/notebook-transfer-api.ts");
-const { importUpload } = await import("../../app/notebook-import-upload.ts");
+const { importUpload, RECONCILE_INTERVAL_MS } = await import("../../app/notebook-import-upload.ts");
 
 const LIMIT = 8 * 1024 * 1024;
 
@@ -569,5 +569,31 @@ test("说不准之后重传同一个文件:带同一个上传标识,服务端回
   act(() => result.current.start());
   await waitFor(() => expect(result.current.view.jobs.map((item) => item.id)).toEqual(["existing"]));
   expect(api.uploadNotebookImport.mock.calls[1][1].uploadId).toBe(firstId);
+  expect(result.current.view.uploadError).toBe("");
+});
+
+
+test("弹窗关着时说不准的上传,作业晚些登记出来:被认领成一行,工具栏的「导入待确认」撤掉", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { result, rerender } = renderImport();
+  await waitFor(() => expect(result.current.view.limitBytes).toBe(LIMIT));
+  act(() => result.current.chooseFile(new File([new Uint8Array(10)], "a.snbk")));
+  let cut: (error: unknown) => void = () => undefined;
+  let sent: () => void = () => undefined;
+  api.uploadNotebookImport.mockImplementationOnce((_file: File, options: { onBodySent: () => void }) => {
+    sent = options.onBodySent;
+    return new Promise((_, reject) => { cut = reject; });
+  });
+  act(() => result.current.start());
+  await waitFor(() => expect(api.uploadNotebookImport).toHaveBeenCalledTimes(1));
+  rerender({ isOpen: false });
+  api.listNotebookTransfers.mockResolvedValueOnce([]);
+  await act(async () => { sent(); cut(new TypeError("Failed to fetch")); await Promise.resolve(); });
+  await waitFor(() => expect(result.current.view.uploadAttention).toBe("unsure"));
+  const uploadId = api.uploadNotebookImport.mock.calls[0][1].uploadId;
+  api.listNotebookTransfers.mockResolvedValueOnce([imp("late", { client_upload_id: uploadId })]);
+  await tick(RECONCILE_INTERVAL_MS + 10);
+  await waitFor(() => expect(result.current.view.jobs[0]?.id).toBe("late"));
+  expect(result.current.view.uploadAttention).toBe("");
   expect(result.current.view.uploadError).toBe("");
 });
