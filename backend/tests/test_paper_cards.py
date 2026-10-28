@@ -76,6 +76,18 @@ def _metric(value: str, anchor: str = "e2") -> dict:
     ("3x", "3x faster", "ambiguous_value"),
     ("-1", "delta -1", "ambiguous_value"),
     ("5", "top-1 85.2", "ambiguous_value"),
+    # contiguous multi-token values are not ambiguous even with single digits
+    ("3e-4", "learning rate 3e-4", ""),
+    ("1e-5", "weight decay 1e-5", ""),
+    ("1e-5", "weight decay 1e5", "value_not_in_anchor"),
+    ("3e-4", "3 layers, lr 4", "value_not_in_anchor"),
+    # en / em dashes are range separators like "-"
+    ("1.5-2.0", "gain of 1.5–2.0 dB", ""),
+    ("1.5–2.0", "gain of 1.5-2.0 dB", ""),
+    ("1.5—2.0", "gain of 1.5-2.0 dB", ""),
+    # a minus straight after a non-ASCII letter keeps its sign
+    ("-0.5", "ΔBLEU Δ-0.5", ""),
+    ("0.5", "ΔBLEU Δ-0.5", "value_not_in_anchor"),
     # known limitation (documented): section / version numbers can match
     ("2.1", "see Section 2.1", ""),
 ])
@@ -94,6 +106,7 @@ def test_an_ambiguous_metric_is_dropped_with_its_reason():
 def test_number_tokens_are_canonical():
     assert number_tokens("v1.2.3 got 007 and 2.50") == ["1.2.3", "7", "2.5"]
     assert number_tokens("delta −0.5, top-1, 10-20, 1.2e-3") == ["-0.5", "1", "10", "20", "1.2", "-3"]
+    assert number_tokens("Δ-0.5 and 1.5–2.0") == ["-0.5", "1.5", "2"]
 
 
 # ------------------------------------------------------------------ verify

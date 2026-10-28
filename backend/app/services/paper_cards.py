@@ -124,15 +124,17 @@ def paper_card_prompt(input_block: str) -> str:
 # 指标值接地(规格 §4.2):值与元素文本各自切成「数字 token 序列」,值的序列必须作为
 # **连续子序列**出现在元素文本的序列里。
 #
-# - 全角转半角(NFKC),U+2212 减号视同 ``-``,去千分位逗号;
+# - 全角转半角(NFKC),U+2212 减号与 U+2013/U+2014 连接号都视同 ``-``,去千分位逗号;
 # - token 是完整数字串:前后都不是数字,点号连接的数字串整体算一个 token(185.23、
 #   1.2.3),所以 85.2 不会命中 185.23 或 85.23;字母、%、×、x、^ 等都是边界;
 # - 单个小数点的 token 去小数尾零与整数前导零(85.20 == 85.2);
-# - 符号保留:``-`` 紧跟在非字母数字字符(或开头)之后才是负号,所以 -0.5 不命中 0.5,
-#   而 top-1、10-20 里的 ``-`` 只是分隔(科学计数法 1.2e-3 的指数符号保留);
+# - 符号保留:``-`` 紧跟在 ASCII 字母数字之后只是分隔(top-1、ResNet-50、10-20、
+#   1.5–2.0),其它情况(开头、空白、括号、Δ 这类非 ASCII 字母之后)都是负号,所以 -0.5
+#   不命中 0.5、Δ-0.5 保留符号;科学计数法 1.2e-3 的指数符号也保留;
 # - 多 token 的值(科学计数法 1.2e-3、85.2±0.3、3×10^5)要求这些 token 在元素文本里
 #   连续出现、彼此之间只隔着连接符(e、×、^、±、/ 等),不能东一个西一个凑齐;
-# - 只由一位整数组成的值(``3``、``3x``、``-1``)太含糊,一律拒绝(``ambiguous_value``)。
+# - 只有一个 token、且是一位整数的值(``3``、``3x``、``-1``)太含糊,一律拒绝
+#   (``ambiguous_value``);连续匹配的多 token 值(3e-4、1e-5)不算含糊。
 #
 # 已知限制:token 不看上下文,值 ``2.1`` 会命中元素里的「Section 2.1」这类章节号 /
 # 版本号。引用的元素是模型自己选的、又必须含这个数,残余误判可接受。
@@ -155,7 +157,9 @@ def _canonical_number(token: str) -> str:
 
 def _normalize_numeric_text(text: str) -> str:
     """全角转半角(NFKC)、统一减号并去千分位逗号。"""
-    normalized = unicodedata.normalize("NFKC", text or "").replace("\u2212", "-")
+    normalized = unicodedata.normalize("NFKC", text or "")
+    for dash in ("\u2212", "\u2013", "\u2014"):
+        normalized = normalized.replace(dash, "-")
     return _THOUSANDS_RE.sub("", normalized)
 
 
@@ -166,11 +170,11 @@ def _number_spans(text: str) -> tuple[str, list[tuple[str, int, int]]]:
     for match in _NUMBER_RE.finditer(normalized):
         sign, digits = match.group(1), match.group(2)
         start = match.start()
-        # ``-`` 前面是字母数字(top-1、10-20)就只是分隔符,不是负号;科学计数法的
-        # 指数(1.2e-3:``e`` 前是数字)例外,符号保留。
+        # ``-`` 前面是 ASCII 字母数字(top-1、10-20)就只是分隔符,不是负号;科学计数法
+        # 的指数(1.2e-3:``e`` 前是数字)例外,符号保留。
         before = normalized[start - 1] if sign and start > 0 else ""
-        exponent = before in "eE" and start > 1 and normalized[start - 2].isdigit()
-        if before.isalnum() and not exponent:
+        exponent = before in ("e", "E") and start > 1 and normalized[start - 2].isdigit()
+        if before.isascii() and before.isalnum() and not exponent:
             sign = ""
             start += 1
         spans.append((sign + _canonical_number(digits), start, match.end()))
@@ -194,7 +198,7 @@ def _joined(text: str, end: int, start: int) -> bool:
 
 
 def _is_ambiguous(tokens: list[str]) -> bool:
-    return all(len(token.lstrip("-")) == 1 for token in tokens)
+    return len(tokens) == 1 and len(tokens[0].lstrip("-")) == 1
 
 
 def ground_value(value: str, element_text: str) -> str:

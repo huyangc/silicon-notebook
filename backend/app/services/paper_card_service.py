@@ -15,9 +15,10 @@
 失败分三类(按调度层包装后的 ``.code`` 判定,原始调度异常同样接受):
 - **暂时不可用**(``is_transient_model_error``:队列满/等待超时/熔断/429/5xx/超时)→
   ``deferred``,不写失败行、不累计 ``attempts``;
-- **内容失败**(模型回了但不是合法对象、``malformed_response``、校验后全空,以及元数据
-  抽取的内容失败)→ 写 ``failed`` 行,按同一 basis + 版本冷却 1h(连续 3 次后 24h);
-- 其它(鉴权、配置、未知异常)→ ``failed``,不写行、不冷却。
+- **内容失败与对这篇文档确定性的失败**(模型回了但不是合法对象、``malformed_response``、
+  校验后全空、上下文超长、服务商拒绝该内容等非鉴权 4xx——``INPUT_DETERMINISTIC_MODEL_ERROR_CODES``
+  ——以及元数据抽取的同类失败)→ 写 ``failed`` 行,按同一 basis + 版本冷却 1h(连续 3 次后 24h);
+- 鉴权/配置这类全局故障与未知异常 → ``failed``,不写行、不冷却(修好配置后应立即可用)。
 """
 from __future__ import annotations
 
@@ -38,7 +39,7 @@ from app.repositories.ports import RepositoryDatabasePort, SourceStorePort
 from app.services.document_source_overview import sample_paper_card_input
 from app.services.kg.json_utils import safe_json
 from app.services.model_work import (
-    MALFORMED_RESPONSE_CODE,
+    INPUT_DETERMINISTIC_MODEL_ERROR_CODES,
     is_transient_model_error,
     model_artifact_scope,
     model_error_code,
@@ -209,13 +210,20 @@ class PaperCardService:
             plans = self._classify_all(ordered, permitted, results, cancel_event)
             budget = _Budget(generate_limit)
             pending = [plans[key] for key in ordered if key in plans]
+            deadline = time.monotonic() + self._wait_bound_seconds()
             for retry in (True, False):
                 if not pending:
                     break
                 leaders, waiters = self._partition(pending)
-                admitted = self._admit(leaders, budget, results)
-                self._run_leaders(admitted, cancel_event, results)
-                pending = self._await_waiters(waiters, cancel_event, results, retry=retry)
+                try:
+                    admitted = self._admit(leaders, budget, results)
+                    self._run_leaders(admitted, cancel_event, results)
+                finally:
+                    # 无论这一轮怎么结束(包括 parallelism()/建池本身抛错),本轮占到的
+                    # 单飞位都要交还,否则后来的请求会一直等一个不存在的领头者。
+                    for plan, flight in leaders:
+                        self._flights.finish(plan.source_id, flight)
+                pending = self._await_waiters(waiters, cancel_event, results, retry=retry, deadline=deadline)
         except CoreCancellation:
             self._emit_all([results[key] for key in ordered if key in results], actor_id)
             raise
@@ -325,9 +333,10 @@ class PaperCardService:
 
     def _admit(self, leaders: list[tuple[_Plan, _Flight]], budget: _Budget,
                results: dict[tuple[str, str], CardResult]) -> list[tuple[_Plan, _Flight]]:
-        """按输入顺序预留模型调用:卡片 1 次,需先抽元数据的 2 次(预算只剩 1 时只做元数据,
-        是论文的话卡片留到下次)。预留不退回,所以哪几篇被推迟只取决于输入顺序。
-        没被放行的领头者立刻交还单飞位(带上结论,等待者据此自己决定)。"""
+        """按输入顺序给本轮的领头者预留模型调用:卡片 1 次,需先抽元数据的 2 次(预算只剩 1
+        时只做元数据,是论文的话卡片留到下次)。预留不退回。哪几篇被推迟取决于输入顺序,
+        也取决于并发时序:同一篇正被别的请求生成时它是等待者、不占预算,领头者没留下卡片
+        时它在第二轮才按剩余预算重新排队。没被放行的领头者立刻交还单飞位(带上结论)。"""
         enabled = bool(getattr(self._settings, "paper_card_enabled", True))
         admitted = []
         for plan, flight in leaders:
@@ -467,8 +476,10 @@ class PaperCardService:
             if is_transient_model_error(exc):
                 raise
             code = model_error_code(exc)
-            if code == MALFORMED_RESPONSE_CODE:
-                return self._write(plan, sample.basis, model, failure=MALFORMED_RESPONSE_CODE, audit=audit)
+            if code in INPUT_DETERMINISTIC_MODEL_ERROR_CODES:
+                # 对这篇输入确定性的失败:写行冷却,别每次提问都再烧一次。
+                failure = code if code == "malformed_response" else f"model_error:{code}"
+                return self._write(plan, sample.basis, model, failure=failure, audit=audit)
             return CardResult(*key, "failed", reason=f"model_error:{code or type(exc).__name__}", model=model)
         parsed = _parse_object(raw)
         if parsed is None:
@@ -519,21 +530,39 @@ class PaperCardService:
         return cards, bases
 
     # ------------------------------------------------------------ single flight
+    def _wait_bound_seconds(self) -> float:
+        """等待别的请求生成同一篇的总上限:领头者最多两次模型调用(元数据 + 卡片),
+        每次最多「交互队列等待 30 秒 + 单次超时 × (重试 + 1)」。"""
+        per_call = float(getattr(self._settings, "openai_compat_timeout_seconds", 60)) * (
+            1 + int(getattr(self._settings, "openai_compat_max_retries", 0) or 0)
+        ) + 30.0
+        return 2 * per_call
+
     def _await_waiters(self, waiters: list[tuple[_Plan, _Flight]], cancel_event: CancelEvent,
-                       results: dict[tuple[str, str], CardResult], *, retry: bool) -> list[_Plan]:
-        """同一篇正被别的请求生成:在池外等它结束(轮询取消)。领头者以无卡终态结束时沿用
-        它的结论;生成了卡片的按缓存重判;领头者被取消或推迟、没留下有效卡片时,返回需要
-        自己再生成的计划(``retry``),否则记 ``deferred/in_flight``。"""
+                       results: dict[tuple[str, str], CardResult], *, retry: bool,
+                       deadline: float) -> list[_Plan]:
+        """同一篇正被别的请求生成:在池外等它结束(轮询取消,整次调用最多等到 ``deadline``,
+        超过的记 ``deferred/in_flight``)。领头者以无卡终态结束时沿用它的结论;生成了卡片的
+        按缓存重判;领头者被取消或推迟、没留下有效卡片时,返回需要自己再生成的计划
+        (``retry``),否则记 ``deferred/in_flight``。"""
         again: list[_Plan] = []
         if not waiters:
             return again
         started = {plan.key: time.monotonic() for plan, _flight in waiters}
-        for _plan, flight in waiters:
+        timed_out: set[tuple[str, str]] = set()
+        for plan, flight in waiters:
             while not flight.done.wait(_WAIT_POLL_SECONDS):
                 raise_if_cancelled(cancel_event)
+                if time.monotonic() >= deadline:
+                    timed_out.add(plan.key)
+                    break
         raise_if_cancelled(cancel_event)
         recheck: dict[str, list[_Plan]] = {}
         for plan, flight in waiters:
+            if plan.key in timed_out:
+                results[plan.key] = CardResult(*plan.key, "deferred", reason="in_flight",
+                                               elapsed_ms=_ms(started[plan.key]))
+                continue
             outcome = flight.result
             if outcome is not None and outcome.status in _TERMINAL_WITHOUT_CARD:
                 results[plan.key] = dataclasses.replace(

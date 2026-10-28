@@ -103,6 +103,15 @@ class SourceFileStore:
     ) -> str:
         """Raw document text for windowing: read the stored .md/.txt file when
         present, else reconstruct from element texts."""
+        text = self.read_text_file(file_path)
+        if text is not None:
+            return text
+        return "\n\n".join(e.text for e in fallback_elements)
+
+    def read_text_file(self, file_path: str) -> str | None:
+        """The stored .md/.txt file's text (possibly ``""``), or ``None`` when the
+        source is not such a file or it cannot be read — the case in which
+        ``read_source_text`` reconstructs from elements instead."""
         path = file_path or ""
         if path and (path.endswith(".md") or path.endswith(".markdown") or path.endswith(".txt")):
             try:
@@ -110,5 +119,5 @@ class SourceFileStore:
                 return Path(resolved).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 pass
-        return "\n\n".join(e.text for e in fallback_elements)
+        return None
 

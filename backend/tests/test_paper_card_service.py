@@ -378,6 +378,62 @@ def test_an_auth_failure_is_failed_without_a_row(repo, nb, service, model):
     assert _card_row(repo, nb, "s1") is None
 
 
+class _CodedError(Exception):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+@pytest.mark.parametrize(("error", "reason"), [
+    (lambda: _CodedError("context_length_exceeded"), "model_error:model_context_exceeded"),
+    (lambda: _CodedError("model_rejected"), "model_error:model_rejected"),
+    (lambda: kit.StatusError(400), "model_error:provider_error"),
+    (lambda: kit.StatusError(422), "model_error:provider_error"),
+], ids=["context_exceeded", "rejected", "http_400", "http_422"])
+def test_input_deterministic_failures_are_cooled_down(repo, nb, service, model, error, reason):
+    _paper(repo, nb, "s1")
+
+    def fail(prompt):
+        raise error()
+
+    model.reply = fail
+    [first] = _get(service, nb, ["s1"])
+    assert (first.status, first.reason) == ("failed", reason)
+    row = _card_row(repo, nb, "s1")
+    assert (row["status"], row["raw_json"]["reason"], row["attempts"]) == ("failed", reason, 1)
+    assert _get(service, nb, ["s1"])[0].reason == "cooldown"
+    assert model.card_calls == 1
+
+
+@pytest.mark.parametrize(("error", "reason"), [
+    (lambda: kit.StatusError(403), "model_error:provider_auth"),
+    (lambda: _CodedError("unknown_model"), "model_error:unknown_model"),
+    (lambda: _CodedError("protocol_mismatch"), "model_error:protocol_mismatch"),
+], ids=["auth", "unknown_model", "protocol_mismatch"])
+def test_global_config_failures_write_no_row(repo, nb, service, model, error, reason):
+    _paper(repo, nb, "s1")
+
+    def fail(prompt):
+        raise error()
+
+    model.reply = fail
+    [result] = _get(service, nb, ["s1"])
+    assert (result.status, result.reason) == ("failed", reason)
+    assert _card_row(repo, nb, "s1") is None
+
+
+def test_an_input_deterministic_metadata_failure_is_cooled_down(repo, nb, service, model):
+    _paper(repo, nb, "s1", meta=None)
+
+    def too_long(prompt):
+        raise _CodedError("context_length_exceeded")
+
+    model.on_meta = too_long
+    assert _get(service, nb, ["s1"])[0].reason == "metadata_failed"
+    assert _get(service, nb, ["s1"])[0].reason == "cooldown"
+    assert model.meta_calls == 1
+
+
 @pytest.mark.parametrize("error", [
     lambda: ModelQueueTimeout(), lambda: ModelQueueFull(), lambda: kit.StatusError(429),
     lambda: kit.StatusError(502), lambda: TimeoutError("timed out"),
@@ -529,14 +585,16 @@ def test_the_metadata_variant_pages_the_opening_only(repo, nb, service, model, m
     ingestion = service._ingestion
     store = repo._runtime.source_store
     monkeypatch.setattr(ingestion, "source_elements", lambda *_: pytest.fail("full element load"))
+    # keyset pages only: the OFFSET reader re-counts the source on every page
+    monkeypatch.setattr(store, "source_elements_page", lambda *_a, **_k: pytest.fail("counting page read"))
     pages = []
-    original = store.source_elements_page
+    original = store.source_elements_after
 
     def counting(*args, **kwargs):
-        pages.append(kwargs.get("offset"))
+        pages.append(1)
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(store, "source_elements_page", counting)
+    monkeypatch.setattr(store, "source_elements_after", counting)
     source = store.get_source("s1")
     head_chars = repo.settings.paper_meta_head_chars
     head = ingestion._paper_meta_paged_head(source, head_chars, None)
@@ -545,13 +603,39 @@ def test_the_metadata_variant_pages_the_opening_only(repo, nb, service, model, m
     assert head == ingestion._paper_meta_full_head(source, None, head_chars)
 
 
+@pytest.mark.parametrize("content", ["", "# Gated Widgets\nAbstract: tokens."])
+def test_the_paged_head_reads_a_text_file_like_the_original(repo, nb, service, model, tmp_path, content):
+    kit.seed_source(repo, nb, "s1")
+    ingestion = service._ingestion
+    path = tmp_path / "s1.md"
+    path.write_text(content, encoding="utf-8")
+    source = repo._runtime.source_store.get_source("s1").model_copy(update={"file_path": str(path)})
+    head = ingestion._paper_meta_paged_head(source, 4000, None)
+    assert head == ingestion._paper_meta_full_head(source, None, 4000) == content
+    if not content:   # an empty file is "no text", never a fallback to the elements
+        assert ingestion.extract_paper_metadata_cancellable(
+            source, cancel_event=None, client=repo._runtime.models.chat("paper_metadata")) == "no_text"
+
+
+def test_a_non_content_value_error_is_not_cooled_down(repo, nb, service, model, monkeypatch):
+    _paper(repo, nb, "s1", meta=None)
+
+    def broken(*_args):
+        raise ValueError("bad storage configuration")
+
+    monkeypatch.setattr(service._ingestion.source_files, "read_text_file", broken)
+    [result] = _get(service, nb, ["s1"])
+    assert (result.status, result.reason) == ("failed", "metadata_error")
+    assert _card_row(repo, nb, "s1") is None
+
+
 def test_the_metadata_variant_reads_and_writes_inside_fanout_slots(repo, nb, service, model, monkeypatch):
     from app.services.retrieval_run import holding_fanout_slot, retrieval_run
 
     _paper(repo, nb, "s1", meta=None)
     store = repo._runtime.source_store
     seen = {}
-    for name in ("get_paper_meta", "source_elements_page", "upsert_paper_meta"):
+    for name in ("get_paper_meta", "source_elements_after", "upsert_paper_meta"):
         original = getattr(store, name)
 
         def spy(*args, _name=name, _original=original, **kwargs):
@@ -564,14 +648,16 @@ def test_the_metadata_variant_reads_and_writes_inside_fanout_slots(repo, nb, ser
             store.get_source("s1"), cancel_event=None, client=repo._runtime.models.chat("paper_metadata"),
         )
     assert status == "stored"
-    assert seen == {"get_paper_meta": True, "source_elements_page": True, "upsert_paper_meta": True}
+    assert seen == {"get_paper_meta": True, "source_elements_after": True, "upsert_paper_meta": True}
 
 
 def test_get_cards_refuses_to_run_inside_a_fanout_slot(repo, nb, service, model):
     from app.services.retrieval_run import retrieval_fanout_slot, retrieval_run
 
     _paper(repo, nb, "s1")
-    with retrieval_run(run_kind="test", fanout_limit=1):
+    # fanout_limit=2 so that, without the guard, the call completes (and the
+    # pytest.raises fails fast) instead of deadlocking on the one slot.
+    with retrieval_run(run_kind="test", fanout_limit=2):
         with retrieval_fanout_slot():
             with pytest.raises(RuntimeError, match="retrieval_fanout_slot"):
                 _get(service, nb, ["s1"])
@@ -724,6 +810,35 @@ def test_waiters_do_not_consume_the_generate_limit(repo, nb, service, model):
 
 
 def test_a_waiter_adopts_the_leaders_terminal_status(repo, nb, service, model):
+    # The leader ends in a terminal state that leaves NO row (an auth failure), so
+    # re-reading the cache could not tell the waiter anything: only adopting the
+    # leader's own result gives failed/model_error with a single model call.
+    _paper(repo, nb, "s1")
+    entered, release = threading.Event(), threading.Event()
+
+    def denied(prompt):
+        entered.set()
+        assert release.wait(10)
+        raise kit.StatusError(401)
+
+    model.on_card = denied
+    results: dict[str, object] = {}
+    leader = threading.Thread(target=lambda: results.update(a=_get(service, nb, ["s1"])[0]))
+    leader.start()
+    assert entered.wait(5)
+    waiter = threading.Thread(target=lambda: results.update(b=_get(service, nb, ["s1"])[0]))
+    waiter.start()
+    _wait_until(lambda: _waiting_on(service, "s1"))
+    release.set()
+    leader.join(5)
+    waiter.join(5)
+    assert (results["a"].status, results["a"].reason) == ("failed", "model_error:provider_auth")
+    assert (results["b"].status, results["b"].reason) == ("failed", "model_error:provider_auth")
+    assert model.card_calls == 1
+    assert _card_row(repo, nb, "s1") is None
+
+
+def test_a_waiter_adopts_the_leaders_not_paper(repo, nb, service, model):
     _paper(repo, nb, "s1", meta=None)
     model.is_paper = False
     entered, release = threading.Event(), threading.Event()
@@ -740,6 +855,42 @@ def test_a_waiter_adopts_the_leaders_terminal_status(repo, nb, service, model):
     waiter.join(5)
     assert results["a"].status == results["b"].status == "not_paper"
     assert model.meta_calls == 1
+
+
+def test_a_round_that_fails_to_start_releases_its_flights(repo, nb, service, model, monkeypatch):
+    _paper(repo, nb, "s1")
+
+    def broken(_workload):
+        raise RuntimeError("registry reload in progress")
+
+    monkeypatch.setattr(service._models, "parallelism", broken)
+    with pytest.raises(RuntimeError, match="registry reload"):
+        _get(service, nb, ["s1"])
+    assert service._flights.get("s1") is None
+    monkeypatch.undo()
+    results: dict[str, object] = {}
+    later = threading.Thread(target=lambda: results.update(r=_get(service, nb, ["s1"])[0]))
+    later.start()
+    later.join(5)
+    assert not later.is_alive(), "a later request hung on a leaked flight"
+    assert results["r"].status == "generated"
+
+
+def test_waiting_for_another_request_is_bounded(repo, nb, service, model, monkeypatch):
+    _paper(repo, nb, "s1")
+    entered, release = _block_cards(model)
+    leader = threading.Thread(target=lambda: _get(service, nb, ["s1"]))
+    leader.start()
+    try:
+        assert entered.wait(5)
+        monkeypatch.setattr(service, "_wait_bound_seconds", lambda: 0.3)
+        started = time.monotonic()
+        [result] = _get(service, nb, ["s1"])
+        assert (result.status, result.reason) == ("deferred", "in_flight")
+        assert time.monotonic() - started < 2.0
+    finally:
+        release.set()
+        leader.join(5)
 
 
 def test_a_waiter_generates_itself_when_the_leader_was_cancelled(repo, nb, service, model):

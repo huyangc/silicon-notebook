@@ -307,6 +307,19 @@ TRANSIENT_MODEL_ERROR_CODES = frozenset({
 #: The one code that means the model answered but the reply broke the JSON
 #: contract — a content failure, not an availability one.
 MALFORMED_RESPONSE_CODE = "malformed_response"
+#: Failures that are deterministic for the INPUT that was sent (the same
+#: document would fail the same way again): a reply that broke the JSON
+#: contract, an input over the context window, a provider refusing that
+#: content, and the remaining non-auth 4xx (``provider_error`` is
+#: ``_stable_error_code``'s fallback for them). Callers caching per-document
+#: results may cool these down; auth/config codes (``provider_auth``,
+#: ``unknown_model``, ``protocol_mismatch`` …) are global faults and must not.
+INPUT_DETERMINISTIC_MODEL_ERROR_CODES = frozenset({
+    MALFORMED_RESPONSE_CODE,
+    "model_context_exceeded",
+    "model_rejected",
+    "provider_error",
+})
 
 
 def model_error_code(error: BaseException) -> str:
