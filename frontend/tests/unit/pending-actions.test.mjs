@@ -10,6 +10,8 @@ import {
   pendingView,
   askElapsedLabel,
   pendingItemOrigin,
+  transferInProgress,
+  transferLabel,
 } from "../../app/pending-actions.ts";
 
 const report = { type: "report_outline", notebook_id: "nb1", notebook_name: "NB1", report_id: "r1", title: "T" };
@@ -156,4 +158,29 @@ test("pendingItemOrigin: library name for notebook items, 全局问答 for globa
   assert.equal(pendingItemOrigin({ type: "ask", notebook_name: "", job_id: "b" }), "");
   // 全局条目与笔记本条目 job id 前缀不同,签名互不相撞。
   assert.notEqual(itemSig({ type: "ask", scope: "global", job_id: "gask-1" }), itemSig({ type: "ask", job_id: "askjob-1" }));
+});
+
+
+test("notebook_transfer: identity is the job (two imports before publish do not collide)", () => {
+  const a = { type: "notebook_transfer", kind: "import", state: "running", job_id: "xfer-a", notebook_id: "" };
+  const b = { ...a, job_id: "xfer-b" };
+  assert.equal(itemSig(a), "transfer:xfer-a:running");
+  assert.notEqual(itemSig(a), itemSig(b));
+  // 完成后是新签名:进行中时关掉过,完成/失败时重新出现。
+  assert.notEqual(itemSig({ ...a, state: "failed" }), itemSig(a));
+});
+
+test("notebook_transfer: in-progress items show but are not unread, like the backend count", () => {
+  const running = { type: "notebook_transfer", kind: "export", state: "running", job_id: "x1", notebook_id: "nb1" };
+  const queued = { ...running, job_id: "x2", state: "queued" };
+  const ready = { ...running, job_id: "x3", state: "succeeded" };
+  const failed = { ...running, job_id: "x4", state: "failed", kind: "import" };
+  const v = pendingView([running, queued, ready, failed], [], [], []);
+  assert.equal(v.visibleItems.length, 4);
+  assert.equal(v.unread, 2);
+  assert.equal(transferInProgress(running), true);
+  assert.equal(transferInProgress(ready), false);
+  assert.deepEqual([running, queued, ready, failed].map(transferLabel), [
+    "导出进行中", "导出排队中", "导出完成", "导入失败",
+  ]);
 });
