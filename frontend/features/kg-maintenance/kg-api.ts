@@ -125,16 +125,25 @@ export const fetchKgSearch = (nb: string, query: string, k = 30) =>
     options,
   );
 
+// 合并对象的 canonical id 是类型前缀加成员归一后的名字(内容);按它读详情时,浏览器日志里
+// 这一段只写成 `{canonical_id}`(AGENTS.md:日志不带内容)。对象 id(`ko-…`)不透明,照常记。
+// 后端访问日志的同一规则在 `backend/app/core/log_paths.py`。
+const CANONICAL_ID_RE = /^K[LFP]?-/;
+const kgDetailLogSegment = (id: string) =>
+  CANONICAL_ID_RE.test(id) ? "{canonical_id}" : encodeURIComponent(id);
+
 export const fetchKgNeighbors = (
   nb: string,
   id: string,
   cap = 50,
   sourceNotebookId = "",
-) =>
-  requestJson<KgNeighborsResp>(
-    `/notebooks/${nb}/objects/${encodeURIComponent(id)}/neighbors?cap=${cap}${sourceNotebookId ? `&source_notebook_id=${encodeURIComponent(sourceNotebookId)}` : ""}`,
-    options,
+) => {
+  const query = `?cap=${cap}${sourceNotebookId ? `&source_notebook_id=${encodeURIComponent(sourceNotebookId)}` : ""}`;
+  return requestJson<KgNeighborsResp>(
+    `/notebooks/${nb}/objects/${encodeURIComponent(id)}/neighbors${query}`,
+    { ...options, logPath: `/notebooks/${nb}/objects/${kgDetailLogSegment(id)}/neighbors${query}` },
   );
+};
 
 // `after` is the hub-cluster member keyset cursor (R3·T-B2): the `id` of the
 // last member on the previous page, or "" for the first page. Omitting it
@@ -144,17 +153,20 @@ export const fetchConceptDetail = (nb: string, id: string, sourceNotebookId = ""
   if (sourceNotebookId) params.set("source_notebook_id", sourceNotebookId);
   if (after) params.set("after", after);
   const query = params.toString();
+  const suffix = query ? `?${query}` : "";
   return requestJson<ConceptDetailResp>(
-    `/notebooks/${nb}/concepts/${encodeURIComponent(id)}/detail${query ? `?${query}` : ""}`,
-    options,
+    `/notebooks/${nb}/concepts/${encodeURIComponent(id)}/detail${suffix}`,
+    { ...options, logPath: `/notebooks/${nb}/concepts/${kgDetailLogSegment(id)}/detail${suffix}` },
   );
 };
 
-export const fetchNodeContext = (nb: string, id: string, sourceNotebookId = "") =>
-  requestJson<NodeContext>(
-    `/notebooks/${nb}/objects/${encodeURIComponent(id)}/context${sourceNotebookId ? `?source_notebook_id=${encodeURIComponent(sourceNotebookId)}` : ""}`,
-    options,
+export const fetchNodeContext = (nb: string, id: string, sourceNotebookId = "") => {
+  const query = sourceNotebookId ? `?source_notebook_id=${encodeURIComponent(sourceNotebookId)}` : "";
+  return requestJson<NodeContext>(
+    `/notebooks/${nb}/objects/${encodeURIComponent(id)}/context${query}`,
+    { ...options, logPath: `/notebooks/${nb}/objects/${kgDetailLogSegment(id)}/context${query}` },
   );
+};
 
 export const fetchPendingMerges = (nb: string) =>
   requestJson<PendingMerge[]>(`/notebooks/${nb}/unified-kg/pending-merges`, options);

@@ -2,8 +2,9 @@
 
 A few routes carry user or source content -- or a credential -- in a path segment:
 the KG analysis finding dismissal (F4's subject key is a source-derived concept name,
-F2's is a pair of source ids), group invite and public share tokens, custom object
-schema type names. Every place that records a request path (the uvicorn access log,
+F2's is a pair of source ids), the KG detail reads addressed by a merged object's
+canonical id (the id carries a member's normalized name), group invite and public
+share tokens, custom object schema type names. Every place that records a request path (the uvicorn access log,
 the ``requests`` event channel) passes it through :func:`loggable_path`, which keeps
 the route and replaces those segments with a placeholder. The request itself is
 untouched -- only the copy a log line records -- and the API shape does not change.
@@ -18,22 +19,48 @@ from __future__ import annotations
 
 import re
 
-_CONTENT_SEGMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
+# Each entry: (a literal every match contains, the pattern, its replacement). The
+# literal is a substring test run before the pattern, so a path that cannot match
+# costs no regex search -- every request's log line goes through this table.
+_CONTENT_SEGMENTS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     (
+        "/kg-analysis/findings/",
         re.compile(r"(/api/notebooks/[^/?#]+/kg-analysis/findings/[^/?#]+/).+(/dismissal)$"),
         r"\1{subject_key}\2",
     ),
-    (re.compile(r"(/api/group-invites/)[^/?#]+(/join)$"), r"\1{token}\2"),
-    (re.compile(r"(/api/public/reports/)[^/?#]+$"), r"\1{token}"),
-    (re.compile(r"(/api/public/conversations/)[^/?#]+(/assets/)[^/?#]+$"), r"\1{token}\2{alias}"),
-    (re.compile(r"(/api/public/conversations/)[^/?#]+$"), r"\1{token}"),
-    (re.compile(r"(/api/(?:notebooks/[^/?#]+/)?object-schemas/)[^/?#]+$"), r"\1{object_type}"),
+    ("/group-invites/", re.compile(r"(/api/group-invites/)[^/?#]+(/join)$"), r"\1{token}\2"),
+    ("/public/reports/", re.compile(r"(/api/public/reports/)[^/?#]+$"), r"\1{token}"),
+    (
+        "/public/conversations/",
+        re.compile(r"(/api/public/conversations/)[^/?#]+(/assets/)[^/?#]+$"),
+        r"\1{token}\2{alias}",
+    ),
+    ("/public/conversations/", re.compile(r"(/api/public/conversations/)[^/?#]+$"), r"\1{token}"),
+    (
+        "/object-schemas/",
+        re.compile(r"(/api/(?:notebooks/[^/?#]+/)?object-schemas/)[^/?#]+$"),
+        r"\1{object_type}",
+    ),
+    # KG detail reads addressed by a merged object's canonical id
+    # (``concepts/{id}/detail``, ``objects/{id}/neighbors``, ``objects/{id}/context``):
+    # ``K-`` / ``KL-`` / ``KF-`` / ``KP-`` plus a member's normalized name, which may
+    # contain "/". An opaque object id (``ko-…``) on the same routes is kept.
+    (
+        "/K",
+        re.compile(
+            r"(/api/notebooks/[^/?#]+/(?:concepts|objects)/)K[LFP]?-.+"
+            r"(/(?:detail|neighbors|context))$"
+        ),
+        r"\1{canonical_id}\2",
+    ),
 )
 
 
 def loggable_path(path: str) -> str:
     """``path`` (no query string) with any content-bearing segment replaced."""
-    for pattern, replacement in _CONTENT_SEGMENTS:
+    for needle, pattern, replacement in _CONTENT_SEGMENTS:
+        if needle not in path:
+            continue
         templated, count = pattern.subn(replacement, path, count=1)
         if count:
             return templated
