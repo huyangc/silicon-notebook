@@ -53,10 +53,13 @@ MCP `read` 档也可触发生成；卡片只覆盖论文。**本计划范围一�
 
 | PR | 任务 | 合入后的可见效果 |
 |---|---|---|
-| PR1 存储与服务 | T1–T4 | 无用户可见变化（服务有单测与 PG 测试；门控默认关） |
-| PR2 Agent 与合成 | T5–T7 | 问答 reasoning 模式可用三个动作与论文表；门控默认开 |
-| PR3 MCP 与文档 | T8–T9 | MCP 24 个工具；文档、更新说明 |
+| PR1 存储、服务、Agent 与合成 | T1–T7 | 问答 reasoning 模式可用三个动作与论文表；门控默认开 |
+| PR2 MCP 与文档 | T8–T9 | MCP 24 个工具；文档、更新说明 |
+| PR3 阈值校准 | T10 | 阈值换成校准值 |
 
+原计划把 T1–T4 单独作为 PR1，但组件调用审计（`scripts/audit_component_callers.py --check`，`check_contracts.sh`
+与 `test_component_caller_audit` 执行）要求每个服务成员都有生产调用方；T1–T4 的服务要到 T5 才有调用方，单独合入必红。
+所以 T1–T7 合成一个 PR（2026-10-28 调整），不往测试白名单里塞临时条目。
 PR2 基于 PR1 合入后的 master，PR3 基于 PR2；每个 PR 开之前 rebase 到最新 master 并重跑门禁。
 
 ---
@@ -163,11 +166,11 @@ PR2 基于 PR1 合入后的 master，PR3 基于 PR2；每个 PR 开之前 rebase
    运行在 T10。`FIND_SOURCES_*_RELEVANCE` 先写保守的临时值。
 4. 测试：假模型单测（逐字段片段选择、无向量回落、非法 anchor、数值不接地丢弃、非论文可用、天花板外来源被拒、取消）。
 
-**PR1 门禁**：T1–T4 完成后，主 agent 跑 §3 全量门禁，开 PR1，走 codex 评审闭环合入。
+**T1–T4 检查点**：主 agent 跑相关测试与组件审计之外的守卫（审计在 T5 接线后转绿），不开 PR。
 
 ### T5 Reflect 动作接入（opus 实现子代理：触及热函数与 prompt）
 
-依赖 PR1 合入。
+依赖 T1–T4 完成。
 
 1. `domain/reflect_action.py`：三个动作 id 进 `CORE_REFLECT_ACTION_IDS`，嵌套键进 `REFLECT_SCHEMA_TOP_LEVEL_FIELDS`
    （不用 `STRICT_SCHEMA_FALLBACK_KEYS` 里的名字）。
@@ -215,11 +218,11 @@ PR2 基于 PR1 合入后的 master，PR3 基于 PR2；每个 PR 开之前 rebase
 依赖 T6。本机 deepseek-flash（单服务副本配置），用 T4 的合成论文笔记本跑规格 §8 的 6 题，standard 与 exhaustive 各一遍：
 记录耗时、生成篇数、`deferred` 数、表内每个数字是否能在引用原文找到（人工核对），结果贴 PR2 描述。不达标回 T5/T6 修。
 
-**PR2 门禁**：§3 全量门禁 + 前端 `tsc`/vitest，开 PR2，codex 闭环合入。
+**PR1 门禁**：§3 全量门禁（含组件调用审计）+ 前端 `tsc`/vitest，开 PR1，codex 闭环合入。
 
 ### T8 MCP 工具（sonnet，`impl-task`）
 
-技术上只依赖 PR1；为减少与 PR2 的冲突，排在 PR2 合入之后开 PR3（测试骨架可在 PR2 评审期间先写）。
+依赖 PR1 合入（服务与运行时装配都在 PR1）。
 
 1. `mcp_tools/sources.py`：`list_sources` 加 `authors/pub_year/venue` 及字段限长；新增 `find_sources`、`get_paper_cards`、
    `extract_from_sources`（规格 §7.4），`tier="read"`；来源集合显式传 `all_visible ∪ 主人 hidden`；
@@ -244,16 +247,16 @@ PR2 基于 PR1 合入后的 master，PR3 基于 PR2；每个 PR 开之前 rebase
 - `fangan_todo.md` 登记本特性条目并在合入后移到完成。
 - `tests/test_architecture_documentation.py` 全绿。
 
-**PR3 门禁**：§3 全量门禁，开 PR3，codex 闭环合入。
+**PR2 门禁**：§3 全量门禁，开 PR2，codex 闭环合入。
 
 ### T10 阈值校准（主 agent，最后做）
 
-依赖 PR3 合入。
+依赖 PR2 合入。
 
 1. 请用户指定真实论文笔记本与 6 个主题；跑 `candidates`（只用嵌入检索）。
 2. 跑 `prelabel` 不带 `--confirm`，把调用次数与模型报给用户，**等用户在对话里明确同意后**再带 `--confirm` 运行。
 3. 用户核对标注文件；跑 `sweep`，把阈值写回 `app/core/config.py`，同时更新部署文档里的校准说明。
-4. 小 PR（PR4）：配置值 + 曲线与嵌入模型写进 PR 描述；§3 门禁 + codex 闭环合入。
+4. 小 PR（PR3）：配置值 + 曲线与嵌入模型写进 PR 描述；§3 门禁 + codex 闭环合入。
 
 ---
 
