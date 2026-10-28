@@ -13399,6 +13399,16 @@ button.tag:hover {
 .pending-row:hover {
   background: var(--soft, #f2f4f7);
 }
+/* 只呈现状态、点击不做任何事的行(导出/导入作业):不像可点的样子,只有「×」可点。 */
+.pending-row.pending-row-static {
+  cursor: default;
+}
+.pending-row.pending-row-static:hover {
+  background: transparent;
+}
+.pending-row-static .pending-row-x {
+  cursor: pointer;
+}
 /* 文本内容纵向堆叠(notebook 名 + 标签),min-width:0 让长标签能省略号截断而不撑宽 */
 .pending-row-main {
   display: flex;

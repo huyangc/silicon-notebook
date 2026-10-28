@@ -44,7 +44,25 @@ export function itemSig(it: PendingItem): string {
   // 带上它等于每半分钟给这条待办换一个新身份,关掉过的项会一直复活。job 只有
   // running 一个在途态,终态即整条消失,所以身份不需要再编码状态。
   if (it.type === "ask") return `ask:${it.job_id ?? ""}`;
+  // 导出/导入作业按 job 认身份(导入发布前 notebook_id 为空,按库认会互相撞);
+  // 带状态:进行中的条目关掉之后,完成或失败时重新出现。
+  if (it.type === "notebook_transfer") return `transfer:${it.job_id ?? ""}:${it.state ?? ""}`;
   return `index:${it.notebook_id}:${it.state ?? ""}`;
+}
+
+/** 导出/导入作业还在进行(排队或运行):与后端 count 同口径,只呈现、不计未读。 */
+export function transferInProgress(it: PendingItem): boolean {
+  return it.type === "notebook_transfer" && (it.state === "queued" || it.state === "running");
+}
+
+/** 导出/导入条目的一句状态(完整面板上线前铃铛里唯一的呈现,不带任何操作)。
+ *  后端只为导出下发「已完成」(导入完成即离开铃铛),所以完成态只有「导出完成」。 */
+export function transferLabel(it: PendingItem): string {
+  const what = it.kind === "import" ? "导入" : "导出";
+  if (it.state === "queued") return `${what}排队中`;
+  if (it.state === "running") return `${what}进行中`;
+  if (it.state === "failed") return `${what}失败`;
+  return "导出完成";
 }
 
 /** 条目行首那枚出处标签:库名;全局问答不属于任何一本库,标成「全局问答」。
@@ -110,8 +128,12 @@ export function pendingView(
   // 徽标从「有东西等你处理」退化成常态噪音。它仍然可见、可关掉、终态即消失。
   // 索引构建中 / 论文补全中那两类仍然计未读——那是用户没发起、可能已经忘了的后台
   // 活,提醒他一次是有价值的;这条分岔正是这个差别。
+  // 进行中的导出/导入同「进行中的提问」:自己刚发起的,不计未读(与后端 count 同口径);
+  // 完成待下载与失败计。
   const unread =
-    visibleItems.filter((it) => it.type !== "ask" && !seenSet.has(itemSig(it))).length +
+    visibleItems.filter(
+      (it) => it.type !== "ask" && !transferInProgress(it) && !seenSet.has(itemSig(it)),
+    ).length +
     done.filter((d) => !seenSet.has(doneSig(d.notebook_id, d.kind))).length;
   return { visibleItems, visibleDone: done, unread };
 }

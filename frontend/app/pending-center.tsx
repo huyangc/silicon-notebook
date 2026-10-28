@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode, type Ref } fr
 import { Bell } from "lucide-react";
 import { performApiRequest } from "./api-client.ts";
 import { getToken } from "./auth";
-import { itemSig, currentSigs, doneMessage, pruneSigs, pendingView, askElapsedLabel, pendingItemOrigin } from "./pending-actions";
+import { itemSig, currentSigs, doneMessage, pruneSigs, pendingView, askElapsedLabel, pendingItemOrigin, transferLabel } from "./pending-actions";
 import { bellDeletionHint, bellDeletionLabel } from "./notebook-deletion-copy.ts";
 
 // 「进行中的提问」在铃铛打开时的重算间隔。快照只在提问起止时推送,已进行时长要
@@ -22,7 +22,10 @@ const saveSigs = (key: string, v: string[]) => {
 export type PendingItem = {
   type:
     | "report_outline" | "governance" | "index" | "paper_meta" | "share_request" | "ask"
-    | "notebook_pending_delete";
+    | "notebook_pending_delete" | "notebook_transfer";
+  // notebook_transfer:网页导出/导入笔记本的作业(job_id、state、kind)。完整面板在
+  // 后续前端里;这里只呈现一句状态,不带任何操作。
+  kind?: "export" | "import";
   // notebook_pending_delete:正在一天删除窗口里、与我有关的笔记本(我是主人,或我在那里
   // 有记忆)。计入未读;点击在通知面板展开该笔记本的操作。
   delete_after?: string;
@@ -295,6 +298,7 @@ export function PendingBell(props: {
     { key: "governance", label: "治理待办", items: view.visibleItems.filter((i) => i.type === "governance") },
     { key: "index", label: "索引状态", items: view.visibleItems.filter((i) => i.type === "index") },
     { key: "paper_meta", label: "论文元数据", items: view.visibleItems.filter((i) => i.type === "paper_meta") },
+    { key: "notebook_transfer", label: "导出与导入", items: view.visibleItems.filter((i) => i.type === "notebook_transfer") },
   ];
 
   const labelFor = (it: PendingItem): string => {
@@ -310,6 +314,7 @@ export function PendingBell(props: {
       return elapsed ? `${head} · ${elapsed}` : head;
     }
     if (it.type === "share_request") return `${it.group_name || "群组"} · ${it.count ?? 0} 项待审批`;
+    if (it.type === "notebook_transfer") return transferLabel(it);
     if (it.type === "governance") {
       const n = it.subtype === "merge" ? "待合并" : it.subtype === "edge" ? "关系审核" : "内容审核";
       return `${it.notebook_name} · ${n} ${it.count}`;
@@ -373,7 +378,17 @@ export function PendingBell(props: {
                 <span className="pending-group-x" title={`关闭全部「${g.label}」`}
                       onClick={() => dismissGroup(g.items.map(itemSig))}>×</span>
               </div>
-              {g.items.map((it, idx) => (
+              {g.items.map((it, idx) => it.type === "notebook_transfer" ? (
+                // 只呈现状态:没有跳转、没有操作(仅「关掉」这一条铃铛自己的功能)。
+                <div className="pending-row pending-row-static" key={`${g.key}-${idx}`} data-testid="pending-transfer-row">
+                  <span className="pending-row-main">
+                    {pendingItemOrigin(it) && <span className="pending-row-nb">{pendingItemOrigin(it)}</span>}
+                    <span className="pending-row-label">{labelFor(it)}</span>
+                  </span>
+                  <span className="pending-row-x" title="关掉"
+                        onClick={() => dismissItem(itemSig(it))}>×</span>
+                </div>
+              ) : (
                 <button className="pending-row" key={`${g.key}-${idx}`}
                         onClick={() => { setOpen(false); onOpenItem(it); }}>
                   <span className="pending-row-main">
