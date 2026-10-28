@@ -1834,7 +1834,8 @@ SHARE 锁；门开着
 `scripts/cli.sh notebook export` 把一本笔记本导出为一个 `.snbk` 文件（zip 包，格式
 `silicon-notebook.notebook-archive` v1，定义在 `app.domain.notebook_archive`）；
 `scripts/cli.sh notebook inspect` 校验这样的文件；[`scripts/cli.sh notebook import`](#笔记本单文件导入)
-把它导入另一个部署。
+把它导入本部署或另一个部署。库主也可以在浏览器里做同样的事，受 `NOTEBOOK_TRANSFER_WEB_MAX_MB` 约束
+（[网页作业](#网页导出与导入作业)）；命令行没有这个上限，写出的是同一种格式。
 
 与[跨环境笔记本同步](#跨环境笔记本同步)的区别：同步在两个保持关联的环境之间搬目录型包（保留源
 id、按用户名映射、目标端成为只读镜像、记忆随行）。导出文件是一本笔记本一个文件，内容恰好是
@@ -1960,6 +1961,63 @@ schema；130 被中断（Ctrl-C）。多个文件按顺序导入，遇到第一�
 只补没有向量的），投影被打断的表记为投影失败（在表内重建投影即可），本次运行的任何笔记本都不建 scale 索引
 （记为 `skipped:interrupted`，附建索引命令），后续文件不再导入，所有回执照常输出（人读格式与 `--json`）。
 发布之前被中断：该文件什么都不留（导入会补偿），它之前那些文件的回执照常输出。
+
+## 网页导出与导入作业
+
+库主在浏览器里导出、任何登录用户在浏览器里导入（契约见
+[产品参考](./product-and-api_zh.md#笔记本导出与导入snbk)）；两者都作为作业跑在 API 进程里，受
+`NOTEBOOK_TRANSFER_WEB_MAX_MB` 约束（见部署参考）。用的是与上面 CLI 相同的归档格式和同一个导入器；网页导入与
+在线服务并存运行（不需要 `--confirm-service-stopped`），所以超过网页上限的笔记本走 CLI。
+
+**状态只在这一个 API 进程里。** 作业注册表、一次性下载票据与每人的作业名额（同时 2 个）都在内存里；每个作业另有
+一份 JSON sidecar。不加表、零迁移。第二个 API 进程既看不见另一个进程的作业，也认不得它的票据：只跑一个。工作在
+重活池里执行（受 `BACKGROUND_MAINTENANCE_CONCURRENCY` 约束），诊断里的名字是 `notebook-export-<job>` 与
+`notebook-import-<job>`；导入的重新嵌入是下文的 `notebook-reembed` 作业，由名为
+`notebook-transfer-watch-<job>` 的线程等待（最多 24 小时；超过就把重新嵌入记为仍在运行，不建索引）。日志
+（`silicon_notebook.notebook_transfer`）只记作业 id、笔记本 id 与异常类名；下载与上传请求的 query 从不进日志。
+
+**文件，位于存储根目录（`SILICON_NOTEBOOK_STORAGE_DIR`，默认 `.local/storage`）下：**
+
+```text
+transfers/jobs/<job>.json                 每个作业一份 sidecar（状态、阶段、id、报告、错误）
+transfers/exports/<job>.snbk              完成的导出，保留到作业过期
+transfers/exports/<job>.snbk.<random>.part   正在写的导出（写完以改名发布）
+transfers/imports/<job>.upload.part       正在接收的上传
+transfers/imports/<job>.snbk              已接收的上传，导入结束即删除
+```
+
+上传文件在导入结束后一律不保留，不论结果。磁盘按每人「两个网页上限大小的在途文件」加「保留到过期的已完成导出」
+估算（每人每本一个：同一本较新的导出会取代较旧的）。
+
+**过期清理。** 已结束的作业——记录、sidecar 与导出文件——保留 `NOTEBOOK_TRANSFER_TTL_SECONDS`（默认 86400）。
+读取时只在内存里丢弃过期作业；清理——服务启动时、每次建作业时、以及为下一个到期作业设定的那一个过期定时器——还会
+删除 `transfers/` 下没有作业认领、且这么久没被写过的文件（被杀掉的导出留下的 part 文件、请求中断的上传）。服务
+启动时没有作业认领的文件一律立刻删除，因为此时不可能有人还在写它。这三个目录里的东西都不需要手工删；也不要往里
+放别的文件，清理会把它们删掉。
+
+**重启恢复。** 服务启动时加载全部 sidecar：
+
+- 原本 `queued` 或 `running` 的作业判为失败：`export_interrupted`、`import_interrupted`（导入尚未发布，什么都
+  不留），或在数据库表明笔记本已发布（行存在且不再是隐藏的 `importing` 占位行）时记为
+  `import_followup_interrupted`——那本笔记本保留、归导入者；作业的文件删除；
+- 文件已经不在的已完成导出直接丢弃；其余已结束的作业保留到过期；
+- 启动日志写 `startup: marked N interrupted notebook transfer job(s) failed`。
+
+发布之前被杀掉的导入会留下它的隐藏占位行；与 CLI 一样，它在某次服务启动时、心跳早于
+`NOTEBOOK_IMPORT_STALE_SECONDS` 后被收割（`startup: handed N abandoned notebook import(s) to the delete job`）。
+重启早于这个时长时，它会隐藏到之后的某次启动；用户永远看不到它。
+
+**补完后续被打断的导入**（`import_followup_interrupted` 或 `import_followup_failed`）。笔记本已经发布；重新嵌入
+**不会**在启动时重新提交，scale 索引没有被请求，Knowhow 投影也可能被打断。不要再导入一次这个文件（那会多出一本）。
+二选一：
+
+- 库主删除这本笔记本、重新导入文件（作业的提示文案建议的做法）；或者
+- 原地补齐：笔记本「看板」的「来源状态」→「补齐向量」（`POST /api/notebooks/{id}/backfill-vectors`）在服务运行
+  时补段与内容块的向量；知识对象与关系的向量用 `scripts/cli.sh batch embed --notebook-id <id>` 与
+  `scripts/cli.sh kg backfill-relations <id>` 补（就是 CLI 导入被中断时列出的那两条命令；两者都只补没有向量的，
+  在 PostgreSQL 上都是离线维护工具，需要停服并带 `--confirm-service-stopped`）；投影失败的 Knowhow 表在表内重建；
+  最后建 scale 索引（笔记本的检索索引重建，或 `scripts/build_scale_index.py build --notebook <id> --full`）。
+  体检 H4/H5 会显示还缺什么。
 
 ## 补齐笔记本缺失的向量（`notebook-reembed`）
 

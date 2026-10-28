@@ -1426,6 +1426,39 @@ NOTEBOOK_IMPORT_STALE_SECONDS    # an import sentinel whose heartbeat is older t
                                  # sync_origin), never a sync mirror (default 3600; 60..604800)
 ```
 
+**Web notebook export and import** (product contract in
+[the product reference](./product-and-api.md#notebook-export-and-import-snbk), files and recovery
+in [operations](./operations.md#web-notebook-export-and-import-jobs)):
+
+```text
+NOTEBOOK_TRANSFER_WEB_MAX_MB     # one web export file and one web import upload, in MB
+                                 # (1 MB = 1024 x 1024 bytes; default 512; 1..1024). An export is
+                                 # refused up front (413) when the notebook's source files exceed
+                                 # it and stops when the file grows past it; an upload is refused
+                                 # the moment it passes it. Larger notebooks: the CLI
+NOTEBOOK_TRANSFER_TTL_SECONDS    # how long a finished job and its export file are kept, then
+                                 # removed with leftover part files (default 86400; 600..604800)
+```
+
+- **One API process.** The jobs, their download tickets and the per-user slots live in the
+  API process's memory (plus one sidecar per job under `<storage>/transfers/`). Keep the single
+  Uvicorn worker (`scripts/prod.sh` pins `--workers 1`) and run one API process per storage
+  directory: a second process would not see the first one's jobs or tickets.
+- **The Next build reads it too.** In a same-origin deployment the Next.js rewrite clones a
+  request body up to one ceiling, the larger of the source-upload envelope above and
+  `NOTEBOOK_TRANSFER_WEB_MAX_MB` + 1 MiB (one raw `application/zip` body,
+  `frontend/next-upload-limit.mjs`), fixed when the frontend is **built**. `scripts/prod.sh`
+  exports the root `.env` before building, so changing `NOTEBOOK_TRANSFER_WEB_MAX_MB` needs a
+  rebuild of the frontend as well as a backend restart; offline bundles (`scripts/pack.sh`)
+  build against the maximum 1024 so the runtime `.env` may choose any valid value. The Next
+  proxy buffers an upload in memory, which is why the upper bound is 1024 and why raising the
+  limit costs frontend memory. The browser reads the backend's parsed value from
+  `GET /api/system/config` (`notebook_transfer_max_bytes`); the backend's streaming 413 stays
+  authoritative.
+- **Disk.** Uploads and exports are written under `<storage>/transfers/`; allow, per active
+  user, two files of the web limit in flight plus the finished exports kept for
+  `NOTEBOOK_TRANSFER_TTL_SECONDS`.
+
 **Welcome question suggestions:**
 
 Automatic notebook titles/descriptions also use the `notebook_metadata` workload.

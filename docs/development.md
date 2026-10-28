@@ -486,6 +486,19 @@ statement-local planner settings (measured in both directions).
   Record table-specific design reasons beside the migration that introduces them.
   Update affected schema/seed/snapshot fixtures and migration manifests in the same
   change; do not rebaseline an old compatibility fixture to hide upgrade breakage.
+- **The deep copy's closure is also the notebook archive format.** Adding a table to, or
+  removing one from, the copy closure (either backend's `sharing_store._COPY_SNAPSHOT_QUERIES`)
+  changes what a `.snbk` file means: update `ARCHIVE_TABLES` in
+  [`app/domain/notebook_archive.py`](../backend/app/domain/notebook_archive.py) and bump its
+  `FORMAT_VERSION` (the new version goes into `READABLE_FORMAT_VERSIONS`; an old one stays
+  there only while this build can still read its files), in the same change, and add the new
+  version's table set to the frozen-set guard. Two guards in
+  [`backend/tests/test_notebook_archive_format.py`](../backend/tests/test_notebook_archive_format.py)
+  pin this: `test_archive_tables_are_exactly_the_copy_closure_on_both_backends` (the closure
+  equals `ARCHIVE_TABLES` on both backends) and
+  `test_the_table_set_of_each_format_version_is_frozen` (each format version names one table
+  set for good). A new column needs no format bump: an importer refuses a file carrying a
+  column its database lacks (as "from a newer build"), so the compatibility gate is per column.
 - SQLite migrations are one-way. A database's future `PRAGMA user_version` fails
   startup with `schema contains a future version`; PostgreSQL similarly rejects a
   future ledger version. Readiness exposes only the redacted initialization failure.
