@@ -245,3 +245,11 @@ def test_cli_a_database_error_ends_one_notebook_and_the_run_goes_on(repo, monkey
     assert "lock timeout" not in out and "mosfet" not in out.lower()
     assert "rewrite-descriptions done" in out and f'"incomplete_notebooks": ["{first}"]' in out
     assert cases._texts(repo, second)["MOSFET"] == "model-new::MOSFET"
+
+
+def test_a_hub_whose_input_changed_is_not_overwritten(repo, monkeypatch):
+    cases.assert_a_hub_whose_input_changed_is_not_overwritten(repo, monkeypatch)
+
+
+def test_no_completion_record_after_a_write_during_the_run(repo):
+    cases.assert_no_completion_record_after_a_write_during_the_run(repo)

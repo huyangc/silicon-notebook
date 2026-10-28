@@ -156,3 +156,11 @@ def test_pg_kg_delete_drops_the_staged_texts_only(repo):
 
 def test_pg_a_completed_notebook_is_answered_from_its_record(repo):
     cases.assert_a_completed_notebook_is_answered_from_its_record(repo)
+
+
+def test_pg_a_hub_whose_input_changed_is_not_overwritten(repo, monkeypatch):
+    cases.assert_a_hub_whose_input_changed_is_not_overwritten(repo, monkeypatch)
+
+
+def test_pg_no_completion_record_after_a_write_during_the_run(repo):
+    cases.assert_no_completion_record_after_a_write_during_the_run(repo)

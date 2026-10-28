@@ -598,3 +598,34 @@ def assert_an_interrupt_does_not_wait_for_calls_in_flight(repo):
         assert workers and all(t.daemon for t in workers)
     finally:
         release.set()
+
+
+def assert_a_hub_whose_input_changed_is_not_overwritten(repo, monkeypatch):
+    """The append scenario with every canonical a hub (one row per page):
+    the hub's lock-free verification recomputes the input and skips MOSFET."""
+    monkeypatch.setattr(_rewrite_module(), "_PUBLISH_PAGE_ROWS", 1)
+    assert_an_append_between_plan_and_publish_is_not_overwritten(repo)
+
+
+def assert_no_completion_record_after_a_write_during_the_run(repo):
+    """A write anywhere in the notebook while the run plans or generates
+    (here a KG mutation bump that changes no description input) means the
+    plan may not describe the notebook as it is now: the run still ends
+    done, but records nothing, so the next dry run plans in full."""
+    nb = build_notebook(repo)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    wrote = []
+
+    def write_once(_name):
+        if not wrote:
+            wrote.append(True)
+            lifecycle._mark_unified_kg_dirty(nb)
+
+    bind_chat_client(repo, WORKLOAD, DescModel("model-new", hook=write_once))
+    report = rewrite(repo, nb)
+    assert wrote and report.status == "done"
+    dry = rewrite(repo, nb, dry_run=True)
+    assert (dry.plans, dry.up_to_date, dry.model_calls) == (1, 2, 0)
+    # Unchanged since that full read's run? Then the following run records.
+    again = rewrite(repo, nb)
+    assert again.plans == 1 and rewrite(repo, nb, dry_run=True).plans == 0
