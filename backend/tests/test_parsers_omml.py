@@ -674,9 +674,10 @@ def test_docx_without_a_free_sentinel_keeps_formulas_as_inline_text(tmp_path):
 
 def test_adjacent_formulas_never_fuse_into_display_markers(tmp_path):
     parts = [("math", omath(r("a"))), ("math", omath(r("b"))), "$5"]
-    docx = docx_with(tmp_path / "adjacent.docx", [parts])
-    assert [el.text for el in _parse_docx(docx)] == ["$a$ $b$ $5"]
-    assert [el.text for el in parse_docx_basic("s1", docx)] == ["$a$ $b$ $5"]
+    after_dollar = ["cost 5$", ("math", omath(r("c")))]
+    docx = docx_with(tmp_path / "adjacent.docx", [parts, after_dollar])
+    assert [el.text for el in _parse_docx(docx)] == ["$a$ $b$ $5", "cost 5$ $c$"]
+    assert [el.text for el in parse_docx_basic("s1", docx)] == ["$a$ $b$ $5", "cost 5$ $c$"]
     pptx = pptx_with(tmp_path / "adjacent.pptx", [[
         ("equation", [pptx_paragraph(("math", omath(r("a"))), ("math", omath(r("b"))), "$5")]),
         ("notes_math", pptx_paragraph("N ", ("math", omath_para(r("a"), r("b"))))),
