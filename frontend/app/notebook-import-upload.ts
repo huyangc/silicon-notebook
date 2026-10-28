@@ -11,12 +11,15 @@
 //
 // 上传之前先读一次自己的作业:进行中的导出与导入已经有两个(后端每人上限),就不上传——
 // 服务器会在读请求体之前回 409 并断开,浏览器那边只看得到一次说不清原因的网络中断。
-// 上传中途真断了,再读一次作业把原因说清楚(名额满了),说不清就照实说可能的几种原因。
+// 每一串上传尝试带一个上传标识(`X-Upload-Id`,见 `chain`):上传被打断后只按它认领这一次
+// 建出的作业(别的标签页的导入不算),重传同一个文件也用它,服务端据此不会建第二本。
+// 确定没被接收时才说失败或「没有导入任何内容」;说不准时照实说说不准。
 //
 // 票据、文件内容都不经过这里;日志只有 api-client 那一行(路径与 query 的键)。
 
 import { useSyncExternalStore } from "react";
 
+import { newClientRequestId } from "./client-request-id.ts";
 import { httpErrorStatus } from "./errors.ts";
 import { pageReloading } from "./page-reload.ts";
 import {
@@ -30,6 +33,7 @@ import {
   listNotebookTransfers,
   transferRequestErrorText,
   uploadNotebookImport,
+  uploadStillInProgress,
   type NotebookTransferJob,
 } from "./notebook-transfer-api.ts";
 
@@ -105,49 +109,77 @@ function percentOf(sent: number, total: number): number {
 const isAbort = (error: unknown): boolean =>
   error instanceof DOMException && error.name === "AbortError";
 
-/** 预检之后新出现的那个导入作业(读不到为 `null`)。 */
-async function createdSince(known: Set<string>): Promise<NotebookTransferJob | null> {
+/** 连接断了、又判断不出服务器有没有接收时那句话:不叫人马上重传(会多出一本)。 */
+export const IMPORT_UPLOAD_UNSURE_TEXT = "连接中断，导入可能已被接收；请先看下方的导入记录，再决定是否重传。";
+/** 停止了、而请求体可能已经整个到了服务器:同一个意思。 */
+export const IMPORT_STOP_UNSURE_TEXT = "已停止上传，但文件可能已经传完、导入可能已被接收；请先看下方的导入记录，再决定是否重传。";
+
+/**
+ * 一串上传尝试共用的上传标识(`X-Upload-Id`)。它绑在**选中的那个文件**上,一直沿用到这一
+ * 串有了确定的结局为止:说不准有没有被接收(`unsure`)时,再传这同一个文件仍用同一个标识
+ * ——服务端认出它,回已经建出的那个作业,不读请求体,不会多出一本。换了文件、或有了确定
+ * 结局(已接收、确定没被接收、服务端明确拒绝),下一次就用新的标识。
+ */
+let chain: { file: File; uploadId: string } | null = null;
+
+function uploadIdFor(file: File): string {
+  if (chain?.file !== file) chain = { file, uploadId: newClientRequestId() };
+  return chain.uploadId;
+}
+
+/** 这一串尝试有了确定的结局:下一次上传用新的标识。 */
+function endChain(file: File): void {
+  if (chain?.file === file) chain = null;
+}
+
+/**
+ * 按上传标识找这一次上传建出的作业。只认 `client_upload_id` 相等的那一个:别的标签页
+ * 同时开始的导入不是这一次的。读不到作业为 `undefined`(说不准),没有为 `null`。
+ */
+async function jobOfUpload(uploadId: string): Promise<NotebookTransferJob | null | undefined> {
   try {
     const jobs = await listNotebookTransfers();
-    return jobs.find((job) => job.kind === "import" && !known.has(job.id)) ?? null;
+    return jobs.find((job) => job.kind === "import" && job.client_upload_id === uploadId) ?? null;
   } catch {
-    return null;
+    return undefined;
   }
 }
 
-/** 连接断了、又判断不出服务器有没有接收时那句话:不叫人马上重传(会多出一本)。 */
-export const IMPORT_UPLOAD_UNSURE_TEXT = "连接中断，导入可能已被接收；请先看下方的导入记录，再决定是否重传。";
-
 /**
- * 上传中途连接断了:再读一次作业,先判断服务器是不是**已经接收**了这次上传——请求体传完
- * 之后它会接着检查、建作业,浏览器那边却只看到一次网络错误。
+ * 上传被打断(连接断了,或用户停止)之后:先按上传标识认领这一次的作业。
  *
- * * 预检之后多出来一个导入作业:那就是这一次的,照实交出(`uploaded`),不能说失败——
- *   否则文件还选着,用户一重传就多出一本笔记本。
- * * 判断不了:作业读不到、上传前没能读到基准、或者请求体已经传完(作业可能还没建出来)
- *   却还没看到它——`unsure`,不叫人马上重传。
- * * 确定没有被接收:名额满了就照实说;名额没满、文件也确定没超上限,那就只是网络;
- *   其余说出可能的几种原因。
+ * * 找到了:服务器已经接收,照实交出(`uploaded`)——不能说失败或「没有导入任何内容」。
+ * * 说不准(`unsure`):作业读不到;或者请求体已经整个交给了网络(服务器可能还在检查文件、
+ *   作业还没登记)却还没看到它。不叫人马上重传;真要重传,用的仍是同一个标识。
+ * * 确定没被接收:请求体没有传完——服务器只在读完整个请求体之后才建作业,半截的请求体
+ *   一断开它就放掉名额。停止的就说停止了;断开的再说清原因(名额满了 / 只是网络 / 可能的
+ *   几种原因)。
  */
-async function explainCut(
-  known: Set<string> | null,
+async function settleInterrupted(
+  uploadId: string,
+  stopped: boolean,
   bodySent: boolean,
   file: File,
   limitBytes: number | null,
 ): Promise<UploadOutcome> {
-  let jobs: NotebookTransferJob[];
+  const job = await jobOfUpload(uploadId);
+  if (job) return { kind: "uploaded", job, fileName: file.name };
+  const unsureText = stopped ? IMPORT_STOP_UNSURE_TEXT : IMPORT_UPLOAD_UNSURE_TEXT;
+  if (job === undefined || bodySent) return { kind: "unsure", text: unsureText };
+  if (stopped) return { kind: "stopped" };
+  return { kind: "failed", text: await cutReason(file, limitBytes) };
+}
+
+/** 确定没被接收的一次断开:能说清原因就说清楚。 */
+async function cutReason(file: File, limitBytes: number | null): Promise<string> {
   try {
-    jobs = await listNotebookTransfers();
+    if (activeTransferCount(await listNotebookTransfers()) >= MAX_ACTIVE_TRANSFER_JOBS) return TRANSFER_BUSY_TEXT;
   } catch {
-    return { kind: "unsure", text: IMPORT_UPLOAD_UNSURE_TEXT };
+    return IMPORT_UPLOAD_CUT_TEXT;
   }
-  if (known === null) return { kind: "unsure", text: IMPORT_UPLOAD_UNSURE_TEXT };
-  const created = jobs.find((job) => job.kind === "import" && !known.has(job.id));
-  if (created) return { kind: "uploaded", job: created, fileName: file.name };
-  if (bodySent) return { kind: "unsure", text: IMPORT_UPLOAD_UNSURE_TEXT };
-  if (activeTransferCount(jobs) >= MAX_ACTIVE_TRANSFER_JOBS) return { kind: "failed", text: TRANSFER_BUSY_TEXT };
-  if (limitBytes !== null && file.size <= limitBytes) return { kind: "failed", text: IMPORT_UPLOAD_FAILED_TEXT };
-  return { kind: "failed", text: IMPORT_UPLOAD_CUT_TEXT };
+  // 名额没满、文件也确定没超上限:那就只是网络。
+  if (limitBytes !== null && file.size <= limitBytes) return IMPORT_UPLOAD_FAILED_TEXT;
+  return IMPORT_UPLOAD_CUT_TEXT;
 }
 
 export const importUpload = {
@@ -179,50 +211,64 @@ export const importUpload = {
     const base = { fileName: file.name, total: file.size };
     publish({ ...base, percent: 0, stage: "precheck" });
     const current = () => mine === generation;
-    // 预检时读到的作业 id:停止之后再读一次,多出来的那个导入就是这一次上传建出来的。
-    let known: Set<string> | null = null;
-    // 请求体已经全部交给网络(进度到了 100%):此后服务器会接着检查、建作业。
+    const uploadId = uploadIdFor(file);
+    // 上传请求已经发出 / 请求体已经整个交给了网络(`xhr.upload` 的 load):此后服务器
+    // 可能已经接收,打断之后要按上传标识认领。
+    let requestStarted = false;
     let bodySent = false;
     try {
       let jobs: NotebookTransferJob[] | null = null;
       try {
         jobs = await listNotebookTransfers(own.signal);
-        known = new Set(jobs.map((job) => job.id));
       } catch (error) {
         if (isAbort(error)) throw error;
         // 读不到就不预检:由服务端兜底。
       }
       if (!current()) return;
       if (jobs && activeTransferCount(jobs) >= MAX_ACTIVE_TRANSFER_JOBS) {
+        endChain(file);
         deliver({ kind: "failed", text: TRANSFER_BUSY_TEXT });
         return;
       }
       publish({ ...base, percent: 0, stage: "uploading" });
+      requestStarted = true;
       const job = await uploadNotebookImport(file, {
         name,
+        uploadId,
         signal: own.signal,
         onProgress: (sent, total) => {
           if (!current()) return;
           const percent = percentOf(sent, total);
+          // 进度到了 100% 也按「请求体已经传完」算(宁可说不准,不说没导入)。
           if (percent >= 100) bodySent = true;
           publish({ ...base, percent, stage: percent >= 100 ? "checking" : "uploading" });
         },
+        onBodySent: () => {
+          bodySent = true;
+          if (current()) publish({ ...base, percent: 100, stage: "checking" });
+        },
       });
-      if (current()) deliver({ kind: "uploaded", job, fileName: file.name });
+      if (!current()) return;
+      endChain(file);
+      deliver({ kind: "uploaded", job, fileName: file.name });
     } catch (error) {
       if (!current()) return;
-      if (isAbort(error)) {
-        // 请求体也许在停下的那一刻已经传完:服务器那时会接着检查、建作业。再读一次,
-        // 多出来的导入作业就是这一次的——照实交出去,不说「没有导入任何内容」。
-        const created = known ? await createdSince(known) : null;
+      const interrupted = isAbort(error) || error instanceof TypeError;
+      if (interrupted && !requestStarted) {
+        // 停在预检那一步:请求根本没发出,确定什么都没导入。
+        endChain(file);
+        deliver({ kind: "stopped" });
+      } else if (interrupted) {
+        const outcome = await settleInterrupted(uploadId, isAbort(error), bodySent, file, limitBytes);
         if (!current()) return;
-        deliver(created ? { kind: "uploaded", job: created, fileName: file.name } : { kind: "stopped" });
-      } else if (error instanceof TypeError) {
-        const outcome = await explainCut(known, bodySent, file, limitBytes);
-        if (!current()) return;
+        if (outcome.kind !== "unsure") endChain(file);
         deliver(outcome);
+      } else if (uploadStillInProgress(error)) {
+        // 同一个标识的上一次上传还在服务端处理:这一次没被接收,上一次的结果未定。
+        deliver({ kind: "unsure", text: transferRequestErrorText(error, {}, IMPORT_UPLOAD_UNSURE_TEXT) });
       } else {
-        // 超过上限被拒:上限可能刚被改小,下次重新读。
+        // 服务端明确拒绝:确定的结局。超过上限被拒时上限可能刚被改小,下次重新读。
+        endChain(file);
         if (httpErrorStatus(error) === 413) forgetTransferLimit();
         deliver({ kind: "failed", text: transferRequestErrorText(error, IMPORT_UPLOAD_ERRORS, IMPORT_UPLOAD_FAILED_TEXT) });
       }
@@ -244,6 +290,7 @@ export const importUpload = {
   /** 登出:中止上传,丢掉一切(包括还没人拿走的结局),下一个人从空白开始。 */
   reset(): void {
     generation += 1;
+    chain = null;
     controller?.abort();
     controller = null;
     pendingOutcomes.splice(0);
