@@ -1217,3 +1217,16 @@ def test_metric_cell_does_not_repeat_the_unit_and_spaces_the_baseline_alike(metr
     paper = _evidence(_tools(cards=[_card_outcome("nb", "s1", "Cascaded", card)]))
     row = _table_lines(paper.table)[2]
     assert f"{text} [{paper.keys[e]}]" in row
+
+
+
+def test_a_truncated_table_cell_never_ends_inside_a_number():
+    import re
+
+    from app.services import paper_card_answer as answer
+
+    # a plain cut keeps TABLE_CELL_CHARS - 1 characters: "…85." for this text
+    text = "x" * (answer.TABLE_CELL_CHARS - 5) + " 85.23 AP on COCO"
+    cell = answer._cell([(text, "")])
+    assert cell.endswith("…")
+    assert re.search(r"[\d.]…$", cell) is None and "85." not in cell

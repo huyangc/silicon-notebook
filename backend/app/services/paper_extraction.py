@@ -509,7 +509,8 @@ class PaperExtractionService:
             page = self._sources.source_elements_page(source_id, offset=0, limit=EXTRACT_OPENING_ELEMENTS)
             outline, selection.truncated = retrieval.section_outline(notebook_id, source_id)
         for element in page.items:
-            text = (element.text or "").strip()[:EXTRACT_OPENING_MAX_CHARS]
+            # 模型看到的、接地判据用的都是截断后的文本:绝不切进数字(同卡片输入)。
+            text = cap_number_safe((element.text or "").strip(), EXTRACT_OPENING_MAX_CHARS)
             if element.source_id == source_id and text:
                 selection.excerpts.append(Excerpt(
                     f"e{len(selection.excerpts) + 1}", "element", element.id, "",
@@ -581,7 +582,7 @@ class PaperExtractionService:
             }
         excerpts = []
         for index, chunk in enumerate(chunks, 1):
-            text = (chunk.text or "").strip()[:EXTRACT_PASSAGE_MAX_CHARS]
+            text = cap_number_safe((chunk.text or "").strip(), EXTRACT_PASSAGE_MAX_CHARS)
             if not text:
                 continue
             element_ids = [str(e) for e in (chunk.element_ids or ()) if str(e or "")]
