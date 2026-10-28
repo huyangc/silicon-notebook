@@ -174,8 +174,8 @@ def test_pg_another_model_never_answers_from_the_record(repo):
     cases.assert_another_model_never_answers_from_the_record(repo)
 
 
-def test_pg_a_graph_delete_during_generation_leaves_no_staged_texts(repo):
-    cases.assert_a_graph_delete_during_generation_leaves_no_staged_texts(repo)
+def test_pg_a_graph_delete_during_generation_leaves_no_staged_texts(repo, monkeypatch):
+    cases.assert_a_graph_delete_during_generation_leaves_no_staged_texts(repo, monkeypatch)
 
 
 def test_pg_rows_that_raced_a_graph_delete_are_pruned_at_the_end(repo, monkeypatch):

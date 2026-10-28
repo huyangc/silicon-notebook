@@ -671,12 +671,15 @@ def assert_another_model_never_answers_from_the_record(repo):
     assert model_b.calls == 2
 
 
-def assert_a_graph_delete_during_generation_leaves_no_staged_texts(repo):
+def assert_a_graph_delete_during_generation_leaves_no_staged_texts(repo, monkeypatch):
     """The knowledge graph is deleted while the model runs: nothing generated
     from the deleted graph's evidence stays staged -- results that come back
-    after the delete are not written (the epoch-guarded put)."""
+    after the delete are not written (the epoch-guarded put; the end-of-run
+    prune is switched off here so the put alone is what is tested)."""
     nb = build_notebook(repo)
     lifecycle = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(_rewrite_module().ConceptDescriptionRewrite,
+                        "_prune_after_a_graph_delete", lambda self, notebook_id: None)
     deleted = []
 
     def delete_once(_name):
