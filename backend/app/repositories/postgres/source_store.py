@@ -45,10 +45,17 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
     placeholders,
 )
+from app.domain.source_find_terms import fold_term, like_pattern
+from app.repositories.find_sources_rows import assemble_rows, check_kind
 from app.repositories.paper_card_rows import paper_card_row, utc_iso
 from app.repositories.postgres import memory_sql
 from app.repositories.postgres.database import PostgresDatabase
-from app.repositories.postgres.id_binding import bind_ids, execute_ids, member_of
+from app.repositories.postgres.id_binding import (
+    bind_ids,
+    execute_bound,
+    execute_ids,
+    member_of,
+)
 from app.repositories.postgres.memory_sql import (
     memory_source_readable,
     memory_source_type_predicate,
@@ -161,6 +168,73 @@ PAPER_META_NO_META_SQL = (
 PAPER_META_OWN_ROW_JOIN_SQL = (
     f" LEFT JOIN source_paper_meta m ON {PAPER_META_OWN_ROW_SQL}"
 )
+
+
+def _find_sources_term_legs(
+    notebook_id: str, folded_terms: Sequence[str],
+) -> tuple[str, list[object]]:
+    """``find_sources_metadata_rows``' term legs (0048's per-table UNION shape,
+    see that method).  Every leg ORs one ``lower(col) LIKE %s`` per term and
+    reports ``(source_id, field, v1, v2)``; ``v2`` is the file name on the
+    title leg.  The promotion leg (a legacy-titled promotion source matched by
+    its MAPPED title) appears only for a term naming today's wording, exactly as
+    in ``list_sources_page``."""
+    patterns = [like_pattern(term) for term in folded_terms]
+
+    def any_like(expression: str) -> tuple[str, list[object]]:
+        return (
+            "(" + " OR ".join(f"{expression} LIKE %s" for _ in patterns) + ")",
+            list(patterns),
+        )
+
+    legs: list[str] = []
+    params: list[object] = []
+
+    def leg(head: str, expressions: Sequence[str], scope: str) -> None:
+        clauses: list[str] = []
+        for expression in expressions:
+            clause, values = any_like(expression)
+            clauses.append(clause)
+            params.extend(values)
+        legs.append(f"{head} WHERE {scope}AND (" + " OR ".join(clauses) + ")")
+
+    visible = f"notebook_id=%s AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
+    params.append(notebook_id)
+    leg(
+        "SELECT id AS source_id,'title' AS field,title AS v1,file_name AS v2 "
+        "FROM sources",
+        ("lower(title)", "lower(file_name)"), visible,
+    )
+    if any(needle_names_current_wording(term) for term in folded_terms):
+        params.append(notebook_id)
+        leg(
+            f"SELECT id,'title',{mapped_title_sql('title')},'' FROM sources",
+            (f"lower({mapped_title_sql('title')})",),
+            f"notebook_id=%s AND {promotion_gate_sql('source_type', 'id')} ",
+        )
+    params.append(notebook_id)
+    leg("SELECT id,'summary',summary,'' FROM sources", ("lower(summary)",), visible)
+    params.append(notebook_id)
+    leg(
+        "SELECT a.source_id,'author',a.name,'' FROM source_authors a",
+        ("lower(a.name)",), "a.notebook_id=%s ",
+    )
+    params.append(notebook_id)
+    leg(
+        "SELECT m.source_id,'paper_title',m.paper_title,'' FROM source_paper_meta m",
+        ("lower(m.paper_title)",), "m.notebook_id=%s ",
+    )
+    params.append(notebook_id)
+    leg(
+        "SELECT m.source_id,'venue',m.venue,'' FROM source_paper_meta m",
+        ("lower(m.venue)",), "m.notebook_id=%s ",
+    )
+    params.append(notebook_id)
+    leg(
+        "SELECT m.source_id,'keywords',m.keywords::text,'' FROM source_paper_meta m",
+        ('lower(m.keywords::text COLLATE "C")',), "m.notebook_id=%s ",
+    )
+    return " UNION ALL ".join(legs), params
 
 
 def _sort_key(value: object) -> str:
@@ -530,6 +604,93 @@ class SourceStore:
             # PR-E8: the document-limit count (SQLite twin)
             visible_document_count=None if needle else int(counted["d"]),
         )
+
+    def find_sources_metadata_rows(
+        self,
+        connection,
+        notebook_id: str,
+        *,
+        terms: Sequence[str] = (),
+        year_from: int | None = None,
+        year_to: int | None = None,
+        venue: str = "",
+        author: str = "",
+        kind: str = "papers",
+        allowed_source_ids: Sequence[str] | None = None,
+    ) -> list[dict]:
+        """``find_sources``' metadata leg over ONE library (the canonical
+        definition; SQLite mirrors it).  Two statements on the caller's
+        connection:
+
+        1. **the filtered scope** -- every user-visible source of the library
+           (``VISIBLE_SOURCE_TYPES_PREDICATE``, the source tab's predicate, so
+           Memory/Knowhow projections never appear) that passes ``kind`` /
+           year / venue / author and, when given, ``allowed_source_ids``
+           (``id_binding.member_of``, a custom plan: the run's frozen ceiling
+           can hold the whole library).  ``kind="papers"`` is ``is_paper=1``
+           plus the sources WITHOUT a paper-meta row that are eligible for one
+           (``PAPER_META_ELIGIBLE_SQL``): metadata is extracted lazily and
+           never backfilled, so an unextracted paper must still be findable.
+           Paper meta is joined on its OWN ``notebook_id`` as well
+           (``list_sources_page`` comment, point 2).
+        2. **the term legs** (only with ``terms``) -- 0048's shape: one leg per
+           table and column group, each rooted at its own table's
+           ``notebook_id=``, the visible predicate repeated as an inline
+           literal on the ``sources`` legs so ``idx_sources_nb_title_file_trgm``'s
+           partial predicate is implied, OR'd ``lower(col) LIKE`` per term with
+           ``%``/``_``/backslash escaped (``source_find_terms.like_pattern``;
+           PostgreSQL's LIKE escapes with backslash by default).  ``UNION ALL``:
+           each leg reports the matched VALUE, and Python re-checks it
+           (``find_sources_rows.assemble_rows``) for the field and the word
+           boundary.  ``keywords`` is matched on the jsonb text under
+           ``COLLATE "C"`` so ``lower()`` folds exactly what Python folds.
+
+        Returns one dict per in-scope source, ``matches`` = ``{field:
+        word_boundary}`` (empty without a term hit); see ``assemble_rows``."""
+        kind = check_kind(kind)
+        folded = [term for term in dict.fromkeys(
+            fold_term(value) for value in terms) if term]
+        where = [f"s.notebook_id=%s AND s.{VISIBLE_SOURCE_TYPES_PREDICATE}"]
+        params: list[object] = [notebook_id]
+        bound = None
+        if allowed_source_ids is not None:
+            bound = bind_ids(list(allowed_source_ids))
+            where.append(member_of("s.id", bound))
+            params.append(bound.param)
+        if kind == "papers":
+            where.append(
+                "(m.is_paper=1 OR (m.source_id IS NULL"
+                f"{PAPER_META_ELIGIBLE_SQL}))"
+            )
+        if year_from is not None:
+            where.append("m.pub_year>=%s")
+            params.append(int(year_from))
+        if year_to is not None:
+            where.append("m.pub_year<=%s")
+            params.append(int(year_to))
+        if fold_term(venue):
+            where.append("lower(m.venue) LIKE %s")
+            params.append(like_pattern(fold_term(venue)))
+        if fold_term(author):
+            where.append(
+                "s.id IN (SELECT a.source_id FROM source_authors a "
+                "WHERE a.notebook_id=%s AND lower(a.name) LIKE %s)"
+            )
+            params.extend((notebook_id, like_pattern(fold_term(author))))
+        scope_rows = execute_bound(
+            connection,
+            "SELECT s.id,s.notebook_id,s.title,s.source_type,s.doc_type,"
+            "s.parse_status,m.source_id AS meta_id,m.is_paper,m.paper_title,"
+            "m.venue,m.pub_year FROM sources s LEFT JOIN source_paper_meta m "
+            "ON m.source_id=s.id AND m.notebook_id=s.notebook_id "
+            f"WHERE {' AND '.join(where)}",
+            params, bound,
+        ).fetchall()
+        hit_rows: list = []
+        if folded and scope_rows:
+            statement, leg_params = _find_sources_term_legs(notebook_id, folded)
+            hit_rows = connection.execute(statement, leg_params).fetchall()
+        return assemble_rows(scope_rows, hit_rows, folded)
 
     def visible_document_count(self, notebook_id: str) -> int:
         with self.database.connect() as connection:

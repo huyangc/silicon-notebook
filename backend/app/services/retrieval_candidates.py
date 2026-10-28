@@ -55,6 +55,7 @@ from app.services.chunk_lane import (  # noqa: F401 - re-exported, see above
     _CHUNK_PEER_LEG,
     _CHUNK_SUPPLEMENT_LEG,
     _lexical_gate_drift_probe,
+    note_chunk_lane,
 )
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.navigation_filter import (
@@ -4234,6 +4235,7 @@ class CandidateRetrievalService(_RetrievalState):
                     source_restricted=source_restricted,
                 )
                 if ann is not None:
+                    note_chunk_lane("ann")
                     return ann
         if peek_only:
             # 暖 ANN 缺席(索引不常驻/handle 未开/签名被换代)或 ANN fail-open:
@@ -4257,6 +4259,7 @@ class CandidateRetrievalService(_RetrievalState):
             #
             # 补召回接缝在 ``_run_chunk_candidate_contributors`` 顶部同样按这条
             # lane 早退:这一腿绝不为外库付生成问题索引的扫描/解码成本。
+            note_chunk_lane("fts_degraded")
             return self._retrieve_chunks_fts_degraded(
                 notebook_id, query, query_vector, recall,
                 self.notebook_chunk_count(notebook_id),
@@ -4300,11 +4303,13 @@ class CandidateRetrievalService(_RetrievalState):
             # 比每子查询一次整库 COUNT 便宜一个数量级。
             n_chunks = self.notebook_chunk_count(notebook_id)
             if large or n_chunks > threshold:
+                note_chunk_lane("fts_degraded")
                 return self._retrieve_chunks_fts_degraded(
                     notebook_id, query, query_vector, recall, n_chunks,
                     allowed_source_ids=allowed_source_ids,
                     source_restricted=source_restricted,
                 )
+        note_chunk_lane("baseline")
         # ↓ 有界暴力路径:scoped 与 unscoped 取**同一份**版本键控进程缓存矩阵,
         # scoped 只在打分之前多做一次掩码。
         #

@@ -16,8 +16,9 @@ the tests included) keeps working unchanged.
 """
 from __future__ import annotations
 
+import contextlib
 import contextvars
-from typing import Optional
+from typing import Iterator, Optional
 
 
 def _lexical_gate_drift_probe(retrieval_state, notebook_id: str) -> bool:
@@ -175,6 +176,35 @@ def note_recall_failure(stage: object = "") -> None:
         failures.append(str(stage or ""))
 
 
+# Which recall lane ``_retrieve_chunks_baseline`` took ("baseline" = bounded
+# brute force, "ann", "fts_degraded"), for a caller that has to know it:
+# ``find_sources`` judges a passage-only source differently on the lexical-only
+# lane, where a fused relevance carries no semantic signal (design §5.3).  A
+# list installed by ``observed_chunk_lane`` and appended to by the producer;
+# ``None`` (the default) means nobody listens and nothing is recorded.
+_CHUNK_LANE_SINK: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar(
+    "_chunk_lane_sink", default=None
+)
+
+
+def note_chunk_lane(lane: str) -> None:
+    """Record the lane just taken, when a caller is listening."""
+    sink = _CHUNK_LANE_SINK.get()
+    if sink is not None:
+        sink.append(lane)
+
+
+@contextlib.contextmanager
+def observed_chunk_lane() -> Iterator[list]:
+    """Collect the lanes the chunk producers take inside this block."""
+    sink: list = []
+    token = _CHUNK_LANE_SINK.set(sink)
+    try:
+        yield sink
+    finally:
+        _CHUNK_LANE_SINK.reset(token)
+
+
 __all__ = [
     "_CHUNK_ARM_DRIFTED",
     "_CHUNK_PEEK_ONLY",
@@ -183,4 +213,6 @@ __all__ = [
     "_CHUNK_SUPPLEMENT_LEG",
     "_lexical_gate_drift_probe",
     "note_recall_failure",
+    "note_chunk_lane",
+    "observed_chunk_lane",
 ]

@@ -1243,6 +1243,8 @@ REASONING_SECTION_BROWSE_MAX_CHARS # 单次 browse_sections 目录渲染的字�
 REASONING_SECTION_HINT_MAX_ENTRIES / REASONING_SECTION_HINT_SOURCES / REASONING_SECTION_HINT_RELATIVE_FLOOR # 向量章节线索块的规模（条目数、覆盖的来源数，以及相对本 run 已有最高 chunk 相似度的分数阈值；任一计数为 0 时不出块）；默认值与取值范围见 product-and-api
 REASONING_SECTION_OUTLINE_MAX_ROWS # 单个来源为大纲扫描、为向量读取的 chunk 数硬界（0 整体撤下导航）；同时约束单来源的向量内存（约 行数 × 运行时维度 × 4 字节）；默认值与取值范围见 product-and-api
 REASONING_SECTION_VECTOR_CACHE_MAX_BYTES # 跨 run 共享的进程级章节向量缓存的字节预算（LRU；0 关闭，此时每个 run 自己读取来源向量）。条目的键含数据库、库、来源、来源的 chunked_at、大纲指纹与查询维度，所以重新分块会让它失效；没有 chunked_at、或仍有 chunk 缺向量的来源不进缓存。已知限制：换成同维度的嵌入模型、或不重新分块就原地重嵌入，要等条目被淘汰或进程重启后才被看到；默认值与取值范围见 product-and-api
+FIND_SOURCES_CHUNK_RECALL # 文档级检索 find_sources 的语义腿每个库召回的片段数，限定在元数据过滤后剩下的来源内（默认 400；1..2000）；最后一个召回片段仍高于 FIND_SOURCES_RELATED_RELEVANCE 时结果标记 semantic_recall_capped（可能还有更多相关文档）
+FIND_SOURCES_STRONG_RELEVANCE / FIND_SOURCES_RELATED_RELEVANCE # find_sources 按文档最佳片段的融合 relevance（0..1，不是余弦；相关线不得高于强相关线）分档：达到强相关线为 strong，达到相关线为 related。只在有语义信号的车道（有界暴力、ANN）适用；FTS 降级车道上只靠片段命中的文档需命中 2 个片段才进 related。默认值（0.7 / 0.3）是校准脚本按当前嵌入模型写定之前的保守临时值；更换嵌入模型后要重跑校准
 REASONING_MAX_TOKENS # 逐步推理规划（查询扩展）与每轮反思的单次输出上限（默认 16384；ge=1）。这是 Legacy 共用的部署预算；各 workload 的输出、重试与超时边界仍独立生效。
 PAPER_CARD_ENABLED # 论文卡片懒生成的部署级开关（逐篇结构化要点，缓存在 source_paper_cards，只在调用方用到时生成；默认 true）。关闭后仍返回已缓存且有效的卡片，不再生成新卡（这些论文报 failed/disabled）。卡片复用 paper_metadata 模型绑定，不新增 workload，[bindings] 不用改
 PAPER_CARD_INPUT_CHARS # 单张卡片原文采样输入的字数上限（默认 16000；ge=2000）：前 40% 给开头，再放最多 6 张表格（每张截断到 1500 字），其余均匀取样（含最后一个元素）

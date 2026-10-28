@@ -2196,6 +2196,32 @@ class SourceStorePort(Protocol):
         A source without elements is absent from the result (treat as ``""``)."""
         ...
     def visible_document_count(self, notebook_id: str) -> int: ...
+    def find_sources_metadata_rows(
+        self,
+        db: object,
+        notebook_id: str,
+        *,
+        terms: Sequence[str] = (),
+        year_from: int | None = None,
+        year_to: int | None = None,
+        venue: str = "",
+        author: str = "",
+        kind: str = "papers",
+        allowed_source_ids: Sequence[str] | None = None,
+    ) -> list[dict]:
+        """``find_sources``' metadata leg over ONE library, on the caller's
+        connection: one dict per USER-VISIBLE source (``list_sources_page``'s
+        predicate) that passes ``kind`` (``"papers"``: ``is_paper=1`` plus
+        eligible sources without a paper-meta row; ``"all"``), the year range,
+        the venue / author substrings and, when given, ``allowed_source_ids``.
+        Each dict carries ``source_id, notebook_id, title, source_type,
+        doc_type, parse_status, has_meta, is_paper (None without a meta row),
+        paper_title, venue, pub_year`` and ``matches``: ``{field:
+        word_boundary}`` for the ``terms`` (fields of
+        ``source_find_terms.FIND_SOURCES_FIELDS``; the file name counts as
+        ``title``).  Matching is ``lower(col) LIKE`` with ``%``/``_`` escaped,
+        re-checked in Python with SQL's ASCII-only fold."""
+        ...
 
 
 @runtime_checkable
@@ -3511,6 +3537,13 @@ class RetrievalPort(Protocol):
     def section_outline(self, notebook_id: str, source_id: str) -> tuple[tuple[tuple[str, str, bool], ...], bool]: ...
     def section_chunk_similarities(self, notebook_id: str, source_id: str, chunk_ids: Sequence[str], query_texts: Sequence[str]) -> dict[str, float]: ...
     def section_chunks(self, notebook_id: str, source_id: str, chunk_ids: Sequence[str], limit: int, question: str) -> list[RetrievedChunk]: ...
+    # ``find_sources``' semantic leg: the ordinary chunk recall of ONE library
+    # (``notebook_id`` owns the sources) restricted to ``allowed_source_ids``
+    # before Top-K, ``recall`` candidates at most, behind the result-boundary
+    # ceiling filter.  Returns ``(chunks, lane)``; ``lane`` is the recall lane
+    # that ran: ``baseline`` (bounded brute force), ``ann`` or ``fts_degraded``
+    # (lexical candidates only).  A federated caller calls it per library.
+    def retrieve_chunks_in_sources(self, notebook_id: str, query: str, recall: int, allowed_source_ids: Sequence[str]) -> tuple[list[RetrievedChunk], str]: ...
     # The raw-passage retrieval pair (reasoning's ``search_chunks`` channel).
     # Spelled here as well as on ``AskCandidatePort`` because reasoning reaches
     # them through its own ``RetrievalPort`` handle, not through the ask

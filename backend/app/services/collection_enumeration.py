@@ -138,6 +138,7 @@ from app.services.collection_catalog import (
     CollectionCatalogService,
     ScopeElementPlan,
     ScopeSource,
+    ScopeSourcePlan,
     SourceCeiling,
 )
 from app.services.evidence_attestation import attest_read
@@ -648,6 +649,18 @@ def _attest_rows(rows: Sequence[Any]) -> None:
         )
         for row in rows
     })
+
+
+@dataclass(frozen=True)
+class SourceScopeResolution:
+    """``CollectionEnumerationService.source_scope``'s answer: the effective
+    participants (in resolution order), their tier map, the user-visible
+    in-ceiling source plan over them and the ceiling digest."""
+
+    notebook_ids: Tuple[str, ...]
+    tiers: Dict[str, str]
+    plan: ScopeSourcePlan
+    ceiling_digest: str
 
 
 class EnumerationInvariantError(RuntimeError):
@@ -1289,19 +1302,17 @@ class CollectionEnumerationService:
         emitted: List[Tuple[str, str]] = list(cursor.emitted_meta) if cursor else []
 
         with self._database.connect() as db:
-            notebook_ids, tiers = self._participants(db, active_notebook_id)
-            if local_only:
-                notebook_ids = tuple(n for n in notebook_ids if n == active_notebook_id)
-            plan = self._catalog.scope_source_plan(
-                db, notebook_ids, ceiling_binds=ceiling_binds,
+            resolved = self.source_scope(
+                db, active_notebook_id,
+                ceiling_binds=ceiling_binds, local_only=local_only,
+            )
+            notebook_ids, tiers, plan = (
+                resolved.notebook_ids, resolved.tiers, resolved.plan,
             )
             sources: Optional[Tuple[ScopeSource, ...]] = plan.sources
             total: Optional[int] = plan.total
             scope_id = (
-                tuple(notebook_ids), plan.fingerprint,
-                self._catalog.scope_ceiling_digest(
-                    db, notebook_ids, ceiling_binds=ceiling_binds,
-                ),
+                tuple(notebook_ids), plan.fingerprint, resolved.ceiling_digest,
             )
             if cursor is not None:
                 if (cursor.scope_notebook_ids, cursor.scope_fingerprint,
@@ -1399,6 +1410,39 @@ class CollectionEnumerationService:
             cursor=_resumable(coverage, resume),
             extra_pages=walk.pages,
             payload_chars=walk.payload,
+        )
+
+    def source_scope(
+        self,
+        db: object,
+        active_notebook_id: str,
+        *,
+        ceiling_binds: bool,
+        local_only: bool = False,
+    ) -> "SourceScopeResolution":
+        """THE source set of the SOURCES collection for this run, on the
+        caller's connection: the participants narrowed by the run's library
+        checkboxes (``_participants``), the user-visible in-ceiling plan
+        (``scope_source_plan``) and the ceiling digest
+        (``scope_ceiling_digest``) -- what ``enumerate_sources`` lists, and
+        what ``find_sources`` searches (design §5.2), resolved once here so
+        the two can never disagree.  ``local_only`` keeps the active notebook
+        only; callers drop it in a subjectless run themselves
+        (``enumerate_sources``).  ``ceiling_binds`` is the run's verdict, as
+        for every collection entry."""
+        notebook_ids, tiers = self._participants(db, active_notebook_id)
+        if local_only:
+            notebook_ids = tuple(n for n in notebook_ids if n == active_notebook_id)
+        plan = self._catalog.scope_source_plan(
+            db, notebook_ids, ceiling_binds=ceiling_binds,
+        )
+        return SourceScopeResolution(
+            notebook_ids=tuple(notebook_ids),
+            tiers=dict(tiers),
+            plan=plan,
+            ceiling_digest=self._catalog.scope_ceiling_digest(
+                db, notebook_ids, ceiling_binds=ceiling_binds,
+            ),
         )
 
     def _source_scope_moved(
