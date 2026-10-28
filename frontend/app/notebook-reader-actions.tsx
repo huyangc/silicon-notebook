@@ -198,15 +198,22 @@ type NotebookMenuActionsProps = {
    */
   manageDisabledNote?: string;
   deleteDisabledNote?: string;
+  /**
+   * 卡片菜单里给不给「导出笔记本」。导出的常规入口在笔记本设置弹窗(「编辑信息」)的
+   * 「导出」一节;只有设置弹窗打不开、而这个人又能导出(镜像库的库主)时,菜单才给这一格
+   * ——入口不重复。判据由调用方按 `workspaceCapabilities` 算好传进来。
+   */
+  canExportFromMenu?: boolean;
   onLeave: () => void;
   onEdit: () => void;
+  onExport?: () => void;
   onDelete: (event: MouseEvent<HTMLButtonElement>) => void;
 };
 
 /**
  * 笔记本卡片(主页列表)的操作菜单。
  *
- * - owner:编辑信息 + 删除笔记本;
+ * - owner:编辑信息 + 删除笔记本;镜像库的库主没有设置弹窗,给「导出笔记本」;
  * - 组管理员 / 群组共享的只读成员(reader + `granted_via`):只有「由组管理员管理」
  *   说明,**没有编辑信息、没有删除、没有退出**。⚠ 组管理员的「编辑信息」刻意**不在
  *   这里**(P2-T2 评审 P2-4 修正):卡片菜单的「编辑信息」打开的是那个 fused 编辑器
@@ -221,8 +228,10 @@ export function NotebookMenuActions({
   canDeleteNotebook,
   manageDisabledNote = "",
   deleteDisabledNote = "",
+  canExportFromMenu = false,
   onLeave,
   onEdit,
+  onExport,
   onDelete,
 }: NotebookMenuActionsProps) {
   if ((notebook.access ?? "owner") === "reader") {
@@ -237,6 +246,7 @@ export function NotebookMenuActions({
         : manageDisabledNote
           ? <span className="notebook-menu-note">{manageDisabledNote}</span>
           : null}
+      {canExportFromMenu && onExport && <button onClick={onExport}>导出笔记本</button>}
       {canDeleteNotebook
         ? <button className="danger" onClick={onDelete}>删除笔记本</button>
         : deleteDisabledNote

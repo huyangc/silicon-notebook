@@ -249,6 +249,9 @@ import {
   type GroupPageTab,
 } from "./group-api";
 import { NotebookMenuActions, ReaderNotebookBadge } from "./notebook-reader-actions";
+import { ImportToolbarButton, NotebookExportModal, NotebookExportSection, NotebookImportModal } from "./notebook-transfer-panel";
+import { useNotebookImport } from "./use-notebook-transfer";
+import { reloadPage } from "./page-reload";
 import { PasswordChangeModal } from "./password-change-modal";
 import { ReleaseNotesModal } from "./release-notes-modal";
 import { SearchProfileModal } from "./search-profile-modal";
@@ -679,7 +682,7 @@ export default function Home() {
   const [authRestoreError, setAuthRestoreError] = useState("");
   const [authRestoreRetry, setAuthRestoreRetry] = useState(0);
   // 另一个标签页换了或清了 token：本页的用户与按 actor 归属的状态已失效，整页重载重建。
-  useEffect(() => subscribeTokenChanges(() => window.location.reload()), []);
+  useEffect(() => subscribeTokenChanges(() => reloadPage()), []);
   const [health, setHealth] = useState<Health | null>(null);
   const [currentNotebookId, setCurrentNotebookId] = useState<string | null>(null);
   const [currentNotebook, setCurrentNotebook] = useState<NotebookSummary | null>(null);
@@ -1099,6 +1102,14 @@ export default function Home() {
     sourceId: sourceDetail?.id ?? null,
     onClosed: handleRootModalClosed,
   });
+  // 网页导入单本笔记本:状态机住在这里(不在弹窗里),关掉弹窗上传不断、重新打开看得见
+  // 进度;只在弹窗打开时读记录与轮询。新笔记本一出现就刷新列表。
+  const notebookImport = useNotebookImport({
+    open: rootModals.view("notebook-import").open,
+    onNotebookReady: () => { notebookCollection.refreshAfterAccessChange().catch(reportError); },
+  });
+  // 卡片菜单「导出笔记本」(镜像库)打开的那一本;弹窗关闭即清空。
+  const [exportTarget, setExportTarget] = useState<{ id: string; name: string } | null>(null);
   // 登录后每个用户每次页面加载问一次「系统更新说明」;有待看说明才开槽位。
   const releaseNotes = useReleaseNotes(currentUser?.id ?? null, authChecked);
   useEffect(() => {
@@ -2200,6 +2211,7 @@ export default function Home() {
   function leaveActorOwners(): void {
     notebookCollection.leaveActor();
     rootModals.leaveActor();
+    notebookImport.leaveActor();
     workspaceExtensions.leaveWorkspace();
     askSession.abortForLogout();
     reportWorkspace.leaveWorkspace();
@@ -3190,6 +3202,24 @@ export default function Home() {
   // 串参数，闭包内部就不用再碰可能为 null 的属性链。
   function editMenuNotebook(notebookId: string) {
     return () => { void presentNotebookEditor(notebookId); notebookCollection.closeMenu(); };
+  }
+
+  function exportMenuNotebook(notebook: { id: string; name: string }) {
+    return () => {
+      notebookCollection.closeMenu();
+      if (!rootModals.open("notebook-export", rootModals.captureActorOwner())) return;
+      setExportTarget({ id: notebook.id, name: notebook.name });
+    };
+  }
+
+  function openImportModal() {
+    rootModals.open("notebook-import", rootModals.captureActorOwner());
+  }
+
+  /** 导入弹窗里的「打开笔记本」:先收起弹窗,再打开那本(打开本身也会撤下它)。 */
+  function openImportedNotebook(notebookId: string) {
+    rootModals.requestClose("notebook-import", "button");
+    openNotebook(notebookId).catch(reportError);
   }
 
   function deleteMenuNotebook(notebookId: string) {
@@ -4968,6 +4998,12 @@ export default function Home() {
       case "notebook-delete":
         notebookCollection.closeDelete();
         return;
+      case "notebook-export":
+        setExportTarget(null);
+        return;
+      // 导入的状态机不随弹窗关闭而停:上传与作业都接着走(只是不再轮询)。
+      case "notebook-import":
+        return;
       case "source-add":
         resetStagedIntake();
         setLinkSectionOpen(false);
@@ -5110,7 +5146,7 @@ export default function Home() {
     setMemoryAnswerId(null);
     await logoutUser();
     setCurrentUser(null);
-    window.location.reload();
+    reloadPage();
   }
 
   function openModelPanel(serviceId: string | null = null) {
@@ -5581,6 +5617,7 @@ export default function Home() {
               <button className="sort-button" title="查看我分享出去的笔记本及其只读成员" onClick={() => openSharedByMe().catch(reportError)}>
                 <Share2 size={15} /> 已分享
               </button>
+              <ImportToolbarButton failed={notebookImport.view.uploadFailedUnseen} onOpen={openImportModal} />
               <button className="new-pill" disabled={notebookCollection.creating} onClick={() => { void notebookCollection.createDefaultNotebook(); }}>＋ 新建</button>
             </div>
           </section>
@@ -6635,8 +6672,12 @@ export default function Home() {
             // 它们按下去,写死在组件里的「镜像…」就成了一句说谎的话。
             manageDisabledNote={menuNotebookCapabilities.mirrored ? MIRROR_NOTEBOOK_MANAGE_NOTE : ""}
             deleteDisabledNote={menuNotebookCapabilities.mirrored ? MIRROR_NOTEBOOK_DELETE_NOTE : ""}
+            // 导出的常规入口在设置弹窗的「导出」一节;设置弹窗打不开(今天只有镜像)而又能
+            // 导出时,菜单才给这一格——入口不重复。
+            canExportFromMenu={menuNotebookCapabilities.canExportNotebook && !menuNotebookCapabilities.canManageNotebook}
             onLeave={leaveMenuNotebook(notebookCollection.menu.notebook.id, notebookCollection.menu.position)}
             onEdit={editMenuNotebook(notebookCollection.menu.notebook.id)}
+            onExport={exportMenuNotebook(notebookCollection.menu.notebook)}
             onDelete={deleteMenuNotebook(notebookCollection.menu.notebook.id)}
           />
         </div>
@@ -7310,6 +7351,14 @@ export default function Home() {
                 <label>来源类型（每行/逗号一条）<input name="source_types" defaultValue={(notebookCollection.editor?.target?.source_types ?? []).join(", ")} /></label>
                 <label>分类（每行/逗号一条）<input name="taxonomy" defaultValue={(notebookCollection.editor?.target?.taxonomy ?? []).join(", ")} /></label>
               </section>
+              {notebookCollection.editor?.target && workspaceCapabilities(
+                notebookCollection.editor.target.access,
+                currentUser?.role ?? "",
+                notebookCollection.editor.target.can_manage_content ?? false,
+                notebookCollection.editor.target.sync_origin ?? "",
+              ).canExportNotebook && (
+                <NotebookExportSection notebookId={notebookCollection.editor.target.id} />
+              )}
               <div className="modal-actions settings-footer">
                 <button type="button" className="sort-button" onClick={() => rootModals.requestClose("notebook-editor", "button")}>{notebookCollection.editor?.busy ? "停止等待" : "取消"}</button>
                 <button type="submit" className="new-pill" disabled={notebookCollection.editor?.busy}>{notebookCollection.editor?.busy ? "保存中…" : "保存"}</button>
@@ -7346,6 +7395,32 @@ export default function Home() {
             </>)}
           </FloatingModalCard>
         </section>
+      )}
+
+      {rootModals.view("notebook-export").open && exportTarget && (
+        <NotebookExportModal
+          notebookId={exportTarget.id}
+          notebookName={exportTarget.name}
+          onClose={() => rootModals.requestClose("notebook-export", "button")}
+          interactive={rootModals.view("notebook-export").topmost}
+          zIndex={rootModals.view("notebook-export").zIndex}
+        />
+      )}
+
+      {rootModals.view("notebook-import").open && (
+        <NotebookImportModal
+          view={notebookImport.view}
+          onChooseFile={notebookImport.chooseFile}
+          onNameChange={notebookImport.setName}
+          onStart={() => { notebookImport.start(); }}
+          onStopUpload={notebookImport.stopUpload}
+          onCancelJob={(job) => { void notebookImport.cancelJob(job); }}
+          onRemoveJob={(job) => { void notebookImport.removeJob(job); }}
+          onOpenNotebook={openImportedNotebook}
+          onClose={() => rootModals.requestClose("notebook-import", "button")}
+          interactive={rootModals.view("notebook-import").topmost}
+          zIndex={rootModals.view("notebook-import").zIndex}
+        />
       )}
 
       {rootModals.view("password-change").open && (

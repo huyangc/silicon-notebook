@@ -411,3 +411,40 @@ test("顶栏徽章:本地库不渲染镜像说明", () => {
   expect(screen.getByLabelText("笔记本名称")).toBeInTheDocument();
   expect(container.querySelectorAll(".reader-badge-chip")).toHaveLength(1);
 });
+
+
+test("卡片菜单的「导出笔记本」只在调用方说可以时出现(镜像库的库主:设置弹窗打不开)", async () => {
+  const user = userEvent.setup();
+  const onExport = vi.fn();
+  const { rerender } = render(
+    <NotebookMenuActions
+      notebook={notebook({ access: "owner", shared_from: "", sync_origin: "site-a" })}
+      canManageNotebook={false}
+      canDeleteNotebook={false}
+      manageDisabledNote={MIRROR_NOTEBOOK_MANAGE_NOTE}
+      deleteDisabledNote={MIRROR_NOTEBOOK_DELETE_NOTE}
+      canExportFromMenu
+      onLeave={vi.fn()}
+      onEdit={vi.fn()}
+      onExport={onExport}
+      onDelete={vi.fn()}
+    />,
+  );
+  await user.click(screen.getByRole("button", { name: "导出笔记本" }));
+  expect(onExport).toHaveBeenCalledOnce();
+  // 本地库:导出在设置弹窗(「编辑信息」)里,菜单不重复给。
+  rerender(
+    <NotebookMenuActions
+      notebook={notebook({ access: "owner", shared_from: "" })}
+      canManageNotebook
+      canDeleteNotebook
+      canExportFromMenu={false}
+      onLeave={vi.fn()}
+      onEdit={vi.fn()}
+      onExport={onExport}
+      onDelete={vi.fn()}
+    />,
+  );
+  expect(screen.queryByRole("button", { name: "导出笔记本" })).toBeNull();
+  expect(screen.getByRole("button", { name: "编辑信息" })).toBeInTheDocument();
+});

@@ -15428,3 +15428,112 @@ button.release-notes-toggle { cursor: pointer; }
   color: var(--muted);
   font-size: 13px;
 }
+
+
+/* —— 网页导出 / 导入单本笔记本(notebook-transfer-panel.tsx) —— */
+.notebook-transfer-card {
+  width: min(600px, 100%);
+}
+.notebook-transfer-body h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 750;
+  color: var(--ink);
+}
+.transfer-status,
+.transfer-jobs {
+  display: grid;
+  gap: 8px;
+}
+.transfer-note,
+.transfer-hint,
+.transfer-progress,
+.transfer-job-text,
+.transfer-error,
+.transfer-ok {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.transfer-hint,
+.transfer-note,
+.transfer-job-text {
+  color: var(--muted);
+}
+.transfer-progress {
+  color: var(--ink);
+  font-weight: 600;
+}
+.transfer-error {
+  color: var(--danger);
+}
+.transfer-ok {
+  color: var(--green);
+}
+.transfer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+/* 结果态落在按钮自身(「已开始下载」),到点由状态机还原。 */
+button.transfer-button-done {
+  background: var(--green);
+  border-color: var(--green);
+  color: #fff;
+}
+.link-button.transfer-button-done {
+  background: none;
+  color: var(--green);
+}
+/* 工具栏「导入」:弹窗关着时上传失败了,结果落在这颗按钮自己身上。 */
+button.transfer-toolbar-failed {
+  color: var(--danger);
+  border-color: var(--danger-border);
+}
+/* 上传进度条(role="progressbar"):细条,落在「开始导入」那一排里。 */
+.transfer-upload-bar {
+  position: relative;
+  flex: 1 1 120px;
+  max-width: 220px;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--soft);
+}
+.transfer-upload-bar > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--blue);
+}
+.transfer-job {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.transfer-job-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+.transfer-job-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.transfer-job-state {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+.transfer-job--failed {
+  border-color: var(--danger-border);
+}

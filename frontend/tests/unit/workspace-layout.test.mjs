@@ -173,11 +173,12 @@ test("账号菜单不再有统一身份关联/迁移入口", () => {
 test("跨标签页会话同步在 page 根部安装一次,变更时整页重载", () => {
   assert.ok(importsFrom(page, "./auth-session").some((item) => item.imported === "subscribeTokenChanges"));
   const installs = callSitesIn(findFunction(page, "Home")).filter((call) => call.target === "subscribeTokenChanges");
-  assert.deepEqual(installs.map((call) => call.arguments), [["() => window.location.reload()"]]);
+  // 经 reloadPage:它先记下「页面自己要重载」,上传进行中的 beforeunload 提示就不会挡住它。
+  assert.deepEqual(installs.map((call) => call.arguments), [["() => reloadPage()"]]);
   assert.ok(
     callSitesIn(findFunction(page, "Home")).some((call) => (
       call.target === "useEffect"
-      && call.arguments[0] === "() => subscribeTokenChanges(() => window.location.reload())"
+      && call.arguments[0] === "() => subscribeTokenChanges(() => reloadPage())"
       && call.arguments[1] === "[]"
     )),
     "subscribeTokenChanges 必须由挂载一次的 effect 安装并返回退订",

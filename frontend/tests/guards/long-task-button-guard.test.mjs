@@ -76,6 +76,16 @@ const LONG_TASK_BUTTONS = [
   { match: "run(spec, event)", module: "kg-analysis-findings.tsx", why: "问题的处置按钮:删除/重新解析/补上关联都是后台或确认后的长动作", requires: "disabledFor" },
   { match: "void dismiss()", module: "kg-analysis-findings.tsx", why: "标为正常:等回执期间不能重复提交", requires: 'busy === "dismiss"' },
   { match: "void undo()", module: "kg-analysis-findings.tsx", why: "撤销标为正常:等回执期间不能重复提交", requires: "busy" },
+  // 网页导出 / 导入单本笔记本(notebook-transfer-panel.tsx)。导出与导入都是后台作业;
+  // 下面每颗按钮发的是一次会持续的请求(建作业、取票据、取消时服务端最多等 30 秒收尾、
+  // 上传几百 MB),在途期间必须禁用。
+  { match: "exporter.start()", module: "notebook-transfer-panel.tsx", why: "开始导出:POST 在飞期间连点会再要一次(同一作业,但错误/结果会互相覆盖)", requires: "view.starting" },
+  { match: "exporter.download()", module: "notebook-transfer-panel.tsx", why: "下载:每次点击都换一张一次性票据并开始一次几百 MB 的下载", requires: "view.downloading" },
+  { match: "exporter.cancel()", module: "notebook-transfer-panel.tsx", why: "取消导出:DELETE 在飞期间不能再点", requires: "view.cancelling" },
+  { match: "exporter.exportMemories()", module: "notebook-transfer-panel.tsx", why: "导出我的记忆:整份 Markdown 读完才开始下载", requires: "view.memoryExporting" },
+  { match: "onStart", module: "notebook-transfer-panel.tsx", why: "开始导入:先核对名额、再上传整个导出文件,在途期间重复提交会占掉第二个作业名额", requires: "uploading" },
+  { match: "onCancel", module: "notebook-transfer-panel.tsx", why: "取消导入:服务端最多等 30 秒确定笔记本留不留,收尾(pending)期间也不能再点", requires: ["row.busy", "row.stopping"] },
+  { match: "onRemove", module: "notebook-transfer-panel.tsx", why: "移除导入记录:DELETE 在飞期间不能重复提交", requires: ["row.busy", "row.stopping"] },
 ];
 
 // 长任务入口的另一种形态：**file input**。外层 label 无法 :disabled,所以禁用位落在
@@ -189,6 +199,18 @@ test("搬出 page.tsx 的长任务按钮:page.tsx 传进去的是真正的在飞
   assert.equal(restores.length, 1, "DuplicateResults 应当恰好挂一处 MergedAwayList");
   assert.equal(restores[0].bindings.busyId, "mergingId", "MergedAwayList 的 busyId 没有接到真正的在飞位");
   assert.match(restores[0].bindings.onRestore ?? "", /runWrite\(/, "MergedAwayList 的 onRestore 没有接到 runWrite");
+});
+
+test("导入弹窗接的是 page 持有的那一份导入状态机(在飞位因此跨开关弹窗)", async () => {
+  // 组件只读 view.upload / view.rows 判在飞;page.tsx 若传进一份别的 view(或每次新建),
+  // 上一条照样全绿,而关掉再打开弹窗后「开始导入」又能点了。
+  const page = await parseModule("page.tsx");
+  const modals = jsxElements(page, "NotebookImportModal");
+  assert.equal(modals.length, 1, "page.tsx 应当恰好挂一处 NotebookImportModal");
+  assert.equal(modals[0].bindings.view, "notebookImport.view");
+  assert.match(modals[0].bindings.onStart ?? "", /notebookImport\.start\(/);
+  assert.match(modals[0].bindings.onCancelJob ?? "", /notebookImport\.cancelJob\(/);
+  assert.match(modals[0].bindings.onRemoveJob ?? "", /notebookImport\.removeJob\(/);
 });
 
 test("page.tsx 的长任务 file input 也带非平凡的 disabled，且表达式里含在飞标志", async () => {
