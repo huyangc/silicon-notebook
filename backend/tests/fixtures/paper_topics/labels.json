@@ -1,0 +1,41 @@
+{
+  "_note": "Synthetic papers written for this repository (no third-party text). strong = the paper is about the topic; related = it uses or touches the topic. Every key not listed under a topic is unrelated to it.",
+  "topics": {
+    "diffusion": {
+      "query": "diffusion models for image generation",
+      "terms": ["diffusion", "denoising"],
+      "strong": ["dif-01", "dif-02", "dif-03", "dif-04", "dif-05"],
+      "related": ["x-robdif", "x-detdif"]
+    },
+    "molgraph": {
+      "query": "graph neural networks for molecular property prediction",
+      "terms": ["graph neural network", "molecular", "molecule"],
+      "strong": ["mol-01", "mol-02", "mol-03", "mol-04", "mol-05"],
+      "related": ["x-ragmol"]
+    },
+    "asr": {
+      "query": "automatic speech recognition word error rate",
+      "terms": ["speech recognition", "ASR"],
+      "strong": ["asr-01", "asr-02", "asr-03", "asr-04", "asr-05", "x-asrrag"],
+      "related": ["x-asrqa"]
+    },
+    "rag": {
+      "query": "retrieval-augmented generation for question answering",
+      "terms": ["retrieval-augmented", "RAG"],
+      "strong": ["rag-01", "rag-02", "rag-03", "rag-04", "rag-05", "x-ragmol", "x-asrqa"],
+      "related": ["x-asrrag"]
+    },
+    "robotrl": {
+      "query": "reinforcement learning for robot manipulation",
+      "terms": ["reinforcement learning", "robot"],
+      "strong": ["rob-01", "rob-02", "rob-03", "rob-04", "rob-05", "x-robdif"],
+      "related": ["x-robdet"]
+    },
+    "detection": {
+      "query": "object detection on COCO",
+      "terms": ["object detection", "detector"],
+      "strong": ["det-01", "det-02", "det-03", "det-04", "det-05", "x-detdif"],
+      "related": ["x-robdet"]
+    }
+  }
+}

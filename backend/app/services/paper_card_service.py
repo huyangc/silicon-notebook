@@ -481,7 +481,7 @@ class PaperCardService:
                 failure = code if code == "malformed_response" else f"model_error:{code}"
                 return self._write(plan, sample.basis, model, failure=failure, audit=audit)
             return CardResult(*key, "failed", reason=f"model_error:{code or type(exc).__name__}", model=model)
-        parsed = _parse_object(raw)
+        parsed = parse_model_object(raw)
         if parsed is None:
             return self._write(plan, sample.basis, model, failure="malformed", audit=audit)
         card, dropped = verify_paper_card(parsed, sample.elements)
@@ -605,7 +605,7 @@ class PaperCardService:
         self._event_log.emit(event)
 
 
-def _parse_object(raw: Any) -> dict | None:
+def parse_model_object(raw: Any) -> dict | None:
     """与论文元数据同一口径:先直解析,失败再走 ``safe_json`` 的围栏/think 剥离;
     单对象数组拆包,其它非对象形状算畸形。"""
     try:

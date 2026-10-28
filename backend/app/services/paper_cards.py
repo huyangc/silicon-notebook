@@ -201,6 +201,18 @@ def _is_ambiguous(tokens: list[str]) -> bool:
     return len(tokens) == 1 and len(tokens[0].lstrip("-")) == 1
 
 
+def _run_in(text: str, spans: list[tuple[str, int, int]], wanted: list[str]) -> bool:
+    """``wanted`` 作为一段连续、只隔连接符的数字 token 出现在 ``spans`` 里。"""
+    width = len(wanted)
+    for i in range(len(spans) - width + 1):
+        window = spans[i:i + width]
+        if [token for token, _s, _e in window] == wanted and all(
+            _joined(text, window[k][2], window[k + 1][1]) for k in range(width - 1)
+        ):
+            return True
+    return False
+
+
 def ground_value(value: str, element_text: str) -> str:
     """指标值接地,返回 ``""`` 表示通过,否则是丢弃原因码:``no_number``、
     ``ambiguous_value`` 或 ``value_not_in_anchor``。"""
@@ -210,14 +222,39 @@ def ground_value(value: str, element_text: str) -> str:
     if _is_ambiguous(wanted):
         return "ambiguous_value"
     text, spans = _number_spans(element_text)
-    width = len(wanted)
-    for i in range(len(spans) - width + 1):
-        window = spans[i:i + width]
-        if [token for token, _s, _e in window] == wanted and all(
-            _joined(text, window[k][2], window[k + 1][1]) for k in range(width - 1)
-        ):
-            return ""
-    return "value_not_in_anchor"
+    return "" if _run_in(text, spans, wanted) else "value_not_in_anchor"
+
+
+# 只由一个一位整数(加上最多这么多字的单位,如 ``3x``、``5 %``)构成的值太含糊。
+_BARE_NUMBER_MAX_CHARS = 4
+
+
+def ground_prose_numbers(value: str, element_text: str) -> str:
+    """一句可能夹着数字的文字值(逐篇抽取的临时字段)的数值接地,同 ``ground_value``
+    的归一化与 token 规则,返回 ``""`` 表示通过,否则是原因码。
+
+    值里的数字按「只隔连接符」切成若干段(``85.2±0.3`` 是一段,``12 layers on
+    ImageNet-1k`` 是两段),**每一段**都要作为连续 token 出现在引用文本里——不要求
+    整句的数字彼此相邻。没有数字的值直接通过。整个值只是一个一位整数(可带短单位)
+    时按 ``ambiguous_value`` 拒绝;夹在文字里的一位整数只要求在引用文本里出现。"""
+    normalized, spans = _number_spans(value)
+    if not spans:
+        return ""
+    if len(spans) == 1 and _is_ambiguous([spans[0][0]]) and len(
+        "".join(normalized.split())
+    ) <= _BARE_NUMBER_MAX_CHARS:
+        return "ambiguous_value"
+    groups: list[list[str]] = [[spans[0][0]]]
+    for previous, current in zip(spans, spans[1:]):
+        if _joined(normalized, previous[2], current[1]):
+            groups[-1].append(current[0])
+        else:
+            groups.append([current[0]])
+    text, text_spans = _number_spans(element_text)
+    for group in groups:
+        if not _run_in(text, text_spans, group):
+            return "value_not_in_anchor"
+    return ""
 
 
 def value_grounded(value: str, element_text: str) -> bool:
