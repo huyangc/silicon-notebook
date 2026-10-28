@@ -1649,8 +1649,8 @@ reflect）和铃铛。该任务行的 `conversation_id` 为空，删除会话不
 "items": [...], "notice", "skipped_libraries", "index_required", "truncation"}`。`evidence_kind` 取 `retrieval`、
 `document_overview`、`structured_enumeration` 或 `none`。每条 item 带 `key`（合成上下文里的 `kN` 标号）、`kind`
 （`chunk`、`kg`、`memory`、`element`、`collection`、`external`、`spreadsheet`（电子表格确定性分析结果）、
-`document_read`、`context`；按号段与产出方写下的字段判定，所以集合清单预览里的元素行是 `collection`、按篇读取的
-原文摘录是 `document_read`）、该片段的原样 `text`、与回答 `anchors` 相同的句柄字段（`object_id`、`object_type`、
+`document_read`、`paper_card`（论文要点摘要的一行，号段 `k9001` 起）、`context`；按号段与产出方写下的字段判定，
+所以集合清单预览里的元素行是 `collection`、按篇读取的原文摘录是 `document_read`、论文卡片摘要行是 `paper_card`）、该片段的原样 `text`、与回答 `anchors` 相同的句柄字段（`object_id`、`object_type`、
 `label`、`source_title`、`location_label`、`source_id`、`element_id`、`tier`、`relevance`、`provenance`，适用时
 还有 `knowhow` / `memory_id` / `url`，由同一个锚点解析器产出），以及回答引用会带的 `ref`（来源元素是 `el` ref，
 Memory 条目是 `mem` ref），所以 `read_reference` 解析它的方式与解析回答引用完全一致（`knowhow` 对交给

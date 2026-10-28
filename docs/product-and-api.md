@@ -2238,9 +2238,10 @@ The response is `{"notebook_id", "status": "retrieved", "output": "evidence", "m
 "items": [...], "notice", "skipped_libraries", "index_required", "truncation"}`. `evidence_kind` is
 `retrieval`, `document_overview`, `structured_enumeration` or `none`. Each item carries `key` (the `kN`
 label the synthesis context uses), `kind` (`chunk`, `kg`, `memory`, `element`, `collection`, `external`,
-`spreadsheet` — a deterministic workbook analysis result —, `document_read`, `context`; decided from the
-key band and the fields its producer wrote, so an element row of a collection preview is `collection`
-and a `read_document` excerpt is `document_read`), the verbatim `text` of that fragment, the same handle
+`spreadsheet` — a deterministic workbook analysis result —, `document_read`, `paper_card` — a line of a
+paper key-point digest, keyed `k9001`+ —, `context`; decided from the key band and the fields its
+producer wrote, so an element row of a collection preview is `collection`, a `read_document` excerpt is
+`document_read` and a paper-card digest line is `paper_card`), the verbatim `text` of that fragment, the same handle
 fields an answer's `anchors` carry (`object_id`, `object_type`, `label`, `source_title`,
 `location_label`, `source_id`, `element_id`, `tier`, `relevance`, `provenance`, plus `knowhow` /
 `memory_id` / `url` when applicable), produced by the same anchor parser, and the `ref` an answer

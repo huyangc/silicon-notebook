@@ -24,8 +24,9 @@ from app.services.spreadsheet_analysis import SPREADSHEET_RESULT_DEFINITION
 
 # Key-number bands.  They mirror ``AskService._MIX_KG_KEY_BASE`` (1000),
 # ``_MEMORY_KEY_BASE`` (3000), ``_ELEMENT_KEY_BASE`` (4000),
-# ``_COLLECTION_KEY_BASE`` (5000), ``_EXTERNAL_KEY_BASE`` (6000) and
-# ``_DOCUMENT_READ_KEY_BASE`` (7000); ``test_ask_evidence`` pins them equal.
+# ``_COLLECTION_KEY_BASE`` (5000), ``_EXTERNAL_KEY_BASE`` (6000),
+# ``_DOCUMENT_READ_KEY_BASE`` (7000) and ``_PAPER_CARD_KEY_BASE`` (9000);
+# ``test_ask_evidence`` / ``test_paper_card_answer`` pin them equal.
 # They are repeated here (not imported) so this module stays a leaf that
 # ``ask_service`` can import.
 _KG_BASE = 1000
@@ -34,6 +35,7 @@ _ELEMENT_BASE = 4000
 _COLLECTION_BASE = 5000
 _EXTERNAL_BASE = 6000
 _DOCUMENT_READ_BASE = 7000
+_PAPER_CARD_BASE = 9000
 
 # Sectioned synthesis shifts every band by ``i * OUTLINE_SECTION_KEY_STRIDE``
 # (``outline_synthesis``); the band is read after removing that shift, exactly
@@ -62,7 +64,8 @@ def kind_for_key(key: str, id_map: Mapping[str, Mapping[str, Any]]) -> str:
       no chunks -- typed, below the memory band;
     * element blocks (k4001+), collection-preview rows (k5001+,
       ``collection_enumeration_answer``: "element"/"source"/graph types),
-      ``read_document`` excerpts (k7001+, "element") -- the band decides,
+      ``read_document`` excerpts (k7001+, "element") and paper-card / extracted
+      value elements (k9001+, ``paper_card_answer``, "element") -- the band decides,
       because their ``object_type`` names the row, not the producer;
     * workbook results (k6001+, ``spreadsheet_prompt_block``: "element" or
       "source") share the band with external evidence and are told apart by
@@ -78,6 +81,8 @@ def kind_for_key(key: str, id_map: Mapping[str, Mapping[str, Any]]) -> str:
     if match is None:
         return "context"
     band = int(match.group(1)) % _SECTION_KEY_STRIDE
+    if band >= _PAPER_CARD_BASE:
+        return "paper_card"
     if band >= _DOCUMENT_READ_BASE:
         return "document_read"
     if band >= _EXTERNAL_BASE:

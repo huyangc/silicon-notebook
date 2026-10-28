@@ -854,6 +854,10 @@ READ_DOCUMENT_DEPTH_DEFAULT = READ_DOCUMENT_DEPTH_BRIEF
 # 由 `test_reasoning_document_read_synthesis.py` 的相等用例钉住——不写成模块级
 # assert,是因为那会把 `ask_service` 变成本模块的 import 期依赖(反向依赖)。
 DOCUMENT_READ_KEY_BASE = 7000
+# 论文卡片证据段(k9001+,`paper_card_answer.PAPER_CARD_KEY_BASE`)的起点:按篇取样
+# 的号段整体必须落在它之下(`document_read_active` 的号段闸)。同值钉在
+# `test_paper_card_answer`。
+PAPER_CARD_KEY_BASE = 9000
 # 每次 read_document 从自己的字符份额里让出来的包头预留。合成侧(T5)给每一篇
 # 取样拼一行 `supplemental_excerpt_header` 形状的包头,不预留的话最后一篇会在
 # 装配时被自己的标题挤掉。
@@ -4498,8 +4502,9 @@ class ReasoningRetriever:
           章节标题;
         * 元素池份额不足 1 篇,首读就是 budget skip;
         * 号段总宽 `DOCUMENT_READ_KEY_BASE + 次数 × 池宽` 越过
-          `OUTLINE_SECTION_KEY_STRIDE`,按篇取样的 `[kN]` 会与按节合成第 2 节的证据
-          撞号——那不会报错,只会把引用静静指错。
+          `PAPER_CARD_KEY_BASE`(9000,其上是论文卡片段,再上是按节合成第 2 节的
+          `OUTLINE_SECTION_KEY_STRIDE`),按篇取样的 `[kN]` 会与卡片证据撞号——那不会
+          报错,只会把引用静静指错(余量 2000,启动期超出会告警)。
 
         判据按 brief 的均分份额算(最坏情况:每一次都只拿到 1/N)。`depth=
         "thorough"`(PR-4)只放大单次份额、从不缩小,所以它不改变这把闸的结论;
@@ -4538,7 +4543,7 @@ class ReasoningRetriever:
             and share_chars >= DOCUMENT_READ_MIN_CHARS_PER_ELEMENT
             and element_pool // policy_reads >= 1
             and (DOCUMENT_READ_KEY_BASE + policy_reads * element_pool
-                 <= OUTLINE_SECTION_KEY_STRIDE)
+                 <= PAPER_CARD_KEY_BASE < OUTLINE_SECTION_KEY_STRIDE)
         )
 
     # --- 文档内导航的总闸(browse_sections / read_section / 章节线索块) ---
