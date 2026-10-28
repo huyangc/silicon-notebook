@@ -655,3 +655,35 @@ def check_unknown_notebook_and_cleanup(repo, backend: Backend, tmp: Path, monkey
     with pytest.raises(NotebookExportError):
         export(repo, NB, existing)
     assert existing.read_bytes() == b"keep me"
+
+
+def check_checkpoint_sees_the_bytes_and_can_stop_the_export(
+    repo, backend: Backend, tmp: Path
+) -> None:
+    """``checkpoint`` runs throughout the write with the part file's growing size,
+    and what it raises -- mid-rows or mid-files -- reaches the caller unchanged,
+    leaving neither the archive nor its part file behind."""
+    storage = Path(repo.storage_dir)
+    seed(repo, backend, char_cases.full_world(), storage, char_cases.FULL_FILES)
+    seen: list[int] = []
+    out = tmp / "watched.snbk"
+    report = export(repo, NB, out, checkpoint=seen.append)
+    assert len(seen) > len(ARCHIVE_TABLES), seen
+    assert seen == sorted(seen) and seen[0] >= 0
+    assert seen[-1] <= report.archive_bytes
+
+    class Stop(Exception):
+        pass
+
+    for stop_at in (1, len(seen) - 1):
+        calls = []
+
+        def stopping(written: int) -> None:
+            calls.append(written)
+            if len(calls) == stop_at:
+                raise Stop
+
+        target = tmp / f"stopped-{stop_at}.snbk"
+        with pytest.raises(Stop):
+            export(repo, NB, target, checkpoint=stopping)
+        assert list(tmp.glob(f"stopped-{stop_at}.snbk*")) == [], stop_at

@@ -684,3 +684,7 @@ def test_a_manifest_beyond_the_reader_limit_fails_the_export(repo, out_dir, monk
     with pytest.raises(NotebookExportError, match="清单过大"):
         cases.export(repo, cases.NB, out)
     assert list(out_dir.iterdir()) == []
+
+
+def test_the_checkpoint_sees_the_bytes_and_can_stop_the_export(repo, out_dir):
+    cases.check_checkpoint_sees_the_bytes_and_can_stop_the_export(repo, BACKEND, out_dir)

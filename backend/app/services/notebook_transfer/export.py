@@ -203,8 +203,14 @@ def export_notebook(
     global_object_schemas: Iterable[ObjectSchemaModel] = (),
     include_vectors: bool = True,
     now: "Callable[[], datetime] | None" = None,
+    checkpoint: "Callable[[int], None] | None" = None,
 ) -> ExportReport:
     """Write ``notebook_id`` to ``out_path`` (see the module docstring).
+
+    ``checkpoint(written)`` runs before every page of rows and every block of a
+    file goes into the archive, with the bytes the part file holds so far; what
+    it raises stops the export (the part file is removed) and reaches the caller
+    unchanged -- the web job's cancellation and its archive-size cap.
 
     Raises ``NotebookNotFoundError`` when the notebook does not exist or is being
     deleted, ``NotebookExportError`` when the output already exists (checked
@@ -217,7 +223,7 @@ def export_notebook(
         raise NotebookExportError(f"输出目录不存在: {out_path.parent}")
     _refuse_output_inside_exported_trees(out_path, Path(storage_dir), notebook_id)
     stale = stale_part_files(out_path)
-    writer = _ArchiveWriter.create(out_path)
+    writer = _ArchiveWriter.create(out_path, checkpoint=checkpoint)
     try:
         report = _write_archive(
             writer, rows, notebook_id, out_path,
@@ -630,7 +636,9 @@ class _ArchiveWriter:
     would inflate beyond the ratio limit), one entry open at a time, every entry
     counted against the reader limits as it closes."""
 
-    def __init__(self, part: Path, handle) -> None:
+    def __init__(
+        self, part: Path, handle, *, checkpoint: "Callable[[int], None] | None" = None
+    ) -> None:
         self.part = part
         self._handle = handle
         self._zip = zipfile.ZipFile(
@@ -638,9 +646,12 @@ class _ArchiveWriter:
         )
         self._entries = 0
         self._uncompressed = 0
+        self._checkpoint = checkpoint
 
     @classmethod
-    def create(cls, out_path: Path) -> "_ArchiveWriter":
+    def create(
+        cls, out_path: Path, *, checkpoint: "Callable[[int], None] | None" = None
+    ) -> "_ArchiveWriter":
         """A fresh, uniquely named part file beside ``out_path`` (``O_EXCL``)."""
         while True:
             part = out_path.with_name(f"{out_path.name}.{secrets.token_hex(6)}{PART_SUFFIX}")
@@ -648,7 +659,13 @@ class _ArchiveWriter:
                 fd = os.open(part, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o644)
             except FileExistsError:
                 continue
-            return cls(part, os.fdopen(fd, "w+b"))
+            return cls(part, os.fdopen(fd, "w+b"), checkpoint=checkpoint)
+
+    def _check(self) -> None:
+        """Hand the caller's checkpoint the bytes written so far (the position
+        of the part file: the zip writes it sequentially, compressed)."""
+        if self._checkpoint is not None:
+            self._checkpoint(self._handle.tell())
 
     def _info(self, name: str, compress_type: int) -> zipfile.ZipInfo:
         info = zipfile.ZipInfo(name, date_time=_ENTRY_DATE)
@@ -683,6 +700,7 @@ class _ArchiveWriter:
         count = 0
         with self._open(name) as entry:
             for page in pages:
+                self._check()
                 for row in page:
                     kept = normalize(table, row)
                     if kept is None:
@@ -710,6 +728,7 @@ class _ArchiveWriter:
         digest = DigestCounter()
         with self._open(name, compress_type) as entry:
             while True:
+                self._check()
                 block = os.read(fd, _COPY_BLOCK)
                 if not block:
                     break
@@ -722,6 +741,7 @@ class _ArchiveWriter:
         digest = DigestCounter()
         with self._open(name) as entry:
             while True:
+                self._check()
                 block = source.read(_COPY_BLOCK)
                 if not block:
                     break
