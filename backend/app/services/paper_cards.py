@@ -309,18 +309,31 @@ def _cap(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit].rstrip()
 
 
-def _numberish(ch: str) -> bool:
-    return ch.isdigit() or ch in ".,"
+_SPAN_NUMBER = r"(?:\d[\d,]*(?:\.\d+)?|\.\d+)"
+# 一个完整的数值表达式:普通数、科学计数法(1.2e-3)、乘幂(3×10^5、10^-5)、
+# 正负误差(85.2±0.3)。截断时整段视为一个数,切点落在里面就退到整段之前。
+_NUMBER_SPAN_RE = re.compile(
+    rf"[-+−]?{_SPAN_NUMBER}"
+    rf"(?:\s*(?:[eE][-+−]?\d+"
+    rf"|[×xX*·]\s*10\s*(?:\^|\*\*)\s*[-+−]?\d+"
+    rf"|\^\s*[-+−]?\d+"
+    rf"|±\s*{_SPAN_NUMBER}))*"
+)
 
 
 def cap_number_safe(value: str, limit: int) -> str:
-    """截到 ``limit`` 字;切点落在数字中间(两侧都是数字/小数点/千分位)时退到这个数之前,
-    绝不留下半个数(``36.2`` 截成 ``36.`` 会变成另一个数)。卡片指标与逐篇抽取共用。"""
+    """截到 ``limit`` 字;切点落在一个数值表达式里面时退到整个表达式之前,绝不留下半个数
+    (``36.2`` 截成 ``36.``、``1.2e-3`` 截成 ``1.2``、``3×10^5`` 截成 ``3×10`` 都会变成
+    另一个数)。卡片输入、卡片指标、逐篇抽取与表格渲染共用。"""
     if len(value) <= limit:
         return value
     cut = limit
-    while cut > 0 and _numberish(value[cut - 1]) and _numberish(value[cut]):
-        cut -= 1
+    for match in _NUMBER_SPAN_RE.finditer(value, 0, limit + 64):
+        if match.start() >= cut:
+            break
+        if match.start() < cut < match.end():
+            cut = match.start()
+            break
     return value[:cut].rstrip()
 
 

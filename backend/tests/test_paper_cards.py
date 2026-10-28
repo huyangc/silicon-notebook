@@ -407,3 +407,21 @@ def test_card_input_never_ends_inside_a_number(where):
     assert not shown.text.endswith("85.2") and "85.2" not in shown.text
     card, dropped = verify_paper_card({"metrics": [_metric("85.2", anchor="e1")]}, (shown,))
     assert card["metrics"] == [] and dropped
+
+
+
+@pytest.mark.parametrize(("value", "limit", "expected"), [
+    ("1.2e-3", 3, ""),                 # codex round 8 repro
+    ("3\u00d710^5", 4, ""),           # codex round 8 repro
+    ("lr 1.2E+03 used", 7, "lr"),
+    ("lr 3x10^5 steps", 6, "lr"),
+    ("err 85.2\u00b10.3 val", 8, "err"),
+    ("ab 10^-5 x", 6, "ab"),
+    ("acc 85.23 AP", 8, "acc"),
+    ("acc 85.23 AP", 9, "acc 85.23"),  # a cut right after the number keeps it
+    ("hello world 12", 8, "hello wo"),
+])
+def test_cap_number_safe_never_splits_a_numeric_expression(value, limit, expected):
+    from app.services.paper_cards import cap_number_safe
+
+    assert cap_number_safe(value, limit) == expected
