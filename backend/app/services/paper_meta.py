@@ -114,6 +114,12 @@ def _doi_tokens(text: str) -> List[str]:
     return tokens
 
 
+class PaperMetaContentError(ValueError):
+    """模型回了,但回复不能当论文元数据用(非对象 JSON、is_paper 不是布尔)。
+    内容失败:对同一份头部文本再问一次多半还是这样,交互路径据此冷却;
+    其它 ValueError(配置、存储)不算。仍是 ValueError,原有捕获口径不变。"""
+
+
 def verify_paper_meta(data: Dict[str, Any], head_text: str, model: str) -> Dict[str, Any]:
     """接地校验:返回可直接交给 SourceStore.upsert_paper_meta 的 meta dict。
     不在头部文本中的字段不落库;丢弃明细记入 raw_json 审计信封
@@ -126,7 +132,7 @@ def verify_paper_meta(data: Dict[str, Any], head_text: str, model: str) -> Dict[
     # evidence that this source is not a paper: persisting false suppresses retry.
     is_paper = data.get("is_paper")
     if not isinstance(is_paper, bool):
-        raise ValueError("paper-meta is_paper must be a boolean")
+        raise PaperMetaContentError("paper-meta is_paper must be a boolean")
     head_text = head_text or ""
     head_norm = _norm(head_text)
     dropped: Dict[str, Any] = {}

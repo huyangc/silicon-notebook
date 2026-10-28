@@ -63,7 +63,7 @@ from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.model_work import (
-    MALFORMED_RESPONSE_CODE,
+    INPUT_DETERMINISTIC_MODEL_ERROR_CODES,
     is_transient_model_error,
     model_artifact_scope,
     model_error_code,
@@ -71,6 +71,7 @@ from app.services.model_work import (
 from app.services.retrieval_run import retrieval_fanout_slot
 from app.services.paper_meta import (
     PAPER_META_SCHEMA_HINT,
+    PaperMetaContentError,
     paper_meta_doc_type_eligible,
     paper_meta_prompt,
     verify_paper_meta,
@@ -3374,8 +3375,8 @@ class SourceIngestionService:
             self.event_log.logger.exception(
                 "paper metadata extraction failed for %s", source.id
             )
-            content = isinstance(exc, ValueError) or (
-                model_error_code(exc) == MALFORMED_RESPONSE_CODE
+            content = isinstance(exc, PaperMetaContentError) or (
+                model_error_code(exc) in INPUT_DETERMINISTIC_MODEL_ERROR_CODES
             )
             return "failed" if content else "error"
 
@@ -3395,27 +3396,26 @@ class SourceIngestionService:
     def _paper_meta_paged_head(
         self, source: "SourceSummary | SourceDetail", head_chars: int, cancel_event: Any
     ) -> str:
-        """与 ``_paper_meta_full_head`` 同一段文本(.md/.txt 读文件,否则按元素顺序以
-        空行拼接),但元素按页读取、读够 ``head_chars`` 即停。"""
-        path = getattr(source, "file_path", "") or ""
-        if path.endswith((".md", ".markdown", ".txt")):
-            text = self.source_files.read_source_text(path, ())
-            if text:
-                return text[:head_chars]
+        """与 ``_paper_meta_full_head`` 逐字同一段文本:能读到的 .md/.txt 原文件就用它
+        (空文件即空文本,与原入口一样走 ``no_text``),否则按元素顺序以空行拼接——但元素
+        按键集分页读取(``source_elements_after``,与 ``source_elements`` 同一顺序、
+        不做逐页 COUNT),读够 ``head_chars`` 即停。"""
+        text = self.source_files.read_text_file(getattr(source, "file_path", "") or "")
+        if text is not None:
+            return text[:head_chars]
         parts: List[str] = []
         length = -2
-        offset = 0
+        after = None
         while length < head_chars:
             raise_if_cancelled(cancel_event)
             with retrieval_fanout_slot():
-                page = self.sources.source_elements_page(
-                    source.id, offset=offset, limit=_PAPER_META_HEAD_PAGE
+                page, after = self.sources.source_elements_after(
+                    source.id, after, _PAPER_META_HEAD_PAGE
                 )
-            for element in page.items:
+            for element in page:
                 parts.append(element.text)
                 length += len(element.text) + 2
-            offset += len(page.items)
-            if not page.items or offset >= page.total_count:
+            if after is None or not page:
                 break
         return "\n\n".join(parts)[:head_chars]
 
@@ -3488,7 +3488,7 @@ class SourceIngestionService:
         ):
             parsed = parsed[0]  # single-object-in-array: unwrap, don't discard
         if not isinstance(parsed, dict):
-            raise ValueError("paper-meta LLM returned non-object JSON")
+            raise PaperMetaContentError("paper-meta LLM returned non-object JSON")
         meta = verify_paper_meta(
             parsed, head_text,
             model=str(getattr(client, "model", "") or ""),
