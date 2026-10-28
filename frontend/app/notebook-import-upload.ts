@@ -114,22 +114,34 @@ export const IMPORT_UPLOAD_UNSURE_TEXT = "连接中断，导入可能已被接�
 /** 停止了、而请求体可能已经整个到了服务器:同一个意思。 */
 export const IMPORT_STOP_UNSURE_TEXT = "已停止上传，但文件可能已经传完、导入可能已被接收；请先看下方的导入记录，再决定是否重传。";
 
+/** 已经停在预检那一步、而上一次带这个标识的上传结果未定时那句话。 */
+export const IMPORT_PRECHECK_STOP_UNSURE_TEXT = "已停止。上一次上传可能已被接收；请先看下方的导入记录，再决定是否重传。";
+
 /**
  * 一串上传尝试共用的上传标识(`X-Upload-Id`)。它绑在**选中的那个文件**上,一直沿用到这一
  * 串有了确定的结局为止:说不准有没有被接收(`unsure`)时,再传这同一个文件仍用同一个标识
- * ——服务端认出它,回已经建出的那个作业,不读请求体,不会多出一本。换了文件、或有了确定
- * 结局(已接收、确定没被接收、服务端明确拒绝),下一次就用新的标识。
+ * ——服务端认出它,回已经建出的那个作业,不读请求体,不会多出一本。
+ *
+ * 只有确定的结局才换标识(`endChain`):已接收(含按标识认领到)、确定没被接收、服务端明确
+ * 拒绝且这个标识下确实没有作业,或者换了文件。预检里的拒绝(名额满了、作业读不到)与预检
+ * 时的停止都**不是**确定的结局——那时请求还没发出,而上一次带这个标识的尝试(`unresolved`)
+ * 可能已经建出作业、正占着名额;换了标识,下一次重传就会多出一本。
  */
-let chain: { file: File; uploadId: string } | null = null;
+let chain: { file: File; uploadId: string; unresolved: boolean } | null = null;
 
-function uploadIdFor(file: File): string {
-  if (chain?.file !== file) chain = { file, uploadId: newClientRequestId() };
-  return chain.uploadId;
+function chainFor(file: File): { file: File; uploadId: string; unresolved: boolean } {
+  if (chain?.file !== file) chain = { file, uploadId: newClientRequestId(), unresolved: false };
+  return chain;
 }
 
 /** 这一串尝试有了确定的结局:下一次上传用新的标识。 */
 function endChain(file: File): void {
   if (chain?.file === file) chain = null;
+}
+
+/** 这一串尝试的结局说不准:标识留着,下一次(哪怕被打断)也不能当作确定没导入。 */
+function leaveUnresolved(file: File): void {
+  if (chain?.file === file) chain.unresolved = true;
 }
 
 /**
@@ -211,7 +223,10 @@ export const importUpload = {
     const base = { fileName: file.name, total: file.size };
     publish({ ...base, percent: 0, stage: "precheck" });
     const current = () => mine === generation;
-    const uploadId = uploadIdFor(file);
+    const attempt = chainFor(file);
+    const { uploadId } = attempt;
+    // 上一次带这个标识的尝试结果未定:这一次没认领到作业时,也只能说说不准。
+    const carried = attempt.unresolved;
     // 上传请求已经发出 / 请求体已经整个交给了网络(`xhr.upload` 的 load):此后服务器
     // 可能已经接收,打断之后要按上传标识认领。
     let requestStarted = false;
@@ -225,8 +240,15 @@ export const importUpload = {
         // 读不到就不预检:由服务端兜底。
       }
       if (!current()) return;
-      if (jobs && activeTransferCount(jobs) >= MAX_ACTIVE_TRANSFER_JOBS) {
+      // 先按标识对账:上一次尝试其实已经被接收(它的作业可能正占着一个名额)——认领它,不再上传。
+      const adopted = jobs?.find((job) => job.kind === "import" && job.client_upload_id === uploadId);
+      if (adopted) {
         endChain(file);
+        deliver({ kind: "uploaded", job: adopted, fileName: file.name });
+        return;
+      }
+      if (jobs && activeTransferCount(jobs) >= MAX_ACTIVE_TRANSFER_JOBS) {
+        // 预检拒绝不是确定的结局:标识留着。
         deliver({ kind: "failed", text: TRANSFER_BUSY_TEXT });
         return;
       }
@@ -255,22 +277,37 @@ export const importUpload = {
       if (!current()) return;
       const interrupted = isAbort(error) || error instanceof TypeError;
       if (interrupted && !requestStarted) {
-        // 停在预检那一步:请求根本没发出,确定什么都没导入。
-        endChain(file);
-        deliver({ kind: "stopped" });
+        // 停在预检那一步:这一次的请求根本没发出。标识留着;上一次的结果未定就照实说。
+        deliver(carried ? { kind: "unsure", text: IMPORT_PRECHECK_STOP_UNSURE_TEXT } : { kind: "stopped" });
       } else if (interrupted) {
-        const outcome = await settleInterrupted(uploadId, isAbort(error), bodySent, file, limitBytes);
+        let outcome = await settleInterrupted(uploadId, isAbort(error), bodySent, file, limitBytes);
         if (!current()) return;
-        if (outcome.kind !== "unsure") endChain(file);
+        // 没认领到作业,而上一次带这个标识的尝试结果未定:这一次的「确定没被接收」不代表那一次。
+        if (carried && outcome.kind !== "uploaded") {
+          outcome = { kind: "unsure", text: isAbort(error) ? IMPORT_STOP_UNSURE_TEXT : IMPORT_UPLOAD_UNSURE_TEXT };
+        }
+        if (outcome.kind === "unsure") leaveUnresolved(file);
+        else endChain(file);
         deliver(outcome);
       } else if (uploadStillInProgress(error)) {
         // 同一个标识的上一次上传还在服务端处理:这一次没被接收,上一次的结果未定。
+        leaveUnresolved(file);
         deliver({ kind: "unsure", text: transferRequestErrorText(error, {}, IMPORT_UPLOAD_UNSURE_TEXT) });
       } else {
-        // 服务端明确拒绝:确定的结局。超过上限被拒时上限可能刚被改小,下次重新读。
-        endChain(file);
+        // 服务端明确拒绝。有些拒绝(格式、按声明长度的 413)发生在服务端按标识去重之前,不能
+        // 证明这个标识下没有作业:上一次结果未定时先按标识对账,认领到就交出它。
         if (httpErrorStatus(error) === 413) forgetTransferLimit();
-        deliver({ kind: "failed", text: transferRequestErrorText(error, IMPORT_UPLOAD_ERRORS, IMPORT_UPLOAD_FAILED_TEXT) });
+        const text = transferRequestErrorText(error, IMPORT_UPLOAD_ERRORS, IMPORT_UPLOAD_FAILED_TEXT);
+        const job = carried ? await jobOfUpload(uploadId) : null;
+        if (!current()) return;
+        if (job) {
+          endChain(file);
+          deliver({ kind: "uploaded", job, fileName: file.name });
+        } else {
+          // 读不到作业时这个标识下有没有作业仍未定:标识留着。
+          if (job === null) endChain(file);
+          deliver({ kind: "failed", text });
+        }
       }
     } finally {
       if (current()) {
