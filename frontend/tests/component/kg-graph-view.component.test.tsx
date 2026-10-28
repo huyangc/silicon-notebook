@@ -296,7 +296,7 @@ test("搜索框把输入原样交给注入命令；节点/边计数按当前视�
 
 test("待确认合并把候选与 confirm 位交回注入命令，且在飞/重建时两颗都禁用", async () => {
   const decideMerge = vi.fn();
-  const candidate: PendingMerge = { id: "m-1", canonical_a: "K-A", canonical_b: "K-B", score: 0.91, status: "pending" };
+  const candidate: PendingMerge = { id: "m-1", canonical_a: "K-A", canonical_b: "K-B", score: 0.91, status: "pending", name_a: "A", name_b: "B" };
   const { unmount } = renderView({
     decideMerge,
     kgGraph: graphView({ pendingMerges: [candidate] }),
@@ -320,14 +320,15 @@ test("待确认合并把候选与 confirm 位交回注入命令，且在飞/重�
 });
 
 
-test("待确认合并两侧显示概念名；某侧没有名字时回退到去掉 K- 的 id", () => {
+test("待确认合并两侧显示概念名；某侧没有名字时显示「未命名概念」，不显示 id 里的种子", () => {
   const named: PendingMerge = {
     id: "m-1", canonical_a: "K-rms norm", canonical_b: "K-layer norm", score: 0.91,
     status: "pending", name_a: "RMSNorm", name_b: "LayerNorm",
   };
-  // 一侧名字为空（后端对这位查看者没有可显示的名字），一侧缺字段（旧响应）
+  // 一侧名字为空（后端对这位查看者没有可显示的名字），一侧缺字段（旧响应）。
+  // canonical id 是类型前缀加成员归一后的名字，只作操作句柄，不上屏。
   const partial: PendingMerge = {
-    id: "m-2", canonical_a: "K-q former", canonical_b: "K-qformer", score: 0.85,
+    id: "m-2", canonical_a: "K-quiet zebra", canonical_b: "KL-xylophone claim", score: 0.85,
     status: "pending", name_a: "",
   };
   const withName: PendingMerge = { ...partial, id: "m-3", name_b: "Q-Former" };
@@ -337,11 +338,13 @@ test("待确认合并两侧显示概念名；某侧没有名字时回退到去�
   const labels = rows.map((row) => row.querySelector("span")!.textContent);
   expect(labels).toEqual([
     "RMSNorm ↔ LayerNorm (0.91)",
-    "q former ↔ qformer (0.85)",
-    "q former ↔ Q-Former (0.85)",
+    "未命名概念 ↔ 未命名概念 (0.85)",
+    "未命名概念 ↔ Q-Former (0.85)",
   ]);
-  // 有名字时种子串不上屏
-  expect(screen.queryByText(/rms norm/)).toBeNull();
+  const text = document.body.textContent ?? "";
+  for (const seed of ["rms norm", "quiet zebra", "xylophone", "K-", "KL-"]) {
+    expect(text.includes(seed)).toBe(false);
+  }
 });
 
 
@@ -366,7 +369,7 @@ test("只差写法的一对标「同名不同写法」；按含义找到的、�
 
 
 test("只读工作区看不到图谱处理、自动判重与逐行合并决定", () => {
-  const candidate: PendingMerge = { id: "m-1", canonical_a: "K-A", canonical_b: "K-B", score: 0.91, status: "pending" };
+  const candidate: PendingMerge = { id: "m-1", canonical_a: "K-A", canonical_b: "K-B", score: 0.91, status: "pending", name_a: "A", name_b: "B" };
   renderView({
     readOnlyWorkspace: true,
     readOnlyIndexes: true,
@@ -421,7 +424,7 @@ test("没有知识图谱时无可删除；任一维护/整理任务在跑时删�
 
 
 test("删除在飞：自动判重与全部自动判重同样禁用（删除会清掉待确认合并）", () => {
-  const candidate: PendingMerge = { id: "m-1", canonical_a: "K-A", canonical_b: "K-B", score: 0.91, status: "pending" };
+  const candidate: PendingMerge = { id: "m-1", canonical_a: "K-A", canonical_b: "K-B", score: 0.91, status: "pending", name_a: "A", name_b: "B" };
   const idle = renderView({ kgGraph: graphView({ pendingMerges: [candidate] }) });
   expect(screen.getByRole("button", { name: "自动判重" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "全部自动判重" })).toBeEnabled();
@@ -445,7 +448,7 @@ test("删除在飞：按钮换成「删除中…」并禁用，同一维护槽�
 
 
 test("删除期间待确认合并的逐行决定也禁用（候选正被一并清掉）", () => {
-  const candidate: PendingMerge = { id: "m-1", canonical_a: "K-A", canonical_b: "K-B", score: 0.91, status: "pending" };
+  const candidate: PendingMerge = { id: "m-1", canonical_a: "K-A", canonical_b: "K-B", score: 0.91, status: "pending", name_a: "A", name_b: "B" };
   renderView({ kgGraph: graphView({ pendingMerges: [candidate], deleting: true }) });
   const row = screen.getByText(/A ↔ B/).closest(".kg-merge-row") as HTMLElement;
   expect(within(row).getByRole("button", { name: "合并" })).toBeDisabled();

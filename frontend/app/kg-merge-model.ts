@@ -1,16 +1,17 @@
 import type { PendingMerge } from "./workspace-model";
 
 
-// What a pending-merge row shows for its two sides: the concept's name, or,
-// when the backend has none to show (no published cluster carries the id, or
-// every member is hidden from this viewer), the id without its `K-` prefix.
+// Shown for a side the backend has no name for (no published cluster carries
+// the id yet, or an older response without the field).
+export const UNNAMED_MERGE_SIDE = "未命名概念";
+
+// What a pending-merge row shows for its two sides: the concept's name, or
+// `UNNAMED_MERGE_SIDE`. Never the canonical id: it is the type prefix plus a
+// member's normalised name (possibly a member hidden from this viewer), kept
+// only as the row's handle.
 export function pendingMergeSides(candidate: PendingMerge): [string, string] {
-  const side = (name: string | undefined, canonicalId: string) =>
-    name || canonicalId.replace(/^K-/, "");
-  return [
-    side(candidate.name_a, candidate.canonical_a),
-    side(candidate.name_b, candidate.canonical_b),
-  ];
+  const side = (name: string | undefined) => name || UNNAMED_MERGE_SIDE;
+  return [side(candidate.name_a), side(candidate.name_b)];
 }
 
 

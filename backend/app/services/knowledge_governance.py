@@ -33,7 +33,7 @@ mutation-commits-before-candidate-status boundary.
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
@@ -619,9 +619,9 @@ class KnowledgeGovernanceService:
 
     def pending_merges(self, notebook_id: str) -> List[dict]:
         """Every pending candidate, each row also carrying ``name_a`` /
-        ``name_b``: the display names of its two sides (P4-T6). The list's
-        rows are not filtered by viewer (a shared tool, as before); the names
-        are, by the cluster label rule of the KG detail reads.
+        ``name_b``: the display names of its two sides (P4-T6). The names
+        follow the cluster label rule of the KG detail reads, and so does the
+        one row filter: every other row goes to every reader (a shared tool).
 
         * A name is the published cluster's stored ``canonical_name``, read
           by one bounded point lookup per distinct id of this response
@@ -632,13 +632,16 @@ class KnowledgeGovernanceService:
           (``filtering(viewer_scope)``; ``None`` -- nothing hidden -- costs the
           scope's one or two bounded reads and changes nothing), a cluster
           that may hold a hidden member is named by its first visible member
-          (``KgViewerScope.cluster_labels``, one batched member read), and one
-          with no visible live member gets ``""``: its stored name can only
-          have come from a hidden member.
-        * ``""`` also when no published cluster row carries the id (a bridge
+          (``KgViewerScope.cluster_labels``, one batched member read).
+        * A cluster with no visible live member does not exist for the viewer
+          (as in the detail reads: absent from search and the graph, 404 on
+          its detail), so a row naming one is left out for this viewer: its
+          id is ``K-<seed>`` and the seed, like the stored name, can only
+          have come from a hidden member. The row stays for its other readers.
+        * ``""`` when no published cluster row carries the id (a bridge
           candidate whose cluster was never formed, a candidate written in
-          the moment before its rebuild publishes); the browser then shows
-          the id as before."""
+          the moment before its rebuild publishes); the browser then shows a
+          placeholder, never the id."""
         self.get_notebook(notebook_id)
         with self._connect() as db:
             rows = self.governance_store.pending_merges(db, notebook_id)
@@ -647,6 +650,7 @@ class KnowledgeGovernanceService:
                 for side in ("canonical_a", "canonical_b") if row[side]
             })
             names: Dict[str, str] = {}
+            absent: Set[str] = set()
             for start in range(0, len(ids), _IN_CHUNK):
                 names.update(self.governance_store.pending_merge_names(
                     db, notebook_id, ids[start:start + _IN_CHUNK]))
@@ -654,6 +658,8 @@ class KnowledgeGovernanceService:
             scope = filtering(self._viewer_scope(notebook_id))
             if scope is not None:
                 for cid, label in scope.cluster_labels(ids).items():
+                    if label is None:
+                        absent.add(cid)
                     names[cid] = label or ""
         from app.services.kg_merge import merge_candidate_kind
 
@@ -662,6 +668,9 @@ class KnowledgeGovernanceService:
         # keys themselves stay internal: they are seed strings, not names.
         out = []
         for row in rows:
+            if absent and (str(row["canonical_a"]) in absent
+                           or str(row["canonical_b"]) in absent):
+                continue
             kind = merge_candidate_kind(row)
             item = {key: value for key, value in row.items()
                     if key not in ("seed_a", "seed_b")}

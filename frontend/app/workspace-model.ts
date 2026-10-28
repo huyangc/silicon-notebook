@@ -1045,7 +1045,8 @@ export type PendingMerge = {
   score: number;
   status: string;
   // Display names of the two sides; "" (or absent) when the backend has none
-  // to show this viewer -- the row then falls back to the id without `K-`.
+  // (no published cluster carries the id yet) -- the row then shows
+  // 「未命名概念」, never the id (`kg-merge-model.ts`).
   name_a?: string;
   name_b?: string;
   // "spelling_variant": the two names differ only in spaces, hyphens,
