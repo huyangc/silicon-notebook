@@ -243,6 +243,7 @@ PR2 基于 PR1 合入后的 master，PR3 基于 PR2；每个 PR 开之前 rebase
 - `docs/development.md:518` / `docs/development_zh.md:390` 里「21 个工具…」那句（MCP smoke 钉住）；
 - 更新说明写明三个新动作 id 与 `answer_layout` 成为保留名（仓库外插件同名动作会注册失败），以及换嵌入模型后要重跑校准脚本；
 - `docs/deployment-and-configuration*.md`：新增环境变量（规格 §4.5、§5、§7.1）与「`paper_metadata` 绑定现在也承担卡片与抽取」的容量提示；
+  写明 `PAPER_CARD_ENABLED=false` 只关卡片、不关抽取，抽取由 `REASONING_EXTRACT_ENABLED` 与 MCP 档位控制；
 - `release-notes/`：按 README 分级写一条重点更新；
 - `fangan_todo.md` 登记本特性条目并在合入后移到完成。
 - `tests/test_architecture_documentation.py` 全绿。
@@ -292,5 +293,6 @@ rebase 合入前逐提交检出跑相关测试与守卫（`rebase-merge-lands-ev
 | 热函数行数天花板 | 新逻辑放执行器与新模块，热函数只加分派一行；基线同 diff 改 |
 | reflect schema 变化导致经验/快照大面积红 | T5 一次性改完全部快照与尾部位置断言，报告列出每个 hash 变化 |
 | 阈值校准依赖标注集质量 | 标注集与评测脚本随 PR1 合入；阈值只用档位断言，换模型后重跑脚本 |
+| 2 字符短词（如 `wu`）在 10k 库经驱动执行约 450ms，而单条 EXPLAIN 约 20ms（T3 测量，疑为 psycopg 自动预备语句切到通用计划） | PR1 门禁前由主 agent 复现并定位；确属预备语句问题则在 find_sources 语句上关闭自动预备或改写，测量文档记录 |
 | 首问变慢 | 规格 §8 的生成上限与 `deferred`；T7 记录实测耗时，超出预期时调低 standard 档生成数 |
 | `paper_metadata` 服务被交互卡片挤占 | 队列超时降级为 `deferred`；部署文档提示按需提高该服务 `max_concurrency` |
