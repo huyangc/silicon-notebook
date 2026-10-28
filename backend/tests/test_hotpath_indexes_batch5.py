@@ -14,9 +14,9 @@ Contract under test:
      migration file cannot import Python at apply time). This module parses
      the migration file's three ``CREATE INDEX IF NOT EXISTS`` statements
      and cross-checks each against its batch-5 spec.
-  2. ``HOTPATH_INDEX_SPECS`` totals seventeen entries (eight batch-1 + two
-     batch-2 + one batch-3 + three batch-4 + three batch-5) and batches 1-4
-     are untouched by this addition.
+  2. ``HOTPATH_INDEX_SPECS`` holds the total of the per-batch table in
+     ``tests/hotpath_index_batches.py`` and batches 1-4 are untouched by
+     this addition.
 
 (Renumbered from batch 4 when hot-path batch 4's trgm migration 0048 landed
 on master first; this batch's migration is 0049. These three plain btree
@@ -29,7 +29,7 @@ import re
 from pathlib import Path
 
 from app.repositories.postgres.hotpath_indexes import HOTPATH_INDEX_SPECS
-
+from tests.hotpath_index_batches import EXPECTED_SPEC_TOTAL, total_mismatch_message
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MIGRATION = (
@@ -103,10 +103,8 @@ def test_migration_file_exists_and_declares_exactly_the_three_batch5_statements(
 def test_batch5_specs_are_present_and_batches_1_to_3_are_untouched():
     names = {spec.name for spec in HOTPATH_INDEX_SPECS}
     assert _BATCH5_NAMES <= names
-    assert len(HOTPATH_INDEX_SPECS) == 18, (
-        "expected seven batch-1 (idx_clusters_nb_canonical superseded by batch 6) plus two batch-2 plus zero batch-3 (superseded by batch 6) plus three "
-        f"batch-5 entries in HOTPATH_INDEX_SPECS, found "
-        f"{len(HOTPATH_INDEX_SPECS)}: {sorted(names)}"
+    assert len(HOTPATH_INDEX_SPECS) == EXPECTED_SPEC_TOTAL, (
+        total_mismatch_message(names)
     )
     batch1_names = {
         "idx_clusters_nb_canonical_name_lower",

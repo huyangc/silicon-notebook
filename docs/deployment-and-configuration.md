@@ -426,7 +426,7 @@ common lexical terms may scan global trigram matches before filtering by noteboo
 hit the statement timeout. See the monitored rollout and rollback procedure in
 [Operations](./operations.md#postgresql-notebook-aware-lexical-indexes).
 
-An already-populated PostgreSQL database should also get the accumulated hot-path fix indexes (batch 1's six groups / eight indexes, plus batch 2's payload-search GIN and checkup-H5 partial index, plus batch 3's one keyset-covering index, plus batch 4's three source-search GIN trigram indexes, plus batch 5's three delete-jobization FK/keyset indexes, plus batch 6's three generation-aware cluster replacements (batch 3 W2 PR-1) — twenty in total across the builder's registry; batch 2's GIN ran about 1.5x the knowledge_objects table segment on a synthetic low-entropy benchmark (real payloads have richer trigrams and may run larger; measure after building) and is a registered write-amplification debt, reversible via DROP INDEX CONCURRENTLY)
+An already-populated PostgreSQL database should also get the accumulated hot-path fix indexes (batch 1's six groups / eight indexes, plus batch 2's payload-search GIN and checkup-H5 partial index, plus batch 3's one keyset-covering index, plus batch 4's three source-search GIN trigram indexes, plus batch 5's three delete-jobization FK/keyset indexes, plus batch 6's three generation-aware cluster replacements (batch 3 W2 PR-1), plus batch 7's paper-metadata covering index; batch 2's GIN ran about 1.5x the knowledge_objects table segment on a synthetic low-entropy benchmark (real payloads have richer trigrams and may run larger; measure after building) and is a registered write-amplification debt, reversible via DROP INDEX CONCURRENTLY)
 across six query-family groups (`concept_clusters(notebook_id, canonical_id)`, its
 `lower(canonical_name)` companion, three reverse-FK covers on
 `extraction_runs`/`knowledge_source_fact_elements`/`memory_items`,
@@ -519,6 +519,19 @@ probes, a narrower prefix hijacks the generation-predicated readers into Index S
 Filter — the regression the INCLUDE columns exist to prevent.) Migration 0051 then validates
 shapes and is a pure ledger no-op. Skipping the builder-first flow still works but pays the
 in-transaction index builds/drops on `concept_clusters` during the migration window.
+
+**Batch 7 (migration 0084, SQLite v103)** adds one covering btree,
+`idx_source_paper_meta_source_nb` on `source_paper_meta(source_id) INCLUDE (notebook_id,
+is_paper)`. The paper-metadata readers count a metadata row as its source's only when the
+row's own `notebook_id` is the source's notebook; this index lets the missing-metadata
+probe (the backfill queue and the 「补全论文信息」 button) and the analytics paper-metadata
+counts check that without visiting the heap. Same builder-first order as the earlier
+batches: `scripts/build_hotpath_indexes.py --apply` builds it with `CREATE INDEX
+CONCURRENTLY` (seconds-scale: one row per source), then migrate (0084 validates the shape
+and is a ledger no-op). Nothing is retired. Rollback: `DROP INDEX CONCURRENTLY
+idx_source_paper_meta_source_nb;` (the readers then probe the heap). SQLite builds the same
+name over `(source_id, notebook_id, is_paper)` in v103, and its readers name it with
+`INDEXED BY`.
 
 If you intend to build scale indexes offline or off-host
 (`scripts/build_scale_index.py`, an independent process that runs *beside* the live

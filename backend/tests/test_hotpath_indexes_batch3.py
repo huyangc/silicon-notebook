@@ -15,9 +15,9 @@ Contract under test:
      reusing ``test_hotpath_indexes_batch2.py``'s statement regex (it
      already tolerates an absent ``USING``/``WHERE`` clause, which is this
      batch's whole shape).
-  2. ``HOTPATH_INDEX_SPECS`` totals fourteen entries (eight batch-1 + two
-     batch-2 + one batch-3 + three batch-4) and batch 1/2 are untouched by
-     this addition.
+  2. ``HOTPATH_INDEX_SPECS`` holds the total of the per-batch table in
+     ``tests/hotpath_index_batches.py`` and batch 1/2 are untouched by this
+     addition.
   3. The new spec's key columns stay byte-identical to
      ``knowledge_store.py``'s ``concept_cluster_detail_rows``/
      ``concept_cluster_member_total`` query text on both backends (the
@@ -34,7 +34,7 @@ import re
 from pathlib import Path
 
 from app.repositories.postgres.hotpath_indexes import HOTPATH_INDEX_SPECS
-
+from tests.hotpath_index_batches import EXPECTED_SPEC_TOTAL, total_mismatch_message
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MIGRATION = (
@@ -107,10 +107,8 @@ def test_batch3_spec_is_present_and_batch1_batch2_are_untouched():
     # 是 idx_clusters_nb_canonical_member_gen(INCLUDE (generation))。
     assert _BATCH3_NAME not in names
     assert "idx_clusters_nb_canonical_member_gen" in names
-    assert len(HOTPATH_INDEX_SPECS) == 18, (
-        "expected seven batch-1 (idx_clusters_nb_canonical superseded by batch 6) plus two batch-2 plus zero batch-3 (superseded by batch 6) plus three "
-        f"batch-4 plus three batch-5 plus three batch-6 entries in HOTPATH_INDEX_SPECS, found "
-        f"{len(HOTPATH_INDEX_SPECS)}: {sorted(names)}"
+    assert len(HOTPATH_INDEX_SPECS) == EXPECTED_SPEC_TOTAL, (
+        total_mismatch_message(names)
     )
     # Batch 1/2 names untouched by this addition.
     batch1_names = {

@@ -29,8 +29,8 @@ Contract under test:
   3. The DO block's expected values reconcile with the specs, dimension by
      dimension (the same check ``test_hotpath_indexes_batch2.py`` performs for
      its own migration).
-  4. ``HOTPATH_INDEX_SPECS`` totals fourteen entries (eight batch-1 + two
-     batch-2 + one batch-3 + three batch-4) and the earlier batches are
+  4. ``HOTPATH_INDEX_SPECS`` holds the total of the per-batch table in
+     ``tests/hotpath_index_batches.py`` and the earlier batches are
      untouched.
   5. Each spec's key columns stay byte-identical to the leg of
      ``list_sources_page``'s rewritten UNION that it exists to serve, on both
@@ -48,7 +48,7 @@ import re
 from pathlib import Path
 
 from app.repositories.postgres.hotpath_indexes import HOTPATH_INDEX_SPECS
-
+from tests.hotpath_index_batches import EXPECTED_SPEC_TOTAL, total_mismatch_message
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MIGRATION = (
@@ -128,10 +128,8 @@ def test_migration_file_exists_and_declares_exactly_three_statements():
 def test_batch4_specs_are_present_and_earlier_batches_are_untouched():
     names = {spec.name for spec in HOTPATH_INDEX_SPECS}
     assert set(_BATCH4_NAMES) <= names
-    assert len(HOTPATH_INDEX_SPECS) == 18, (
-        "expected seven batch-1 (idx_clusters_nb_canonical superseded by batch 6) plus two batch-2 plus zero batch-3 (superseded by batch 6) plus three "
-        f"batch-4 plus three batch-5 plus three batch-6 entries in HOTPATH_INDEX_SPECS, found "
-        f"{len(HOTPATH_INDEX_SPECS)}: {sorted(names)}"
+    assert len(HOTPATH_INDEX_SPECS) == EXPECTED_SPEC_TOTAL, (
+        total_mismatch_message(names)
     )
     batch1_names = {
         "idx_clusters_nb_canonical_name_lower",

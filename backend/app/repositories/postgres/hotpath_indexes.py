@@ -26,7 +26,11 @@ contributing this module's first UNIQUE entry and first two INCLUDE-carrying
 entries (the ``unique``/``include`` spec fields below exist for them); the
 three superseded cluster indexes are dropped by that migration, with the
 production order being builder --apply first, then DROP INDEX CONCURRENTLY
-of the old names, then migrate.
+of the old names, then migrate. Batch 7 added a seventh migration,
+``backend/app/repositories/postgres/migrations/0084_source_paper_meta_source_nb.sql``,
+contributing one INCLUDE-carrying covering btree index for the own-notebook
+paper-metadata probe (``backend/tests/test_hotpath_indexes_batch7.py``
+cross-checks it).
 Every migration and this module's ``HOTPATH_INDEX_SPECS`` are independent
 hand-authored copies of the same index shapes on purpose (a migration file
 cannot import Python at apply time): ``backend/tests/test_hotpath_indexes.py``
@@ -534,6 +538,23 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
             ("concept_clusters", "generation", "bigint NOT NULL DEFAULT 0"),
         ),
         serves="version_facts cluster COUNT/MAX + concept_clusters_count skip-gate leg behind the published-generation predicate; boundedness evidence for the PR-2 catch-up scan",
+    ),
+    # ── 批 7(迁移 0084):「这条 source 自己的论文元数据」的覆盖索引。缺论文元数据
+    # 谓词(补抽排队 / 「补全论文信息」按钮探针 / 看板 missing)与看板 has_meta /
+    # marker 计数逐 source 判「子表行的 notebook_id 就是 source 的库」,主键只有
+    # source_id,不建它每次探针都要回表。键只放 source_id:读者按 source_id 连接、
+    # notebook 用 IS NOT DISTINCT FROM 过滤,计划保持收窄前的形状,只把主键换成
+    # 本索引(理由与实测见 0084 头注释)。
+    HotpathIndexSpec(
+        name="idx_source_paper_meta_source_nb",
+        table="source_paper_meta",
+        columns=("source_id",),
+        predicate="",
+        predicate_shape="",
+        opclasses=("pg_catalog:text_ops",),
+        collations=("pg_catalog:C",),
+        include=("notebook_id", "is_paper"),
+        serves="own-notebook paper-metadata probe (missing-metadata predicate, analytics has_meta/marker/missing) as an Index Only Scan",
     ),
 )
 

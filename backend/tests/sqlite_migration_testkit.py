@@ -44,13 +44,21 @@ V78_AUTH_TABLES = {
 }
 
 
+def rollback_v103(db: sqlite3.Connection) -> None:
+    """Remove what SQLite migration 103 added: the covering index
+    ``idx_source_paper_meta_source_nb``. Callers lower ``user_version``
+    themselves."""
+    db.execute("DROP INDEX idx_source_paper_meta_source_nb")
+
+
 def rollback_v102(db: sqlite3.Connection) -> None:
     """Remove what SQLite migration 102 added: the concept seed space
     (``concept_merge_candidates.seed_version``,
     ``unified_kg_state.concept_seed_version``) and the board partition
     (``unified_kg_state.community_partition_version`` /
-    ``community_partition_mode``, ``communities.board_key``). Callers lower
-    ``user_version`` themselves."""
+    ``community_partition_mode``, ``communities.board_key``). v103 is undone
+    first (newest-first). Callers lower ``user_version`` themselves."""
+    rollback_v103(db)
     db.execute("ALTER TABLE communities DROP COLUMN board_key")
     db.execute("ALTER TABLE unified_kg_state DROP COLUMN community_partition_mode")
     db.execute("ALTER TABLE unified_kg_state DROP COLUMN community_partition_version")

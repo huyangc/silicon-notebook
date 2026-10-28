@@ -350,7 +350,7 @@ PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py --apply
 全库 trgm 命中再按 notebook 过滤，最终撞 statement timeout。监控、上线和回退步骤见
 [运维文档](./operations_zh.md#postgresql-notebook-aware-词法索引)。
 
-已有数据的 PostgreSQL 库还应在线建好热路径修复索引（批 1 六组共八条 + 批 2 两条：payload 搜索 GIN 与体检 H5 部分索引 + 批 3 一条 keyset 覆盖索引 + 批 4 三条来源检索 trgm 索引 + 批 5 三条删除作业化 FK/keyset 索引 + 批 6 三条代次化簇索引接替者(批 3 W2 PR-1)，注册表共二十条；批 2 的 GIN 体积按合成低熵语料基准外推约为 knowledge_objects 表段的 1.5×（真实语料 trigram 更杂,可能更大,建后以实际为准），属登记过的写放大债，劣化超阈值可 DROP INDEX CONCURRENTLY 无损回退）
+已有数据的 PostgreSQL 库还应在线建好热路径修复索引（批 1 六组共八条 + 批 2 两条：payload 搜索 GIN 与体检 H5 部分索引 + 批 3 一条 keyset 覆盖索引 + 批 4 三条来源检索 trgm 索引 + 批 5 三条删除作业化 FK/keyset 索引 + 批 6 三条代次化簇索引接替者(批 3 W2 PR-1) + 批 7 一条论文元数据覆盖索引；批 2 的 GIN 体积按合成低熵语料基准外推约为 knowledge_objects 表段的 1.5×（真实语料 trigram 更杂,可能更大,建后以实际为准），属登记过的写放大债，劣化超阈值可 DROP INDEX CONCURRENTLY 无损回退）
 （`concept_clusters(notebook_id, canonical_id)`、其 `lower(canonical_name)` 搭档、三条
 反向 FK 覆盖——`extraction_runs`/`knowledge_source_fact_elements`/`memory_items`、
 `knowledge_relations(notebook_id, source_object_id, target_object_id, edge_type)`、
@@ -421,6 +421,16 @@ psql "$DATABASE_URL" -c 'DROP INDEX CONCURRENTLY uq_clusters_notebook_type_membe
 (两条裸前缀索引随整改一并退役:实测更窄的前缀会把带 generation 谓词的读者劫成
 Index Scan + 回表过滤——恰是 INCLUDE 列要防的回归。)随后迁移 0051 校验形态并
 纯落账。不走 builder 先行也能完成,但迁移窗口要付事务内建/删索引的锁代价。
+
+**批 7(迁移 0084,SQLite v103)**新增一条覆盖 btree：`source_paper_meta(source_id)
+INCLUDE (notebook_id, is_paper)` 上的 `idx_source_paper_meta_source_nb`。论文元数据的
+读者只把「子表自身 notebook_id 就是 source 所在库」的行算作这条 source 的元数据；有了这条
+索引，缺元数据探针（补抽排队与「补全论文信息」按钮）和看板的论文元数据计数不用回表就能
+判。生产顺序与前几批相同：先 `scripts/build_hotpath_indexes.py --apply` 用
+`CREATE INDEX CONCURRENTLY` 在线建（每条 source 一行，秒级），再迁移（0084 校验形态、
+纯落账）。不退役任何索引。回退：`DROP INDEX CONCURRENTLY idx_source_paper_meta_source_nb;`
+（读者退回回表探针）。SQLite 在 v103 用同名索引建 `(source_id, notebook_id, is_paper)`，
+读者用 `INDEXED BY` 指名。
 
 若打算用离线 / 异机通道构建 scale 索引（`scripts/build_scale_index.py`，一个与在役服务
 **并存**的独立进程），PostgreSQL 侧有两条前提。其一，它的 per-notebook 互斥是
