@@ -25,7 +25,8 @@ The user's rulings (docs/superpowers/plans/2026-10-22-notebook-export-import.md
   the job is created, and is deleted when the import ends, whatever its outcome.
 * **Expiry.** A finished job -- its record, sidecar and export file -- is kept
   ``NOTEBOOK_TRANSFER_TTL_SECONDS``. Reads (a job, the list, the bell, a ticket)
-  drop expired jobs in memory only; ``sweep`` -- at startup, when a job is
+  drop every expired job whole -- its record, sidecar, tickets and own files
+  (``_expire``) -- without scanning a directory; ``sweep`` -- at startup, when a job is
   created and on the expiry timer -- also removes, under ``transfers/``, every
   file no job owns that has not been written to for that long (a part file of a
   killed export, an upload whose request died); startup removes every file no
