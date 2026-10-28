@@ -26,7 +26,10 @@ class NotebookTransferJob(BaseModel):
     ``queued``, ``writing``, ``done``; import: ``queued``, ``preflight``,
     ``files``, ``rows``, ``validate``, ``publish``, ``project``, ``reembed``,
     ``index``, ``done``). ``notebook_id`` is the exported notebook, or the new
-    notebook of an import once it is published (``""`` before). A finished job
+    notebook of an import from its first progress event on (``""`` before):
+    the id exists while the import still writes into its hidden sentinel, so
+    it is openable only once ``phase`` reaches ``project`` or later, or the
+    failure is an ``import_followup_*`` one. A finished job
     is kept until ``expires_at``; a ``succeeded`` export is ``downloadable``
     through a one-time ticket until then."""
 
