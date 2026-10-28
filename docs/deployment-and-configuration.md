@@ -739,7 +739,8 @@ may share an existing service, with no independent service concurrency budget.
 id and the backend refuses to start.** Whenever `MODEL_SERVICES_CONFIG` is
 non-empty, `[bindings]` must cover every workload (all three kinds — chat,
 embedding, rerank) and must not name an id that is not a workload (a
-misspelling, or one retired by an upgrade such as `graph_chain_verify`). Either
+misspelling, or one retired by an upgrade such as `graph_chain_verify` or
+`kg_community_summary`). Either
 one and the process exits non-zero, and the backend log — which is also stderr,
 since `prod.sh`/`backend.sh` append it to the same file — carries one readable
 line stating why, with no traceback:
@@ -756,27 +757,16 @@ found in — an id that exists only in `[thinking]` is not findable in
 `[bindings]`. The message carries ids, labels and table names only — never a
 secret or an endpoint.
 
-One retired id is the exception: `kg_community_summary` (the community-report
-summarizer, retired as dead code — it was never called at runtime). A
-`model-services.toml` generated from the template before its retirement binds it
-in both tables; one produced by migrating the legacy environment variables has
-only the `[bindings]` line. A leftover `kg_community_summary` line in
-`[bindings]` or `[thinking]` does **not** refuse startup: it is ignored, and
-every load of the configuration that goes on to succeed logs this hint line (no
-path, no file text) — at startup the preflight and the model-service
-construction each load the file once, so the startup log normally shows it
-twice, and a hot reload logs it again when it publishes the edited file. When
-the same file is refused for another reason, the hint is left out so the log
-does not say "does not affect startup" next to the refusal:
-
-```text
-model-bindings: MODEL_SERVICES_CONFIG 指向的文件的 [bindings]/[thinking] 里有已退役、可忽略的工作负载：kg_community_summary（[bindings]/[thinking]）。已忽略，不影响启动；可以删除这些行。
-```
-
-Deleting the lines on upgrade is optional. Hot reload treats them the same
-way. Any other unknown or retired id still refuses startup as described above.
-This allowance is scheduled for removal two releases after the retirement;
-after that a leftover line refuses like any other retired id.
+A retired id that your `model-services.toml` still carries is refused like any
+other — for example `kg_community_summary` (the community-report summarizer,
+retired as dead code because it was never called at runtime), which files
+generated from the template before its retirement bind in both tables. Delete
+its lines from `[bindings]` and `[thinking]` before upgrading (the refusal names
+the table each one is in). Rolling back to a version older than that retirement
+needs the opposite edit: that version still lists the workload, so add
+`kg_community_summary = "<id of a chat service>"` back to `[bindings]` first, or
+its startup check refuses the file for the missing binding. Rolling back to a
+version that still ignored the leftover lines needs no edit.
 
 **The refusal line never prints the configuration file's path** — it says
 "MODEL_SERVICES_CONFIG 指向的文件", so look the TOML up through that environment

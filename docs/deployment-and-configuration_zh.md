@@ -586,7 +586,7 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 **绑定表在启动时被硬校验：缺一个工作负载或多一个未知 id，后端直接拒绝启动。**
 只要 `MODEL_SERVICES_CONFIG` 非空，`[bindings]` 就必须覆盖全部工作负载（chat / embedding /
 rerank 三类都算），且不得出现不是工作负载的 id（拼错的，或版本升级后已退役的，如
-`graph_chain_verify`）。任一条不满足，进程以非零码退出，后端日志（以及 stderr，`prod.sh` /
+`graph_chain_verify`、`kg_community_summary`）。任一条不满足，进程以非零码退出，后端日志（以及 stderr，`prod.sh` /
 `backend.sh` 把它追加进同一个日志文件）里是一整句可读的原因，没有 traceback：
 
 ```
@@ -598,19 +598,12 @@ id 按「已退役」与「疑似拼错」分开写，因为这两种要做的�
 表——只写在 `[thinking]` 里的陈旧 id，在 `[bindings]` 里是翻不到的。消息里只有 id、中文标签和
 表名，不含任何密钥或 endpoint。
 
-有一个已退役 id 例外：`kg_community_summary`（主题板块摘要生成，运行时从未被调用，作为死代码
-退役）。退役之前从模板生成的 `model-services.toml` 在两张表里都绑着它；经旧环境变量迁移得到的
-文件只有 `[bindings]` 一行。`[bindings]` 或 `[thinking]` 里残留的 `kg_community_summary` 行
-**不会**导致拒启：它被忽略，每次加载配置且加载成功时打一行下面的提示（不含路径、不含文件内容）——
-启动时预检与模型服务构造各加载一次，所以启动日志里通常出现两次；热重载发布改过的文件时再打一次。
-同一份文件若因别的原因被拒启，这行提示不打，免得日志在拒启信息旁边写「不影响启动」：
-
-```text
-model-bindings: MODEL_SERVICES_CONFIG 指向的文件的 [bindings]/[thinking] 里有已退役、可忽略的工作负载：kg_community_summary（[bindings]/[thinking]）。已忽略，不影响启动；可以删除这些行。
-```
-
-升级时删不删这些行都可以，热重载同样对待。其它未知或已退役的 id 仍按上文拒启。这条放行计划在
-退役两个版本后移除，届时残留行会像其它已退役 id 一样拒启。
+部署文件里残留的已退役 id 与其它退役 id 一样被拒启，例如 `kg_community_summary`（主题板块摘要
+生成，运行时从未被调用，作为死代码退役）：退役之前从模板生成的 `model-services.toml` 在两张表里都
+绑着它。升级前请把 `[bindings]` 与 `[thinking]` 里的这些行删掉（拒启消息会指出每个 id 在哪张表）。
+回滚到比这次退役更旧的版本则要反向操作：旧版本仍把它当现行工作负载，须先在 `[bindings]` 里加回
+`kg_community_summary = "<某个 chat 服务的 id>"`，否则旧版的启动校验会因缺少这条绑定拒启该文件。
+回滚到仍然忽略这些残留行的版本则不需要改文件。
 
 **拒启那一行不会打印配置文件的路径**——它写的是「MODEL_SERVICES_CONFIG 指向的文件」，请照着这个
 环境变量去找那份 TOML。原因是后端以 `uvicorn … >>"$BACKEND_LOG" 2>&1` 启动，stderr 就是日志

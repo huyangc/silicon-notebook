@@ -261,11 +261,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 
 ### 其它残余
 
-- [ ] **`IGNORABLE_RETIRED_WORKLOADS` 两个版本后移除**（来源：PR #853）：`kg_community_summary` 已退役，
-      `backend/app/services/model_registry.py` 的 `IGNORABLE_RETIRED_WORKLOADS` 让部署文件里残留的
-      绑定行不致拒启，并在每次加载成功时打一行脱敏提示。自 #853 所在版本起再过两个版本，部署文件
-      都已清掉这两行后，删除该名单、对应启动提示与部署文档（`docs/deployment-and-configuration*.md`）里
-      「已退役可忽略 id」一段。回滚到 #853 之前的版本前，运维要把那两行加回，否则旧版严格校验拒启。
 - [ ] **`communities.title` / `summary` / `findings` 三列已无写入方**（来源：PR #853）：社区摘要生成
       已删除，这三列除 `copy_forward_communities`（翻转事务内把未重建层级的旧行复制进新代）原样带过之外
       没有写入方。本轮不做迁移（SQLite 与 PostgreSQL 的 `communities` 表都还有这三列）；是否删列留到
