@@ -15,6 +15,7 @@ const api = vi.hoisted(() => ({
   uploadNotebookImport: vi.fn(),
   // 这里的用例里,上传抛出的非网络错误都按「确定拒绝」处理(白名单判定的用例在 api 层)。
   uploadRefusedForSure: vi.fn(() => true),
+  getImportUploadStatus: vi.fn(async (): Promise<unknown> => ({ status: "receiving" })),
 }));
 vi.mock("../../app/notebook-transfer-api.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../app/notebook-transfer-api.ts")>()),
@@ -30,7 +31,7 @@ const {
 } = await import("../../app/use-notebook-transfer.ts");
 const { forgetTransferLimit } = await import("../../app/notebook-transfer-api.ts");
 const {
-  importUpload, RECONCILE_INTERVAL_MS, RECONCILE_WINDOW_MS, IMPORT_RECONCILE_UNREADABLE_TEXT,
+  importUpload, RECONCILE_INTERVAL_MS, IMPORT_RECONCILE_UNREADABLE_TEXT,
 } = await import("../../app/notebook-import-upload.ts");
 
 const LIMIT = 8 * 1024 * 1024;
@@ -618,15 +619,14 @@ test("弹窗关着时说不准的上传,作业晚些登记出来:被认领成一
   await act(async () => { sent(); cut(new TypeError("Failed to fetch")); await Promise.resolve(); });
   await waitFor(() => expect(result.current.view.uploadAttention).toBe("unsure"));
   const uploadId = api.uploadNotebookImport.mock.calls[0][1].uploadId;
-  api.listNotebookTransfers.mockResolvedValueOnce([imp("late", { client_upload_id: uploadId })]);
+  api.getImportUploadStatus.mockResolvedValueOnce({ status: "job", job: imp("late", { client_upload_id: uploadId }) });
   await tick(RECONCILE_INTERVAL_MS + 10);
   await waitFor(() => expect(result.current.view.jobs[0]?.id).toBe("late"));
   expect(result.current.view.uploadAttention).toBe("");
   expect(result.current.view.uploadError).toBe("");
 });
 
-
-test("对账读不到而先停下的那一串:重新打开导入弹窗就接着核对,读得到时认领", async () => {
+test("对账问不到而先停下的那一串:重新打开导入弹窗就接着核对,问得到时认领", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   const { result, rerender } = renderImport();
   await waitFor(() => expect(result.current.view.limitBytes).toBe(LIMIT));
@@ -639,17 +639,50 @@ test("对账读不到而先停下的那一串:重新打开导入弹窗就接着�
   });
   act(() => result.current.start());
   await waitFor(() => expect(api.uploadNotebookImport).toHaveBeenCalledTimes(1));
-  api.listNotebookTransfers.mockRejectedValue(new TypeError("offline"));
+  api.listNotebookTransfers.mockResolvedValueOnce([]);
+  api.getImportUploadStatus.mockRejectedValue(new TypeError("offline"));
   await act(async () => { sent(); cut(new TypeError("Failed to fetch")); await Promise.resolve(); });
   await waitFor(() => expect(result.current.view.uploadError).toContain("可能已被接收"));
   rerender({ isOpen: false });
-  await tick(RECONCILE_WINDOW_MS + RECONCILE_INTERVAL_MS * 6);
+  await tick(RECONCILE_INTERVAL_MS * 5);
   expect(result.current.view.uploadError).toBe(IMPORT_RECONCILE_UNREADABLE_TEXT);
   expect(result.current.view.uploadAttention).toBe("unsure");
   const uploadId = api.uploadNotebookImport.mock.calls[0][1].uploadId;
-  api.listNotebookTransfers.mockReset();
-  api.listNotebookTransfers.mockResolvedValue([imp("resumed", { client_upload_id: uploadId })]);
+  api.getImportUploadStatus.mockReset();
+  api.getImportUploadStatus.mockResolvedValue({ status: "job", job: imp("resumed", { client_upload_id: uploadId }) });
   rerender({ isOpen: true });
   await waitFor(() => expect(result.current.view.jobs[0]?.id).toBe("resumed"));
   expect(result.current.view.uploadError).toBe("");
+});
+
+test("旧上传说不准时换选了文件、填了名字:旧上传后来被认领,它的一行出现,新的选择与名字原样保留", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { result } = renderImport();
+  await waitFor(() => expect(result.current.view.limitBytes).toBe(LIMIT));
+  const fileA = new File([new Uint8Array(10)], "甲.snbk");
+  act(() => result.current.chooseFile(fileA));
+  let cut: (error: unknown) => void = () => undefined;
+  let sent: () => void = () => undefined;
+  api.uploadNotebookImport.mockImplementationOnce((_file: File, options: { onBodySent: () => void }) => {
+    sent = options.onBodySent;
+    return new Promise((_, reject) => { cut = reject; });
+  });
+  act(() => result.current.start());
+  await waitFor(() => expect(api.uploadNotebookImport).toHaveBeenCalledTimes(1));
+  api.listNotebookTransfers.mockResolvedValueOnce([]);
+  await act(async () => { sent(); cut(new TypeError("Failed to fetch")); await Promise.resolve(); });
+  await waitFor(() => expect(result.current.view.uploadError).toContain("可能已被接收"));
+  const uploadIdA = api.uploadNotebookImport.mock.calls[0][1].uploadId;
+  // 换选 B、填名字。
+  const fileB = new File([new Uint8Array(20)], "乙.snbk");
+  act(() => result.current.chooseFile(fileB));
+  act(() => result.current.setName("乙的新名字"));
+  const key = result.current.view.fileInputKey;
+  api.getImportUploadStatus.mockResolvedValueOnce({ status: "job", job: imp("a-job", { client_upload_id: uploadIdA }) });
+  await tick(RECONCILE_INTERVAL_MS + 10);
+  await waitFor(() => expect(result.current.view.jobs.map((item) => item.id)).toContain("a-job"));
+  expect(result.current.view.fileNames["a-job"]).toBe("甲.snbk");
+  expect(result.current.view.file).toBe(fileB);
+  expect(result.current.view.name).toBe("乙的新名字");
+  expect(result.current.view.fileInputKey).toBe(key);
 });

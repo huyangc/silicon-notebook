@@ -19,6 +19,7 @@ import {
   UPLOAD_IN_PROGRESS_TEXT,
   uploadRefusedForSure,
   uploadStillInProgress,
+  getImportUploadStatus,
   REPAIR_HINT,
   FOLLOWUP_GENERIC,
   importReportNotes,
@@ -323,6 +324,26 @@ test("确定拒绝是白名单:只有后端认得出地给出、又在建作业�
     xhrs[0].respond(status, body, headers);
     expect([status, body, uploadRefusedForSure(await pending)]).toEqual([status, body, definitive]);
   }
+});
+
+test("问上传标识的去向:job / receiving / none 三种回答;形状不对或请求失败都抛出(不当成「没有」)", async () => {
+  vi.spyOn(console, "debug").mockImplementation(() => undefined);
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const fetchMock = vi.spyOn(globalThis, "fetch");
+  fetchMock.mockResolvedValueOnce(json({ status: "job", job: job({ kind: "import", client_upload_id: "up-test-0001" }) }));
+  const found = await getImportUploadStatus("up-test-0001");
+  expect(found.status).toBe("job");
+  expect(String(fetchMock.mock.calls[0][0])).toBe("http://127.0.0.1:8000/api/notebook-imports/uploads/up-test-0001");
+  fetchMock.mockResolvedValueOnce(json({ status: "receiving", job: null }));
+  expect(await getImportUploadStatus("up-test-0001")).toEqual({ status: "receiving" });
+  fetchMock.mockResolvedValueOnce(json({ status: "none", job: null }));
+  expect(await getImportUploadStatus("up-test-0001")).toEqual({ status: "none" });
+  fetchMock.mockResolvedValueOnce(json({ status: "maybe" }));
+  await expect(getImportUploadStatus("up-test-0001")).rejects.toThrow();
+  fetchMock.mockResolvedValueOnce(json({ status: "job", job: { id: "" } }));
+  await expect(getImportUploadStatus("up-test-0001")).rejects.toThrow();
+  fetchMock.mockResolvedValueOnce(json({ detail: "x" }, 502));
+  await expect(getImportUploadStatus("up-test-0001")).rejects.toThrow();
 });
 
 test("作业解析带回 client_upload_id", () => {

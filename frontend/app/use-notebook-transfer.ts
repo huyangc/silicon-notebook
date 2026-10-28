@@ -20,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { exportDeletedNotebookMemories } from "./notebook-deletion-api.ts";
 import { EXPORT_TOO_LARGE_TEXT } from "./notebook-exit-copy.ts";
 import { saveBlobAsFile } from "./download-file.ts";
-import { importUpload, type UploadOutcome } from "./notebook-import-upload.ts";
+import { importUpload, type UploadOrigin, type UploadOutcome } from "./notebook-import-upload.ts";
 import {
   DOWNLOAD_FAILED_TEXT,
   EXPORT_START_ERRORS,
@@ -366,6 +366,9 @@ export function useNotebookImport(options: {
   onReadyRef.current = options.onNotebookReady;
   const [limitBytes, setLimitBytes] = useState<number | null>(null);
   const [file, setFile] = useState<File | null>(null);
+  // 当前选中的文件(结局到达时比对它,决定动不动表单)与工具栏那一句出自哪次上传。
+  const fileRef = useRef<File | null>(null);
+  const attentionFileRef = useRef<File | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
   const [name, setName] = useState("");
   const [uploadError, setUploadError] = useState("");
@@ -418,7 +421,15 @@ export function useNotebookImport(options: {
   }, [announce]);
 
   // 上传的结局:当时挂着的这个状态机接,或者(Home 刚重新挂载)接住之前落定的那些。
-  useEffect(() => importUpload.consumeOutcomes((outcome: UploadOutcome) => {
+  //
+  // 每个结局带着它出自哪一次选择(`origin`:文件与那一串的上传标识)。导入记录、列表刷新、
+  // 工具栏的状态按上传本身走;表单(选中的文件、名字、「开始导入」旁那句话)只在当前选中的
+  // 还是那个文件时才动——用户在旧上传对账期间换了文件、填了名字,旧上传的结局不能把它清掉。
+  useEffect(() => importUpload.consumeOutcomes((outcome: UploadOutcome, origin: UploadOrigin) => {
+    // 当前选中的就是它:可以清表单。什么都没选(比如 Home 刚重新挂载):那句话可以说,但没有
+    // 表单可清。选的是别的文件:表单一个字都不动。
+    const ownsForm = fileRef.current === origin.file;
+    const mayTell = ownsForm || fileRef.current === null;
     if (outcome.kind === "uploaded") {
       const { job } = outcome;
       uploadedRef.current.add(job.id);
@@ -427,22 +438,37 @@ export function useNotebookImport(options: {
       if (importedNotebookReady(job)) announce(job.id, job.notebook_id);
       setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
       setFileNames((current) => ({ ...current, [job.id]: outcome.fileName }));
-      setFile(null);
-      setName("");
-      setFileInputKey((key) => key + 1);
-      setUploadError("");
-      // 说不准之后后台对账认领到了:工具栏上的「导入待确认」也就有了着落。
-      setUploadAttention("");
-      setNotice({ text: "文件已上传，正在导入；进度见下方。关掉这个窗口不影响导入。", jobId: job.id });
+      // 说不准之后后台对账认领到了:工具栏上那一句(若出自这次上传)也就有了着落。
+      if (attentionFileRef.current === origin.file) {
+        attentionFileRef.current = null;
+        setUploadAttention("");
+      }
+      if (ownsForm) {
+        setFile(null);
+        fileRef.current = null;
+        setName("");
+        setFileInputKey((key) => key + 1);
+      }
+      if (mayTell) {
+        setUploadError("");
+        setNotice({ text: "文件已上传，正在导入；进度见下方。关掉这个窗口不影响导入。", jobId: job.id });
+      }
     } else if (outcome.kind === "stopped") {
-      setUploadError("");
-      setNotice({ text: "已停止上传，没有导入任何内容。" });
+      if (mayTell) {
+        setUploadError("");
+        setNotice({ text: "已停止上传，没有导入任何内容。" });
+      }
     } else {
-      setNotice({ text: "" });
-      setUploadError(outcome.text);
-      // 弹窗关着时失败(或说不准)的:结果要落在发起它的那颗按钮(工具栏「导入」)上。对账到
-      // 时限也没建出作业(`not_created`)按失败说:没有作业,可以重传。
-      if (!openRef.current) setUploadAttention(outcome.kind === "unsure" ? "unsure" : "failed");
+      if (mayTell) {
+        setNotice({ text: "" });
+        setUploadError(outcome.text);
+      }
+      // 弹窗关着时失败(或说不准)的:结果要落在发起它的那颗按钮(工具栏「导入」)上。服务端
+      // 确认没建出作业(`not_created`)按失败说:没有作业,可以重传。
+      if (!openRef.current) {
+        attentionFileRef.current = origin.file;
+        setUploadAttention(outcome.kind === "unsure" ? "unsure" : "failed");
+      }
     }
   }), [announce]);
 
@@ -450,6 +476,7 @@ export function useNotebookImport(options: {
   // 后台对账已经停下(一直读不到作业)的那一串,这时接着核对。
   useEffect(() => {
     if (!open) return;
+    attentionFileRef.current = null;
     setUploadAttention("");
     importUpload.resumeReconcile();
   }, [open]);
@@ -530,7 +557,9 @@ export function useNotebookImport(options: {
 
   const fileError = importFileProblem(file, limitBytes);
 
+  // 换文件:旧的那一串从表单上摘下来(它在后台照样对账,结局照样进导入记录与工具栏)。
   const chooseFile = useCallback((next: File | null) => {
+    fileRef.current = next;
     setFile(next);
     setUploadError("");
     setNotice({ text: "" });
@@ -608,6 +637,8 @@ export function useNotebookImport(options: {
     setUploadError("");
     setNotice({ text: "" });
     setUploadAttention("");
+    attentionFileRef.current = null;
+    fileRef.current = null;
     setJobs([]);
     setRows({});
     setNotes({});
