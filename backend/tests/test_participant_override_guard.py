@@ -68,6 +68,9 @@ _READER_WHITELIST = frozenset({
     # 联邦消费方读参与集的唯一入口,跑在父线程、不在任何 ``try`` 里,所以那一处
     # 刻意**不**登记进下面的 ``_SEAT_FAILSOFT_SITES``。
     "app/services/chunk_federation.py",
+    # ``find_sources`` 的 peer 库读时限:联邦运行里取 ``current_federated_run_plan``
+    # 的逐库时限,与 chunk_federation 的逐库失败隔离同一口径;只读不装。
+    "app/services/source_finder.py",
 })
 _WRITER_WHITELIST = frozenset({
     # D1-2:``global_ask_run`` —— 唯一同时安装覆盖、逐库天花板、detached turn 与
