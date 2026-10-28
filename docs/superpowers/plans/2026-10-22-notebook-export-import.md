@@ -1,6 +1,9 @@
 # 笔记本单文件导出 / 跨部署导入：实施计划
 
-状态：已定稿（§9 裁决 2026-10-22），待开工。
+状态：已交付（2026-10-29）。§10 七个 PR 全部完成：#967、#974、#989、#1021、#1029、#1039 已合入，PR7 文档收尾随本次提交；
+现行契约以 `docs/product-and-api*.md`「笔记本导出与导入」、`docs/operations*.md`、`docs/deployment-and-configuration*.md` 与
+`architecture.md` §5 为准，本计划只作历史记录（与代码不一致处以代码为准，例如下载走隐藏 iframe 而非 `<a download>`，
+`DELETE` 返回 `{id, outcome, kept_notebook_id}`，导入另有 `X-Upload-Id` 幂等头与上传状态端点）。§9 裁决 2026-10-22。
 
 ## 0. 用户裁决（2026-10-22）
 
