@@ -80,8 +80,13 @@ class _Refs:
     values: list[str] = field(default_factory=list)
     _index: dict[str, int] = field(default_factory=dict)
 
-    def index(self, source_id: str, element_id: str) -> int | None:
-        ref = element_ref(self.notebook_id, source_id, str(element_id or ""))
+    def index(
+        self, source_id: str, element_id: str, notebook_id: str = "",
+    ) -> int | None:
+        """``notebook_id``: the library the source belongs to, when the caller
+        knows it (a found source carries its own); else the page's."""
+        ref = element_ref(
+            notebook_id or self.notebook_id, source_id, str(element_id or ""))
         if ref is None:
             return None
         if ref not in self._index:
@@ -166,7 +171,7 @@ def _found_item(
         omitted.characters += len(passage.text)
     else:
         best["text"] = _clip(passage.text, passage_chars, omitted)
-    index = (refs.index(item.source_id, passage.element_ids[0])
+    index = (refs.index(item.source_id, passage.element_ids[0], item.notebook_id)
              if passage.element_ids else None)
     if index is not None:
         best["ref"] = index
@@ -182,7 +187,6 @@ def find_sources_page(
     to leave trailing items out, ``next_cursor`` points at the first one not
     delivered, so following it never skips a source."""
     items = list(result.items)
-    offset = items[0].rank - 1 if items else 0
 
     def build(level: int) -> tuple[dict[str, Any], _Omitted, _Refs]:
         detail = min(level, len(_FIND_LEVELS) - 1)
@@ -191,7 +195,9 @@ def find_sources_page(
         omitted.items += len(items) - shown
         rows = [_found_item(item, detail, refs, omitted) for item in items[:shown]]
         if shown < len(items):
-            next_cursor: str | None = cursor_at(offset + shown)
+            # The first undelivered item's own position in the ranking (its
+            # rank is 1-based): right even when the page itself has gaps.
+            next_cursor: str | None = cursor_at(items[shown].rank - 1)
         else:
             next_cursor = result.next_cursor or None
         return {

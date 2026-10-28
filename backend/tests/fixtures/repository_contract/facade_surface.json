@@ -8750,6 +8750,12 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/sources.py",
+        "scope": "<module>._recheck_delivery",
+        "target": "refresh_agent_principal"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/services/answer_links.py",
         "scope": "<module>._live_issuer",
         "target": "refresh_agent_principal"
@@ -8965,6 +8971,12 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/memory_context.py",
         "scope": "<module>._memory_rows",
+        "target": "require_agent_access"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/sources.py",
+        "scope": "<module>._recheck_delivery",
         "target": "require_agent_access"
       },
       {
@@ -9976,6 +9988,12 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/citations.py",
         "scope": "<module>._read_element",
+        "target": "source_notebook_id"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/sources.py",
+        "scope": "<module>._readable_requested",
         "target": "source_notebook_id"
       }
     ],

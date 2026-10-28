@@ -20,6 +20,7 @@ from app.api.source_routes import (
 )
 from app.core.config import get_settings
 from app.core.memory_inputs import normalize_text
+from app.domain.agent_tools import principal_has_capability
 from app.domain.cancellation import CoreCancellation
 from app.domain.promotion_source import PROMOTION_SOURCE_TYPE
 from app.models.sources import SourceDetail
@@ -36,6 +37,7 @@ from app.services.paper_extraction import (
 from app.services.source_finder import (
     FIND_SOURCES_PAGE_SIZE,
     FindSourcesCursorError,
+    FindSourcesCursorScopeChangedError,
     FindSourcesCursorStaleError,
     FindSourcesError,
     FindSourcesRequest,
@@ -45,6 +47,7 @@ from app.services.source_format_admission import (
     supported_source_suffixes,
 )
 
+from . import global_ask as _global
 from ._shared import (
     OUTPUT_INTEGER_LIMIT,
     RESULT_LIMIT,
@@ -56,7 +59,6 @@ from ._shared import (
     _selected_notebook,
     _writable_notebook,
 )
-from .memory_context import _memory_read_allowed
 from .paper_pages import extraction_page, find_sources_page, paper_cards_page
 
 # This names a document rather than a Memory item. The full title is stored;
@@ -386,6 +388,10 @@ _CURSOR_STALE = (
     "cursor 已失效：两页之间有论文的元数据被抽取，排序已经变化，沿用旧偏移会漏掉或重复来源；"
     "请去掉 cursor、用同样的条件从第一页重新检索"
 )
+_CURSOR_SCOPE_CHANGED = (
+    "cursor 已失效：两页之间笔记本的来源有增删，排序已经变化，沿用旧偏移会漏掉或重复来源；"
+    "请去掉 cursor、用同样的条件从第一页重新检索"
+)
 _CURSOR_INVALID = (
     "cursor 无效：翻页时只改 cursor，其余参数必须与上一次完全相同；要换条件就去掉 cursor 重新检索"
 )
@@ -417,23 +423,57 @@ def _owner_generation_slot(owner_id: str) -> Iterator[None]:
                 _GENERATING.pop(owner_id, None)
 
 
-def _paper_source_set(repo: Any, principal: Any, notebook_id: str) -> set[str]:
-    """The source set a paper tool reads: the notebook's visible sources plus
-    the hidden projections THIS owner may read (design §5.2).
+def _memory_viewer(principal: Any) -> str:
+    """Whose Memory projections a paper tool may read: the owner's own while
+    the (freshly refreshed) token may read Memory, else nobody's (``""`` --
+    Knowhow projections only). The same rule ``read_reference`` applies, read
+    off the live principal instead of a second ``require_agent_access``."""
+    return principal.owner_id if principal_has_capability(principal, "memory:read") else ""
 
-    MCP has no retrieval run, so nothing narrows the services' reads to the
+
+def _paper_source_set(repo: Any, principal: Any, notebook_id: str) -> set[str]:
+    """``find_sources``' source set: the notebook's visible sources plus the
+    hidden projections THIS owner may read (design §5.2).
+
+    MCP has no retrieval run, so nothing narrows the finder's reads to the
     caller: without this explicit set, another member's Memory projection
-    chunks would reach ``best_passage`` and extraction. The Memory half is
-    the owner's own only, and only while the token may read Memory -- the
-    same gate ``search`` applies (``""`` = Knowhow projections only)."""
-    viewer = (
-        principal.owner_id
-        if _memory_read_allowed(repo, principal, notebook_id) else ""
-    )
+    chunks would reach ``best_passage``."""
     return {
         *repo.all_visible_source_ids(notebook_id),
-        *repo.hidden_source_ids(notebook_id, viewer),
+        *repo.hidden_source_ids(notebook_id, _memory_viewer(principal)),
     }
+
+
+def _readable_requested(
+    repo: Any, principal: Any, notebook_id: str, source_ids: list[str],
+) -> list[tuple[str, str]]:
+    """The requested sources the owner may read in ``notebook_id`` -- the
+    ``allowed`` set of ``get_paper_cards`` / ``extract_from_sources``.
+
+    The same per-id gate ``read_reference`` uses (``source_notebook_id`` with
+    the Memory viewer: another member's Memory answers ``None`` exactly like a
+    missing id), one primary-key read per requested id (at most 3), instead
+    of materializing the notebook's whole source set for three ids."""
+    viewer = _memory_viewer(principal)
+    return [
+        (notebook_id, source_id) for source_id in source_ids
+        if repo.source_notebook_id(source_id, viewer_id=viewer) == notebook_id
+    ]
+
+
+def _recheck_delivery(repo: Any, principal: Any, notebook_id: str) -> None:
+    """Re-authorize a model-calling paper tool at the moment it hands back
+    its result (the work can take minutes): the token as it is now, then the
+    notebook still allowlisted and readable -- ``ask``'s delivery recheck.
+    A revoked or expired token is ``token_inactive``; a lost notebook keeps
+    its own access code. The generated cards stay cached either way."""
+    try:
+        live = repo.refresh_agent_principal(principal.token_id)
+    except PermissionError:
+        live = None
+    if live is None or live.owner_id != principal.owner_id:
+        raise AgentToolError("token_inactive", _global._INACTIVE)
+    repo.require_agent_access(live, "knowledge:read", notebook_id)
 
 
 def _paper_source_ids(source_ids: Any) -> list[str]:
@@ -480,6 +520,10 @@ def _find_request(
 ) -> FindSourcesRequest:
     if kind not in ("papers", "all"):
         raise AgentToolError("invalid_argument", "kind 只能是 papers 或 all")
+    if not 1 <= limit <= FIND_SOURCES_PAGE_SIZE:
+        raise AgentToolError(
+            "invalid_argument", f"limit 必须在 1 到 {FIND_SOURCES_PAGE_SIZE} 之间"
+        )
     return FindSourcesRequest(
         query=query, terms=tuple(terms or ()), year_from=year_from,
         year_to=year_to, venue=venue, author=author, kind=kind,
@@ -496,6 +540,8 @@ def _find(
         result = _runtime_service(repo, "source_finder").find(
             notebook_id, request, allowed_source_ids=allowed, cancel_event=stop,
         )
+    except FindSourcesCursorScopeChangedError:
+        raise AgentToolError("invalid_argument", _CURSOR_SCOPE_CHANGED) from None
     except FindSourcesCursorStaleError:
         raise AgentToolError("invalid_argument", _CURSOR_STALE) from None
     except FindSourcesCursorError:
@@ -517,37 +563,41 @@ def _paper_cards(
     repo: Any, principal: Any, notebook_id: str, source_ids: list[str],
     stop: threading.Event,
 ) -> dict[str, Any]:
-    scope = _paper_source_set(repo, principal, notebook_id)
     results = _runtime_service(repo, "paper_cards").get_cards(
         [(notebook_id, source_id) for source_id in source_ids],
-        allowed=[(notebook_id, sid) for sid in source_ids if sid in scope],
+        allowed=_readable_requested(repo, principal, notebook_id, source_ids),
         generate_limit=PAPER_CARD_GENERATE_LIMIT,
         cancel_event=stop,
         actor_id=principal.owner_id,
     )
+    _recheck_delivery(repo, principal, notebook_id)
     return paper_cards_page(notebook_id, results, _displays(repo, results))
+
+
+def _extract_fields(fields: Any) -> tuple[str, ...]:
+    """``fields`` as the service normalizes them (``field_index`` in its
+    results indexes exactly this tuple), refused before any repository work
+    or owner slot."""
+    try:
+        return normalize_fields(fields or ())
+    except ExtractionRequestError:
+        raise AgentToolError("invalid_argument", _EXTRACT_INVALID) from None
 
 
 def _extract(
     repo: Any, principal: Any, notebook_id: str, source_ids: list[str],
-    fields: list[str], stop: threading.Event,
+    fields: tuple[str, ...], stop: threading.Event,
 ) -> dict[str, Any]:
-    scope = _paper_source_set(repo, principal, notebook_id)
-    service = _runtime_service(repo, "paper_extraction")
     try:
-        # The service's own normalization: ``field_index`` in its results
-        # indexes exactly this tuple.
-        wanted = normalize_fields(fields)
-        results = service.extract(
-            [(notebook_id, source_id) for source_id in source_ids], wanted,
-            allowed=[(notebook_id, sid) for sid in source_ids if sid in scope],
+        results = _runtime_service(repo, "paper_extraction").extract(
+            [(notebook_id, source_id) for source_id in source_ids], fields,
+            allowed=_readable_requested(repo, principal, notebook_id, source_ids),
             limit=len(source_ids), cancel_event=stop, actor_id=principal.owner_id,
         )
     except ExtractionRequestError:
         raise AgentToolError("invalid_argument", _EXTRACT_INVALID) from None
-    return extraction_page(
-        notebook_id, list(wanted), results, _displays(repo, results),
-    )
+    _recheck_delivery(repo, principal, notebook_id)
+    return extraction_page(notebook_id, list(fields), results, _displays(repo, results))
 
 
 def register_source_tools(
@@ -616,6 +666,9 @@ def register_source_tools(
                         "kg_analyzed_empty": item.kg_analyzed_empty,
                         "agent_created": item.agent_created,
                         "created_at": item.created_at,
+                        # ⚠ 19 of OUTPUT_MAPPING_LIMIT's 20 keys: a 21st key
+                        # would make the packer drop one (alphabetically last)
+                        # from every item.
                         # Paper metadata the page read already hydrated
                         # (``sources_from_rows``): no extra query.
                         "authors": list(item.authors[:3]),
@@ -687,9 +740,12 @@ def register_source_tools(
             "`coverage.semantic_recall_capped` is true, `counts.meta_pending_*` "
             "are non-zero or `coverage.skipped_libraries` is non-empty, do not "
             "claim the list is complete. Pass `next_cursor` back as `cursor` "
-            "with otherwise identical arguments for the next page; a stale "
-            "cursor (paper metadata was extracted between pages) is refused -- "
-            "restart from page 1. Requires the read permission."
+            "with otherwise identical arguments for the next page, and page "
+            "through ALL results BEFORE calling get_paper_cards or "
+            "extract_from_sources: generating a card can extract paper "
+            "metadata, which makes an open cursor stale. A stale cursor (paper "
+            "metadata extracted, or sources added or removed, between pages) "
+            "is refused -- restart from page 1. Requires the read permission."
         ),
         tier="read",
     )
@@ -726,6 +782,8 @@ def register_source_tools(
             "datasets. Cards are generated on first use and cached; one call "
             "makes at most 3 model calls (metadata + card together), and the "
             "sources beyond that come back `deferred` -- call again for them. "
+            "Finish paging through find_sources first: extracting a paper's "
+            "metadata here makes an open find_sources cursor stale. "
             "Every source gets a `status`: ready / generated (card included), "
             "not_paper (use extract_from_sources instead), meta_pending (paper "
             "metadata not extracted yet / not writable here), deferred (retry "
@@ -782,6 +840,7 @@ def register_source_tools(
         notebook_id: str = "",
     ) -> dict[str, Any]:
         wanted = _paper_source_ids(source_ids)
+        wanted_fields = _extract_fields(fields)
         repo = repository_provider()
         stop = threading.Event()
 
@@ -793,7 +852,7 @@ def register_source_tools(
                 principal, selected
             ):
                 return _extract(
-                    repo, principal, selected, wanted, list(fields or ()), stop
+                    repo, principal, selected, wanted, wanted_fields, stop
                 )
 
         return await _run_with_progress(

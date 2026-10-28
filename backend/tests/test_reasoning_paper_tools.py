@@ -44,9 +44,11 @@ from app.services.reports.policy import (
 )
 from app.services.retrieval_run import holding_fanout_slot
 from app.services.source_finder import (
+    SCOPE_CHANGED_CURSOR_MESSAGE,
     STALE_CURSOR_MESSAGE,
     BestPassage,
     FindSourcesCursorError,
+    FindSourcesCursorScopeChangedError,
     FindSourcesCursorStaleError,
     FindSourcesError,
     FindSourcesResult,
@@ -518,6 +520,24 @@ def test_a_stale_cursor_says_restart_from_the_first_page_and_keeps_handles(corpu
     assert "从第一页重新检索" in llm.prompts[2]
     assert "其余参数与上一次完全相同" not in llm.prompts[2]
     assert [outcome.handles for outcome in result.paper_finds] == [("p1",), ("p1",)]
+
+
+def test_a_scope_changed_cursor_names_the_source_change_not_the_arguments(corpus):
+    repo, nb, seeded = corpus
+    sid = seeded["det-01"]
+    page = _result([_found(nb, sid, "Detector")], cursor="fs1.next")
+    finder = _StubFinder(
+        page, FindSourcesCursorScopeChangedError(SCOPE_CHANGED_CURSOR_MESSAGE))
+    llm = _RecordingLLM([
+        _find(terms=["detector"]),
+        _find(terms=["detector"], cursor="fs1.next"),
+        ANSWER,
+    ])
+    result = _run(_stub_retriever(repo, llm, finder=finder), nb)
+    assert "find_sources_cursor_stale" in _skips(result)
+    assert "来源有增删" in llm.prompts[2] and "从第一页重新检索" in llm.prompts[2]
+    assert "元数据有更新" not in llm.prompts[2]
+    assert "其余参数与上一次完全相同" not in llm.prompts[2]
 
 
 def test_extraction_request_errors_and_per_run_counting(corpus):

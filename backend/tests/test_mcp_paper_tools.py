@@ -225,6 +225,10 @@ async def test_another_members_memory_never_reaches_find_or_extraction(mcp_env):
                 extracted = _payload(await client.call("extract_from_sources", {
                     "source_ids": ["mem-bob"], "fields": ["secret note"],
                 }))
+                cards = _payload(await client.call(
+                    "get_paper_cards", {"source_ids": ["mem-bob"]}))
+                own = _payload(await client.call(
+                    "get_paper_cards", {"source_ids": ["mem-alice"]}))
     finally:
         del finder.find
     # The explicit set: alice's own projection in, bob's out.
@@ -233,6 +237,10 @@ async def test_another_members_memory_never_reaches_find_or_extraction(mcp_env):
     assert ids and "mem-bob" not in ids
     assert "bob" not in json.dumps(found, ensure_ascii=False)
     assert extracted["items"] == [{"source_id": "mem-bob", "status": "not_found"}]
+    # No title, no status beyond "not found": the same as a missing id.
+    assert cards["items"] == [{"source_id": "mem-bob", "status": "not_found"}]
+    # The owner's own projection passes the gate (and is then simply no paper).
+    assert own["items"][0]["status"] != "not_found"
     assert fake.prompts == []
 
 
@@ -297,9 +305,40 @@ async def test_a_stale_cursor_tells_the_agent_to_restart(mcp_env):
             "terms": ["other words"], "limit": 1, "cursor": first["next_cursor"],
         })
     assert _error_code(stale) == "invalid_argument"
-    assert "第一页重新检索" in _error(stale)
+    assert "第一页重新检索" in _error(stale) and "元数据" in _error(stale)
+    assert "来源有增删" not in _error(stale)
     assert _error_code(foreign) == "invalid_argument"
     assert "cursor 无效" in _error(foreign)
+
+
+@pytest.mark.anyio
+async def test_a_source_set_change_between_pages_is_stale_not_other_arguments(mcp_env):
+    """Identical arguments over a changed source set: the cursor is stale and
+    says the notebook's sources changed -- not "you changed the arguments"."""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    seed_paper_topics(repo, notebook_id, keys=["dif-01", "dif-02", "dif-03"], embed=False)
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        first = _payload(await client.call("find_sources", {
+            "terms": ["diffusion"], "limit": 1,
+        }))
+        # A plain document (no paper metadata): only the source set moves.
+        card_kit.seed_source(repo, notebook_id, "added-between-pages")
+        changed = await client.call("find_sources", {
+            "terms": ["diffusion"], "limit": 1, "cursor": first["next_cursor"],
+        })
+        other_arguments = await client.call("find_sources", {
+            "terms": ["diffusion"], "kind": "all", "limit": 1,
+            "cursor": first["next_cursor"],
+        })
+        restarted = _payload(await client.call("find_sources", {
+            "terms": ["diffusion"], "limit": 1,
+        }))
+    assert _error_code(changed) == "invalid_argument"
+    assert "来源有增删" in _error(changed) and "第一页重新检索" in _error(changed)
+    assert "cursor 无效" not in _error(changed)
+    assert "cursor 无效" in _error(other_arguments)
+    assert restarted["next_cursor"] and restarted["next_cursor"] != first["next_cursor"]
 
 
 def test_a_budget_cut_page_continues_at_the_first_undelivered_item():
@@ -307,9 +346,11 @@ def test_a_budget_cut_page_continues_at_the_first_undelivered_item():
     from app.services.source_finder import BestPassage, FoundSource
 
     long_title = "长标题" * 66
+    # Ranks with a gap (a peer library's items left out of the page): the
+    # resume point is the first undelivered item's own rank, not a count.
     items = tuple(
         FoundSource(
-            rank=11 + index, source_id=f"src-{index:02d}", notebook_id="nb",
+            rank=11 + index + (5 if index >= 2 else 0), source_id=f"src-{index:02d}", notebook_id="nb",
             title=long_title, pub_year=2024, venue="会议" * 40,
             authors=("作者甲", "作者乙", "作者丙"), tier="strong",
             reasons=("title", "passages:3"),
@@ -335,8 +376,10 @@ def test_a_budget_cut_page_continues_at_the_first_undelivered_item():
     assert page["truncation"]["truncated"] is True
     delivered = len(page["items"])
     assert 1 <= delivered < 20
-    assert page["next_cursor"] == f"cursor@{10 + delivered}"
-    assert [item["rank"] for item in page["items"]] == list(range(11, 11 + delivered))
+    assert delivered >= 2
+    assert page["next_cursor"] == f"cursor@{items[delivered].rank - 1}"
+    assert page["next_cursor"] == f"cursor@{15 + delivered}"
+    assert [item["rank"] for item in page["items"]] == [i.rank for i in items[:delivered]]
     _assert_refs_resolve(page)
 
 
@@ -457,9 +500,23 @@ async def test_paper_tool_arguments_are_validated_in_chinese(mcp_env):
         empty = await client.call("find_sources", {})
         kind = await client.call("find_sources", {"terms": ["x"], "kind": "books"})
         terms = await client.call("find_sources", {"terms": [str(i) for i in range(7)]})
-    for result in (too_many, none, fields, empty, kind, terms):
+        no_rows = await client.call("find_sources", {"terms": ["x"], "limit": 0})
+        # Arguments are judged before authorization: a notebook outside the
+        # allowlist does not get a chance to answer first.
+        fields_first = await client.call("extract_from_sources", {
+            "source_ids": ["a"], "fields": [], "notebook_id": mcp_env["other"].id})
+    for result in (too_many, none, fields, empty, kind, terms, no_rows, fields_first):
         assert _error_code(result) == "invalid_argument"
     assert "最多 3 篇" in _error(too_many)
+    assert "limit" in _error(no_rows)
+
+
+def test_find_sources_requests_refuse_a_zero_limit():
+    from app.services.source_finder import FindSourcesError, FindSourcesRequest, _normalized
+
+    with pytest.raises(FindSourcesError):
+        _normalized(FindSourcesRequest(terms=("x",), limit=0))
+    assert _normalized(FindSourcesRequest(terms=("x",), limit=None)).limit == 20
 
 
 # -------------------------------------------------- concurrency and cancel
@@ -479,6 +536,10 @@ async def test_a_third_concurrent_generating_call_of_one_owner_is_busy(mcp_env):
                 cards = await client.call("get_paper_cards", {"source_ids": ids})
                 extract = await client.call("extract_from_sources", {
                     "source_ids": ids, "fields": ["top-1"]})
+                # A bad request is refused as such, never as busy.
+                bad = await client.call("extract_from_sources", {
+                    "source_ids": ids, "fields": ["a", "b", "c", "d", "e"]})
+                assert _error_code(bad) == "invalid_argument"
                 # Searching calls no chat model: not counted.
                 assert not (await client.call("find_sources", {"terms": ["x"]})).isError
             assert _error_code(cards) == "busy" and _error_code(extract) == "busy"
@@ -536,6 +597,83 @@ async def test_a_cancelled_call_stops_the_service_before_its_next_model_call(mcp
     assert stops and stops[0].is_set()
     assert fake.card_calls == 1, "no model call after the cancel"
     assert source_tools._GENERATING == {}
+
+
+@pytest.mark.anyio
+async def test_a_token_revoked_while_cards_generate_gets_no_payload(mcp_env):
+    """The delivery recheck (ask's): the card is cached, the caller whose
+    token died meanwhile receives ask's token_inactive, not the cards."""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    ids = _card_papers(repo, notebook_id, 1)
+    fake = card_kit.FakePaperModel()
+
+    def revoke(_prompt):
+        mcp_env["service"].revoke_agent_token(mcp_env["alice"].id, mcp_env["token_a"].id)
+
+    fake.on_card = revoke
+    app = mcp_env["app"]
+    with card_kit.scheduled_paper_model(repo, fake):
+        async with app.router.lifespan_context(app):
+            async with OfficialMcpClient(
+                app, mcp_env["token_a"].token, manage_lifespan=False
+            ) as client:
+                refused = await client.call("get_paper_cards", {"source_ids": ids})
+            async with OfficialMcpClient(
+                app, mcp_env["token_b"].token, manage_lifespan=False
+            ) as client:
+                cached = _payload(await client.call(
+                    "get_paper_cards", {"source_ids": ids}))
+    assert _error_code(refused) == "token_inactive"
+    assert card_kit.TITLE not in _error(refused)
+    assert fake.card_calls == 1
+    assert cached["items"][0]["status"] == "ready"
+
+
+@pytest.mark.anyio
+async def test_a_notebook_lost_during_extraction_gets_no_payload(mcp_env):
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    seeded = seed_paper_topics(repo, notebook_id, keys=["dif-01"], embed=False)
+    fake = FakeExtractionModel()
+
+    def remove_bob(_prompt):
+        mcp_env["sharing"].remove_member(notebook_id, mcp_env["bob"].id)
+
+    fake.on_call = remove_bob
+    with card_kit.scheduled_paper_model(repo, fake):
+        async with OfficialMcpClient(mcp_env["app"], mcp_env["bob_token"].token) as client:
+            refused = await client.call("extract_from_sources", {
+                "source_ids": [seeded["dif-01"]], "fields": ["FID score"]})
+    assert len(fake.prompts) == 1
+    assert _error_code(refused) == "notebook_unreadable"
+
+
+@pytest.mark.anyio
+async def test_cards_and_extraction_gate_each_id_without_the_whole_source_set(mcp_env):
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    ids = _card_papers(repo, notebook_id, 1)
+    service = mcp_env["service"]
+    calls: list[str] = []
+    for name in ("all_visible_source_ids", "hidden_source_ids"):
+        real = getattr(service, name)
+
+        def spy(*args, _real=real, _name=name, **kwargs):
+            calls.append(_name)
+            return _real(*args, **kwargs)
+
+        setattr(service, name, spy)
+    fake = card_kit.FakePaperModel()
+    try:
+        with card_kit.scheduled_paper_model(repo, fake):
+            async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+                cards = _payload(await client.call("get_paper_cards", {"source_ids": ids}))
+    finally:
+        for name in ("all_visible_source_ids", "hidden_source_ids"):
+            delattr(service, name)
+    assert cards["items"][0]["status"] == "generated"
+    assert calls == []
 
 
 # ---------------------------------------------------- extract_from_sources
