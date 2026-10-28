@@ -1,8 +1,8 @@
 """``source_paper_cards`` 读回的行的后端中性投影。
 
-两个适配器读回同样的列（SQLite 的 ``card`` / ``raw_json`` 是 TEXT JSON、时间是本地
-朴素 ISO 文本；PostgreSQL 是 jsonb 与带时区的 ``datetime``），所以"折成调用方要的
-形状"与"统一成 UTC ISO"只写一份，放在这里而不是任一侧——适配器之间绝不互相 import。
+两个适配器读回同样的列（SQLite 的 ``card`` / ``raw_json`` 是 TEXT JSON、时间是 ISO
+文本；PostgreSQL 是 jsonb 与带时区的 ``datetime``），所以"折成调用方要的形状"与
+"时间渲染成 UTC ISO"只写一份，放在这里而不是任一侧——适配器之间绝不互相 import。
 """
 from __future__ import annotations
 
@@ -15,8 +15,9 @@ def utc_iso(value: Any) -> str:
     """把一个时刻渲染成 UTC ISO 字符串；空值给 ``""``。
 
     ``datetime`` 带时区就换算成 UTC；朴素的 ``datetime`` / ISO 文本按系统本地时间解释
-    （SQLite 里 ``now()`` 写的就是本地朴素文本，与 ``local_datetime`` 同一约定）。结果
-    与 PostgreSQL 会话时区无关，所以卡片 ``basis`` 在会话时区变化时不会让全部卡片失效。
+    （与 ``local_datetime`` 同一约定）。结果与 PostgreSQL 会话时区无关，所以 PostgreSQL
+    上的卡片 ``basis`` 在会话时区变化时不会让全部卡片失效。SQLite 的 ``basis`` 不走这里
+    （它用 ``MAX(created_at)`` 的原文本）；这里只渲染行里的 ``created_at`` / ``updated_at``。
     """
     if value is None or value == "":
         return ""

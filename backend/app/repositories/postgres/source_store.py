@@ -2424,17 +2424,21 @@ class SourceStore:
             for source_id, row in meta_rows.items()
         }
 
+    # 卡片读取与见证批读的每条语句 id 数上限(绑定 id 清单规则:分批的键探针,
+    # PostgreSQL 每条不超过 1024 个占位符)。
+    _CARD_IN_CHUNK = 1_024
+
     def paper_cards_for_sources(
         self, connection, source_ids: Sequence[str], *, notebook_id: str
     ) -> dict[str, dict]:
         """按 source_id 批量取论文卡片行,并按子表自身的 ``notebook_id`` 收窄到
         ``notebook_id``(这些 source 自己所在的库),口径同 ``paper_meta_for_sources``。
-        一批一条 SQL,经 ``pk_source_paper_cards`` 驱动。有效性(basis / 版本 / 是否
-        仍是论文)由调用方判定;这里只读行。"""
+        每批(<=1024 个 id)一条 SQL,经 ``pk_source_paper_cards`` 驱动。有效性
+        (basis / 版本 / 是否仍是论文)由调用方判定;这里只读行。"""
         cards: dict[str, dict] = {}
         ids = list(source_ids)
-        for offset in range(0, len(ids), self.IN_CHUNK):
-            batch = ids[offset : offset + self.IN_CHUNK]
+        for offset in range(0, len(ids), self._CARD_IN_CHUNK):
+            batch = ids[offset : offset + self._CARD_IN_CHUNK]
             for row in connection.execute(
                 "SELECT * FROM source_paper_cards "
                 f"WHERE source_id IN ({placeholders(batch)}) AND notebook_id=%s",
@@ -2442,6 +2446,10 @@ class SourceStore:
             ).fetchall():
                 cards[row["source_id"]] = paper_card_row(row)
         return cards
+
+    @staticmethod
+    def _card_basis_of(row) -> str:
+        return utc_iso(None if row is None else row["basis"])
 
     def upsert_paper_card(
         self,
@@ -2458,9 +2466,14 @@ class SourceStore:
         """写入/覆盖一张论文卡片,返回是否真的写入。
 
         锁序与 ``upsert_paper_meta`` 相同:先 notebook 后 source(``FOR KEY SHARE``),
-        校验归属;来源已被删则 ``KeyError``。**条件写**:同 basis 同版本已是 ``ready``
-        时,``failed`` 不得覆盖它(返回 False);``attempts`` 在 SQL 里自增
-        (``attempts = 旧值 + 1``,不做读改写),``ready`` 写入时清零。"""
+        校验归属;来源已被删则 ``KeyError``。``status`` 只接受 ``ready`` / ``failed``
+        (否则 ``ValueError``,不发任何 SQL)。持锁后重读当前见证,传入的 ``basis``
+        已过期就拒写(返回 False):在途的旧任务不顶掉新内容上的卡片。**条件写**:
+        同 basis 同版本已是 ``ready`` 时,``failed`` 不得覆盖它(返回 False);
+        ``failed`` 时 ``attempts`` 在 SQL 里自增,basis 或版本变了则从 1 重新计,
+        ``ready`` 写入时清零。"""
+        if status not in ("ready", "failed"):
+            raise ValueError(f"unknown paper card status: {status!r}")
         now = self.now()
         ready = status == "ready"
         with self.database.write() as connection:
@@ -2473,6 +2486,12 @@ class SourceStore:
                 (source_id, notebook_id),
             ).fetchone() is None:
                 raise KeyError(source_id)
+            current = connection.execute(
+                "SELECT MAX(created_at) AS basis FROM source_elements WHERE source_id=%s",
+                (source_id,),
+            ).fetchone()
+            if self._card_basis_of(current) != basis:
+                return False
             cursor = connection.execute(
                 "INSERT INTO source_paper_cards"
                 "(source_id,notebook_id,basis,card_version,status,card,raw_json,model,"
@@ -2485,7 +2504,9 @@ class SourceStore:
                 + (
                     "attempts=0,"
                     if ready
-                    else "attempts=source_paper_cards.attempts+1,"
+                    else "attempts=CASE WHEN source_paper_cards.basis=excluded.basis"
+                    " AND source_paper_cards.card_version=excluded.card_version"
+                    " THEN source_paper_cards.attempts+1 ELSE 1 END,"
                 )
                 + "updated_at=excluded.updated_at"
                 + (
@@ -2511,18 +2532,33 @@ class SourceStore:
             )
             return int(cursor.rowcount or 0) > 0
 
-    def source_element_generation_utc(self, source_id: str) -> str:
-        """与 ``CatalogStore.source_element_generation`` 同一聚合
-        (``MAX(source_elements.created_at)``),但统一渲染成 UTC ISO 字符串,与 PG
-        会话时区无关——论文卡片的 ``basis`` 要存要比,按会话时区渲染会在时区变化时
-        让全部卡片失效。无元素给 ``""``。"""
+    def source_card_basis(self, source_id: str) -> str:
+        """论文卡片的 ``basis``:来源元素的生成见证
+        (``MAX(source_elements.created_at)``),渲染成 UTC ISO 字符串,与 PG 会话时区
+        无关——basis 要存要比,按会话时区渲染会在时区变化时让全部卡片失效。无元素
+        给 ``""``。"""
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT MAX(created_at) AS generation FROM source_elements "
-                "WHERE source_id=%s",
+                "SELECT MAX(created_at) AS basis FROM source_elements WHERE source_id=%s",
                 (source_id,),
             ).fetchone()
-        return utc_iso(None if row is None else row["generation"])
+        return self._card_basis_of(row)
+
+    def source_card_bases(self, connection, source_ids: Sequence[str]) -> dict[str, str]:
+        """``source_card_basis`` 的批量版,在调用方的连接上:每批(<=1024 个 id)一条
+        ``GROUP BY source_id``,经 ``idx_source_elements_source_type`` 的前缀走。没有
+        元素的来源不在结果里(调用方按 ``""`` 处理)。"""
+        bases: dict[str, str] = {}
+        ids = list(source_ids)
+        for offset in range(0, len(ids), self._CARD_IN_CHUNK):
+            batch = ids[offset : offset + self._CARD_IN_CHUNK]
+            for row in connection.execute(
+                "SELECT source_id, MAX(created_at) AS basis FROM source_elements "
+                f"WHERE source_id IN ({placeholders(batch)}) GROUP BY source_id",
+                batch,
+            ).fetchall():
+                bases[row["source_id"]] = self._card_basis_of(row)
+        return bases
 
     def sources_missing_paper_meta(
         self, notebook_id: str, include_existing: bool = False

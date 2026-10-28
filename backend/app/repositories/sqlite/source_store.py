@@ -36,7 +36,7 @@ from app.repositories.ports import (
     DocumentCapacityExceeded,
     SourceElementWrite,
 )
-from app.repositories.paper_card_rows import paper_card_row, utc_iso
+from app.repositories.paper_card_rows import paper_card_row
 from app.repositories.sqlite import memory_sql
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.id_binding import bind_ids, drive_by
@@ -2656,9 +2656,13 @@ class SourceStore:
                           raw_json: dict, model: str) -> bool:
         """写入/覆盖一张论文卡片,返回是否真的写入;镜像 PostgreSQL 的同名方法。
 
-        单写事务里校验归属(来源不在该库则 ``KeyError``)。**条件写**:同 basis 同
-        版本已是 ``ready`` 时,``failed`` 不得覆盖它(返回 False);``attempts`` 在
-        SQL 里自增、``ready`` 写入时清零。"""
+        ``status`` 只接受 ``ready`` / ``failed``(否则 ``ValueError``,不发 SQL)。
+        单写事务里校验归属(来源不在该库则 ``KeyError``),并重读当前见证:传入的
+        ``basis`` 已过期就拒写(返回 False)。**条件写**:同 basis 同版本已是 ``ready``
+        时,``failed`` 不得覆盖它(返回 False);``failed`` 时 ``attempts`` 在 SQL 里
+        自增,basis 或版本变了则从 1 重新计,``ready`` 写入时清零。"""
+        if status not in ("ready", "failed"):
+            raise ValueError(f"unknown paper card status: {status!r}")
         now = self.now()
         ready = status == "ready"
         with self.database.write() as db:
@@ -2667,6 +2671,12 @@ class SourceStore:
                 (source_id, notebook_id),
             ).fetchone() is None:
                 raise KeyError(source_id)
+            current = db.execute(
+                "SELECT MAX(created_at) FROM source_elements WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+            if (current[0] if current and current[0] is not None else "") != basis:
+                return False
             cursor = db.execute(
                 "INSERT INTO source_paper_cards "
                 "(source_id, notebook_id, basis, card_version, status, card, raw_json, "
@@ -2676,8 +2686,10 @@ class SourceStore:
                 "notebook_id=excluded.notebook_id, basis=excluded.basis, "
                 "card_version=excluded.card_version, status=excluded.status, "
                 "card=excluded.card, raw_json=excluded.raw_json, model=excluded.model, "
-                + ("attempts=0, " if ready
-                   else "attempts=source_paper_cards.attempts+1, ")
+                + ("attempts=0, " if ready else
+                   "attempts=CASE WHEN source_paper_cards.basis=excluded.basis "
+                   "AND source_paper_cards.card_version=excluded.card_version "
+                   "THEN source_paper_cards.attempts+1 ELSE 1 END, ")
                 + "updated_at=excluded.updated_at"
                 + ("" if ready else
                    " WHERE NOT (source_paper_cards.status='ready'"
@@ -2692,16 +2704,33 @@ class SourceStore:
             )
             return int(cursor.rowcount or 0) > 0
 
-    def source_element_generation_utc(self, source_id: str) -> str:
-        """与 ``CatalogStore.source_element_generation`` 同一聚合
-        (``MAX(source_elements.created_at)``),但统一渲染成 UTC ISO 字符串,与 PostgreSQL
-        侧的同名方法同一形状。无元素给 ``""``。"""
+    def source_card_basis(self, source_id: str) -> str:
+        """论文卡片的 ``basis``:来源元素的生成见证 ``MAX(source_elements.created_at)``
+        的**原文本**,与 ``CatalogStore.source_element_generation`` 的令牌逐字相同,
+        不做任何时区解释(SQLite 的这个文本本来就稳定)。无元素给 ``""``。"""
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT MAX(created_at) FROM source_elements WHERE source_id = ?",
                 (source_id,),
             ).fetchone()
-        return utc_iso(row[0] if row else None)
+        return row[0] if row and row[0] is not None else ""
+
+    def source_card_bases(self, db: sqlite3.Connection,
+                          source_ids: Sequence[str]) -> Dict[str, str]:
+        """``source_card_basis`` 的批量版,在调用方的连接上:每批(<=900 个 id)一条
+        ``GROUP BY source_id``,经 ``idx_source_elements_source_type`` 的前缀走。没有
+        元素的来源不在结果里(调用方按 ``""`` 处理)。"""
+        bases: Dict[str, str] = {}
+        ids = list(source_ids)
+        for i in range(0, len(ids), self.IN_CHUNK):
+            batch = ids[i:i + self.IN_CHUNK]
+            ph = ",".join("?" for _ in batch)
+            for row in db.execute(
+                "SELECT source_id, MAX(created_at) AS basis FROM source_elements "
+                f"WHERE source_id IN ({ph}) GROUP BY source_id", batch,
+            ).fetchall():
+                bases[row["source_id"]] = row["basis"]
+        return bases
 
     def sources_missing_paper_meta(self, notebook_id: str,
                                    include_existing: bool = False) -> List[str]:

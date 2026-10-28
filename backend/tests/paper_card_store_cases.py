@@ -20,7 +20,8 @@ OTHER_NB = "nb-pc-other"
 SRC = "src-pc"
 OWNER = "u-pc"
 NOW = "2026-10-28T12:00:00+00:00"
-BASIS = "2026-10-28T11:00:00+00:00"
+ELEMENT_STAMP = "2026-10-28T11:00:00+00:00"
+NEWER_STAMP = "2026-10-28T13:00:00+00:00"
 CARD = {"problem": "p", "metrics": [{"name": "m", "value": "1.0"}]}
 
 
@@ -44,6 +45,7 @@ class Env:
                 (notebook_id, notebook_id, OWNER, "ready", NOW, NOW),
             )
         self.source(SRC)
+        self.element("e-seed", ELEMENT_STAMP)
 
     def source(self, source_id: str, notebook_id: str = NB) -> None:
         self.run(
@@ -66,9 +68,12 @@ class Env:
             {"is_paper": True, "paper_title": "T", "keywords": [], "authors": [], "model": "m"},
         )
 
+    def basis(self, source_id: str = SRC) -> str:
+        return self.store.source_card_basis(source_id)
+
     def card(self, source_id: str = SRC, notebook_id: str = NB, **overrides) -> bool:
         args: dict[str, Any] = dict(
-            basis=BASIS, card_version=1, status="ready", card=CARD,
+            basis=self.basis(source_id), card_version=1, status="ready", card=CARD,
             raw_json={"dropped": 0}, model="model-a",
         )
         args.update(overrides)
@@ -87,7 +92,7 @@ def assert_ready_roundtrip(env: Env) -> None:
     assert env.card() is True
     row = env.read()[SRC]
     assert row["notebook_id"] == NB
-    assert row["basis"] == BASIS
+    assert row["basis"] == env.basis()
     assert row["card_version"] == 1
     assert row["status"] == "ready"
     assert row["card"] == CARD
@@ -103,6 +108,7 @@ def assert_read_is_narrowed_and_batched(env: Env) -> None:
     env.seed()
     env.source("src-pc-2")
     env.source("src-pc-3")
+    env.element("e-2", ELEMENT_STAMP, "src-pc-2")
     env.card(SRC)
     env.card("src-pc-2")
     assert set(env.read([SRC, "src-pc-2", "src-pc-3", "src-none"])) == {SRC, "src-pc-2"}
@@ -125,6 +131,7 @@ def assert_upsert_checks_ownership(env: Env) -> None:
 def assert_source_delete_cascades(env: Env) -> None:
     env.seed()
     env.source("src-keep")
+    env.element("e-keep", ELEMENT_STAMP, "src-keep")
     env.card(SRC)
     env.card("src-keep")
     env.run("DELETE FROM sources WHERE id=?", (SRC,))
@@ -134,6 +141,7 @@ def assert_source_delete_cascades(env: Env) -> None:
 def assert_notebook_delete_cascades(env: Env) -> None:
     env.seed()
     env.source("src-other", OTHER_NB)
+    env.element("e-other", ELEMENT_STAMP, "src-other")
     env.card(SRC)
     env.card("src-other", OTHER_NB)
     env.run("DELETE FROM notebooks WHERE id=?", (NB,))
@@ -143,6 +151,7 @@ def assert_notebook_delete_cascades(env: Env) -> None:
 def assert_clear_paper_meta_deletes_the_card(env: Env) -> None:
     env.seed()
     env.source("src-keep")
+    env.element("e-keep", ELEMENT_STAMP, "src-keep")
     env.meta()
     env.meta("src-keep")
     env.card(SRC)
@@ -162,12 +171,21 @@ def assert_failed_never_overwrites_a_ready_card_of_the_same_basis(env: Env) -> N
     # leaves the row byte-for-byte as it was (attempts included).
     assert env.card(status="failed", card={}, raw_json={"reason": "late"}, model="model-b") is False
     assert env.read()[SRC] == before
-    # A different basis (the document was re-parsed): the old ready card is stale,
-    # so the failure is recorded.
-    assert env.card(status="failed", basis="2026-10-28T11:30:00+00:00", card={}) is True
-    row = env.read()[SRC]
-    assert (row["status"], row["card"], row["attempts"]) == ("failed", {}, 1)
-    assert row["basis"] == "2026-10-28T11:30:00+00:00"
+
+
+def assert_a_stale_basis_is_refused_and_keeps_the_newer_card(env: Env) -> None:
+    env.seed()
+    stale = env.basis()
+    env.element("e-new", NEWER_STAMP)  # the document was re-parsed: a newer witness
+    fresh = env.basis()
+    assert fresh != stale
+    assert env.card(basis=fresh, status="ready", card={"problem": "new"}) is True
+    before = env.read()[SRC]
+    # An in-flight task that sampled the old content: neither its ready nor its
+    # failed write may displace the card built on the new content.
+    assert env.card(basis=stale, status="ready", card={"problem": "old"}) is False
+    assert env.card(basis=stale, status="failed", card={}) is False
+    assert env.read()[SRC] == before
 
 
 def assert_failed_for_another_card_version_overwrites(env: Env) -> None:
@@ -192,22 +210,64 @@ def assert_attempts_count_in_sql_and_reset_on_ready(env: Env) -> None:
     assert (row["status"], row["attempts"], row["card"]) == ("ready", 0, CARD)
     assert row["created_at"] == first_created  # created_at survives an overwrite
     # A ready card replaces a ready card of another basis, too.
-    assert env.card(status="ready", basis="2026-10-28T13:00:00+00:00", card={"problem": "q"}) is True
+    env.element("e-new", NEWER_STAMP)
+    assert env.card(status="ready", card={"problem": "q"}) is True
     row = env.read()[SRC]
-    assert (row["basis"], row["card"]) == ("2026-10-28T13:00:00+00:00", {"problem": "q"})
+    assert (row["basis"], row["card"]) == (env.basis(), {"problem": "q"})
 
 
-def assert_generation_utc_is_max_element_stamp_in_utc(env: Env) -> None:
+def assert_attempts_restart_when_basis_or_version_changes(env: Env) -> None:
     env.seed()
-    assert env.store.source_element_generation_utc(SRC) == ""
-    env.element("e1", "2026-10-28T11:00:00+00:00")
+    for _ in range(3):
+        env.card(status="failed", card={})
+    assert env.read()[SRC]["attempts"] == 3
+    # Same basis, new card version: the old cooldown does not weigh on it.
+    assert env.card(status="failed", card_version=2, card={}) is True
+    assert env.read()[SRC]["attempts"] == 1
+    assert env.card(status="failed", card_version=2, card={}) is True
+    assert env.read()[SRC]["attempts"] == 2
+    # New content (new basis): restart at 1 as well.
+    env.element("e-new", NEWER_STAMP)
+    assert env.card(status="failed", card_version=2, card={}) is True
+    assert env.read()[SRC]["attempts"] == 1
+
+
+def assert_unknown_status_is_rejected_before_any_sql(env: Env) -> None:
+    env.seed()
+    for status in ("", "pending", "READY", "deferred"):
+        with pytest.raises(ValueError):
+            env.card(status=status)
+    # Even for an unknown source: validation precedes the lock and ownership checks.
+    with pytest.raises(ValueError):
+        env.card("src-gone", status="bogus")
+    assert env.count() == 0
+
+
+def assert_card_basis_is_the_catalog_witness_on_sqlite_and_max_stamp_in_general(env: Env) -> None:
+    env.seed()
+    env.source("src-empty")
+    assert env.store.source_card_basis("src-empty") == ""
     env.element("e2", "2026-10-28T12:30:00+00:00")
     env.element("e3", "2026-10-28T09:15:00+00:00")
-    value = env.store.source_element_generation_utc(SRC)
-    parsed = datetime.fromisoformat(value)
-    assert parsed.utcoffset() == timedelta(0)
-    assert parsed == datetime(2026, 10, 28, 12, 30, tzinfo=timezone.utc)
+    value = env.store.source_card_basis(SRC)
+    assert datetime.fromisoformat(value) == datetime(2026, 10, 28, 12, 30, tzinfo=timezone.utc)
     # Another source's elements never leak in.
     env.source("src-other")
     env.element("e9", "2026-10-29T00:00:00+00:00", "src-other")
-    assert env.store.source_element_generation_utc(SRC) == value
+    assert env.store.source_card_basis(SRC) == value
+
+
+def assert_card_bases_batch_matches_the_single_read(env: Env) -> None:
+    env.seed()
+    env.source("src-b")
+    env.source("src-empty")
+    env.element("e-b1", "2026-10-28T12:30:00+00:00", "src-b")
+    env.element("e-b2", "2026-10-28T10:00:00+00:00", "src-b")
+    with env.connect() as db:
+        bases = env.store.source_card_bases(db, [SRC, "src-b", "src-empty", "src-none"])
+        assert env.store.source_card_bases(db, []) == {}
+        many = [f"src-x-{i}" for i in range(2500)] + [SRC]
+        assert env.store.source_card_bases(db, many) == {SRC: env.store.source_card_basis(SRC)}
+    assert set(bases) == {SRC, "src-b"}  # no elements: absent
+    assert bases[SRC] == env.store.source_card_basis(SRC)
+    assert bases["src-b"] == env.store.source_card_basis("src-b")

@@ -896,15 +896,14 @@ _TABLES = (
         "timestamptz",
     ),
     # SQLite v104 / PostgreSQL 0085: the lazily generated paper-card cache.
-    # Deliberately not copied: a card is valid only while its basis (the
-    # source's element-generation witness) matches, and the witness renders
-    # differently after the migration, so every copied card would mismatch;
-    # each environment regenerates on demand. LOCAL_EPHEMERAL, no replication
-    # key.
+    # Deliberately not copied: a pure cache, regenerated on demand; the basis
+    # (the source's element-generation witness) is rendered differently by
+    # the two backends, so a copied card would never match. LOCAL_EPHEMERAL,
+    # no replication key.
     TableSpec("source_paper_cards", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 113),
 )
 
-MANIFEST =Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)
+MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)
 
 
 def _pipeline_names(value: str) -> tuple[str, ...]:
