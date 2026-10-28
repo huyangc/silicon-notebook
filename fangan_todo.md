@@ -2,7 +2,7 @@
 
 更新日期：2026-10-23（第二节「隐藏成员名字经 canonical id 暴露」已处理并移入 `fangan_done.md` §65：摸排确认
 直接读者面不越界，只修了经挂载读与来源天花板下的取名；同日早些时候，图谱分析「问题清单」特性已全部合入并记入 `fangan_done.md` §64，本文件相应补登：
-更新日期：2026-10-28（「宽 except 吞掉 `RetrievalControlError`」已修，移入 `fangan_done.md`；按当日 master
+更新日期：2026-10-28（第二节「换描述模型或提示词后没有任何路径能重写概念描述」已按用户当日裁决（方案 b：显式维护命令，签名口径不变）补上 `kg rewrite-descriptions`，移入 `fangan_done.md` §61；「宽 except 吞掉 `RetrievalControlError`」已修，移入 `fangan_done.md`；按当日 master
 逐条核实改写：第一节「PG 打开路径计数缓存的刻意延后项」去掉已过时的 H4/H5 半句、只留 SQLite 全局 epoch，
 「旧索引退役债」写明 `idx_chunks_source` 不能照同一口径下线，第二节 `page.tsx` 行数与首轮播种残余 ① 行号、
 第四节大文件行数与 owner-view 豁免行号更新，`globals.css` 一条按 10-19 裁决 14「不拆」移入「产品与守卫
@@ -158,15 +158,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       Hypothesis 对象。
 - [ ] schema 归纳只提议新类型，不对既有类型提议新字段。
 - [ ] KG refine 自我修正只有总开关 `KG_REFINE_ENABLED`，无抽样 / 比率控制。
-- [ ] **换描述模型或提示词后，没有任何路径能重写概念描述**（来源：PR #939）：概念描述按签名复用，签名是
-      `_concept_desc_sig(name, quotes)`（`backend/app/services/knowledge_lifecycle.py`）的 sha1，输入只有概念名与
-      去重排序后的前 8 条引文，不含描述模型（`kg_concept_description` 工作负载绑定的服务），也不含
-      `concept_description_prompt`（`backend/app/services/prompts.py`）的版本。所以换了描述模型、或改了描述提示词
-      之后，名字与引文都没变的概念，下一次统一重建照样命中旧描述、不调模型；`batch_ingest --fresh` 只清 rebuild
-      checkpoint，描述阶段仍按签名复用，同样不重写（`docs/operations*.md` 已如实写）。目前没有任何入口能让一个
-      已发布的库按新模型 / 新提示词把描述整批重写，只能等名字或引文变化逐个触发。要补一条显式路径（签名里带模型
-      身份与提示词版本，或一个只重写描述的维护命令）；动手前先定「换模型是否应当整批重写」——整批重写是一大笔
-      描述模型调用，按签名复用正是为了避免种子归一后几乎每个多词概念都被重调一遍。
 - [ ] **问题清单阈值是本机标定的初值，生产只读演练数据回来后复核**（来源：PR #941，规格 §14③ 的用户裁决「先按本机
       初值实现」）：F1 / F2 / F3 / F4 的各阈值与 F2 排除「通用概念」的界（出现在超过 30 个来源里）只在一个 84 个来源的
       本机库（`nb-b37185f4ae`）上标定过，F3 在本机没有正样本；规格 §14③ 写明 4.9 万个来源上 30 可能太小。精确值在

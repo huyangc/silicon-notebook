@@ -23,7 +23,7 @@ npm run cli -- batch ingest --input-dir ./papers --notebook-name "资料库"
 | --- | --- |
 | `batch`（兼容名 `batch-ingest`） | 原 `batch_ingest.py` 的所有阶段和参数 |
 | `scale` | 原 `build_scale_index.py` 的 inspect/build/export/import |
-| `kg` | 原 `app.scripts` 中的 build/recluster/reembed/backfill-relations |
+| `kg` | 原 `app.scripts` 中的 build/recluster/reembed/backfill-relations；rewrite-descriptions（换描述模型或提示词后按库重写概念描述，可与服务同时运行） |
 | `maintain` | chunks、kg-embeddings、reextract、denoise、knowhow、promotion-targets、delete-leftovers、global-attribution、navigation、selected-source |
 | `database` | migrate（把库迁到本构建的 schema：只迁移不 seed，须停服）、migrate-postgres、shadow、merge、retrieval-indexes、hotpath-indexes |
 | `diag` / `diagnose` | 原统一只读诊断；另有 postgres、retrieval、mineru 专项诊断 |
@@ -486,6 +486,10 @@ KG 对象向量在 `store_kg` 入库时嵌入;并发过高被限流漏掉的,用
 上述确认参数仅在 PostgreSQL 必需；SQLite 可省略。其他生产维护 wrapper
 （`build_kg`、`recluster_kg`、`reembed_kg`、`backfill_relation_embeddings`、
 `reextract_notebook.py`、`denoise_reextract_nb.py`）遵循同一规则。
+例外是 `kg rewrite-descriptions`（`app.scripts.rewrite_concept_descriptions`）：它只改已发布
+概念的描述，发布时按库持派生代认领几秒钟，可以与在线服务同时运行，不需要也不接受
+`--confirm-service-stopped`。用法、成本与何时用见 `docs/operations_zh.md` 的「换描述模型或
+提示词后重写概念描述」。
 
 ---
 

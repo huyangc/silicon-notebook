@@ -994,6 +994,104 @@ WHERE u.community_partition_version = 0
               AND c.level = 0 AND c.generation = u.community_generation);
 ```
 
+## Rewriting concept descriptions after a description model or prompt change
+
+**When to use it.** After the model bound to the `kg_concept_description` workload changes, or
+after the description prompt (`concept_description_prompt` in `backend/app/services/prompts.py`)
+is edited. A concept description is reused by the signature of its input — the concept name plus
+the first eight quotes after de-duplication and sorting — and that signature carries neither the
+model nor the prompt: later rebuilds (刷新图谱, `recluster_kg`, `batch_ingest --rebuild-only` /
+`--fresh`) rewrite only the concepts whose name or quotes changed and reuse every other old text
+without calling the model. That is deliberate (user ruling 2026-10-28: the signature and the
+automatic reuse stay as they are); a full rewrite is scheduled by the operator with this command.
+
+```bash
+# See the bill first: how many concepts would be rewritten and how many model calls that takes
+# (calls no model, writes nothing)
+scripts/cli.sh kg rewrite-descriptions <notebook_id> --dry-run
+scripts/cli.sh kg rewrite-descriptions --all --dry-run
+
+# Rewrite (one notebook, or every notebook)
+scripts/cli.sh kg rewrite-descriptions <notebook_id>
+scripts/cli.sh kg rewrite-descriptions --all
+
+# In batches: at most 2000 model calls this run (summed over notebooks with --all); the rest
+# continues on the next run
+scripts/cli.sh kg rewrite-descriptions --all --limit 2000
+```
+
+(Equivalent entry: `PYTHONPATH=backend python -m app.scripts.rewrite_concept_descriptions ...`,
+with the serving process's `.env`.)
+
+**What it does.** It covers exactly the concepts the rebuild's description stage describes:
+published multi-member canonicals merged across sources (members counted over non-deprecated,
+non-Memory concept objects, with at least one quote); single-member concepts get no description
+and are left alone. The input is computed by the same function as the rebuild's, so a concept's
+signature here equals the one a rebuild computes. Each **distinct** input costs one model call (two
+concepts with the same name and quotes share one), in parallel up to the bound physical service's
+`max_concurrency`. It writes only the description and signature columns of `concept_clusters`,
+through the published generation's normal write path: `cluster_mutation_seq` advances in the same
+transaction (the analysis panel's merge-dependent artifacts read as behind until the next analysis
+update), `kg_mutation_seq` does not (clustering inputs did not change; 刷新图谱 may still skip);
+with change capture on, the row changes enter the sync log as usual. Rebuilds afterwards reuse the
+new texts by signature without calling the model, and the rebuild's own description checkpoint
+cannot put the old texts back (the command drops it when it publishes).
+
+**Cost.** The dry run's `model_calls` is the number of model calls to pay for — on a large notebook
+possibly hundreds of thousands; size duration and spend from the description model's price and
+throughput, and use `--limit` to spread it. Staging and resumption are keyed by "description
+model label + description prompt fingerprint":
+
+- every 16 results are staged in `kg_rebuild_checkpoint` (stage `concept_desc_rewrite`); after
+  an interruption (Ctrl-C, a killed process, a `--limit` cut) the same command **does not call
+  the model again** for an input already generated and only publishes it;
+- concepts already written under the same model and prompt are not rewritten (the dry run counts
+  them as `up_to_date`);
+- another model or prompt change starts a new round that rewrites everything. The fingerprint
+  takes only the model label (the model service's `model`) and the prompt: changing only the
+  service address, concurrency, key or thinking mode is not a model change and triggers nothing;
+- descriptions a rebuild generated under the new model are not staged, so the command generates
+  them once more (included in the dry run's count).
+
+Once a notebook completes, staged rows of other model/prompt versions and rows no longer matching
+any concept are deleted; deleting a notebook or its knowledge graph deletes them with every other
+checkpoint; the rebuild's own checkpoint cleanup (including `--fresh`) leaves them alone.
+
+**Failures and exit status.** A failed model call (an exception, a non-JSON reply, an empty
+description) is logged once — notebook id, canonical id and the exception class, never the prompt
+or the reply — and counted in `failed`; that concept keeps its old text, the rest are written, and
+a rerun retries the failed ones. Exit status: `0` done (or a dry run); `1` incomplete (failures, a
+`--limit` cut, concepts whose input changed before publishing, or a rebuild in flight) — rerun;
+`2` a usage error, an unknown notebook, `KG_CONCEPT_DESC_ENABLED=false` or no model bound to
+`kg_concept_description`; `3` the database is not at this build's schema (the command never
+migrates); `130` interrupted. Each notebook ends with one JSON line of counts (`canonicals` /
+`up_to_date` / `to_rewrite` / `model_calls` / `generated` / `failed` / `remaining` / `rewritten` /
+`moved`) and one `kg_concept_description_rewrite` event.
+
+**No service stop needed.** The command opens the database as a schema guest (never migrates,
+never seeds) and neither needs nor accepts `--confirm-service-stopped`:
+
+- planning and generation read published data and write only their own staged rows, holding no
+  lock, for as many hours as they take;
+- publishing holds the notebook's derived-generation claim once (the same cross-process single
+  flight as 刷新图谱 and `recluster_kg`), page by page in short transactions: it takes the concept
+  cluster write lock, checks that the published generation and `kg_reset_epoch` did not move,
+  re-reads the page's concept rows (on PostgreSQL `FOR UPDATE ... SKIP LOCKED`, never waiting on a
+  row someone else holds), recomputes each input from what it read, and writes **only where the
+  input still equals the one the text was generated from** — a concept that gained a member
+  (online fusion), lost a deleted source or had its members changed by a Knowhow reprojection is
+  skipped and counted in `moved`, and the rerun generates it from its new input;
+- if a rebuild is running when it publishes, that notebook reports `busy` and nothing is written
+  (the results are staged; a later rerun only publishes, with no model call); if a rebuild
+  published a new generation after the plan, it re-plans on the new generation and publishes
+  (at most 3 times);
+- while it publishes (usually seconds to a minute or two per notebook) an online 刷新图谱 gets the
+  same "already running" answer as when it meets another rebuild;
+- the command process and the serving process each have their own model scheduler, and their
+  concurrency does not add up in one place: run online, the model service carries the service's own
+  load plus this command's `max_concurrency`; check the service's headroom first at peak hours, or
+  use `--limit` to move the work off-peak.
+
 ## Agent token permission tiers
 
 Upgrading to **PostgreSQL 0069 / SQLite v89** rewrites every Agent token's permissions (revoked ones
@@ -3034,7 +3132,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 - `--pool-report-interval` — in the `all`, `kg`, and `reparse` phases, print producer/source business-pool utilization every N seconds (default 15; `0` disables it). This is not the model-capacity authority; inspect the read-only Model Services status for per-service running/queued counts, health, and breaker state.
 
-Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (source-pipeline concurrency = `KG_JOB_CONCURRENCY`; in `vectors-to-blob`, parse/encode process-pool size, default `min(32, cpu_count())`, `1` = no pool), `--limit` (kg extraction subset — clustering still covers the whole notebook), `--retry-partial` (`kg` only: safely retry graph-bearing sources whose latest run has failed windows), `--no-rebuild` / `--rebuild-only` (split extraction from the final clustering for batched large builds), `--fresh` (clears the rebuild checkpoint to force a full re-run of merge-review adjudication; use when you changed the KG model/thresholds but the data is unchanged — implies a forced rebuild, and also applies to the `all` phase's final clustering. It does not rewrite concept descriptions: the description stage still reads the published descriptions and reuses every one whose name-and-quotes signature is unchanged, without calling the model), `--allow-no-embed` (explicitly allow running when `chunk_embedding` is unbound; refused by default, never silent; ignored by the `embed` subcommand), `--pool-report-interval` (seconds between producer/source business-pool reports in `all`/`kg`/`reparse`; default 15, `0` off), `--all-notebooks` (`vectors-to-blob` / `backfill-source-index` / `backfill-chunk-elements` only: act on every notebook instead of one), `--force` (`metadata`, `question-index`, `backfill-source-index`, `backfill-chunk-elements`, or `backfill-source-facts`: intentionally rebuild completed state), `--mineru-output` / `--source-id` / `--after-id` / `--report` (`backfill-images` only: repeatable MinerU output roots, a single-source pilot restriction, a keyset resume point, and a per-source JSONL detail file carrying counts and stable reason codes only), `--dry-run` (scan & estimate only; for `backfill-images` this is a read-only database pass rather than an input-directory preview). The `embed` subcommand backfills only missing chunk + element + node vectors and requires `--notebook-id`. The `vectors-to-blob` subcommand migrates legacy JSON-text vectors to BLOB and requires `--notebook-id` or `--all-notebooks`. The `backfill-source-index` subcommand proactively builds the source-deletion reverse index and requires `--notebook-id` or `--all-notebooks`. The `backfill-chunk-elements` subcommand proactively builds the element -> chunk reverse index and has the same requirement. The `backfill-images` subcommand surgically restores dropped Markdown source images and requires `--notebook-id` plus at least one `--mineru-output` tree. The `metadata` subcommand backfills paper metadata (title/authors/venue/year) for already-parsed academic-paper sources and requires `--notebook-id` plus a `paper_metadata` binding. The `question-index` subcommand requires one notebook, an explicit rollout mode, and both generated-question model bindings.
+Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (source-pipeline concurrency = `KG_JOB_CONCURRENCY`; in `vectors-to-blob`, parse/encode process-pool size, default `min(32, cpu_count())`, `1` = no pool), `--limit` (kg extraction subset — clustering still covers the whole notebook), `--retry-partial` (`kg` only: safely retry graph-bearing sources whose latest run has failed windows), `--no-rebuild` / `--rebuild-only` (split extraction from the final clustering for batched large builds), `--fresh` (clears the rebuild checkpoint to force a full re-run of merge-review adjudication; use when you changed the KG model/thresholds but the data is unchanged — implies a forced rebuild, and also applies to the `all` phase's final clustering. It does not rewrite concept descriptions: the description stage still reads the published descriptions and reuses every one whose name-and-quotes signature is unchanged, without calling the model; to rewrite them all after changing the description model or prompt, use `kg rewrite-descriptions` — see "Rewriting concept descriptions after a description model or prompt change"), `--allow-no-embed` (explicitly allow running when `chunk_embedding` is unbound; refused by default, never silent; ignored by the `embed` subcommand), `--pool-report-interval` (seconds between producer/source business-pool reports in `all`/`kg`/`reparse`; default 15, `0` off), `--all-notebooks` (`vectors-to-blob` / `backfill-source-index` / `backfill-chunk-elements` only: act on every notebook instead of one), `--force` (`metadata`, `question-index`, `backfill-source-index`, `backfill-chunk-elements`, or `backfill-source-facts`: intentionally rebuild completed state), `--mineru-output` / `--source-id` / `--after-id` / `--report` (`backfill-images` only: repeatable MinerU output roots, a single-source pilot restriction, a keyset resume point, and a per-source JSONL detail file carrying counts and stable reason codes only), `--dry-run` (scan & estimate only; for `backfill-images` this is a read-only database pass rather than an input-directory preview). The `embed` subcommand backfills only missing chunk + element + node vectors and requires `--notebook-id`. The `vectors-to-blob` subcommand migrates legacy JSON-text vectors to BLOB and requires `--notebook-id` or `--all-notebooks`. The `backfill-source-index` subcommand proactively builds the source-deletion reverse index and requires `--notebook-id` or `--all-notebooks`. The `backfill-chunk-elements` subcommand proactively builds the element -> chunk reverse index and has the same requirement. The `backfill-images` subcommand surgically restores dropped Markdown source images and requires `--notebook-id` plus at least one `--mineru-output` tree. The `metadata` subcommand backfills paper metadata (title/authors/venue/year) for already-parsed academic-paper sources and requires `--notebook-id` plus a `paper_metadata` binding. The `question-index` subcommand requires one notebook, an explicit rollout mode, and both generated-question model bindings.
 
 Prereqs: point `MODEL_SERVICES_CONFIG` at the deployment TOML, bind the workloads required by the selected phase (notably `chunk_embedding`, `source_element_embedding`, `knowledge_object_embedding`, `kg_extract`, `paper_metadata`, and optional `chunk_question_generation`), and place only the referenced secrets in `.env`. If `chunk_embedding` is unbound, the CLI **refuses to run by default** — pass `--allow-no-embed` to import without vectors, never silently; phases whose required chat workload is unbound fail clearly. A re-run resumes from **database state**, not a progress file: `ingest` checks content hashes, `kg` checks the latest extraction run, and `embed` checks vector rows. Because a hash is stored before parsing completes, repair interrupted sources without elements using `reparse`. `<storage>/batch_ingest/<notebook>.jsonl` is a write-only run log.
 

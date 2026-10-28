@@ -746,6 +746,84 @@ WHERE u.community_partition_version = 0
               AND c.level = 0 AND c.generation = u.community_generation);
 ```
 
+## 换描述模型或提示词后重写概念描述
+
+**何时用。** 换了 `kg_concept_description` 工作负载绑定的模型，或改了描述提示词
+（`backend/app/services/prompts.py` 的 `concept_description_prompt`）之后。概念描述按
+「概念名 + 去重排序后的前 8 条引文」的签名复用，签名里没有模型与提示词：之后的重建
+（刷新图谱、`recluster_kg`、`batch_ingest --rebuild-only` / `--fresh`）只会重写名字或
+引文变了的概念，其余一律沿用旧描述、不调模型。这是有意的（用户裁决 2026-10-28：
+签名口径与自动复用保持不变），整批重写由运维用下面这条命令择时触发。
+
+```bash
+# 先看要花多少：要重写多少个概念、会调用多少次模型（不调模型、不写库）
+scripts/cli.sh kg rewrite-descriptions <notebook_id> --dry-run
+scripts/cli.sh kg rewrite-descriptions --all --dry-run
+
+# 真正重写（一个库，或全部库）
+scripts/cli.sh kg rewrite-descriptions <notebook_id>
+scripts/cli.sh kg rewrite-descriptions --all
+
+# 分批：本次最多调用 2000 次模型（--all 时是所有库合计），其余下次续跑
+scripts/cli.sh kg rewrite-descriptions --all --limit 2000
+```
+
+（等价入口：`PYTHONPATH=backend python -m app.scripts.rewrite_concept_descriptions ...`，
+与在役服务同一份 `.env`。）
+
+**它做什么。** 只处理重建描述阶段会描述的那些概念：已发布的、跨来源合并出来的多成员
+概念（成员数按未弃用、非 Memory 的概念对象计，且至少有一条引文）；单成员概念不写描述，
+本命令也不碰。输入的算法与重建完全相同（同一个函数），所以同一个概念算出的签名与重建
+算出的一致。每个**不同**的输入调用一次模型（名字与引文都相同的两个概念共用一次），
+并发取所绑定物理服务的 `max_concurrency`。写入只改 `concept_clusters` 的描述与签名两列，
+走已发布代的正常写入路径：同一事务推进 `cluster_mutation_seq`（分析看板里依赖合并结果的
+那几项会显示落后、下次更新分析时重算），`kg_mutation_seq` 不动（聚类输入没变，刷新图谱
+照样可以跳过）；变更捕获开着时这些行变化照常进同步日志。写完之后的重建按签名复用的就是
+新描述，不会再调模型，也不会被重建自己的描述 checkpoint 改回旧文本（命令发布时一并删掉
+那份 checkpoint）。
+
+**成本。** dry run 报的 `model_calls` 就是要付的模型调用次数，大库可能是十万级，按描述
+模型的单价与吞吐估算时长与费用；`--limit` 用来分几次跑。暂存与续跑都按「描述模型标识 +
+描述提示词指纹」记账：
+
+- 每生成 16 条就把结果落进 `kg_rebuild_checkpoint`（阶段 `concept_desc_rewrite`），
+  中断（Ctrl-C、进程被杀、`--limit` 截断）之后重跑同一条命令，已生成过的输入**不再调
+  模型**，直接发布；
+- 同一模型、同一提示词下已经写好的概念不再重写（dry run 里计入 `up_to_date`）；
+- 再换一次模型或提示词就是新的一轮，全部重写。指纹只取模型标识（模型服务配置里的
+  `model`）与提示词：只改服务地址、并发、密钥或思考模式不算换模型，不会触发重写；
+- 重建期间按新模型生成出来的描述不在暂存里，本命令会再生成一次（dry run 的计数里已包含）。
+
+整库完成后，其它模型 / 提示词版本的暂存行与已不对应任何概念的暂存行一并删除；删除笔记本
+或删除知识图谱时暂存行随其它 checkpoint 一起删掉；重建自己的 checkpoint 清理（含
+`--fresh`）不动它。
+
+**失败与退出码。** 单条模型调用失败（异常、返回不是 JSON、描述为空）只记一条日志——
+笔记本 id、概念 id 与异常类名，不记提示词和回复——计入 `failed`，这一条保留原描述，其余
+照常写；重跑会重试失败的那些。退出码：`0` 全部完成（或 dry run）；`1` 未完成（有失败、
+被 `--limit` 截断、发布时有概念的输入已经变了、或有重建在跑），重跑即可；`2` 参数错误、
+笔记本不存在、`KG_CONCEPT_DESC_ENABLED=false` 或 `kg_concept_description` 未绑定模型；`3`
+库不在本构建的 schema 版本（本命令从不迁移）；`130` 被中断。每个库结束时打印一行 JSON
+计数（`canonicals` / `up_to_date` / `to_rewrite` / `model_calls` / `generated` / `failed` /
+`remaining` / `rewritten` / `moved`），并写一条 `kg_concept_description_rewrite` 事件。
+
+**可以不停服。** 本命令以 schema guest 打开库（不迁移、不 seed），不要也不接受
+`--confirm-service-stopped`：
+
+- 规划与生成阶段只读已发布的数据、只写自己的暂存行，不持任何锁，可以跑几个小时；
+- 发布阶段按库持一次派生代认领（与刷新图谱、`recluster_kg` 的跨进程单飞同一把），分页、
+  每页一个短事务：持概念簇写锁，复核已发布代与 `kg_reset_epoch` 没变，重新读这一页概念的
+  行（PostgreSQL 上 `FOR UPDATE ... SKIP LOCKED`，不等任何别人持有的行），按读到的成员
+  重算输入，**只有输入仍与生成时一致**才写——期间有新成员并入（在线融合）、来源被删、
+  Knowhow 重投影改了成员的概念一律跳过，计入 `moved`，重跑时按新输入重新生成；
+- 发布时有重建在跑，本库报 `busy`、什么都不写（生成结果已暂存，稍后重跑只发布、不再调
+  模型）；规划之后有重建发布了新的一代，本库自动按新一代重新规划再发布（最多 3 次）；
+- 发布期间（每库通常几秒到一两分钟）在线点「刷新图谱」会和遇到另一次重建一样得到「正在
+  进行」的提示；
+- 命令进程与服务进程各有自己的模型调度器，两边的并发不合并计算：在线跑的时候，模型
+  服务承受的是服务自身的负载加上本命令的 `max_concurrency`，高峰期跑请先确认服务的余量，
+  或用 `--limit` 分到低峰。
+
 ## Agent token 权限五档
 
 升级到 **PostgreSQL 0069 / SQLite v89** 时，每个 Agent token（含已撤销的）的权限改写为五档
@@ -2366,7 +2444,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 - `--pool-report-interval` —— `all`/`kg`/`reparse` 阶段每 N 秒打印 producer/source 业务线程池占用（默认 15；`0` 关闭）。它不是模型容量权威来源；每个服务的运行数、排队数、健康状态和熔断状态应在只读「模型服务」状态中查看。
 
-选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`，显式值在 repository 构造前应用到本进程业务 scheduler；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--retry-partial`（仅 `kg`：安全重试最近一次有失败窗口且已有对象的来源）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild。它不会重写概念描述：描述阶段仍读已发布的描述，名字与引文的签名没变就直接复用、不调模型）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index` / `backfill-chunk-elements`）、`--force`（`metadata` / `question-index` / `backfill-source-index` / `backfill-chunk-elements` / `backfill-source-facts`：有意重建已完成状态）、`--mineru-output` / `--source-id` / `--after-id` / `--report`（仅 `backfill-images`：可重复的 MinerU output 树根、单源试点限制、keyset 断点续跑起点，以及只含计数与稳定 reason code 的逐源 JSONL 明细）、`--dry-run`（只扫描预估；`backfill-images` 的 dry-run 是只读数据库演练而不是输入目录预览）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量；`question-index` 要求单个 notebook、显式 rollout mode 与两个生成问题模型绑定。
+选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`，显式值在 repository 构造前应用到本进程业务 scheduler；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--retry-partial`（仅 `kg`：安全重试最近一次有失败窗口且已有对象的来源）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild。它不会重写概念描述：描述阶段仍读已发布的描述，名字与引文的签名没变就直接复用、不调模型；换了描述模型或提示词要整批重写，用 `kg rewrite-descriptions`，见「换描述模型或提示词后重写概念描述」）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index` / `backfill-chunk-elements`）、`--force`（`metadata` / `question-index` / `backfill-source-index` / `backfill-chunk-elements` / `backfill-source-facts`：有意重建已完成状态）、`--mineru-output` / `--source-id` / `--after-id` / `--report`（仅 `backfill-images`：可重复的 MinerU output 树根、单源试点限制、keyset 断点续跑起点，以及只含计数与稳定 reason code 的逐源 JSONL 明细）、`--dry-run`（只扫描预估；`backfill-images` 的 dry-run 是只读数据库演练而不是输入目录预览）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量；`question-index` 要求单个 notebook、显式 rollout mode 与两个生成问题模型绑定。
 
 前置：用 `MODEL_SERVICES_CONFIG` 指向部署 TOML，按阶段绑定所需 workload（尤其是 `chunk_embedding`、`source_element_embedding`、`knowledge_object_embedding`、`kg_extract`、`paper_metadata` 和可选的 `chunk_question_generation`），`.env` 只保存 TOML 引用的密钥。`chunk_embedding` 未绑定时 CLI 默认拒绝运行；确需无向量导入须显式加 `--allow-no-embed`。续跑从**数据库状态**推导而非读取进度文件：`ingest` 看内容哈希，`kg` 看最近一次抽取是否完成，`embed` 看向量行是否存在。parse 中断但已写入哈希的来源用 `reparse` 修复；`<storage>/batch_ingest/<notebook>.jsonl` 只是只写运行日志。
 
