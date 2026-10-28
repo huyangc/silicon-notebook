@@ -223,7 +223,7 @@ def test_table_escapes_cells_caps_items_and_marks_only_registered_keys():
         cards=[_card_outcome("nb", "s1", "Gated | Widgets\nNet", _card("s1"))],
         extractions=[_extraction("nb", "s1", "Gated", "COCO 2017: 42.1 AP")],
     )
-    # s1-002(第二条贡献)读不回:它在表里不得出标记。
+    # s1-002(第二条贡献)读不回:它在表里不得出现。
     paper = _evidence(tools, drop={_eid("s1", 2)})
     lines = _table_lines(paper.table)
     assert lines[0] == "| 论文 | 年份 / 会议 | 主要技术指标 | 关键创新点 | 补充字段 |"
@@ -239,7 +239,8 @@ def test_table_escapes_cells_caps_items_and_marks_only_registered_keys():
     keys = set(_MARKER.findall(paper.table))
     assert keys and keys <= set(paper.id_map)
     assert _eid("s1", 2) not in {paper.id_map[k]["element_id"] for k in keys}
-    assert "第二条贡献" in row and "第二条贡献 [" not in row
+    # 读不回的那条贡献没有标记可依:整条不写(不是写成无标记的断言)。
+    assert "第二条贡献" not in row
     # 抽取值并进「补充字段」一列(「字段: 值 [kN]」),引用它自己的那个元素。
     value_key = paper.keys[_eid("s1", 5)]
     assert f"{FIELD}: COCO 2017: 42.1 AP [{value_key}]" in row
@@ -765,6 +766,64 @@ def test_extracted_fields_past_the_table_width_are_named():
     assert all(f"字段{i}: v{i}" in lines[2] for i in range(4))
     assert "字段4" not in lines[2]
     assert paper.coverage.endswith("另有 2 个临时字段未列入表：字段4、字段5。")
+
+
+def _four_field_extraction(source_id, title, fields, offset):
+    return PaperExtractionOutcome(fields=fields, items=(PaperExtractionItem(
+        handle="p1", title=title, result=ExtractionResult(
+            notebook_id="nb", source_id=source_id, status="extracted",
+            fields=tuple(FieldValue(field_index=i, field=f, value=f"{source_id}-v{i}",
+                                    element_id=_eid(source_id, offset + i))
+                         for i, f in enumerate(fields)),
+        )),))
+
+
+@pytest.mark.parametrize("layout", [ANSWER_LAYOUT_PROSE, ANSWER_LAYOUT_PAPER_TABLE])
+def test_fields_past_the_table_width_still_reach_the_digest_and_registration(layout):
+    # Two extractions of four distinct fields each: s2 holds only the later four.
+    first = _four_field_extraction("s1", "甲", tuple(f"字段{i}" for i in range(4)), 0)
+    second = _four_field_extraction("s2", "乙", tuple(f"字段{i}" for i in range(4, 8)), 10)
+    paper = _evidence(_tools(layout=layout, extractions=[first, second]))
+    assert {row.source_id for row in paper.rows} == {"s1", "s2"}
+    registered = {entry["element_id"] for entry in paper.id_map.values()}
+    assert {_eid("s2", 10 + i) for i in range(4)} <= registered
+    digest, shown = paper_digest_block(paper, 10_000)
+    assert "《乙》" in digest and "s2-v3" in digest
+    assert {entry["element_id"] for entry in shown.values()} >= {_eid("s2", 13)}
+    if layout == ANSWER_LAYOUT_PAPER_TABLE:
+        # The table keeps its width: the later fields are named, not shown.
+        assert "字段4" not in paper.table and "s2-v0" not in paper.table
+        assert paper.coverage.endswith("另有 4 个临时字段未列入表：字段4、字段5、字段6、字段7。")
+    else:
+        assert not paper.table
+
+
+def test_entries_whose_anchor_did_not_register_are_not_stated():
+    # s1's first metric and first contribution read back no longer; s2 reads
+    # back nothing at all (deleted or reparsed since its card was read).
+    cards = [_card_outcome("nb", "s1", "A", _card("s1")),
+             _card_outcome("nb", "s2", "B", _card("s2"))]
+    s2_ids = {_eid("s2", i) for i in range(40)}
+    paper = _evidence(_tools(cards=cards), drop={_eid("s1", 1), _eid("s1", 3)} | s2_ids)
+    lines = _table_lines(paper.table)
+    assert len(lines) == 3                         # header, rule, s1 only
+    row = lines[2]
+    assert "top-1" not in row and "latency" not in row and "提出路由块" not in row
+    assert row.split(" | ")[2] == "—"              # no metric left to state
+    assert "第二条贡献 [" in row
+    assert "B" not in paper.table                  # not listed as "未展开" either
+    assert "另有 1 篇的要点对不上原文" in paper.coverage
+    assert paper.coverage.startswith("> 本表展开了 1 篇")
+    digest, _shown = paper_digest_block(paper, 10_000)
+    assert "《B》" not in digest and "top-1" not in digest
+
+
+def test_nothing_registered_means_no_table_and_a_coverage_note():
+    cards = [_card_outcome("nb", "s1", "A", _card("s1"))]
+    paper = _evidence(_tools(cards=cards), drop={_eid("s1", i) for i in range(40)})
+    assert not paper.table and not paper.paper_table
+    assert not paper.id_map
+    assert "另有 1 篇的要点对不上原文" in paper.coverage
 
 
 def test_a_paper_listed_by_two_requests_counts_once_under_its_best_tier():
