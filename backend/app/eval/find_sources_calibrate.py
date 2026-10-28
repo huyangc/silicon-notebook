@@ -20,7 +20,9 @@ A local measurement tool, never run in CI.  Three subcommands, in order:
     then reviews and corrects by hand.
 
 ``sweep``
-    Pure over the reviewed label file: scans the related line for the highest
+    Pure over the reviewed label file (labels without ``"reviewed": true`` are
+    refused unless ``--allow-unreviewed``, and never written with
+    ``--write-config``): scans the related line for the highest
     value whose topic recall (strong + related, within the candidate sets) is
     at least ``--min-recall`` (0.9), then the strong line for the lowest value
     whose strong-tier precision is at least ``--min-strong-precision`` (0.8).
@@ -41,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from contextlib import AbstractContextManager
 from datetime import datetime, timezone
@@ -54,6 +57,8 @@ LABEL_FILE_VERSION = 1
 LABELS = ("strong", "related", "unrelated")
 DEFAULT_PER_TOPIC = 60
 DEFAULT_WORKLOAD = "paper_metadata"
+#: ``prelabel`` writes the label file after this many new labels.
+PRELABEL_SAVE_EVERY = 10
 #: Grid of the sweep (the lines are fused relevances in 0..1).
 SWEEP_STEP = 0.01
 _EXCERPT_CHARS = 1500
@@ -69,16 +74,48 @@ class CalibrationError(ValueError):
 
 
 # ------------------------------------------------------------------ files
-def require_outside_repo(path: Path) -> Path:
-    resolved = Path(path).expanduser().resolve()
+def _git(*args: str) -> str:
     try:
-        resolved.relative_to(_REPO_ROOT)
-    except ValueError:
-        return resolved
-    raise CalibrationError(
-        f"{resolved} is inside the repository; keep label files in the local "
-        "experience directory, outside the repository"
-    )
+        return subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), *args], check=True, capture_output=True, text=True,
+            timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def repository_roots() -> List[Path]:
+    """Every checkout of this repository: the main checkout (the parent of
+    ``git rev-parse --git-common-dir``), every linked worktree
+    (``git worktree list``), and this file's own checkout.  Without git only
+    the last is known."""
+    roots = {_REPO_ROOT.resolve()}
+    common = _git("rev-parse", "--git-common-dir").strip()
+    if common:
+        common_path = Path(common)
+        if not common_path.is_absolute():
+            common_path = _REPO_ROOT / common_path
+        roots.add(common_path.resolve().parent)
+    for line in _git("worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            roots.add(Path(line[len("worktree "):]).resolve())
+    return sorted(roots)
+
+
+def require_outside_repo(path: Path) -> Path:
+    """Refuse a label-file path inside the main checkout or any worktree: the
+    file holds the user's notebook titles and must never be committed."""
+    resolved = Path(path).expanduser().resolve()
+    for root in repository_roots():
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+        raise CalibrationError(
+            f"{resolved} is inside the repository ({root}); keep label files in the "
+            "local experience directory, outside every checkout of the repository"
+        )
+    return resolved
 
 
 def read_labels(path: Path) -> Dict[str, Any]:
@@ -231,27 +268,53 @@ def prelabel_prompt(topic: Mapping[str, Any], title: str, excerpt: str) -> str:
     )
 
 
+class PrelabelStopped(CalibrationError):
+    """A non-transient model failure stopped ``prelabel``; progress was saved."""
+
+    def __init__(self, counts: Mapping[str, int], error: BaseException) -> None:
+        super().__init__(
+            f"prelabel stopped by {type(error).__name__} after {counts['labelled']} labels "
+            "(progress saved; fix the cause and re-run)"
+        )
+        self.counts = dict(counts)
+
+
 def run_prelabel(
     data: Dict[str, Any],
     client: Any,
     read_excerpt: Callable[[str], str],
     *,
     save: Callable[[Dict[str, Any]], None] = lambda _data: None,
+    save_every: int = PRELABEL_SAVE_EVERY,
 ) -> Dict[str, int]:
-    """Pre-label every pending candidate (one request each); ``save`` runs after
-    every topic so an interrupted run keeps its progress."""
-    counts = {"labelled": 0, "unparsable": 0}
-    for topic_index, topic in enumerate(data["topics"]):
-        touched = False
+    """Pre-label every pending candidate (one request each).
+
+    ``save`` runs after every ``save_every`` new labels and at the end, so an
+    interrupted run keeps its progress.  A transient model failure
+    (``is_transient_model_error``: queue full / timeout, rate limit, 5xx …)
+    skips that candidate (it stays pending for the next run) and is counted;
+    any other failure saves the progress and stops with ``PrelabelStopped``."""
+    from app.services.model_work import is_transient_model_error
+
+    counts = {"labelled": 0, "unparsable": 0, "transient": 0}
+    unsaved = 0
+    for topic in data["topics"]:
         for candidate in topic["candidates"]:
             if candidate.get("prelabel") is not None:
                 continue
-            raw = client.chat_json(
-                [{"role": "user", "content": prelabel_prompt(
-                    topic, candidate["title"], read_excerpt(candidate["source_id"]))}],
-                PRELABEL_SCHEMA_HINT,
-                temperature=0.0,
-            )
+            try:
+                raw = client.chat_json(
+                    [{"role": "user", "content": prelabel_prompt(
+                        topic, candidate["title"], read_excerpt(candidate["source_id"]))}],
+                    PRELABEL_SCHEMA_HINT,
+                    temperature=0.0,
+                )
+            except Exception as exc:  # noqa: BLE001 - classified below
+                if is_transient_model_error(exc):
+                    counts["transient"] += 1
+                    continue
+                save(data)
+                raise PrelabelStopped(counts, exc) from exc
             parsed = parse_model_object(raw) or {}
             label = str(parsed.get("label") or "").strip().lower()
             if label not in LABELS:
@@ -261,9 +324,12 @@ def run_prelabel(
             if candidate.get("label") is None:
                 candidate["label"] = label
             counts["labelled"] += 1
-            touched = True
-        if touched:
-            save(data)
+            unsaved += 1
+            if unsaved >= max(1, save_every):
+                save(data)
+                unsaved = 0
+    if unsaved:
+        save(data)
     return counts
 
 
@@ -325,20 +391,33 @@ def evaluate(data: Mapping[str, Any], strong_line: float, related_line: float) -
     }
 
 
+def unreviewed_count(data: Mapping[str, Any]) -> int:
+    """Labelled candidates the user has not marked ``"reviewed": true`` yet."""
+    return sum(1 for _topic, candidate in _labelled(data) if candidate.get("reviewed") is not True)
+
+
 def sweep(
     data: Mapping[str, Any],
     *,
     min_recall: float = 0.9,
     min_strong_precision: float = 0.8,
     step: float = SWEEP_STEP,
+    allow_unreviewed: bool = False,
 ) -> Dict[str, Any]:
     """Recall depends on the related line only (the strong line just moves
     sources between the two tiers): the highest related line that keeps
     ``min_recall``, then the lowest strong line at or above it whose strong
     tier reaches ``min_strong_precision``.  ``chosen`` is ``None`` when either
-    target is out of reach."""
+    target is out of reach.  Labels nobody reviewed (``reviewed`` is not
+    ``true``: model pre-labels) are refused unless ``allow_unreviewed``."""
     if not _labelled(data):
         raise CalibrationError("the label file has no labelled candidate")
+    unreviewed = unreviewed_count(data)
+    if unreviewed and not allow_unreviewed:
+        raise CalibrationError(
+            f"{unreviewed} labels are not reviewed (set \"reviewed\": true after checking "
+            "them, or pass --allow-unreviewed for a provisional curve)"
+        )
     grid = _grid(step)
     related_curve = [(line, evaluate(data, 1.0, line)) for line in grid]
     feasible = [line for line, result in related_curve if result["recall"] >= min_recall]
@@ -420,6 +499,9 @@ def _parser() -> argparse.ArgumentParser:
     swp.add_argument("--labels", required=True, type=Path)
     swp.add_argument("--min-recall", type=float, default=0.9)
     swp.add_argument("--min-strong-precision", type=float, default=0.8)
+    swp.add_argument("--allow-unreviewed", action="store_true",
+                     help="sweep over unreviewed (model) labels too: a provisional curve, "
+                          "never written to the config")
     swp.add_argument("--write-config", type=Path, default=None,
                      help=f"write the chosen lines into this config file (normally {_CONFIG_PATH})")
     return parser
@@ -440,8 +522,18 @@ def main(
     args = _parser().parse_args(argv)
     try:
         if args.command == "sweep":
-            result = sweep(read_labels(args.labels), min_recall=args.min_recall,
-                           min_strong_precision=args.min_strong_precision)
+            data = read_labels(args.labels)
+            unreviewed = unreviewed_count(data)
+            if unreviewed and args.write_config is not None:
+                raise CalibrationError(
+                    f"--write-config needs every label reviewed; {unreviewed} are not"
+                )
+            result = sweep(data, min_recall=args.min_recall,
+                           min_strong_precision=args.min_strong_precision,
+                           allow_unreviewed=args.allow_unreviewed)
+            if unreviewed:
+                print(f"warning: {unreviewed} labels are unreviewed model pre-labels; "
+                      "this curve is provisional", file=out)
             print(format_sweep(result), file=out)
             chosen = result["chosen"]
             if chosen is None:
@@ -484,7 +576,11 @@ def main(
                 save=lambda current: write_labels(args.labels, current),
             )
         write_labels(args.labels, data)
-        print(f"labelled {counts['labelled']}, unparsable {counts['unparsable']}", file=out)
+        print(
+            f"labelled {counts['labelled']}, unparsable {counts['unparsable']}, "
+            f"skipped on transient model errors {counts['transient']} (still pending)",
+            file=out,
+        )
         return 0
     except CalibrationError as exc:
         print(f"error: {exc}", file=out)

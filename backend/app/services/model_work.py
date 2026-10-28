@@ -334,6 +334,20 @@ def is_transient_model_error(error: BaseException) -> bool:
     )
 
 
+def model_failure_reason(error: BaseException) -> tuple[str, bool]:
+    """``(reason code, input_deterministic)`` of a NON-transient model failure,
+    shared by the per-document model callers (paper cards, per-source
+    extraction): ``malformed_response`` / ``model_error:<code>`` for the
+    input-deterministic codes (a caller caching per-document results may cool
+    them down), ``model_error:<code or exception class>`` for everything else
+    (global faults: never cooled down). Transient failures are classified
+    first with ``is_transient_model_error``."""
+    code = model_error_code(error)
+    if code in INPUT_DETERMINISTIC_MODEL_ERROR_CODES:
+        return (code if code == MALFORMED_RESPONSE_CODE else f"model_error:{code}"), True
+    return f"model_error:{code or type(error).__name__}", False
+
+
 @dataclass(frozen=True)
 class ProviderObservation:
     service_id: str

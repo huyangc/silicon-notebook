@@ -39,10 +39,9 @@ from app.repositories.ports import RepositoryDatabasePort, SourceStorePort
 from app.services.document_source_overview import sample_paper_card_input
 from app.services.kg.json_utils import safe_json
 from app.services.model_work import (
-    INPUT_DETERMINISTIC_MODEL_ERROR_CODES,
     is_transient_model_error,
     model_artifact_scope,
-    model_error_code,
+    model_failure_reason,
 )
 from app.services.paper_cards import (
     PAPER_CARD_SCHEMA_HINT,
@@ -475,12 +474,11 @@ class PaperCardService:
         except Exception as exc:  # noqa: BLE001 - classified below
             if is_transient_model_error(exc):
                 raise
-            code = model_error_code(exc)
-            if code in INPUT_DETERMINISTIC_MODEL_ERROR_CODES:
+            failure, deterministic = model_failure_reason(exc)
+            if deterministic:
                 # 对这篇输入确定性的失败:写行冷却,别每次提问都再烧一次。
-                failure = code if code == "malformed_response" else f"model_error:{code}"
                 return self._write(plan, sample.basis, model, failure=failure, audit=audit)
-            return CardResult(*key, "failed", reason=f"model_error:{code or type(exc).__name__}", model=model)
+            return CardResult(*key, "failed", reason=failure, model=model)
         parsed = parse_model_object(raw)
         if parsed is None:
             return self._write(plan, sample.basis, model, failure="malformed", audit=audit)

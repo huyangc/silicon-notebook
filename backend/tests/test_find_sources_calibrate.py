@@ -148,7 +148,10 @@ def test_the_whole_flow_finds_lines_meeting_the_targets(corpus, tmp_path, monkey
     monkeypatch.setattr(repo._runtime.models, "chat", lambda workload: chat)
     assert _run(["prelabel", "--labels", path, "--confirm"], repo)[0] == 0
     code, output = _run(["sweep", "--labels", path])
+    assert code == 2 and "not reviewed" in output       # model labels need a human pass
+    code, output = _run(["sweep", "--labels", path, "--allow-unreviewed"])
     assert code == 0, output
+    assert "warning:" in output and "provisional" in output
     match = re.search(r"chosen: strong=(\S+) related=(\S+) recall=(\S+) strong_precision=(\S+)", output)
     strong, related, recall, precision = (float(v) for v in match.groups())
     assert related <= strong and recall >= 0.9 and precision >= 0.8
@@ -203,3 +206,105 @@ def test_label_files_inside_the_repository_are_refused(tmp_path):
     code, output = _run(["sweep", "--labels", inside])
     assert code == 2 and "inside the repository" in output
     assert not inside.exists()
+
+
+def _git_main_root() -> Path:
+    import subprocess
+
+    common = subprocess.run(
+        ["git", "-C", str(calibrate._REPO_ROOT), "rev-parse", "--git-common-dir"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    path = Path(common)
+    if not path.is_absolute():
+        path = calibrate._REPO_ROOT / path
+    return path.resolve().parent
+
+
+def test_label_files_inside_the_main_checkout_are_refused():
+    inside = _git_main_root() / "labels-should-not-be-here.json"
+    code, output = _run(["sweep", "--labels", inside])
+    assert code == 2 and "inside the repository" in output
+    assert not inside.exists()
+    assert _git_main_root() in calibrate.repository_roots()
+
+
+def test_unreviewed_labels_never_reach_the_config(tmp_path):
+    data = _labels((0.9, "strong", "baseline", {}), (0.2, "unrelated", "baseline", {}))
+    data["topics"][0]["candidates"][1]["reviewed"] = False
+    path = tmp_path / "labels.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    config = tmp_path / "config.py"
+    config.write_text(calibrate._CONFIG_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    before = config.read_bytes()
+    code, output = _run(["sweep", "--labels", path])
+    assert code == 2 and "1 labels are not reviewed" in output
+    code, output = _run(["sweep", "--labels", path, "--allow-unreviewed"])
+    assert code == 0 and "warning: 1 labels are unreviewed" in output
+    code, output = _run(["sweep", "--labels", path, "--allow-unreviewed", "--write-config", config])
+    assert code == 2 and "--write-config needs every label reviewed" in output
+    assert config.read_bytes() == before
+
+
+def _pending(n: int) -> dict:
+    return {"version": 1, "topics": [{"id": "t", "query": "q", "terms": [], "candidates": [
+        {"source_id": f"s{i}", "title": f"T{i}", "best": 0.5, "hits": 1, "lane": "baseline",
+         "matches": {}, "label": None, "prelabel": None, "reviewed": False}
+        for i in range(n)
+    ]}]}
+
+
+class ScriptedChat:
+    def __init__(self, script) -> None:
+        self.configured = True
+        self.model = "fake"
+        self.script = list(script)
+        self.calls = 0
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        self.calls += 1
+        step = self.script.pop(0) if self.script else "strong"
+        if isinstance(step, BaseException):
+            raise step
+        return json.dumps({"label": step, "reason": ""})
+
+
+def test_prelabel_saves_every_n_labels():
+    data = _pending(5)
+    saves: list[int] = []
+    counts = calibrate.run_prelabel(
+        data, ScriptedChat([]), lambda sid: "", save_every=2,
+        save=lambda current: saves.append(sum(c["prelabel"] is not None for c in current["topics"][0]["candidates"])),
+    )
+    assert counts["labelled"] == 5
+    assert saves == [2, 4, 5]
+
+
+def test_prelabel_skips_transient_failures_and_counts_them():
+    from app.services.model_work import ModelQueueFull
+
+    data = _pending(3)
+    counts = calibrate.run_prelabel(data, ScriptedChat(["strong", ModelQueueFull(), "related"]), lambda sid: "")
+    assert counts == {"labelled": 2, "unparsable": 0, "transient": 1}
+    assert [c["prelabel"] for c in data["topics"][0]["candidates"]] == ["strong", None, "related"]
+
+
+def test_prelabel_stops_on_other_failures_after_saving_progress(tmp_path, monkeypatch):
+    path = tmp_path / "labels.json"
+    path.write_text(json.dumps(_pending(4)), encoding="utf-8")
+    chat = ScriptedChat(["strong", RuntimeError("auth broken"), "related"])
+    repo = SimpleNamespace(_runtime=SimpleNamespace(models=SimpleNamespace(chat=lambda workload: chat)))
+    monkeypatch.setattr(calibrate, "source_excerpt", lambda repo, sid: "")
+    code, output = _run(["prelabel", "--labels", path, "--confirm"], repo)
+    assert code == 2 and "prelabel stopped by RuntimeError after 1 labels" in output
+    assert chat.calls == 2
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert [c["prelabel"] for c in saved["topics"][0]["candidates"]] == ["strong", None, None, None]
+
+
+def test_prelabel_without_confirm_sends_nothing_even_with_a_failing_model(tmp_path):
+    path = tmp_path / "labels.json"
+    path.write_text(json.dumps(_pending(3)), encoding="utf-8")
+    chat = ScriptedChat([RuntimeError("must not be called")])
+    code, output = _run(["prelabel", "--labels", path], chat=chat)
+    assert code == 0 and chat.calls == 0 and "3 model requests" in output

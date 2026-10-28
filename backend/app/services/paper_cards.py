@@ -227,16 +227,39 @@ def ground_value(value: str, element_text: str) -> str:
 
 # 只由一个一位整数(加上最多这么多字的单位,如 ``3x``、``5 %``)构成的值太含糊。
 _BARE_NUMBER_MAX_CHARS = 4
+# 文字值里把相邻两个数连成「一个数」的只有紧贴的数学连接符(科学计数法、误差、乘幂);
+# 指数的符号已随 token 保留(1.2e-3 的 gap 只是 ``e``)。``:``、``/``、括号、``-``、
+# 纯空白与任何文字都把两侧分成各自接地的两段(「COCO 2017: 42.1 AP」是两段)。
+_TIGHT_JOINER_CHARS = frozenset("±eE×xX*^+")
+_MAX_TIGHT_JOINER = 3
+
+
+def _tightly_joined(text: str, end: int, start: int) -> bool:
+    gap = "".join(text[end:start].split())
+    return 0 < len(gap) <= _MAX_TIGHT_JOINER and all(ch in _TIGHT_JOINER_CHARS for ch in gap)
+
+
+def _tight_run_in(text: str, spans: list[tuple[str, int, int]], wanted: list[str]) -> bool:
+    width = len(wanted)
+    for i in range(len(spans) - width + 1):
+        window = spans[i:i + width]
+        if [token for token, _s, _e in window] == wanted and all(
+            _tightly_joined(text, window[k][2], window[k + 1][1]) for k in range(width - 1)
+        ):
+            return True
+    return False
 
 
 def ground_prose_numbers(value: str, element_text: str) -> str:
     """一句可能夹着数字的文字值(逐篇抽取的临时字段)的数值接地,同 ``ground_value``
     的归一化与 token 规则,返回 ``""`` 表示通过,否则是原因码。
 
-    值里的数字按「只隔连接符」切成若干段(``85.2±0.3`` 是一段,``12 layers on
-    ImageNet-1k`` 是两段),**每一段**都要作为连续 token 出现在引用文本里——不要求
-    整句的数字彼此相邻。没有数字的值直接通过。整个值只是一个一位整数(可带短单位)
-    时按 ``ambiguous_value`` 拒绝;夹在文字里的一位整数只要求在引用文本里出现。"""
+    抽取值常是带设定的短句(「COCO 2017: 42.1 AP」「ResNet-50: 76.1% top-1」),所以
+    值里的数字按**紧贴的数学连接符**(``±``、``e``、``×``、``^``)切成若干组
+    (``85.2±0.3``、``1.2e-3``、``3×10^5`` 各是一组),``:``、``/``、括号、``-``、空格
+    与文字都把两侧分开;**每一组**都要以同样紧贴的形式连续出现在引用文本里。没有
+    数字的值直接通过。整个值只是一个一位整数(可带短单位)时按 ``ambiguous_value``
+    拒绝;夹在文字里的一位整数只要求在引用文本里出现。"""
     normalized, spans = _number_spans(value)
     if not spans:
         return ""
@@ -246,13 +269,13 @@ def ground_prose_numbers(value: str, element_text: str) -> str:
         return "ambiguous_value"
     groups: list[list[str]] = [[spans[0][0]]]
     for previous, current in zip(spans, spans[1:]):
-        if _joined(normalized, previous[2], current[1]):
+        if _tightly_joined(normalized, previous[2], current[1]):
             groups[-1].append(current[0])
         else:
             groups.append([current[0]])
     text, text_spans = _number_spans(element_text)
     for group in groups:
-        if not _run_in(text, text_spans, group):
+        if not _tight_run_in(text, text_spans, group):
             return "value_not_in_anchor"
     return ""
 
