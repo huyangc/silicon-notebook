@@ -5449,6 +5449,7 @@ class AskService:
                 tier_of=self.evidence_context.tier_map,
                 table_rows=stage.prepared.limits.paper_table_rows,
                 for_answer=for_answer,
+                read_display=self._paper_display_reader(),
             )
         except (AskCancelled, RetrievalControlError):
             raise
@@ -5456,6 +5457,14 @@ class AskService:
             self.event_log.logger.warning(
                 "paper card evidence failed (%s)", type(exc).__name__)
             return None
+
+    def _paper_display_reader(self):
+        """``SourceFinder.display_metadata`` of the seated paper tools (titles,
+        year / venue of sources handed to the tools by raw id); ``None``
+        without a finder (the rows then keep the titles the tools carried)."""
+        finder = getattr(self.paper_tools, "finder", None)
+        reader = getattr(finder, "display_metadata", None)
+        return reader if callable(reader) else None
 
     def _add_paper_digest(self, structured_block: str, structured_map: dict, paper,
                           answer_client, limits, knowhow_block_len: int, room,

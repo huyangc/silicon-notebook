@@ -21,7 +21,10 @@ from app.core.model_values import as_text
 # prompt / schema / 校验规则 / 采样口径任何一项变化都要加一:旧卡片在读取时
 # 因版本不等自动失效(规格 §4.4「有效性在读取时判定」),不写清理代码。
 # 2:指标只收本文方法的成绩,基线数值进 compared_to,setting 写测量条件(T7 验收)。
-PAPER_CARD_VERSION = 2
+# 3:指标值先按数字安全的上限截短再接地(截短会切到数字就丢弃,value_too_long),
+#    name/setting/compared_to 也不再切在数字中间。v2 卡片可能存着与接地数不同的
+#    截短值,升版让它们在读取时失效、按需重生成。
+PAPER_CARD_VERSION = 3
 
 # 示例里不写 null、空列表只给字符串列表字段(本 hint 一个都没有,所以每个列表都
 # 给一个示例项):否则严格 schema 投影整体回落 JSON 模式(json-hint-strict-alignment)。
@@ -306,6 +309,21 @@ def _cap(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit].rstrip()
 
 
+def _numberish(ch: str) -> bool:
+    return ch.isdigit() or ch in ".,"
+
+
+def cap_number_safe(value: str, limit: int) -> str:
+    """截到 ``limit`` 字;切点落在数字中间(两侧都是数字/小数点/千分位)时退到这个数之前,
+    绝不留下半个数(``36.2`` 截成 ``36.`` 会变成另一个数)。卡片指标与逐篇抽取共用。"""
+    if len(value) <= limit:
+        return value
+    cut = limit
+    while cut > 0 and _numberish(value[cut - 1]) and _numberish(value[cut]):
+        cut -= 1
+    return value[:cut].rstrip()
+
+
 class _AnchorResolver:
     """句柄或元素 id → 元素 id;不在本次输入里的返回 ``""``。"""
 
@@ -390,16 +408,24 @@ def _metric_item(raw: Any, resolver: _AnchorResolver, dropped: dict) -> dict | N
             dropped.setdefault("invalid_anchors", []).append(_scalar_text(anchor_raw)[:80])
         _note(dropped, "metrics", "no_valid_anchor", value)
         return None
-    verdict = ground_value(value, element.text)
+    # Bound first, then ground what is stored: grounding the raw value and
+    # cutting it afterwards could store a different number than the verified
+    # one.  A value that cannot be bounded without losing a number is dropped.
+    bounded = cap_number_safe(value, METRIC_VALUE_MAX_CHARS)
+    if number_tokens(bounded) != number_tokens(value):
+        _note(dropped, "metrics", "value_too_long", value)
+        return None
+    verdict = ground_value(bounded, element.text)
     if verdict:
-        _note(dropped, "metrics", verdict, value)
+        _note(dropped, "metrics", verdict, bounded)
         return None
     return {
-        "name": _cap(name, METRIC_NAME_MAX_CHARS),
-        "value": _cap(value, METRIC_VALUE_MAX_CHARS),
+        "name": cap_number_safe(name, METRIC_NAME_MAX_CHARS),
+        "value": bounded,
         "unit": _cap(_scalar_text(raw.get("unit")), METRIC_UNIT_MAX_CHARS),
-        "setting": _cap(_scalar_text(raw.get("setting")), METRIC_SETTING_MAX_CHARS),
-        "compared_to": _cap(_scalar_text(raw.get("compared_to")), METRIC_COMPARED_MAX_CHARS),
+        "setting": cap_number_safe(_scalar_text(raw.get("setting")), METRIC_SETTING_MAX_CHARS),
+        "compared_to": cap_number_safe(
+            _scalar_text(raw.get("compared_to")), METRIC_COMPARED_MAX_CHARS),
         "anchor": element.element_id,
     }
 

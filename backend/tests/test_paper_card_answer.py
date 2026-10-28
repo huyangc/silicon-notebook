@@ -56,6 +56,7 @@ from app.services.reasoning_paper_tools import (
 from app.services.reasoning_retrieval import OutlineSection, ReasoningResult, ReasoningRetriever
 from app.services.retrieval import RetrievedElement
 from app.services.source_finder import (
+    UNTITLED_SOURCE,
     BestPassage,
     FindSourcesRequest,
     FindSourcesResult,
@@ -571,6 +572,27 @@ def test_a_prose_run_without_paper_tools_has_no_findings(repo, monkeypatch):
     _response, llm = _ask(repo, notebook.id, ReasoningResult(), monkeypatch)
     assert all(FINDINGS_GUIDANCE not in prompt and PAPER_DIGEST_GUIDANCE not in prompt
                for prompt in llm.prompts)
+
+
+def test_a_direct_read_without_find_sources_shows_display_metadata(repo, monkeypatch):
+    # get_paper_cards was handed raw source ids (no find_sources): the tool
+    # outcome carries no title.  Rows read the sources' own display metadata.
+    notebook = repo.create_notebook(NotebookCreate(name="论文库"))
+    _seed(repo, notebook.id, "s0", "存储标题")
+    repo._runtime.source_store.upsert_paper_meta("s0", notebook.id, {
+        "is_paper": True, "paper_title": "Gated Widgets", "venue": "ICLR",
+        "pub_year": 2023, "keywords": [], "authors": [], "model": "m"})
+    _seed(repo, notebook.id, "s1", "")                 # no title, no file name
+    with repo._write() as db:
+        db.execute("UPDATE sources SET file_name=? WHERE id=?", ("widgets.pdf", "s0"))
+    result = ReasoningResult(
+        answer_layout=ANSWER_LAYOUT_PAPER_TABLE,
+        paper_cards=[_card_outcome(notebook.id, sid, "", _card(sid)) for sid in ("s0", "s1")])
+    response, llm = _ask(repo, notebook.id, result, monkeypatch)
+    lines = _table_lines(response.answer[response.answer.index("| 论文 |"):])
+    assert lines[2].startswith("| Gated Widgets [") and "| 2023 / ICLR |" in lines[2]
+    assert lines[3].startswith(f"| {UNTITLED_SOURCE} [")
+    assert "《Gated Widgets》 · 2023 / ICLR" in llm.prompts[0]
 
 
 def test_paper_table_answer_end_to_end(repo, monkeypatch):

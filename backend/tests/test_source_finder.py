@@ -22,9 +22,11 @@ from app.domain.vector_index import encode_vector
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.source_finder import (
+    UNTITLED_SOURCE,
     FindSourcesCursorError,
     FindSourcesError,
     FindSourcesRequest,
+    SourceDisplay,
     SourceFinder,
     paper_card_status,
 )
@@ -302,6 +304,25 @@ def test_an_unembedded_query_on_the_small_library_lane_is_not_strong(repo, monke
     assert result.lanes == {nb: "baseline:lexical_only"}
     # One lexical passage: no semantic support, below the two-passage rule.
     assert _tiers(result) == {}
+
+
+def test_display_metadata_reads_each_source_in_its_own_library(repo):
+    instance, nb, *_ = repo
+    _source(instance, nb, "s-paper", title="stored title")
+    _meta(instance, nb, "s-paper", year=2023, venue="ICLR", title="Gated Widgets")
+    _source(instance, nb, "s-file", title="")
+    _source(instance, nb, "s-bare", title="")
+    with instance._runtime.database.write() as db:
+        _execute(db, instance, "UPDATE sources SET title=?, file_name=? WHERE id=?",
+                 ("", "widgets.pdf", "s-file"))
+        _execute(db, instance, "UPDATE sources SET title=?, file_name=? WHERE id=?",
+                 ("", "", "s-bare"))
+    shown = _finder(instance).display_metadata(
+        [(nb, "s-paper"), (nb, "s-file"), (nb, "s-bare"), ("nb-other", "s-paper")])
+    assert set(shown) == {(nb, "s-paper"), (nb, "s-file"), (nb, "s-bare")}
+    assert shown[(nb, "s-paper")] == SourceDisplay("Gated Widgets", 2023, "ICLR")
+    assert shown[(nb, "s-file")].title == "widgets.pdf"
+    assert shown[(nb, "s-bare")] == SourceDisplay(UNTITLED_SOURCE, None, "")
 
 
 def test_the_order_is_total_and_deterministic(repo):
