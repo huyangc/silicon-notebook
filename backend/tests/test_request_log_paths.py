@@ -100,6 +100,26 @@ def test_loggable_target_keeps_the_query_and_templates_the_path():
     assert loggable_target("/api/notebooks?limit=20") == "/api/notebooks?limit=20"
 
 
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("/api/notebook-transfers/download?ticket=t-secret", "/api/notebook-transfers/download"),
+        ("/silicon/api/notebook-transfers/download?ticket=t-secret",
+         "/silicon/api/notebook-transfers/download"),
+        ("/api/notebook-imports?name=%E6%9C%BA%E5%AF%86", "/api/notebook-imports"),
+        # Only those two routes: a job id path or another query keeps its shape.
+        ("/api/notebook-transfers?x=1", "/api/notebook-transfers?x=1"),
+        ("/api/notebook-transfers/xfer-1/download-ticket?x=1",
+         "/api/notebook-transfers/xfer-1/download-ticket?x=1"),
+    ],
+)
+def test_loggable_target_drops_the_query_of_the_ticket_and_import_routes(target, expected):
+    assert loggable_target(target) == expected
+    record = _access_record(target)
+    assert AuthenticationAccessFilter().filter(record)
+    assert "secret" not in record.getMessage() and "%E6" not in record.getMessage()
+
+
 def _access_record(target: str) -> logging.LogRecord:
     return logging.LogRecord(
         "uvicorn.access", logging.INFO, "", 1, '%s - "%s %s HTTP/%s" %d',
