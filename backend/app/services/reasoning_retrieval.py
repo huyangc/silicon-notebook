@@ -134,6 +134,7 @@ from app.services.source_element_selection import (
 )
 from app.services.reports.policy import (
     DEFAULT_REASONING_COMMUNITY_PEERS_CAP_FACTOR,
+    DEFAULT_REASONING_MAX_DOCUMENT_READS,
     DEFAULT_REASONING_MAX_EXACT_LOOKUPS,
     DEFAULT_REASONING_MAX_FOLLOW_CHAIN_ACTIONS,
     DEFAULT_REASONING_MAX_OUTLINE_UPDATES,
@@ -1080,8 +1081,9 @@ def _ambiguous_read_summary(matches, placeholders) -> str:
 
     命中的行带着序号占位串(花名册里标了「（第 N 篇）」)时,下一步是**抄带序号
     的那个形态**——这时候说「无法区分」是错的,它能区分,只是模型给的形态没带序号。
-    不带占位串的多命中(多篇无名文档、或旧口径下的账目撞车)才是真的区分不开。
+    不带占位串的多命中(旧口径下的账目撞车、或调用方没传发号簿)才是真的区分不开。
     示例按**实际写法**给(可能是「（同名第 N 篇）」),且只给后缀、不带标题。
+    多篇无名文档也在发号簿里(「未命名来源（第 N 篇）」),按裸占位串读走前一支。
     """
     issued = [placeholders[row.source_id] for row in matches
               if row.source_id in placeholders]
@@ -1118,9 +1120,12 @@ class _RosterNumbering:
 
     同名判定用模型**看得见**的形态(`_roster_note_form`:折叠空白、截到账目的
     60 字)再做 `_normalized_title`(trim + casefold),与解析器报歧义用的是同一把
-    尺子。无标题占位串(`UNNAMED_SOURCE_LABEL`)**不编号**:账目对它有「最多占
-    一个标题位」的硬规矩(codex #724 R2:20 篇无名文档不得挤掉真标题),编号会让
-    每一篇各占一位;多篇无名文档维持原状(按占位串读会报同名歧义)。
+    尺子。无标题占位串(`UNNAMED_SOURCE_LABEL`)按同一条规则编号(用户 2026-10-28
+    裁决):花名册里有两篇以上无名文档时各得「未命名来源（第 N 篇）」,只有一篇时
+    不编号(与同名序号「凑够两篇才发号」同一条规则)。账目对无名文档「最多占一个
+    标题位」的硬规矩(codex #724 R2:20 篇无名文档不得挤掉真标题)不在这里守,
+    在 `_source_titles_note`:所有无名条目合起来仍只占改前那一个标题位,编号的
+    条目另走一份共享小预算(`_ENUM_NOTE_UNNAMED_TITLES`),超出的折叠成一句计数。
     """
 
     __slots__ = ("issued", "_groups", "_taken", "_real", "_seen", "_synced")
@@ -1149,10 +1154,9 @@ class _RosterNumbering:
                 " ".join(_roster_display_title(row).split()))}
             self._real |= real
             self._taken |= real
-        unnamed = _normalized_title(UNNAMED_SOURCE_LABEL)
         for norm in dict.fromkeys(touched):
             members = self._groups[norm]
-            if len(members) < 2 or norm == unnamed:
+            if len(members) < 2:
                 continue
             for ordinal, (key, form) in enumerate(members, 1):
                 if key in self.issued:
@@ -1982,6 +1986,15 @@ _ENUM_NOTE_MAX_ITEMS = 8
 #     加块头),让「账目 + 地图」两段服务端小块在最坏情况下仍是常数级开销。
 _ENUM_NOTE_SOURCE_TITLES = 20
 _ENUM_NOTE_TITLE_CHARS = 60
+# 编号的无名文档(「未命名来源（第 N 篇）」)在一份来源清单账目里**合起来**最多列几篇
+# (用户 2026-10-28 裁决:无名条目共享子预算并编号)。它们在主预算里仍只占改前那
+# 一个标题位(见 `_source_titles_note`),这个数是另起的小预算,超出的折叠成
+# 「(另有 N 篇未命名来源从略)」。取值与每 run 按篇读取的默认次数上限
+# (`REASONING_MAX_DOCUMENT_READS` 的默认值)同一个数:无名文档没有标题、通常也
+# 没有摘要,能对它做的事就是按篇读取(章节导航的默认上限 3 更小),列出比一个 run
+# 默认能读的篇数更多的句柄不给模型任何新的可操作信息,只把账目烧在同一类条目上。
+# 每条至多十几个字(占位串 + 书名号 + 标记),所以这份预算是常数级的。
+_ENUM_NOTE_UNNAMED_TITLES = DEFAULT_REASONING_MAX_DOCUMENT_READS
 # 花名册账目里「这一行没有已存摘要」的标记。它是 read_document 的选读依据(账目只带
 # 标题不带摘要,模型没有它就无从知道该读哪几篇),也是模型可能连着标题一起抄回来
 # 的东西,`_resolve_roster_rows` 第一步就把它剥掉。
@@ -1994,7 +2007,9 @@ def _source_titles_note(items, placeholders=None) -> str:
 
     `placeholders` 是本 run 花名册的同名序号占位串(`_roster_placeholders`):命中
     的行按「标题（第 N 篇）」列出,其余行与此前逐字节相同;不传/为空时整份输出
-    与加入这个参数之前一致。
+    与加入这个参数之前一致。编号的无名文档(「未命名来源（第 N 篇）」)整组占一个
+    标题位,组内另走 `_ENUM_NOTE_UNNAMED_TITLES` 共享小预算;花名册里没有或只有
+    一篇无名文档时与无名编号之前逐字节相同。
 
     **这是对「账目回喂只报账目、不带条目正文」那条规则的定向豁免**,只对 sources
     集合成立,理由是那条规则在这里恰好自相矛盾:reflect prompt 教模型「先枚举目录
@@ -2018,6 +2033,7 @@ def _source_titles_note(items, placeholders=None) -> str:
     """
     titles: List[str] = []
     used = 0
+    unnamed_placed = False
     for item in items:
         # 显示口径,不是库里的列值:没有显示名的文档在这里叫「未命名来源」,与
         # 花名册预览行、结果卡、以及 `_action_read_document` 的标题解析完全一致。
@@ -2025,32 +2041,31 @@ def _source_titles_note(items, placeholders=None) -> str:
         # 拿不到任何可以写进 `read_document.source` 的句柄,而这个动作最该覆盖的
         # 恰恰是它(没有标题的文档通常也没有摘要,别的通道一个字都描述不了它)。
         #
-        # 占位串**最多占一个标题位**:它对每一篇无名文档都是同一个字面,重复写
-        # N 遍既挤掉真标题、又不给模型任何新的可操作信息(两篇同名时这个动作按
-        # 标题本来就区分不开,只会 unresolved skip)。出现一次是「库里有这么一类
-        # 文档」,出现 N 次只是把有界预算烧在同一句话上。
+        # 无名文档**合起来最多占一个标题位**(codex #724 R2:20 篇无名文档不得把
+        # 后面的真标题挤出账目):第一篇无名文档所在的位置放整组,之后的无名行
+        # 一律跳过。主预算(条数与合计字符)对这一组的收费与改前那一个
+        # 「《未命名来源》」完全相同,所以真标题列到哪一篇、`(+N more)` 是几,与
+        # 有几篇无名文档无关。组内编号的条目另走共享小预算(见 `_unnamed_group_note`)。
         listed = placeholders.get(item.source_id) if placeholders else None
-        raw = listed or " ".join(_roster_display_title(item).split())
-        # `titles` 存的是 (text, mark) 元组——占位串是否已占位要比 text 分量,直接
-        # `raw in titles` 永远为假(codex #724 R2:20 篇无名文档会把占位串重复
-        # 20 遍、把后面的真标题挤出账目)。
-        if not raw or (raw == UNNAMED_SOURCE_LABEL
-                       and any(text == raw for text, _ in titles)):
+        shown = " ".join(_roster_display_title(item).split())
+        unnamed = shown == UNNAMED_SOURCE_LABEL
+        raw = listed or shown
+        if not raw or (unnamed and unnamed_placed):
             continue
         if len(titles) >= _ENUM_NOTE_SOURCE_TITLES:
             break
         # 占位串的标题部分在构造时已按账目口径截好,序号尾巴不能再被这一刀砍掉。
         text = raw if listed else raw[:_ENUM_NOTE_TITLE_CHARS]
-        # 摘要可得性标记:`summary` 属性存在且为空串才标;属性缺席(测试替身、
-        # 非 SourceItem)不标——账目只报它确知的事。标记字符计入合计上界。
-        summary = getattr(item, "summary", None)
-        mark = (_ENUM_NOTE_NO_SUMMARY_MARK
-                if summary is not None and not str(summary).strip() else "")
-        # +2 是《》的开销;先算再收,不能先塞进去再回头砍。
-        if used + len(text) + 2 + len(mark) > _ENUM_NOTE_TITLES_TOTAL_CHARS:
+        mark = _no_summary_mark(item)
+        # +2 是《》的开销;先算再收,不能先塞进去再回头砍。无名组按改前那一个
+        # 占位串收费(`shown` 就是「未命名来源」),编号与折叠不计入主预算。
+        cost = len(shown if unnamed else text) + 2 + len(mark)
+        if used + cost > _ENUM_NOTE_TITLES_TOTAL_CHARS:
             break
-        titles.append((text, mark))
-        used += len(text) + 2 + len(mark)
+        titles.append(_unnamed_group_note(items, placeholders)
+                      if unnamed and listed else f"《{text}》{mark}")
+        unnamed_placed = unnamed_placed or unnamed
+        used += cost
     if not titles:
         return ""
     # 分母用「有名字的条目数」而不是 len(items):没有显示名的文档在这份清单里本来
@@ -2061,7 +2076,35 @@ def _source_titles_note(items, placeholders=None) -> str:
     )
     omitted = max(0, nameable - len(titles))
     tail = f"(+{omitted} more)" if omitted else ""
-    return "，标题: " + "".join(f"《{text}》{mark}" for text, mark in titles) + tail
+    return "，标题: " + "".join(titles) + tail
+
+
+def _no_summary_mark(item) -> str:
+    """摘要可得性标记:`summary` 属性存在且为空串才标;属性缺席(测试替身、
+    非 SourceItem)不标——账目只报它确知的事。标记字符计入合计上界。"""
+    summary = getattr(item, "summary", None)
+    return (_ENUM_NOTE_NO_SUMMARY_MARK
+            if summary is not None and not str(summary).strip() else "")
+
+
+def _unnamed_group_note(items, placeholders) -> str:
+    """一份来源清单里**编号的**无名文档整组(占 `_source_titles_note` 的一个标题位)。
+
+    按清单顺序列前 `_ENUM_NOTE_UNNAMED_TITLES` 篇,每篇是发号簿给它的
+    「未命名来源（第 N 篇）」(与同名序号同一份 `issued`,所以账目、`read_document`
+    解析、已读账目与 `enumerate_elements` 来源名读到的是同一个串);其余折叠成
+    「(另有 N 篇未命名来源从略)」——折叠的几篇照样有号,只是不在账目里占字。
+    只在本 run 发号簿给无名文档编了号时调用;只有一篇无名文档(不编号)时调用方
+    仍渲染改前那一个「《未命名来源》」。
+    """
+    members = [item for item in items
+               if " ".join(_roster_display_title(item).split()) == UNNAMED_SOURCE_LABEL]
+    listed = members[:_ENUM_NOTE_UNNAMED_TITLES]
+    note = "".join(
+        f"《{placeholders.get(item.source_id) or UNNAMED_SOURCE_LABEL}》"
+        f"{_no_summary_mark(item)}" for item in listed)
+    folded = len(members) - len(listed)
+    return note + (f"(另有 {folded} 篇未命名来源从略)" if folded else "")
 
 
 def _enumeration_note(chains, numbering=None) -> str:
