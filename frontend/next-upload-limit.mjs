@@ -26,6 +26,50 @@ export function sourceUploadMaxMbFromEnvironment(value) {
   return parsed;
 }
 
+export const NOTEBOOK_TRANSFER_WEB_MAX_MB_DEFAULT = 512;
+export const NOTEBOOK_TRANSFER_WEB_MAX_MB_MIN = 1;
+export const NOTEBOOK_TRANSFER_WEB_MAX_MB_MAX = 1024;
+
+// A notebook import is one raw application/zip body, not multipart: the
+// allowance above the archive bytes is only the same named transport margin.
+export const NOTEBOOK_IMPORT_TRANSPORT_OVERHEAD_BYTES = BYTES_PER_MIB;
+
+export function notebookTransferMaxMbFromEnvironment(value) {
+  const normalized = value?.trim() || String(NOTEBOOK_TRANSFER_WEB_MAX_MB_DEFAULT);
+  const message = "NOTEBOOK_TRANSFER_WEB_MAX_MB must be a whole number from 1 through 1024";
+  if (!/^[0-9]+$/.test(normalized)) {
+    throw new TypeError(message);
+  }
+  const parsed = Number(normalized);
+  if (
+    !Number.isSafeInteger(parsed)
+    || parsed < NOTEBOOK_TRANSFER_WEB_MAX_MB_MIN
+    || parsed > NOTEBOOK_TRANSFER_WEB_MAX_MB_MAX
+  ) {
+    throw new TypeError(message);
+  }
+  return parsed;
+}
+
+/** Whole-request ceiling of one notebook import upload (the backend's
+ * NOTEBOOK_TRANSFER_WEB_MAX_MB plus the transport margin); the backend's
+ * streaming 413 stays authoritative. */
+export function notebookImportProxyBodyMaxBytes(value) {
+  return (
+    notebookTransferMaxMbFromEnvironment(value) * BYTES_PER_MIB
+    + NOTEBOOK_IMPORT_TRANSPORT_OVERHEAD_BYTES
+  );
+}
+
+/** The one rewrite body ceiling Next applies to every proxied request: the
+ * larger of the source-upload envelope and the notebook-import envelope. */
+export function proxyBodyMaxBytes(sourceUploadMaxMb, notebookTransferMaxMb) {
+  return Math.max(
+    sourceUploadProxyBodyMaxBytes(sourceUploadMaxMb),
+    notebookImportProxyBodyMaxBytes(notebookTransferMaxMb),
+  );
+}
+
 /** Whole-request ceiling required by Next's external-rewrite body clone.
  *
  * SOURCE_UPLOAD_MAX_MB is per file while one multipart request may contain the

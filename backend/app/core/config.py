@@ -1972,6 +1972,19 @@ class Settings(BaseSettings):
     # 永不在此列。下限 60s:比一批写入还短会把活着的导入当成崩溃。
     notebook_import_stale_seconds: int = Field(
         3600, ge=60, le=7 * 86400, validation_alias="NOTEBOOK_IMPORT_STALE_SECONDS")
+    # 网页导出/导入(.snbk)的单文件上限(MB,1 MB = 1024 × 1024 字节):导入上传在
+    # 流式落盘时按它 413,导出在提交时按笔记本原文件总量 413、写入时按导出文件大小
+    # 中止。浏览器经 /system/config 取同一解析值;Next 反代的请求体上限取「来源上传
+    # 包络」与「本值 + 1 MiB」中较大者(frontend/next-upload-limit.mjs)。上限 1024
+    # 与 SOURCE_UPLOAD_MAX_MB 同:上传方向经 Next 反代时整段缓存在内存里。更大的
+    # 笔记本走管理员命令行(scripts/cli.sh notebook export/import)。
+    notebook_transfer_web_max_mb: int = Field(
+        512, ge=1, le=1024, validation_alias="NOTEBOOK_TRANSFER_WEB_MAX_MB")
+    # 网页导出/导入作业结束后保留多久(秒):导出文件在此期间可下载,之后作业记录、
+    # 导出文件一并删除;启动时与每次读写作业时按它清理过期作业、残留的 .part 文件和
+    # 没能交给作业的上传文件。下限 600s:比一次下载的往返还短会让刚完成的导出来不及取。
+    notebook_transfer_ttl_seconds: int = Field(
+        86400, ge=600, le=7 * 86400, validation_alias="NOTEBOOK_TRANSFER_TTL_SECONDS")
     # NoDecode 让 pydantic-settings 不把环境变量当 JSON 解析（否则逗号串会崩），
     # 改由下面的 split_cors_origins(mode="before") 处理逗号分隔；validation_alias
     # 才能真正读到 SILICON_NOTEBOOK_CORS_ORIGINS（v2 下 Field(validation_alias=...) 会被忽略）。
@@ -2245,6 +2258,11 @@ class Settings(BaseSettings):
     def source_upload_max_bytes(self) -> int:
         """Configured per-source upload cap in bytes (1 MB = 1024 × 1024 bytes)."""
         return self.source_upload_max_mb * 1024 * 1024
+
+    @property
+    def notebook_transfer_web_max_bytes(self) -> int:
+        """The web export/import file cap in bytes (1 MB = 1024 × 1024 bytes)."""
+        return self.notebook_transfer_web_max_mb * 1024 * 1024
 
     @property
     def mineru_cloud_enabled(self) -> bool:
