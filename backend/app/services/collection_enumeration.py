@@ -1452,13 +1452,18 @@ class CollectionEnumerationService:
         resolves for this run, on a connection of its own: the set the
         reasoning paper tools (``get_paper_cards`` / ``extract_from_sources``)
         check every handle and raw ``source_id`` against -- the same set
-        ``find_sources`` searches and ``enumerate_sources`` lists."""
+        ``find_sources`` searches and ``enumerate_sources`` lists.
+
+        Plan only: the same participants and ``scope_source_plan`` as
+        ``source_scope``, without the ceiling digest (a membership check needs
+        no cursor identity)."""
         with self._database.connect() as db:
-            resolved = self.source_scope(
-                db, active_notebook_id, ceiling_binds=ceiling_binds,
+            notebook_ids, _tiers = self._participants(db, active_notebook_id)
+            plan = self._catalog.scope_source_plan(
+                db, notebook_ids, ceiling_binds=ceiling_binds,
             )
         return frozenset(
-            (entry.notebook_id, entry.source_id) for entry in resolved.plan.sources
+            (entry.notebook_id, entry.source_id) for entry in plan.sources
         )
 
     def _source_scope_moved(

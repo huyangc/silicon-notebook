@@ -287,13 +287,20 @@ def _result(items, *, cursor="", **extra):
 
 
 class _StubCards:
-    def __init__(self):
+    def __init__(self, *, deferred_rounds=0, error=None):
         self.calls: list = []
+        self.deferred_rounds = deferred_rounds
+        self.error = error
 
     def get_cards(self, items, *, allowed, generate_limit, cancel_event=None, actor_id=""):
         assert not holding_fanout_slot()
         items = list(items)
         self.calls.append((items, generate_limit))
+        if self.error is not None:
+            raise self.error
+        if self.deferred_rounds > 0:
+            self.deferred_rounds -= 1
+            return [CardResult(nb, sid, "deferred", reason="generate_limit") for nb, sid in items]
         return [
             CardResult(nb, sid, "generated", card={"tldr": {"text": "t", "anchors": [f"el-{sid}"]}},
                        calls=1)
@@ -398,7 +405,7 @@ def test_extraction_request_errors_and_per_run_counting(corpus):
     llm = _RecordingLLM([
         _extract(sids[:1], ["x" * 81]),
         _extract(sids, ["COCO AP"]),
-        _extract(sids, ["COCO AP"]),
+        _extract(sids, ["mAP"]),
     ])
     result = _run(_stub_retriever(repo, llm, extraction=extraction), nb)
     assert "extract_invalid" in _skips(result)
@@ -427,7 +434,9 @@ def test_cards_per_call_cap_dedupe_and_generation_budget(corpus):
     assert cards.calls[0][1] == ask_retrieval_limits("standard").paper_card_generations_per_run
     assert "这次没有请求" in llm.prompts[1]
     assert "已有结果,未重复请求" in llm.prompts[2]
-    assert "paper_cards_nothing_to_read" in _skips(result)
+    # Everything asked for already has a result: a repeat note, not "fill in handles".
+    assert "paper_cards_repeat" in _skips(result)
+    assert "都已经有结果,不必再请求" in llm.prompts[2]
 
 
 def test_answer_layout_without_results_falls_back_to_prose(corpus):
@@ -511,17 +520,38 @@ def test_overview_offers_no_extraction_and_withholds_it(corpus):
     assert "answer_layout" in _hint_words(llm)  # the card gate is still open
 
 
-def test_an_empty_source_ceiling_closes_all_three(corpus):
+def test_no_local_source_ticked_but_a_reference_library_keeps_the_tools(corpus):
+    """Only a reference library ticked (legal, ``ask_routes._scope_is_empty``):
+    the tools stay offered and find_sources reaches the library's paper. The
+    active notebook's own empty ceiling is not a reason to close them."""
     from app.services.source_scope import source_scope_context
+    from tests.paper_topics_testkit import seed_paper_topics
 
-    repo, nb, _seeded = corpus
-    llm = _RecordingLLM([])
-    retriever = _stub_retriever(repo, llm, finder=_StubFinder(), cards=_StubCards(),
-                                extraction=_StubExtraction())
-    with source_scope_context(nb, {"mode": "include", "source_ids": [], "narrowed": True}):
-        assert retriever._paper_ceiling_empty(nb)
-        _run(retriever, nb)
-    assert not _hint_words(llm) & {"find_sources", "get_paper_cards", "extract_from_sources"}
+    repo, _corpus_nb, _seeded = corpus
+    bare = repo.create_notebook(NotebookCreate(name="只挂参考库")).id
+    ref = repo.create_notebook(NotebookCreate(name="参考库")).id
+    ref_ids = seed_paper_topics(repo, ref, keys=["det-01"], prefix="ref-")
+    repo.replace_notebook_bases(bare, [ref], repo.current_user().id)
+    llm = _RecordingLLM([_find(terms=TOPIC["terms"])])
+    with source_scope_context(bare, {"mode": "include", "source_ids": [], "narrowed": True}):
+        result = _run(_retriever(repo, llm), bare)
+    assert {"find_sources", "get_paper_cards"} <= _hint_words(llm)
+    (found,) = result.paper_finds
+    assert [(i.notebook_id, i.source_id) for i in found.result.items] == [(ref, ref_ids["det-01"])]
+
+
+def test_a_truly_empty_run_finds_nothing_and_does_not_crash(corpus):
+    """No source at all in scope: find_sources answers 0 with its coverage,
+    a card request for a handle-less id is an out-of-scope note."""
+    repo, _corpus_nb, _seeded = corpus
+    bare = repo.create_notebook(NotebookCreate(name="空库")).id
+    llm = _RecordingLLM([_find(terms=["detector"]), _cards("pt-det-01")])
+    result = _run(_retriever(repo, llm), bare)
+    (found,) = result.paper_finds
+    assert found.result.items == () and found.result.filtered_scope_total == 0
+    assert "paper_cards_out_of_scope" in _skips(result)
+    assert "本页没有命中" in llm.prompts[1]
+    assert _steps(result, "answer")
 
 
 # ---------------------------------------------------------------- parsing
@@ -623,3 +653,96 @@ def test_policy_per_call_caps_match_the_services():
 
 def test_the_three_actions_are_core_ids():
     assert {"find_sources", "get_paper_cards", "extract_from_sources"} <= CORE_REFLECT_ACTION_IDS
+
+
+# ------------------------------------------------------ review round fixes
+def test_answer_layout_stays_writable_after_the_card_budget_is_spent(corpus):
+    """overview: 6 card reads per run, no extraction. Reading 6 spends the card
+    budget, so get_paper_cards leaves the schema -- but the answering turn can
+    still ask for the table (the gate is the UNSPENT one)."""
+    repo, nb, seeded = corpus
+    sids = [seeded[key] for key in sorted(seeded)][:6]
+    llm = _RecordingLLM([_cards(*sids), dict(ANSWER, answer_layout="paper_table")])
+    result = _run(_stub_retriever(repo, llm, cards=_StubCards()), nb, effort="overview")
+    second = json.loads(llm.hints[1])
+    assert "get_paper_cards" not in second and second["answer_layout"] == "prose|paper_table"
+    assert "- answer_layout (a top-level field" in llm.prompts[1]
+    assert result.answer_layout == "paper_table"
+
+
+def test_deferred_only_steps_are_not_zero_hits(corpus):
+    """All results deferred: no ``found`` key, so the experience projection
+    reads no count (not a zero hit); ``deferred`` is reported instead."""
+    from app.domain.retrieval_experience import project_trace_step
+
+    repo, nb, seeded = corpus
+    sid = seeded["det-01"]
+    llm = _RecordingLLM([_cards(sid), _extract([sid], ["COCO AP"])])
+    extraction = _StubExtraction()
+    extraction.extract = lambda items, fields, **kw: [
+        ExtractionResult(n, s, "deferred", reason="model_unavailable") for n, s in items]
+    result = _run(_stub_retriever(repo, llm, cards=_StubCards(deferred_rounds=1),
+                                  extraction=extraction), nb)
+    for step_type in ("paper_cards", "extract_fields"):
+        (step,) = _steps(result, step_type)
+        assert "found" not in step.detail and step.detail["deferred"] == 1
+        projected = project_trace_step({"step_type": step_type, "summary": "",
+                                        "detail": step.detail})
+        assert projected["count"] is None
+
+
+def test_deferred_turns_keep_the_stale_counter_flat(corpus):
+    """Two consecutive turns whose cards were all deferred (the ledger tells
+    the model to retry) do not trip the stale breaker (pinned at 2 here)."""
+    repo, nb, seeded = corpus
+    repo.settings.reasoning_stale_limit = 2
+    sid = seeded["det-01"]
+    cards = _StubCards(deferred_rounds=2)
+    llm = _RecordingLLM([_cards(sid), _cards(sid), _cards(sid)])
+    result = _run(_stub_retriever(repo, llm, cards=cards), nb, effort="deep")
+    assert "stale_circuit_breaker" not in _skips(result)
+    assert len(cards.calls) == 3
+    assert result.paper_cards[0].result.status == "generated"
+
+
+def test_a_deferred_card_is_not_charged_twice_against_the_read_budget(corpus):
+    """overview: 6 reads. 6 deferred, then the same 6 again: the retry is the
+    first charge, so the budget is spent only now (not after the first call)."""
+    repo, nb, seeded = corpus
+    sids = [seeded[key] for key in sorted(seeded)][:6]
+    cards = _StubCards(deferred_rounds=1)
+    llm = _RecordingLLM([_cards(*sids), _cards(*sids)])
+    result = _run(_stub_retriever(repo, llm, cards=cards), nb, effort="overview")
+    assert [len(call[0]) for call in cards.calls] == [6, 6]
+    assert "get_paper_cards" in json.loads(llm.hints[1])
+    assert "get_paper_cards" not in json.loads(llm.hints[2])
+    assert all(o.result.status == "generated" for o in result.paper_cards)
+
+
+def test_a_repeated_extraction_costs_no_budget_and_no_call(corpus):
+    repo, nb, seeded = corpus
+    sid = seeded["det-01"]
+    extraction = _StubExtraction()
+    llm = _RecordingLLM([_extract([sid], ["COCO AP"]), _extract([sid], ["coco ap"]),
+                         _extract([sid], ["mAP"])])
+    result = _run(_stub_retriever(repo, llm, extraction=extraction), nb)
+    assert [call[1] for call in extraction.calls] == [("COCO AP",), ("mAP",)]
+    assert "extract_repeat" in _skips(result)
+    assert "这组字段本次已经抽过" in llm.prompts[2]
+    assert "extract_from_sources 4 篇" in llm.prompts[3]  # 6 - 2: the repeat was free
+
+
+@pytest.mark.parametrize("tool", ["finder", "cards", "extraction"])
+def test_cancellation_inside_a_paper_service_stops_the_run(corpus, tool):
+    from app.services.cancellation import AskCancelled
+
+    repo, nb, seeded = corpus
+    sid = seeded["det-01"]
+    stubs = {"finder": _StubFinder(AskCancelled()),
+             "cards": _StubCards(error=AskCancelled()),
+             "extraction": _StubExtraction(error=AskCancelled())}
+    action = {"finder": _find(terms=["detector"]), "cards": _cards(sid),
+              "extraction": _extract([sid], ["COCO AP"])}[tool]
+    retriever = _stub_retriever(repo, _RecordingLLM([action]), **{tool: stubs[tool]})
+    with pytest.raises(AskCancelled):
+        _run(retriever, nb)
