@@ -767,3 +767,85 @@ def test_answer_prompt_external_rule_survives_history_and_style_blocks():
     rule_14_idx = prompt.index("14. Items tagged [external · <source>]")
     assert rule_14_idx < prompt.index("User: 上一问")
     assert rule_14_idx < prompt.index("[风格] 先给结论")
+
+
+# ---------------------------------------------------------------------------
+# 论文工具(find_sources / get_paper_cards / extract_from_sources / answer_layout,
+# 规格 2026-10-28 §7.1):关门字节不变,开门时三处投影同进同出。
+
+_PAPER_TOOL_GATE_COMBINATIONS = _SECTION_NAV_GATE_COMBINATIONS + [
+    {"search_chunks": True, "section_nav": True},
+    {"enumerate_scope": False},
+]
+_PAPER_TOOL_PROMPT_ONLY = {"section_nav", "enumerate_scope"}
+
+
+def _paper_prompt_gates(gates):
+    extra = {"section_browse_cap": 3, "section_read_cap": 3} if gates.get("section_nav") else {}
+    return dict(_prompt_gates(gates), **extra)
+
+
+@pytest.mark.parametrize("gates", _PAPER_TOOL_GATE_COMBINATIONS)
+def test_paper_tools_closed_are_byte_identical_to_omitting_them(gates):
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+
+    assert reflect_schema_hint(**gates) == reflect_schema_hint(
+        find_sources=False, paper_cards=False, extract=False, **gates)
+    prompt_gates = _paper_prompt_gates(gates)
+    assert reflect_prompt("q", "c", **prompt_gates) == reflect_prompt(
+        "q", "c", find_sources_cap=0, paper_cards_cap=0, extract_cap=0,
+        **prompt_gates)
+    for text in (reflect_schema_hint(**gates), reflect_prompt("q", "c", **prompt_gates)):
+        for word in ("find_sources", "get_paper_cards", "extract_from_sources",
+                     "answer_layout", "paper_table"):
+            assert word not in text
+
+
+@pytest.mark.parametrize("gates", _PAPER_TOOL_GATE_COMBINATIONS)
+def test_paper_tools_open_show_up_in_all_three_projections(gates):
+    """开门 ⇒ 三个枚举词 + 三个同名参数分支(参数一律空串示例) + answer_layout 字段 +
+    三行动作说明与用法段同时出现;对等 run(enumerate_scope=False)不给 scope。"""
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+
+    schema = json.loads(reflect_schema_hint(
+        find_sources=True, paper_cards=True, extract=True, **gates))
+    words = schema["next_action"].split("|")
+    assert {"find_sources", "get_paper_cards", "extract_from_sources"} <= set(words)
+    scope = {"scope": "all|current_notebook"} if gates.get("enumerate_scope", True) else {}
+    assert schema["find_sources"] == {
+        "query": "", "terms": [""], "year_from": "", "year_to": "", "venue": "",
+        "author": "", "kind": "papers|all", **scope, "cursor": ""}
+    assert schema["get_paper_cards"] == {"sources": [""]}
+    assert schema["extract_from_sources"] == {"sources": [""], "fields": [""]}
+    assert schema["answer_layout"] == "prose|paper_table"
+    prompt = reflect_prompt("q", "c", find_sources_cap=2, paper_cards_cap=12,
+                            extract_cap=6, **_paper_prompt_gates(gates))
+    assert "- find_sources:" in prompt and "at most 2 time(s)" in prompt
+    assert "- get_paper_cards:" in prompt and "at most 12 document(s)" in prompt
+    assert "- extract_from_sources:" in prompt and "at most 6 document(s)" in prompt
+    assert "- answer_layout (a top-level field" in prompt
+    assert "NEVER claim the list is complete" in prompt
+    assert ('scope "all"' in prompt) is bool(scope)
+    rule = prompt[prompt.index("This applies to every retrieval field you fill"):]
+    rule = rule[:rule.index("\n")]
+    assert rule.endswith("find_sources.query and find_sources.terms.")
+
+
+def test_answer_layout_rides_the_card_or_the_extraction_gate():
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+
+    only_find = json.loads(reflect_schema_hint(find_sources=True))
+    assert "answer_layout" not in only_find
+    assert "find_sources" in only_find and "get_paper_cards" not in only_find
+    for kwargs in ({"paper_cards": True}, {"extract": True}):
+        assert json.loads(reflect_schema_hint(**kwargs))["answer_layout"] == "prose|paper_table"
+    prompt = reflect_prompt("q", "c", find_sources_cap=1)
+    assert "answer_layout" not in prompt
+    # 只开 find_sources:用法段不点名没有提供的两个动作。
+    workflow = prompt[prompt.index('For "list all documents'):]
+    workflow = workflow[:workflow.index("\n")]
+    assert "get_paper_cards" not in workflow and "extract_from_sources" not in workflow
+    extract_only = reflect_prompt("q", "c", extract_cap=4)
+    assert "- answer_layout" in extract_only
+    assert "the cards do not hold" not in extract_only
+    assert "from find_sources" not in extract_only

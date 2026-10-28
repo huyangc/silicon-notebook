@@ -1445,6 +1445,22 @@ class CollectionEnumerationService:
             ),
         )
 
+    def source_scope_pairs(
+        self, active_notebook_id: str, *, ceiling_binds: bool,
+    ) -> "frozenset[Tuple[str, str]]":
+        """``(owning notebook, source_id)`` of every source ``source_scope``
+        resolves for this run, on a connection of its own: the set the
+        reasoning paper tools (``get_paper_cards`` / ``extract_from_sources``)
+        check every handle and raw ``source_id`` against -- the same set
+        ``find_sources`` searches and ``enumerate_sources`` lists."""
+        with self._database.connect() as db:
+            resolved = self.source_scope(
+                db, active_notebook_id, ceiling_binds=ceiling_binds,
+            )
+        return frozenset(
+            (entry.notebook_id, entry.source_id) for entry in resolved.plan.sources
+        )
+
     def _source_scope_moved(
         self, walk: _Walk, total: Optional[int]
     ) -> SourceEnumeration:

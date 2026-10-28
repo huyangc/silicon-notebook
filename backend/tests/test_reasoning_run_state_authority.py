@@ -77,6 +77,8 @@ GUARDED = (
     "_section_spent", "_section_read_left", "_section_listing_note",
     "_section_failed", "_replay_section_listing", "_take_section_hint_detail",
     "_ambiguous_section_skip", "_section_evidence_sources",
+    # paper tools: the per-round helpers the loop, the ledger and the kwargs call
+    "_note_reflect_decision", "_paper_tools_spent", "_paper_tools_ledger",
 )
 #: ``run`` parameters that are frozen inputs (state keeps an identical copy);
 #: exempt in ``run`` only
@@ -91,6 +93,10 @@ EXEMPT_STATE_METHODS = frozenset({
     "_action_search_chunks", "_action_read_document", "_external_evidence_room",
     "_plugin_action_kwargs", "_add_plugin_reflect_context", "_action_plugin",
     "_admit_external_evidence", "_action_expand_community", "_run_enumeration",
+    # paper tools: the three executors and their helpers
+    "_action_find_sources", "_action_get_paper_cards", "_action_extract_from_sources",
+    "_paper_allowed", "_paper_has_results", "_paper_skip", "_paper_tool_failed",
+    "_resolved_paper_sources", "_paper_budget_left",
 })
 #: methods allowed to (re)build state containers: they finish before the loop
 FIRST_ROUND_PREFIXES = ("_first_round_", "_run_first_round", "_new_run_state")
@@ -407,6 +413,10 @@ PINNED_READS = {
     ("_section_read_left", "state.enum_limits"): 1,
     ("_action_browse_sections", "state.enum_limits"): 1,
     ("_action_read_section", "state.enum_limits"): 1,
+    # The paper tools read the tier fallback too: ``reflect()`` judges the same
+    # tier through ``limits=state.enum_limits``.
+    ("_paper_tools_spent", "state.enum_limits"): 1,
+    ("_paper_tools_ledger", "state.enum_limits"): 1,
 }
 
 

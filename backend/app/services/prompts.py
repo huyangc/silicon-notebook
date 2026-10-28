@@ -658,6 +658,9 @@ def reflect_schema_hint(
     section_nav: bool = False,
     section_browse: bool = True,
     section_read: bool = True,
+    find_sources: bool = False,
+    paper_cards: bool = False,
+    extract: bool = False,
 ) -> str:
     """The reflect response schema, with the enumeration branch iff offered.
 
@@ -775,6 +778,17 @@ def reflect_schema_hint(
     ``section_browse`` / ``section_read`` are two SUBTRACTING per-action gates
     under it (True by default): False drops that one action's word and branch
     -- a run whose cap for it is 0, or whose allowance for it is spent.
+
+    ``find_sources`` / ``paper_cards`` / ``extract`` are the three paper-tool
+    gates (single predicate: ``ReasoningRetriever.paper_tool_flags``), each
+    adding its action word and a same-named branch: ``find_sources`` (``query``,
+    ``terms``, the year / venue / author filters as strings, ``kind``, ``scope``
+    -- dropped in a PEER run like the roster's -- and ``cursor``),
+    ``get_paper_cards`` (``sources``) and ``extract_from_sources``
+    (``sources``, ``fields``). With the card OR the extraction gate open the
+    top-level ``answer_layout`` field (``prose|paper_table``) appears too. All
+    default False: every closed state is byte-for-byte the schema from before
+    the tools existed.
     """
     # The SAME double gate ``reflect_prompt`` applies to the action's own prompt
     # line: ``read_document and enumeration_tools``. The two projections must
@@ -805,6 +819,11 @@ def reflect_schema_hint(
         actions += "|browse_sections"
     if offer_read:
         actions += "|read_section"
+    for word, offered in (("find_sources", find_sources),
+                          ("get_paper_cards", paper_cards),
+                          ("extract_from_sources", extract)):
+        if offered:
+            actions += "|" + word
     # ``keywords`` is ``search_chunks``'s optional literal (full-text) half,
     # shown right after the shared ``query`` and only when it can take effect:
     # it needs the action AND a keyword arm that can actually return something
@@ -894,6 +913,23 @@ def reflect_schema_hint(
          if offer_browse else "")
         + ('"read_section":{"source":"","section":""},' if offer_read else "")
     )
+    # The paper tools. Every argument is shown EMPTY (the ``source_title``
+    # rule: a spelled-out example travels into calls that meant another one);
+    # the years are strings like every other knob, ``kind`` / ``scope`` are
+    # string enums, and the two lists are one-empty-string lists (a string
+    # list is the one place an example list may stand; see the outline branch).
+    paper_tool_branches = (
+        ('"find_sources":{"query":"","terms":[""],"year_from":"","year_to":"",'
+         '"venue":"","author":"","kind":"papers|all",'
+         + ('"scope":"all|current_notebook",' if enumerate_scope else "")
+         + '"cursor":""},' if find_sources else "")
+        + ('"get_paper_cards":{"sources":[""]},' if paper_cards else "")
+        + ('"extract_from_sources":{"sources":[""],"fields":[""]},'
+           if extract else "")
+    )
+    answer_layout_field = (
+        '"answer_layout":"prose|paper_table",' if paper_cards or extract else ""
+    )
     if consult_memory:
         actions += "|consult_memory"
     outline_branch = ""
@@ -945,8 +981,10 @@ def reflect_schema_hint(
         + enumerate_branch
         + read_document_branch
         + section_nav_branches
+        + paper_tool_branches
         + plugin_projection.schema_branches
         + outline_branch
+        + answer_layout_field
         + '"query":"",'
         + keywords_field +
         '"reason":""}'
@@ -991,6 +1029,93 @@ def keyword_language_rule(corpus_langs: Optional[Sequence[str]]) -> str:
         "corpus needs only single-language keywords.")
 
 
+def _paper_tool_lines(
+    find_sources_cap: int, paper_cards_cap: int, extract_cap: int,
+    enumerate_scope: bool,
+) -> str:
+    """The paper tools' action lines and usage paragraph for ``reflect_prompt``
+    (spec 2026-10-28 §7.1). Only the tools whose cap is non-zero are named --
+    a sentence about a tool this run does not offer is a door with no room
+    behind it -- and an all-zero call renders nothing."""
+    find_sources, paper_cards, extract = (
+        find_sources_cap > 0, paper_cards_cap > 0, extract_cap > 0)
+    lines = ""
+    if find_sources:
+        lines += (
+            "- find_sources: the question asks which / all documents or papers "
+            "about a topic (e.g. \"list every paper on X with its metrics and key "
+            "innovations\"). It ranks the documents of this run's scope by topic "
+            "and returns one page of 20 with run-local handles p1, p2, ... and "
+            "their tier (strong / related), year, venue and card status. Set "
+            "find_sources.terms to the topic's LITERAL words, abbreviations and "
+            "aliases as the documents write them (matched against titles, paper "
+            "titles, keywords, authors, venues and summaries) and "
+            "find_sources.query to a natural-language description of the topic "
+            "(semantic search); leave either empty when it does not apply. "
+            "Optional filters: year_from / year_to (a year written as a string, "
+            "e.g. \"2021\"), venue and author (substrings), kind \"papers\" (the "
+            "default) or \"all\" to include non-papers"
+            + (", scope \"all\" (the default) or \"current_notebook\""
+               if enumerate_scope else "")
+            + ". To turn a page, copy the cursor the ledger shows into "
+            "find_sources.cursor and keep every other argument identical; every "
+            f"page counts as a call. You may call it at most {find_sources_cap} "
+            "time(s) in this run.\n"
+        )
+    if paper_cards:
+        lines += (
+            "- get_paper_cards: read the cached key-point CARDS of papers (tldr, "
+            "problem, method, contributions, metrics with their values, datasets; "
+            "every item cites the original text). Set get_paper_cards.sources to "
+            "handles from find_sources (or source ids), at most 10 per call. A "
+            "missing card is generated on the spot within this run's generation "
+            "budget; one reported deferred can be requested again later. "
+            "Non-papers have no card. You may read at most "
+            f"{paper_cards_cap} document(s) this way in this run.\n"
+        )
+    if extract:
+        lines += (
+            "- extract_from_sources: pull up to 4 ad-hoc FIELDS"
+            + (" the cards do not hold" if paper_cards else "")
+            + " (e.g. \"mAP on COCO\", \"training data size\") from each of up to "
+            "8 documents per call: set extract_from_sources.sources to handles "
+            + ("from find_sources " if find_sources else "")
+            + "(or source ids) and extract_from_sources.fields to short field "
+            "descriptions. Each value comes back with the passage that states "
+            "it; a field the document does not state comes back empty. Works "
+            "for non-papers too. You may extract from at most "
+            f"{extract_cap} document(s) in this run.\n"
+        )
+    if paper_cards or extract:
+        lines += (
+            "- answer_layout (a top-level field, not an action; any turn may set "
+            "it and the last value wins): \"paper_table\" when the answer should "
+            "present the papers as a per-paper table built by the system from the "
+            "cards and extracted values you gathered, \"prose\" (the default) "
+            "otherwise. paper_table only takes effect when this run actually "
+            "holds cards or extracted values.\n"
+        )
+    if find_sources:
+        steps = ["find_sources first (terms = literal words and abbreviations, "
+                 "query = a semantic description)"]
+        if paper_cards:
+            steps.append("get_paper_cards on the strong tier")
+        if extract:
+            steps.append("extract_from_sources only for the fields "
+                         + ("the cards lack" if paper_cards else "the question needs"))
+        if paper_cards or extract:
+            steps.append("answer_layout=\"paper_table\"")
+        lines += (
+            "For \"list all documents / papers about X with their key points\": "
+            + " → ".join(steps) + ". While find_sources reports its semantic "
+            "recall capped, its lexical coverage incomplete (papers whose "
+            "metadata is not extracted yet, libraries it could not read) or "
+            "found documents remain unexpanded, the answer must say that more "
+            "may exist — NEVER claim the list is complete.\n"
+        )
+    return lines
+
+
 def reflect_prompt(
     question: str,
     candidates_summary: str,
@@ -1013,6 +1138,9 @@ def reflect_prompt(
     section_nav: bool = False,
     section_browse_cap: int = 0,
     section_read_cap: int = 0,
+    find_sources_cap: int = 0,
+    paper_cards_cap: int = 0,
+    extract_cap: int = 0,
 ) -> str:
     """Next-step decision prompt.
 
@@ -1125,6 +1253,16 @@ def reflect_prompt(
     spent: the caller passes 0) has no line at all, matching the schema's
     ``section_browse`` / ``section_read`` gates. False (the default) renders
     nothing, byte for byte the prompt from before the actions existed.
+
+    ``find_sources_cap`` / ``paper_cards_cap`` / ``extract_cap`` are the three
+    paper tools' per-run allowances (``AskRetrievalLimits``; the caller passes
+    0 for a closed gate, ``ReasoningRetriever.paper_tool_flags``). A non-zero
+    cap renders that tool's line; the workflow paragraph (which forbids
+    claiming a complete list while find_sources reports a coverage gap) rides
+    ``find_sources``, the ``answer_layout`` line rides cards OR extraction,
+    and ``find_sources.query`` / ``find_sources.terms`` join the scope-field
+    rule. All 0 (the default) is byte for byte the prompt from before the
+    tools existed.
     """
     if read_document and read_document_cap < 1:
         raise ValueError(
@@ -1265,6 +1403,8 @@ def reflect_prompt(
         scope_fields.append("keywords")
     if offer_browse:
         scope_fields.append("browse_sections.query")
+    if find_sources_cap > 0:
+        scope_fields += ["find_sources.query", "find_sources.terms"]
     scope_fields_rule = (
         "This applies to every retrieval field you fill: "
         + ", ".join(scope_fields[:-1]) + " and " + scope_fields[-1] + ".\n"
@@ -1453,6 +1593,8 @@ def reflect_prompt(
         "run, so spend them on the documents the question actually needs.\n"
         if read_document and enumeration_tools else ""
     )
+    paper_tool_actions = _paper_tool_lines(
+        find_sources_cap, paper_cards_cap, extract_cap, enumerate_scope)
     # The outline scratchpad (design doc §3.1).  Three things have to be said
     # here or the action is worse than useless:
     #   * WHEN — it earns its turns on answers that have structure to build
@@ -1611,6 +1753,7 @@ def reflect_prompt(
         "nothing.\n"
         f"{enumerate_actions}"
         f"{read_document_action}"
+        f"{paper_tool_actions}"
         f"{outline_action}"
         f"{consult_memory_action}"
         f"{plugin_action_lines}"

@@ -90,7 +90,10 @@ from app.services.indexing_pipeline import IndexingPipelineService
 from app.services.source_embedding import SourceEmbeddingService
 from app.services.source_ingestion import SourceIngestionService
 from app.services.paper_card_service import PaperCardService
+from app.services.paper_cards import PAPER_CARD_VERSION
 from app.services.paper_extraction import PaperExtractionService
+from app.services.reasoning_paper_tools import ReasoningPaperTools
+from app.services.source_finder import SourceFinder
 from app.services.spreadsheet_analysis import SpreadsheetAnalysisService
 from app.services.chunk_question_index import ChunkQuestionIndexService
 from app.services.source_graph_primitives import SourceGraphPrimitives
@@ -1045,6 +1048,12 @@ def _build_agent_jobs(
 
 
 class RepositoryRuntime:
+    # Document-level search (spec 2026-10-28 §5), composed on first use by
+    # ``source_finder`` (it needs the lazily wired retrieval).  A class-level
+    # default rather than an ``__init__`` seat: ``__init__`` is a zero-slack
+    # hot function.
+    _source_finder: SourceFinder | None = None
+
     def __init__(self,
         settings: Settings,
         root_dir: Path,
@@ -1539,6 +1548,26 @@ class RepositoryRuntime:
         self.scale_artifacts.auto_index_checked = value
         if self.kg_mutations is not None:
             self.kg_mutations.auto_index_checked = value
+
+    @property
+    def source_finder(self) -> SourceFinder:
+        """``find_sources`` (spec 2026-10-28 §5) over this runtime's stores, the
+        lazily wired retrieval's ``retrieve_chunks_in_sources`` and the eager
+        collection enumeration (the run's source set).  Built on first use and
+        kept: it holds no per-request state (a race builds two equal ones)."""
+        finder = self._source_finder
+        if finder is None:
+            finder = SourceFinder(
+                database=self.database,
+                sources=self.source_store,
+                retrieval=self.retrieval_component,
+                enumeration=self.collection_enumeration,
+                settings=self.settings,
+                paper_card_version=PAPER_CARD_VERSION,
+                event_log=self.event_log,
+            )
+            self._source_finder = finder
+        return finder
 
     @property
     def retrieval_component(self) -> RetrievalService:
@@ -2811,6 +2840,13 @@ class RepositoryRuntime:
                 collection_enumeration=self.collection_enumeration,
                 overview_sources=self.source_store,
                 overview_source_generation=self.content_tools.source_generation,
+                # 论文工具(规格 2026-10-28 §7.1):find_sources / 卡片 / 抽取。卡片与
+                # 抽取由 wire_source_ingestion 建;没建(窄组合根)时那一个动作关闸。
+                paper_tools=ReasoningPaperTools(
+                    finder=self.source_finder,
+                    cards=self.paper_cards,
+                    extraction=self.paper_extraction,
+                ),
                 # Agentic Memory P1:Agent 对该库的已有理解 store。交座位本身
                 # (形态同上面两个集合服务),提问者身份由 ask 在构造 retriever
                 # 时显式传入 —— 绝不让下游回退 ContextVar。

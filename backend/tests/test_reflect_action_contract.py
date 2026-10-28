@@ -523,6 +523,11 @@ _KNOWN_REFLECT_SCHEMA_GATES = frozenset({
     # 它下面的两把逐动作减法闸(上限为 0 或本 run 已用完时关),开着即默认值。
     "section_browse",
     "section_read",
+    # 论文工具三把闸(规格 2026-10-28 §7.1)。默认关;全门打开时三个动作词、三个同名
+    # 顶层分支与 `answer_layout` 字段必须进保留集。
+    "find_sources",
+    "paper_cards",
+    "extract",
 })
 # The full whitelist each sequence-shaped gate is opened with.
 _REFLECT_SCHEMA_SEQUENCE_GATES = {

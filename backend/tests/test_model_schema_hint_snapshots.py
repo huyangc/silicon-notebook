@@ -143,8 +143,9 @@ _BUILT_HINTS: tuple[tuple[str, str, str | None, tuple[str, ...]], ...] = (
     ("reflect_schema_hint(every gate open)", prompts.reflect_schema_hint(
         ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES, outline=True,
         consult_memory=True, search_chunks=True, read_document=True,
-        keyword_search=True, section_nav=True,
-    ), "model_response_8129508e3f1d95b7", ("next_action", "reason", "sufficient")),
+        keyword_search=True, section_nav=True, find_sources=True,
+        paper_cards=True, extract=True,
+    ), "model_response_be5bfb96fe1dfecd", ("next_action", "reason", "sufficient")),
     ("reflect_schema_hint(kg_actions=False)", prompts.reflect_schema_hint(kg_actions=False),
      "model_response_17f33a17ec8fd780", ("next_action", "reason", "sufficient")),
 )

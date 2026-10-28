@@ -243,6 +243,10 @@ test("NEXT_ACTION 覆盖后端全部真实取值(非机制名)", () => {
     // 章节导航检索(PR-2):第 15、16 个动作 id。
     browse_sections: "查看章节目录",
     read_section: "按章节读取原文",
+    // 论文工具(规格 2026-10-28 §7.1):第 17–19 个动作 id。
+    find_sources: "按主题找出相关文档",
+    get_paper_cards: "读取论文要点卡片",
+    extract_from_sources: "逐篇提取指定字段",
   };
   for (const [action, zh] of Object.entries(cases)) {
     const out = getTraceStepDetail({ step_type: "reflect", detail: { next_action: action } });
@@ -1174,6 +1178,48 @@ test("read_section 步的 detail 显示《标题》、章节与新增段数,不�
   assert.equal(getTraceStepDetail(truncated), "《芯片手册》 5.7 新增 8 段（只读本节前段）");
   const notTruncated = { ...truncated, detail: { ...truncated.detail, truncated: false } };
   assert.equal(getTraceStepDetail(notTruncated), "《芯片手册》 5.7 新增 8 段");
+});
+
+// 论文工具(规格 2026-10-28 §7.1):三个 reflect 动作的轨迹步。
+test("论文工具三步有专属的两字标签,不与已有步同名", () => {
+  // 步类型与动作 id 分开命名(find_sources→find_documents 等),同 add_subquery→retrieve。
+  const keys = ["find_documents", "paper_cards", "extract_fields"];
+  assert.deepEqual(keys.map((key) => TRACE_STEP_LABELS[key]), ["找文", "卡片", "提取"]);
+  for (const key of keys) {
+    assert.ok([...TRACE_STEP_LABELS[key]].length <= 2, `${key} label must fit the badge`);
+    for (const [other, text] of Object.entries(TRACE_STEP_LABELS)) {
+      if (other !== key) assert.notEqual(TRACE_STEP_LABELS[key], text, `${key} vs ${other}`);
+    }
+  }
+});
+
+test("论文工具三步的 detail 各有专属读法,不被通用 found/count 分支截胡", () => {
+  const find = {
+    step_type: "find_documents",
+    summary: "",
+    detail: { strong: 8, related: 5, listed: 13, semantic_recall_capped: false },
+  };
+  assert.equal(getTraceStepDetail(find), "强相关 8 篇、相关 5 篇");
+  assert.equal(
+    getTraceStepDetail({ ...find, detail: { ...find.detail, semantic_recall_capped: true } }),
+    "强相关 8 篇、相关 5 篇（可能还有更多）",
+  );
+  const cards = {
+    step_type: "paper_cards",
+    summary: "",
+    detail: { requested: 6, found: 4, generated: 2, deferred: 1, result_ids: [] },
+  };
+  assert.equal(getTraceStepDetail(cards), "4 张卡片，新生成 2 张，推迟 1 篇");
+  assert.equal(
+    getTraceStepDetail({ ...cards, detail: { ...cards.detail, generated: 0, deferred: 0 } }),
+    "4 张卡片",
+  );
+  const extract = {
+    step_type: "extract_fields",
+    summary: "",
+    detail: { sources: 3, fields: ["mAP"], found: 2, result_ids: [] },
+  };
+  assert.equal(getTraceStepDetail(extract), "3 篇，提取到 2 个值");
 });
 
 test("the final citation check step (PR-D) has its own label and no borrowed detail", () => {

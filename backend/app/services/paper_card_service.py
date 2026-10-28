@@ -75,7 +75,9 @@ _WORKLOAD = "paper_metadata"
 class CardResult:
     """一篇的结果。``card`` 只在 ``ready`` / ``generated`` 时非空;``reason`` 是机器可读的
     原因码(如 ``out_of_scope``、``cooldown``、``generate_limit``、``model_unavailable``)。
-    ``elapsed_ms`` 是这一篇自己花的时间(读缓存、生成或等待)。"""
+    ``elapsed_ms`` 是这一篇自己花的时间(读缓存、生成或等待)。``calls`` 是这一篇从本次
+    ``generate_limit`` 里预留的模型调用数(领头者的预留,不退回;命中缓存、单飞等待者与
+    被推迟的篇为 0)——调用方据它累计跨调用的生成预算。"""
 
     notebook_id: str
     source_id: str
@@ -85,6 +87,7 @@ class CardResult:
     model: str = ""
     dropped: int = 0
     elapsed_ms: int = 0
+    calls: int = 0
 
 
 @dataclass
@@ -386,7 +389,9 @@ class PaperCardService:
         started = time.monotonic()
         result: CardResult | None = None
         try:
-            result = dataclasses.replace(self._run_plan(plan, cancel_event), elapsed_ms=_ms(started))
+            result = dataclasses.replace(
+                self._run_plan(plan, cancel_event), elapsed_ms=_ms(started), calls=plan.calls,
+            )
             return result
         finally:
             self._flights.finish(plan.source_id, flight, result)

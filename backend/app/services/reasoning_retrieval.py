@@ -88,8 +88,24 @@ from app.services.document_source_overview import SourceOverview, prepare_source
 # `[kN]`。import 而不是复制那个数:复制出来的两份一旦漂移,合并锚点时不会报错,
 # 只会静静地把引用指错。
 from app.services.outline_synthesis import OUTLINE_SECTION_KEY_STRIDE
+from app.services.paper_extraction import (
+    EXTRACT_MAX_SOURCES, ExtractionRequestError, normalize_fields,
+)
 from app.services.prompts import (
     project_reflect_actions, reflect_prompt, reflect_schema_hint,
+)
+from app.services.reasoning_paper_tools import (
+    ANSWER_LAYOUT_PROSE, EXTRACT_FROM_SOURCES_ACTION, FIND_SOURCES_ACTION,
+    GET_PAPER_CARDS_ACTION, PAPER_TOOL_ACTIONS, FoundSourcesOutcome,
+    PaperCardOutcome, PaperExtractionItem, PaperExtractionOutcome, PaperHandles,
+    answer_layout_value, card_anchor_ids, card_has_content, extraction_value_count,
+    missing_paper_tool_argument, paper_tool_text_fields, paper_tools_note,
+    parse_paper_tool_arguments, resolve_answer_layout, resolve_source_tokens,
+    year_value,
+)
+from app.services.source_finder import (
+    FIND_SOURCES_PAGE_SIZE, FindSourcesCursorError, FindSourcesError,
+    FindSourcesRequest,
 )
 from app.services.reasoning_actions import (
     ENUMERATE_SCOPE_ALL, ENUMERATE_SCOPE_CURRENT_NOTEBOOK, ENUMERATE_SCOPES,
@@ -126,7 +142,9 @@ from app.services.section_outline import (
 # ``subjectless_run_active`` only answers "this run has no subject library",
 # which is exactly the fact the element arm's closure turns on, and it is
 # installed by the same one manager that installs the override.
-from app.services.source_scope import current_source_scope, subjectless_run_active
+from app.services.source_scope import (
+    current_source_scope, scoped_source_ceiling, subjectless_run_active,
+)
 from app.services.source_element_selection import (
     rank_source_elements,
     source_chunk_content_key,
@@ -713,6 +731,7 @@ def core_reflect_actions(
     read_document: bool, outline: bool, consult_memory: bool,
     search_elements: bool, ppr_retrieve: bool, section_nav: bool,
     section_browse: bool = True, section_read: bool = True,
+    find_sources: bool = False, paper_cards: bool = False, extract: bool = False,
 ) -> Tuple[str, ...]:
     """本轮 reflect 提供的**核心**动作 id(插件动作另由 ``project_reflect_actions``
     给出)。纯函数、零 I/O。
@@ -731,6 +750,8 @@ def core_reflect_actions(
       给出 ``browse_sections`` 与 ``read_section`` 两个动作(**必填**关键字参数:
       每个调用方都必须显式说明本 run 给不给);``section_browse`` /
       ``section_read`` 是它下面两把逐动作减法闸(上限为 0 或本 run 已用完时关);
+    * ``find_sources`` / ``paper_cards`` / ``extract`` = 三个论文工具各自的闸
+      (``paper_tool_flags``),缺省关:既有调用方拿到的集合逐项不变;
     * 其余五把各自对应一个可选动作。
 
     ``exact_lookup`` 例外地**不随**部署开关变(沿用 ppr_retrieve 立下的先例):
@@ -753,6 +774,10 @@ def core_reflect_actions(
         (ENUMERATE_KG_OBJECTS_ACTION,) if enumeration and kg_actions else ()
     ) + (
         (READ_DOCUMENT_ACTION,) if read_document else ()
+    ) + tuple(
+        name for name, offered in zip(
+            PAPER_TOOL_ACTIONS, (find_sources, paper_cards, extract))
+        if offered
     ) + ((OUTLINE_ACTION,) if outline else ()
     ) + ((CONSULT_MEMORY_ACTION,) if consult_memory else ())
     withheld = (
@@ -2891,7 +2916,7 @@ CONSULT_MEMORY_ACTION = "consult_memory"
 CORE_REFLECT_ACTION_IDS: "frozenset[str]" = frozenset(core_reflect_actions(
     kg_actions=True, chunk_search=True, enumeration=True, read_document=True,
     outline=True, consult_memory=True, search_elements=True, ppr_retrieve=True,
-    section_nav=True,
+    section_nav=True, find_sources=True, paper_cards=True, extract=True,
 ))
 
 #: deep 及以上档才提供这个动作。与大纲便签的档位闸同一条道理(低档不该为一次
@@ -3600,6 +3625,25 @@ class ReflectDecision:
     browse_sections_query: str = ""
     read_section_source: str = ""
     read_section_section: str = ""
+    # 论文工具三个动作的参数(规格 2026-10-28 §7.1),只在各自的闸开时解析
+    # (`reasoning_paper_tools.parse_paper_tool_arguments`)。全是字符串、字符串枚举
+    # 或字符串列表;年份照原样留串,由 `SourceFinder` 判非法。来源是 run 内句柄
+    # (`p1`…)或 source_id,执行体入口按本 run 的来源天花板校验。
+    find_sources_query: str = ""
+    find_sources_terms: Tuple[str, ...] = ()
+    find_sources_year_from: str = ""
+    find_sources_year_to: str = ""
+    find_sources_venue: str = ""
+    find_sources_author: str = ""
+    find_sources_kind: str = "papers"
+    find_sources_scope: str = "all"
+    find_sources_cursor: str = ""
+    paper_card_sources: Tuple[str, ...] = ()
+    extract_sources: Tuple[str, ...] = ()
+    extract_fields: Tuple[str, ...] = ()
+    # 本轮写下的 `answer_layout`("prose" | "paper_table"),空串 = 本轮没写。任何
+    # 一轮都可以写,run 取最后一次写下的值(`_note_reflect_decision`)。
+    answer_layout: str = ""
     # update_outline 携带的**整份章节结构**;同 id 的证据 union/显式删除在 run()
     # 应用。解析期只夹形状与边界,证据 key 的合法性要看 run 局部候选集合——
     # reflect() 在这一层根本不知道候选是什么。
@@ -3777,6 +3821,16 @@ class ReasoningResult:
     # 插件 reflect 动作带回的外部证据(设计文档 §6.1)。与 gap 建议相反:它必须在
     # 草稿阶段之内可见,否则就无法被 `[k]` 引用。空列表 = 没有插件动作参与本 run。
     external_evidence: List[ExternalEvidence] = field(default_factory=list)
+    # 论文工具(规格 2026-10-28 §7)的产物,交给合成(T6)消费:`answer_layout` 是本 run
+    # 最终生效的呈现("paper_table" 只在确有卡片或抽取值时成立,否则回落 "prose",
+    # `answer_layout_fallback` 记原因码);`paper_finds` 每次 find_sources 一条(含翻页),
+    # `paper_cards` 每篇来源最新一次的卡片结果(按首次请求顺序),`paper_extractions`
+    # 每次 extract_from_sources 一条。没有用到这些工具的 run 全部为空/缺省。
+    answer_layout: str = ANSWER_LAYOUT_PROSE
+    answer_layout_fallback: str = ""
+    paper_finds: List[FoundSourcesOutcome] = field(default_factory=list)
+    paper_cards: List[PaperCardOutcome] = field(default_factory=list)
+    paper_extractions: List[PaperExtractionOutcome] = field(default_factory=list)
     # Internal selected-source regression oracle.  It is never serialized into
     # Ask/report responses; callers may emit only its redacted event payload.
     baseline_manifest: object | None = None
@@ -4109,6 +4163,32 @@ class _ReasoningRunState:
     # 循环拼 reflect 步 detail 时经 `_take_section_hint_detail` 取走。
     section_hint_detail: Dict[str, Any] = field(default_factory=dict)
 
+    # —— 论文工具(find_sources / get_paper_cards / extract_from_sources /
+    # answer_layout)。全部带缺省值,不经 `_new_run_state`;读写者是三个
+    # `_action_*` 执行体、`_paper_tools_spent`、`_paper_tools_ledger`、
+    # `_note_reflect_decision` 与 `_finish_run`。——
+    #
+    # run 内句柄簿(`p1`…,由 find_sources 发放,同一来源始终同一个号)。
+    paper_handles: "PaperHandles" = field(default_factory=PaperHandles)
+    # 本 run 的来源天花板 `(属主库, source_id)`,首次需要时读一次(与
+    # enumerate_sources / find_sources 同一来源集合);句柄与 source_id 都按它校验。
+    paper_allowed: "Optional[frozenset]" = None
+    paper_finds: List["FoundSourcesOutcome"] = field(default_factory=list)
+    # 每篇来源最新一次的卡片结果,键 `(属主库, source_id)`,插入序 = 首次请求序。
+    paper_cards: Dict[tuple, "PaperCardOutcome"] = field(default_factory=dict)
+    paper_extractions: List["PaperExtractionOutcome"] = field(default_factory=list)
+    # 执行体的教学式 skip(参数非法、越界、额度用完…),进论文工具账目。
+    paper_log: List[str] = field(default_factory=list)
+    # 四个 run 级计数器,对照 `enum_limits` 的四个档位预算;翻页计入 find 次数。
+    find_sources_calls: int = 0
+    paper_card_reads: int = 0
+    paper_card_generations: int = 0
+    extract_sources_used: int = 0
+    # 新发的句柄、带内容的卡片、抽到的值:进循环的进展尺(与 enum_rows_used 同口径)。
+    paper_progress: int = 0
+    # 模型最后一次写下的 answer_layout(空串 = 从没写过)。
+    answer_layout_requested: str = ""
+
 
 
 def _rescored_keeping_origin(rescored, collected):
@@ -4151,8 +4231,14 @@ class ReasoningRetriever:
         plugin_egress_question: str = "",
         report_outline: str = "",
         reflection_context=None,
+        paper_tools=None,
     ):
         self.retrieval = retrieval
+        # 论文工具三个服务(`ReasoningPaperTools`:find_sources / 卡片 / 抽取)。只有
+        # Ask 路径接它(`AskService._build_reasoning_retriever`);缺省 None ⇒ 三个
+        # 动作与 answer_layout 不进 prompt / schema / 白名单,报告逐节深挖与 knowhow
+        # 补全逐字节不变。
+        self.paper_tools = paper_tools
         self.model_clients = model_clients
         self.communities = communities
         self.settings = settings
@@ -4277,6 +4363,12 @@ class ReasoningRetriever:
         # False explicitly -- defense in depth on top of allow_search_chunks,
         # which that gate also reads.
         self.allow_section_nav = True
+        # The three paper tools (``find_sources`` / ``get_paper_cards`` /
+        # ``extract_from_sources``), same discipline as allow_document_read:
+        # False takes all three away through ``paper_tool_flags``. knowhow
+        # completion sets it False explicitly -- it never seats ``paper_tools``
+        # either, but a policy must not rest on a wiring accident.
+        self.allow_paper_tools = True
         # Authoring flows whose synthesis only accepts server-issued evidence
         # keys (knowhow completion) turn this off: an enumerated list would
         # spend the run's budget on items their prompt cannot cite.
@@ -4484,6 +4576,51 @@ class ReasoningRetriever:
             and policy.max_section_browses + policy.max_section_reads > 0
             and int(getattr(
                 self.settings, "reasoning_section_outline_max_rows", 0) or 0) > 0
+        )
+
+    # --- 论文工具的总闸(find_sources / get_paper_cards / extract_from_sources) ---
+    def paper_tool_flags(
+        self, limits: "AskRetrievalLimits | None" = None,
+        spent: "frozenset[str]" = frozenset(),
+    ) -> Tuple[bool, bool, bool]:
+        """本轮是否提供 ``(find_sources, get_paper_cards, extract_from_sources)``。
+
+        与 `document_read_active` 同款单点判定:reflect prompt 的动作说明与用法段、
+        schema 的三个分支与 ``answer_layout`` 字段、``allowed_actions``、字段解析、
+        `_first_round_offered_actions`(经验行过滤)与三个执行体的第一道纵深防御
+        共读这一个结论。关闭态逐字节回到接入前。每个动作的条件缺一不可:
+
+        * 座位在场(``paper_tools`` 里对应的服务;只有 Ask 路径接)且枚举服务在场
+          (来源天花板由它算,`_paper_allowed`);
+        * 调用方策略位 ``allow_paper_tools``(knowhow 补全显式关掉);
+        * 各自的部署开关 ``REASONING_FIND_SOURCES_ENABLED`` /
+          ``REASONING_PAPER_CARDS_ENABLED`` / ``REASONING_EXTRACT_ENABLED``;
+        * 档位预算 > 0(``find_sources_calls_per_run`` / ``paper_card_reads_per_run`` /
+          ``extract_sources_per_run``;overview 档没有抽取);
+        * 不在 ``spent`` 里(本 run 已用完,或本 run 的来源天花板为空,见
+          `_paper_tools_spent`;``_reflect_round_kwargs`` 只在非空时传)。
+
+        ``limits`` 缺省取默认档,与 `document_read_active` 同口径。``getattr`` 读
+        settings:老用例的 settings 替身没有这三格(缺省按开处理,座位缺席已经关闸)。
+        """
+        tools = self.paper_tools
+        if tools is None or not self.allow_paper_tools or self.collection_enumeration is None:
+            return (False, False, False)
+        budget = limits if limits is not None else ask_retrieval_limits(
+            DEFAULT_RETRIEVAL_EFFORT)
+
+        def offered(action: str, switch: str, service: object, cap: str) -> bool:
+            return bool(
+                getattr(self.settings, switch, True) and service is not None
+                and int(getattr(budget, cap, 0) or 0) > 0 and action not in spent)
+
+        return (
+            offered(FIND_SOURCES_ACTION, "reasoning_find_sources_enabled",
+                    tools.finder, "find_sources_calls_per_run"),
+            offered(GET_PAPER_CARDS_ACTION, "reasoning_paper_cards_enabled",
+                    tools.cards, "paper_card_reads_per_run"),
+            offered(EXTRACT_FROM_SOURCES_ACTION, "reasoning_extract_enabled",
+                    tools.extraction, "extract_sources_per_run"),
         )
 
     def _kg_in_scope(self, notebook_id) -> bool:
@@ -5150,8 +5287,13 @@ class ReasoningRetriever:
                 *, plugin_actions: "Sequence[ReflectActionSpec]" = (),
                 limits: "AskRetrievalLimits | None" = None,
                 corpus_langs: "Optional[List[str]]" = None,
-                section_spent: "frozenset[str]" = frozenset()):
+                section_spent: "frozenset[str]" = frozenset(),
+                paper_spent: "frozenset[str]" = frozenset()):
         """规划后的轻量反思：判断材料是否齐备，或选择下一次检索。
+
+        ``paper_spent`` = 本轮不提供的论文工具(``_paper_tools_spent``:本 run 已用完
+        次数/篇数的,或来源天花板为空时三个都在),与 ``section_spent`` 同形、只在非空
+        时传;判据见 ``paper_tool_flags``。
 
         ``section_spent`` = 本轮不提供的文档内导航动作(``_reflect_round_kwargs``
         只在非空时传):本 run 已用完次数的,以及最后一轮的 ``browse_sections``(目录
@@ -5233,6 +5375,12 @@ class ReasoningRetriever:
         section_browse, section_read = self._section_actions_offered(
             section_nav, section_spent)
         section_policy = reasoning_action_policy(self.settings)
+        # 论文工具三把闸:prompt / schema / 白名单 / 解析共读一个结论;prompt 报的
+        # 每 run 额度与执行体 cap skip 报的是同一份档位预算(`limits`)。
+        find_sources, paper_cards, extract = self.paper_tool_flags(
+            limits, paper_spent)
+        paper_budget = limits if limits is not None else ask_retrieval_limits(
+            DEFAULT_RETRIEVAL_EFFORT)
         # 白名单从 collection_catalog import(唯一字面量定义点),prompt/schema/
         # 解析三处共用同一份,不各写一份副本。
         element_kinds = ENUMERABLE_ELEMENT_KINDS if enumeration else ()
@@ -5273,6 +5421,12 @@ class ReasoningRetriever:
                         section_policy.max_section_browses if section_browse else 0),
                     section_read_cap=(
                         section_policy.max_section_reads if section_read else 0),
+                    find_sources_cap=(
+                        paper_budget.find_sources_calls_per_run if find_sources else 0),
+                    paper_cards_cap=(
+                        paper_budget.paper_card_reads_per_run if paper_cards else 0),
+                    extract_cap=(
+                        paper_budget.extract_sources_per_run if extract else 0),
                 ),
             }]
             if self.untrusted_evidence:
@@ -5295,6 +5449,9 @@ class ReasoningRetriever:
                     section_nav=section_nav,
                     section_browse=section_browse,
                     section_read=section_read,
+                    find_sources=find_sources,
+                    paper_cards=paper_cards,
+                    extract=extract,
                 ),
                 timeout=self.settings.reasoning_timeout_seconds,
                 **({"candidates_summary": candidates_summary, "client": client}
@@ -5327,7 +5484,8 @@ class ReasoningRetriever:
                 outline=outline, consult_memory=consult_memory,
                 search_elements=element_search, ppr_retrieve=ppr_action,
                 section_nav=section_nav, section_browse=section_browse,
-                section_read=section_read,
+                section_read=section_read, find_sources=find_sources,
+                paper_cards=paper_cards, extract=extract,
             # 白名单条目与 prompt 行、schema 分支同源:三处都由
             # `project_reflect_actions` 这一个纯函数出,所以插件动作不可能出现
             # 「告诉了模型却调不动」或反过来的那种漂移。空元组 ⇒ 这里一个字节
@@ -5342,7 +5500,10 @@ class ReasoningRetriever:
                 # 不在白名单里的动作都抛错(下面那条 fail_closed 分支)。
                 return ReflectDecision(
                     next_action=action, withheld=True,
-                    reason=as_text(data.get("reason")))
+                    reason=as_text(data.get("reason")),
+                    # answer_layout 任何一轮都可以写,被摘掉动作的这一轮也算。
+                    answer_layout=(answer_layout_value(data)
+                                   if paper_cards or extract else ""))
             rejected_action = ""
             if action_rejected:
                 if self.fail_closed:
@@ -5517,6 +5678,11 @@ class ReasoningRetriever:
                 if section_read and isinstance(read_request, dict):
                     d.read_section_source = as_text(read_request.get("source"))
                     d.read_section_section = as_text(read_request.get("section"))
+            # 论文工具:与上面几个分支同形,闸关时连读都不读;answer_layout 随卡片/
+            # 抽取两把闸之一开着才读(规则在 `parse_paper_tool_arguments`)。
+            parse_paper_tool_arguments(
+                d, data, find_sources=find_sources, paper_cards=paper_cards,
+                extract=extract, enumerate_scope=enumerate_scope)
             if outline:
                 # 与 enumerate 分支同形:只在这一把闸打开时才看这个字段,关闭态
                 # 连读都不读(模型硬吐一份大纲也不会有任何影响)。夹取与丢弃的规则
@@ -5585,6 +5751,10 @@ class ReasoningRetriever:
                 if action == READ_SECTION_ACTION and not d.read_section_section:
                     raise ValueError(
                         "reasoning read_section action is missing section")
+                paper_missing = missing_paper_tool_argument(d, action)
+                if paper_missing:
+                    raise ValueError(
+                        f"reasoning {action} action is missing {paper_missing}")
                 # 插件动作的必填参数,与上面五条「缺参数」校验同形、同措辞
                 # (`reasoning <动作名> action is missing <参数名>`)。只有
                 # fail_closed 才在这里拦;非 fail_closed 留给 T3 的执行分支记
@@ -5614,7 +5784,7 @@ class ReasoningRetriever:
                     d.browse_sections_query,
                     d.read_section_source,
                     d.read_section_section,
-                ) + _plugin_text_arguments(
+                ) + paper_tool_text_fields(d) + _plugin_text_arguments(
                     plugin_spec, d.plugin_action_arguments)
                 if any(len(value) > 2000 for value in bounded_fields):
                     raise ValueError("reasoning reflection field is too long")
@@ -6525,6 +6695,7 @@ class ReasoningRetriever:
         """本 run reflect 提供的核心动作。闸值取 `reflect()` 现算的同一组判据,
         run 级三把(`kg_in_scope`/`outline_active`/`consult_memory_flag`)取
         `_reflect_round_kwargs` 传给它的同一份 state 值;全部零 I/O。"""
+        find_sources, paper_cards, extract = self.paper_tool_flags(state.enum_limits)
         return frozenset(core_reflect_actions(
             kg_actions=state.kg_in_scope,
             chunk_search=self.chunk_search_active(),
@@ -6537,6 +6708,7 @@ class ReasoningRetriever:
             section_nav=self.section_navigation_active(state.enum_limits),
             section_browse=state.action_policy.max_section_browses > 0,
             section_read=state.action_policy.max_section_reads > 0,
+            find_sources=find_sources, paper_cards=paper_cards, extract=extract,
         ))
 
     def _ppr_seed_offered(self) -> bool:
@@ -7384,6 +7556,349 @@ class ReasoningRetriever:
                      f"《{issued.get(item.source_id, item.source_title)}》,"
                      f"新增 {len(overview.id_map)} 段"),
             detail=_read_detail))
+
+    # --- 论文工具(规格 2026-10-28 §7.1):find_sources / get_paper_cards /
+    # extract_from_sources / answer_layout ---
+    #
+    # 三个服务都在**不持有** `retrieval_fanout_slot` 的情况下调用:槽位信号量不可
+    # 重入,卡片与抽取服务自己(及其工作线程)会取槽,fan-out 上限为 1 时会死锁;
+    # 两个服务都在入口拒绝持槽调用。服务抛出的请求错误(`FindSourcesError` /
+    # `FindSourcesCursorError` / `ExtractionRequestError`)与其余非取消异常一律落成
+    # 一条教学式 skip 加账目行,绝不让这一轮检索失败。
+    def _note_reflect_decision(self, state: "_ReasoningRunState", decision) -> None:
+        """reflect 返回之后、本轮分派之前:先检查取消,再记下本轮写下的
+        ``answer_layout``(任何一轮都可写、取最后一次;answer / sufficient 收尾轮不进
+        分派,也在这里记)。"""
+        raise_if_cancelled(self.cancel_event)
+        if decision.answer_layout:
+            state.answer_layout_requested = decision.answer_layout
+
+    @staticmethod
+    def _paper_ceiling_empty(notebook_id: str) -> bool:
+        """本 run 的来源天花板对活动库是空集(用户一篇都没勾):零 I/O。对等 run
+        没有主体库,不按锚点库判。"""
+        if subjectless_run_active():
+            return False
+        ceiling = scoped_source_ceiling(notebook_id)
+        return ceiling is not None and not ceiling
+
+    def _paper_tools_spent(self, state: "_ReasoningRunState") -> "frozenset[str]":
+        """本轮不再提供的论文工具:本 run 已用完档位额度的,或来源天花板为空时三个
+        全部。三个都没开时恒空(调用形状不变)。"""
+        if not any(self.paper_tool_flags(state.enum_limits)):
+            return frozenset()
+        if self._paper_ceiling_empty(state.notebook_id):
+            return frozenset(PAPER_TOOL_ACTIONS)
+        # 上限为 0 的不算「用完」(那由闸自己关),与 `_section_spent` 同一口径。
+        left = self._paper_budget_left(state)
+        return frozenset(
+            name for name in PAPER_TOOL_ACTIONS
+            if left[name] is not None and left[name] <= 0)
+
+    @staticmethod
+    def _paper_budget_left(state: "_ReasoningRunState") -> Dict[str, Optional[int]]:
+        """三个论文工具与卡片生成各自本 run 还剩多少(档位上限为 0 的为 None)。"""
+        budget = state.enum_limits
+
+        def left(cap: int, used: int) -> Optional[int]:
+            return None if cap <= 0 else max(0, cap - used)
+
+        return {
+            FIND_SOURCES_ACTION: left(
+                budget.find_sources_calls_per_run, state.find_sources_calls),
+            GET_PAPER_CARDS_ACTION: left(
+                budget.paper_card_reads_per_run, state.paper_card_reads),
+            EXTRACT_FROM_SOURCES_ACTION: left(
+                budget.extract_sources_per_run, state.extract_sources_used),
+            "generations": max(0, budget.paper_card_generations_per_run
+                               - state.paper_card_generations),
+        }
+
+    def _paper_allowed(self, state: "_ReasoningRunState") -> frozenset:
+        """本 run 的来源天花板 ``(属主库, source_id)``,首次需要时读一次:与
+        ``enumerate_sources`` / ``find_sources`` 同一来源集合
+        (``CollectionEnumerationService.source_scope_pairs``,同一份 run 判词)。"""
+        if state.paper_allowed is None:
+            state.paper_allowed = self.collection_enumeration.source_scope_pairs(
+                state.notebook_id, ceiling_binds=self._run_ceiling_binds())
+        return state.paper_allowed
+
+    @staticmethod
+    def _paper_has_results(state: "_ReasoningRunState") -> bool:
+        return (any(card_has_content(o) for o in state.paper_cards.values())
+                or any(extraction_value_count(o) for o in state.paper_extractions))
+
+    def _paper_skip(self, state: "_ReasoningRunState", summary: str, reason: str,
+                    note: str, **detail) -> None:
+        """论文工具的 skip:零命中写法(不写 ``result_ids``),教学措辞同时进账目。"""
+        state.paper_log.append(note)
+        state.record(TraceStep(step_type="skip", summary=summary,
+                               detail={"reason": reason, **detail}))
+
+    def _paper_tool_failed(self, state: "_ReasoningRunState", action: str,
+                           exc: Exception) -> None:
+        """服务抛出非取消、非请求错误的异常:严格调用方照抛,其余记 skip 继续。"""
+        if self.fail_closed:
+            raise exc
+        self._paper_skip(
+            state, "跳过论文工具(执行失败)", "paper_tool_error",
+            f"{action} 这次执行失败({type(exc).__name__}),可以换一个动作或直接作答",
+            action=action, error_type=type(exc).__name__)
+
+    def _paper_tools_ledger(self, state: "_ReasoningRunState") -> str:
+        """论文工具账目(``paper_tools_note``)加本 run 剩余额度;没用过任何论文工具、
+        也没写过 answer_layout 的 run 返回空串。"""
+        if not (state.paper_finds or state.paper_cards or state.paper_extractions
+                or state.paper_log or state.answer_layout_requested):
+            return ""
+        offer_find, offer_cards, offer_extract = self.paper_tool_flags(state.enum_limits)
+        left = self._paper_budget_left(state)
+        remaining: Dict[str, str] = {}
+        if offer_find:
+            remaining[FIND_SOURCES_ACTION] = f"{left[FIND_SOURCES_ACTION]} 次"
+        if offer_cards:
+            remaining[GET_PAPER_CARDS_ACTION] = (
+                f"{left[GET_PAPER_CARDS_ACTION]} 篇(其中最多再生成 {left['generations']} 次)")
+        if offer_extract:
+            remaining[EXTRACT_FROM_SOURCES_ACTION] = f"{left[EXTRACT_FROM_SOURCES_ACTION]} 篇"
+        return paper_tools_note(
+            finds=state.paper_finds, find_calls=len(state.paper_finds),
+            cards=state.paper_cards, extractions=state.paper_extractions,
+            log=state.paper_log, remaining=remaining,
+            layout_requested=state.answer_layout_requested,
+            has_results=self._paper_has_results(state))
+
+    def _resolved_paper_sources(self, state: "_ReasoningRunState", action: str,
+                                tokens) -> "Optional[tuple]":
+        """句柄 / source_id → 本 run 天花板内的 ``ResolvedSource`` 列表,与被拒的条目
+        一起返回;天花板读失败时记 skip 并返回 None。"""
+        try:
+            allowed = self._paper_allowed(state)
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - one action, not the run
+            self._paper_tool_failed(state, action, exc)
+            return None
+        resolved, rejected = resolve_source_tokens(tokens, state.paper_handles, allowed)
+        if rejected:
+            unknown = [r.token for r in rejected if r.reason == "unknown_handle"]
+            outside = [r.token for r in rejected if r.reason == "out_of_scope"]
+            parts = []
+            if unknown:
+                parts.append(f"句柄 {'、'.join(unknown)} 不是本次 find_sources 发过的号")
+            if outside:
+                parts.append(f"{'、'.join(outside)} 不在本次检索范围内(只能用 find_sources "
+                             "给的句柄或范围内文档的 source_id)")
+            state.paper_log.append(
+                f"{action} 有 {len(rejected)} 个来源没有受理:" + ";".join(parts))
+        return allowed, resolved, rejected
+
+    def _action_find_sources(self, state: "_ReasoningRunState", decision) -> None:
+        """reflect 的 `find_sources`:一页(20 篇)按主题排好序的文档,发放句柄。
+        翻页(cursor)与新检索同样计入本 run 的次数;请求错误记 skip 不计次。"""
+        if not self.paper_tool_flags(state.enum_limits, self._paper_tools_spent(state))[0]:
+            self._paper_skip(
+                state, "跳过文档级检索(本次检索不提供或额度已用完)",
+                "find_sources_unavailable",
+                "find_sources 本次不可用(本 run 的次数已用完或未提供),请用已有句柄继续或直接作答")
+            return
+        request = FindSourcesRequest(
+            query=decision.find_sources_query, terms=decision.find_sources_terms,
+            year_from=year_value(decision.find_sources_year_from),
+            year_to=year_value(decision.find_sources_year_to),
+            venue=decision.find_sources_venue, author=decision.find_sources_author,
+            kind=decision.find_sources_kind, scope=decision.find_sources_scope,
+            cursor=decision.find_sources_cursor, limit=FIND_SOURCES_PAGE_SIZE)
+        try:
+            result = self.paper_tools.finder.find(
+                state.notebook_id, request, ceiling_binds=self._run_ceiling_binds(),
+                cancel_event=self.cancel_event)
+        except FindSourcesCursorError as exc:
+            self._paper_skip(
+                state, "跳过文档级检索(翻页游标无效)", "find_sources_cursor_invalid",
+                f"find_sources.cursor 无效({exc}):翻页时只改 cursor、其余参数与上一次完全"
+                "相同;要换条件就清空 cursor 重新检索")
+            return
+        except FindSourcesError as exc:
+            self._paper_skip(
+                state, "跳过文档级检索(参数不合法)", "find_sources_invalid",
+                f"find_sources 参数不合法:{exc}")
+            return
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - one action, not the run
+            self._paper_tool_failed(state, FIND_SOURCES_ACTION, exc)
+            return
+        state.find_sources_calls += 1
+        handles = []
+        for item in result.items:
+            handle, issued = state.paper_handles.issue(
+                item.notebook_id, item.source_id, item.title)
+            handles.append(handle)
+            state.paper_progress += int(issued)
+        state.paper_finds.append(FoundSourcesOutcome(request, result, tuple(handles)))
+        state.record(TraceStep(
+            step_type="find_documents",
+            summary=(("文档级检索(翻页)" if request.cursor else "文档级检索")
+                     + f":强相关 {result.strong} 篇、相关 {result.related} 篇"),
+            # ``listed`` 不是轨迹计数键:列出文档与列目录一样不算证据命中/零命中。
+            detail={"query": _section_text(request.query),
+                    "terms": [_section_text(t) for t in request.terms],
+                    "kind": request.kind, "listed": len(result.items),
+                    "strong": result.strong, "related": result.related,
+                    "scope_total": result.filtered_scope_total,
+                    "lexical_complete": result.lexical_complete,
+                    "semantic_recall_capped": result.semantic_recall_capped,
+                    "has_more": bool(result.next_cursor)}))
+
+    def _action_get_paper_cards(self, state: "_ReasoningRunState", decision) -> None:
+        """reflect 的 `get_paper_cards`:读缓存的论文卡片,缺失或过期的在本 run 的
+        生成额度内懒生成。每篇来源先按本 run 的来源天花板校验;已有最终结果的篇不重复
+        请求;单次 ≤10 篇、本 run 的读取篇数与生成次数按档位计。"""
+        if not self.paper_tool_flags(state.enum_limits, self._paper_tools_spent(state))[1]:
+            self._paper_skip(
+                state, "跳过论文卡片(本次检索不提供或额度已用完)", "paper_cards_unavailable",
+                "get_paper_cards 本次不可用(本 run 的篇数已用完或未提供)")
+            return
+        checked = self._resolved_paper_sources(
+            state, GET_PAPER_CARDS_ACTION, decision.paper_card_sources)
+        if checked is None:
+            return
+        allowed, resolved, rejected = checked
+        final = ("ready", "generated", "not_paper", "failed", "not_found")
+        held = [r for r in resolved if r.key in state.paper_cards
+                and state.paper_cards[r.key].result.status in final]
+        wanted = [r for r in resolved if r not in held]
+        take = min(state.action_policy.max_paper_cards_per_call,
+                   state.enum_limits.paper_card_reads_per_run - state.paper_card_reads)
+        over, wanted = wanted[take:], wanted[:take]
+        if held:
+            state.paper_log.append(
+                "get_paper_cards:" + "、".join(r.label for r in held) + " 已有结果,未重复请求")
+        if over:
+            state.paper_log.append(
+                f"get_paper_cards 单次最多 {state.action_policy.max_paper_cards_per_call} 篇、"
+                "本 run 篇数有限:" + "、".join(r.label for r in over) + " 这次没有请求")
+        if not wanted:
+            reason = ("paper_cards_out_of_scope" if rejected and not resolved
+                      else "paper_cards_nothing_to_read")
+            self._paper_skip(
+                state, "跳过论文卡片(没有可读取的来源)", reason,
+                "get_paper_cards 这次没有要读的来源:sources 填 find_sources 给的句柄(p1…)",
+                rejected=len(rejected))
+            return
+        generate_left = max(0, state.enum_limits.paper_card_generations_per_run
+                            - state.paper_card_generations)
+        try:
+            results = self.paper_tools.cards.get_cards(
+                [r.key for r in wanted], allowed=allowed, generate_limit=generate_left,
+                cancel_event=self.cancel_event, actor_id=self.profile_owner_id)
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - one action, not the run
+            self._paper_tool_failed(state, GET_PAPER_CARDS_ACTION, exc)
+            return
+        state.paper_card_reads += len(wanted)
+        state.paper_card_generations += sum(int(getattr(r, "calls", 0) or 0) for r in results)
+        by_key = {r.key: r for r in wanted}
+        statuses: Dict[str, int] = {}
+        anchor_ids: List[str] = []
+        for result in results:
+            source = by_key[(result.notebook_id, result.source_id)]
+            outcome = PaperCardOutcome(source.handle, source.title, result)
+            before = state.paper_cards.get(source.key)
+            if card_has_content(outcome) and (before is None or not card_has_content(before)):
+                state.paper_progress += 1
+            # 键已在时原位替换(插入序 = 首次请求序)。
+            state.paper_cards[source.key] = outcome
+            statuses[result.status] = statuses.get(result.status, 0) + 1
+            if card_has_content(outcome):
+                anchor_ids.extend(card_anchor_ids(result.card))
+        ids, truncated = _capped_result_ids(list(dict.fromkeys(anchor_ids)))
+        found = statuses.get("ready", 0) + statuses.get("generated", 0)
+        detail = {"requested": len(wanted), "found": found,
+                  "generated": statuses.get("generated", 0),
+                  "deferred": statuses.get("deferred", 0),
+                  "statuses": statuses, "result_ids": ids}
+        if truncated:
+            detail["result_ids_truncated"] = True
+        state.record(TraceStep(
+            step_type="paper_cards",
+            summary=(f"读取论文卡片:{len(wanted)} 篇,得到 {found} 张"
+                     + (f"(新生成 {statuses['generated']} 张)" if statuses.get("generated") else "")),
+            detail=detail))
+
+    def _action_extract_from_sources(self, state: "_ReasoningRunState", decision) -> None:
+        """reflect 的 `extract_from_sources`:对每篇来源抽取至多 4 个临时字段(不缓存、
+        不看是否论文)。来源先按本 run 的来源天花板校验;单次 ≤8 篇、本 run 的篇数按
+        档位计(真正发起了模型调用的篇才计)。"""
+        if not self.paper_tool_flags(state.enum_limits, self._paper_tools_spent(state))[2]:
+            self._paper_skip(
+                state, "跳过逐篇提取(本次检索不提供或额度已用完)", "extract_unavailable",
+                "extract_from_sources 本次不可用(本 run 的篇数已用完或未提供)")
+            return
+        try:
+            fields = normalize_fields(decision.extract_fields)
+        except ExtractionRequestError as exc:
+            self._paper_skip(state, "跳过逐篇提取(字段不合法)", "extract_invalid",
+                             f"extract_from_sources.fields 不合法:{exc}")
+            return
+        checked = self._resolved_paper_sources(
+            state, EXTRACT_FROM_SOURCES_ACTION, decision.extract_sources)
+        if checked is None:
+            return
+        allowed, resolved, rejected = checked
+        per_call = min(state.action_policy.max_extract_sources_per_call, EXTRACT_MAX_SOURCES)
+        over, batch = resolved[per_call:], resolved[:per_call]
+        if over:
+            state.paper_log.append(
+                f"extract_from_sources 单次最多 {per_call} 篇:"
+                + "、".join(r.label for r in over) + " 这次没有抽取")
+        if not batch:
+            reason = "extract_out_of_scope" if rejected else "extract_no_sources"
+            self._paper_skip(
+                state, "跳过逐篇提取(没有可提取的来源)", reason,
+                "extract_from_sources 这次没有可抽取的来源:sources 填 find_sources 给的句柄(p1…)",
+                rejected=len(rejected))
+            return
+        left = state.enum_limits.extract_sources_per_run - state.extract_sources_used
+        try:
+            results = self.paper_tools.extraction.extract(
+                [r.key for r in batch], fields, allowed=allowed,
+                limit=max(0, min(len(batch), left)),
+                cancel_event=self.cancel_event, actor_id=self.profile_owner_id)
+        except ExtractionRequestError as exc:
+            self._paper_skip(state, "跳过逐篇提取(请求不合法)", "extract_invalid",
+                             f"extract_from_sources 请求不合法:{exc}")
+            return
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - one action, not the run
+            self._paper_tool_failed(state, EXTRACT_FROM_SOURCES_ACTION, exc)
+            return
+        by_key = {r.key: r for r in batch}
+        items = tuple(
+            PaperExtractionItem(by_key[(res.notebook_id, res.source_id)].handle,
+                                by_key[(res.notebook_id, res.source_id)].title, res)
+            for res in results)
+        state.extract_sources_used += sum(
+            1 for res in results
+            if res.status != "not_found" and not (res.status == "deferred" and res.reason == "limit"))
+        outcome = PaperExtractionOutcome(tuple(fields), items)
+        state.paper_extractions.append(outcome)
+        found = extraction_value_count(outcome)
+        state.paper_progress += found
+        ids, truncated = _capped_result_ids(list(dict.fromkeys(
+            value.element_id for res in results for value in res.fields
+            if value.value and value.element_id)))
+        detail = {"sources": len(batch), "fields": [_section_text(f) for f in fields],
+                  "found": found, "result_ids": ids}
+        if truncated:
+            detail["result_ids_truncated"] = True
+        state.record(TraceStep(
+            step_type="extract_fields",
+            summary=f"逐篇提取 {len(fields)} 个字段:{len(batch)} 篇,提取到 {found} 个值",
+            detail=detail))
 
     # --- 文档内导航(§3.5/§3.7–§3.9):browse_sections / read_section / 线索块 ---
     def _not_a_name_note(self, state: "_ReasoningRunState", term: str) -> str:
@@ -8971,7 +9486,7 @@ class ReasoningRetriever:
             summary = self._add_plugin_reflect_context(
                 state, summary, reflect_kwargs, state.no_progress, state.stale, state.steps < state.max_steps)
             decision = self.reflect(state.question, summary, **reflect_kwargs)
-            raise_if_cancelled(self.cancel_event)
+            self._note_reflect_decision(state, decision)
             # 这一轮的大纲提交算不算「溢出纠错」:提前算与原地算等价(四个输入只由
             # `_apply_outline_update` 改),而折叠一份收尾载荷前要先用它应用大纲。
             overflow_repair_submission = terminal_overflow_repair or (
@@ -9040,7 +9555,7 @@ class ReasoningRetriever:
                 break
             before = (
                 len(state.collected) + len(state.elements) + len(state.chunks) + len(state.chains)
-                + state.enum_rows_used + state.document_read_elements_used
+                + state.enum_rows_used + state.document_read_elements_used + state.paper_progress
             )
             if not self._dispatch_reflect_action(
                 state, decision,
@@ -9052,7 +9567,7 @@ class ReasoningRetriever:
             # 并进这把尺(见证失败时它不动,那一轮仍如实算作无进展)。
             state.no_progress = (
                 len(state.collected) + len(state.elements) + len(state.chunks) + len(state.chains)
-                + state.enum_rows_used + state.document_read_elements_used
+                + state.enum_rows_used + state.document_read_elements_used + state.paper_progress
             ) == before
             # consult 建议、插件外部材料、章节目录:送达了但不带库内新证据,stale 持平。
             if not (state.no_progress and (
@@ -9109,6 +9624,9 @@ class ReasoningRetriever:
             state.roster_numbering.sync(state.enum_chains).issued,
             element_search=element_search_offered(self.retrieval),
             section_log=state.section_log)
+        # 论文工具账目(规格 §7.1):没用过这些工具、也没写过 answer_layout 的 run
+        # 一个字节都不加。
+        summary += self._paper_tools_ledger(state)
         # 未执行的已确认方向回喂 reflect(镜像上面几份账目):模型据此知道哪些
         # 用户确认过的方向还没跑过,可以优先用 add_subquery 把它们补上,而不是
         # 另起炉灶猜一个新角度。每轮按 attempted 现算 —— 模型真把某条补上了,
@@ -9294,6 +9812,10 @@ class ReasoningRetriever:
         if section_spent:
             # 有才传:没用完任何一个时调用形状与接入前相同。
             reflect_kwargs["section_spent"] = section_spent
+        paper_spent = self._paper_tools_spent(state)
+        if paper_spent:
+            # 同上:论文工具没用完也没被天花板关掉时调用形状不变。
+            reflect_kwargs["paper_spent"] = paper_spent
         return reflect_kwargs
 
     def _dispatch_reflect_action(
@@ -9356,6 +9878,12 @@ class ReasoningRetriever:
             self._action_browse_sections(state, decision)
         elif decision.next_action == READ_SECTION_ACTION:
             self._action_read_section(state, decision)
+        elif decision.next_action == FIND_SOURCES_ACTION:
+            self._action_find_sources(state, decision)
+        elif decision.next_action == GET_PAPER_CARDS_ACTION:
+            self._action_get_paper_cards(state, decision)
+        elif decision.next_action == EXTRACT_FROM_SOURCES_ACTION:
+            self._action_extract_from_sources(state, decision)
         elif decision.next_action == "ppr_retrieve":
             self._action_ppr_retrieve(state, decision)
         elif decision.next_action == "exact_lookup":
@@ -10228,6 +10756,15 @@ class ReasoningRetriever:
                     raise
                 except Exception:  # noqa: BLE001 — 见上
                     pass
+        # 论文表只在确有卡片或抽取值时成立;否则回落正文,并在轨迹上如实记一步。
+        answer_layout, layout_fallback = resolve_answer_layout(
+            state.answer_layout_requested, self._paper_has_results(state))
+        if layout_fallback:
+            state.record(TraceStep(
+                step_type="skip",
+                summary="未生成论文表(本次没有取到论文卡片或提取结果),按正文作答",
+                detail={"reason": "answer_layout_fallback",
+                        "requested": state.answer_layout_requested}))
         from app.services.retrieval_baseline import (
             build_retrieval_baseline_manifest,
         )
@@ -10251,6 +10788,10 @@ class ReasoningRetriever:
             collection_map_text=state.collection_map_text, outline=state.outline,
             outline_evidence=outline_evidence,
             external_evidence=list(state.external_evidence),
+            answer_layout=answer_layout, answer_layout_fallback=layout_fallback,
+            paper_finds=list(state.paper_finds),
+            paper_cards=list(state.paper_cards.values()),
+            paper_extractions=list(state.paper_extractions),
             baseline_manifest=baseline_manifest,
             # `failed` 是**稀疏**键:只有检索本身抛过异常且未被后续成功清除的
             # 查询才带它——常规行形状逐字不变(reflect 回喂/trace 消费方按具名

@@ -1308,6 +1308,16 @@ class Settings(BaseSettings):
     # 消费者,逐步推理不提供按篇取样。
     reasoning_document_read_enabled: bool = Field(
         True, validation_alias="REASONING_DOCUMENT_READ_ENABLED")
+    # 论文工具三个 reflect 动作(规格 2026-10-28 §7.1)各自的总开关:文档级检索
+    # find_sources、论文卡片 get_paper_cards、逐篇抽取 extract_from_sources。关掉即该
+    # 动作不进 prompt/schema/allowed_actions 三处;卡片与抽取都关时 answer_layout
+    # 字段也不出现。每次运行的次数/篇数按检索档位(AskRetrievalLimits)计。
+    reasoning_find_sources_enabled: bool = Field(
+        True, validation_alias="REASONING_FIND_SOURCES_ENABLED")
+    reasoning_paper_cards_enabled: bool = Field(
+        True, validation_alias="REASONING_PAPER_CARDS_ENABLED")
+    reasoning_extract_enabled: bool = Field(
+        True, validation_alias="REASONING_EXTRACT_ENABLED")
     # 逐步推理的大纲便签(reflect 动作 update_outline)总开关。它**另外**受档位
     # 约束:只有用户把检索档位选到「穷尽」时才提供(设计文档 §3.1,用户拍板),
     # 因为按节合成的成本要由用户显式选择来承担。关掉即两处都回到接入前:prompt

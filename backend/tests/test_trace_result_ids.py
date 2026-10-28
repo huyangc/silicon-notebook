@@ -26,6 +26,8 @@ reasoning_retrieval.py 的候选池汇总 "answer" 步,以及 ``step_limit`` 截
   ⑧ exact_lookup 动作步  ⑨ 无图首轮的原文播种  ⑩ search_chunks 动作步
   ⑪ read_document 动作步(PR-A;见证失败也是零命中的 I/O 步,不是 skip)
   ⑫ read_section 动作步(文档内导航;browse_sections 列目录不产证据,不写这把键)
+  ⑬ paper_cards / ⑭ extract_fields 动作步(论文工具;find_documents 列文档不产证据,
+  不写这把键)
 外加 ask_service.py 的 synthesis 步(``anchor_evidence_ids``)。
 """
 from __future__ import annotations
@@ -872,3 +874,47 @@ def test_read_section_step_carries_result_ids_and_browse_and_skips_do_not(
     skip = next(t for t in result.trace if t.step_type == "skip"
                 and t.detail.get("reason") == "section_not_surfaced")
     assert "result_ids" not in skip.detail
+
+
+def test_paper_tool_steps_write_result_ids_and_the_document_list_does_not(
+    tmp_path, monkeypatch,
+):
+    """⑬ paper_cards / ⑭ extract_fields(论文工具,规格 2026-10-28 §7.1):卡片引用的
+    元素与抽到的值引用的元素进 ``result_ids``;find_documents 是一页排好序的文档(不是
+    证据),与 browse_sections 一样不写这把键;拒收的 skip 也不写。"""
+    from tests.paper_topics_testkit import sqlite_corpus
+    from tests.test_reasoning_paper_tools import (
+        _cards,
+        _extract,
+        _find,
+        _found,
+        _RecordingLLM,
+        _result,
+        _run,
+        _stub_retriever,
+        _StubCards,
+        _StubExtraction,
+        _StubFinder,
+    )
+
+    corpus = sqlite_corpus(tmp_path, monkeypatch)
+    repo, nb, seeded = next(corpus)
+    try:
+        sid = seeded["det-01"]
+        llm = _RecordingLLM([
+            _find(terms=["detector"]), _cards("p1"), _cards("not-in-scope"),
+            _extract(["p1"], ["COCO AP"]),
+        ])
+        retriever = _stub_retriever(
+            repo, llm, finder=_StubFinder(_result([_found(nb, sid, "Det")])),
+            cards=_StubCards(), extraction=_StubExtraction())
+        result = _run(retriever, nb)
+    finally:
+        corpus.close()
+    by_type = {t.step_type: t for t in result.trace}
+    assert "result_ids" not in by_type["find_documents"].detail
+    assert by_type["paper_cards"].detail["result_ids"] == [f"el-{sid}"]
+    assert by_type["extract_fields"].detail["result_ids"] == [f"el-{sid}"]
+    refused = next(t for t in result.trace if t.step_type == "skip"
+                   and t.detail.get("reason") == "paper_cards_out_of_scope")
+    assert "result_ids" not in refused.detail

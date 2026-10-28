@@ -1715,6 +1715,30 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/eval/find_sources_calibrate.py",
+        "scope": "<module>._attach_titles",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/eval/find_sources_calibrate.py",
+        "scope": "<module>.main",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/eval/find_sources_calibrate.py",
+        "scope": "<module>.source_excerpt",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/eval/find_sources_calibrate.py",
+        "scope": "<module>.wide_open_finder",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/services/knowhow/api.py",
         "scope": "<module>.build_projector",
         "target": "_runtime"
@@ -3871,6 +3895,12 @@
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>._followup_source_scope",
+        "target": "all_visible_source_ids"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/eval/find_sources_calibrate.py",
+        "scope": "<module>.build_candidates",
         "target": "all_visible_source_ids"
       }
     ],
@@ -9164,6 +9194,12 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/eval/find_sources_calibrate.py",
+        "scope": "<module>.wide_open_finder",
+        "target": "retrieval"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/eval/retrieval_metrics.py",
         "scope": "<module>.run_recall",
         "target": "retrieval"
@@ -9628,6 +9664,12 @@
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>.update_report_outline",
+        "target": "settings"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/eval/find_sources_calibrate.py",
+        "scope": "<module>.wide_open_finder",
         "target": "settings"
       },
       {

@@ -664,6 +664,10 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.generate_report', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.public_report_route', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.backfill_paper_metadata', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/eval/find_sources_calibrate.py', scope='<module>._attach_titles', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/eval/find_sources_calibrate.py', scope='<module>.main', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/eval/find_sources_calibrate.py', scope='<module>.source_excerpt', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/eval/find_sources_calibrate.py', scope='<module>.wide_open_finder', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.build_projector', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.complete_row', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.fill_missing_knowhow_chunk_vectors', kind='attribute', target='_runtime'),
@@ -1121,6 +1125,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.get_admin_user_notebook_source', kind='attribute', target='all_visible_source_ids'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._validate_source_scope', kind='attribute', target='all_visible_source_ids'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._followup_source_scope', kind='attribute', target='all_visible_source_ids'),
+            ConsumerSite(path='backend/app/eval/find_sources_calibrate.py', scope='<module>.build_candidates', kind='attribute', target='all_visible_source_ids'),
         ),
         patches=(
         ),
@@ -3119,6 +3124,7 @@ SURFACE_MEMBERS = (
         owner='RetrievalService',
         kind='property',
         consumers=(
+            ConsumerSite(path='backend/app/eval/find_sources_calibrate.py', scope='<module>.wide_open_finder', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/eval/retrieval_metrics.py', scope='<module>.run_recall', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._embed_query', kind='attribute', target='retrieval'),
@@ -3346,6 +3352,7 @@ SURFACE_MEMBERS = (
         kind='instance_attribute',
         consumers=(
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.update_report_outline', kind='attribute', target='settings'),
+            ConsumerSite(path='backend/app/eval/find_sources_calibrate.py', scope='<module>.wide_open_finder', kind='attribute', target='settings'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all', kind='attribute', target='settings'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_kg', kind='attribute', target='settings'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_question_index', kind='attribute', target='settings'),

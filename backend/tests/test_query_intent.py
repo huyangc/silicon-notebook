@@ -315,6 +315,12 @@ def test_ask_retrieval_threshold_table_is_complete_monotonic_and_exact():
     assert [row.enum_page_size for row in limits] == [50, 50, 50, 50, 50]
     assert [row.enum_pages_per_run for row in limits] == [2, 4, 6, 8, 12]
     assert [row.enum_rows_per_run for row in limits] == [100, 200, 300, 400, 600]
+    # 论文工具(规格 2026-10-28 §8):次数/篇数随档位只增不减;overview 不提供抽取。
+    assert [row.find_sources_calls_per_run for row in limits] == [1, 2, 3, 3, 4]
+    assert [row.paper_card_reads_per_run for row in limits] == [6, 12, 20, 30, 40]
+    assert [row.paper_card_generations_per_run for row in limits] == [3, 6, 10, 16, 24]
+    assert [row.extract_sources_per_run for row in limits] == [0, 6, 8, 12, 16]
+    assert [row.paper_table_rows for row in limits] == [6, 12, 20, 30, 40]
 
 
 def test_generic_reasoning_question_requires_clarification_before_retrieval():

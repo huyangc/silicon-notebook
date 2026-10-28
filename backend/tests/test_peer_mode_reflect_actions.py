@@ -486,7 +486,8 @@ def test_core_action_ids_are_every_gate_open():
     every = core_reflect_actions(
         kg_actions=True, chunk_search=True, enumeration=True, read_document=True,
         outline=True, consult_memory=True, search_elements=True,
-        ppr_retrieve=True, section_nav=True)
+        ppr_retrieve=True, section_nav=True, find_sources=True,
+        paper_cards=True, extract=True)
     assert len(every) == len(set(every))
     assert frozenset(every) == CORE_REFLECT_ACTION_IDS
     for word in RETRIEVAL_ACTIONS:

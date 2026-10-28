@@ -183,3 +183,17 @@ def test_the_enumerate_wildcard_is_offered_by_either_listing_action():
     assert not experience_action_offered("enumerate", frozenset({"answer"}))
     assert experience_action_offered("retrieve", frozenset({"add_subquery"}))
     assert not experience_action_offered("ppr", frozenset({"add_subquery"}))
+
+
+def test_paper_tool_experience_rows_follow_their_own_gates():
+    """论文工具的三个词(轨迹步类型)各自折回自己的动作 id:闸开才推荐,闸关不渲染。"""
+    for word, gate in (("find_documents", "find_sources"),
+                       ("paper_cards", "paper_cards"),
+                       ("extract_fields", "extract")):
+        base = dict(kg_actions=False, chunk_search=True, enumeration=False,
+                    read_document=False, outline=False, consult_memory=False,
+                    search_elements=True, ppr_retrieve=False, section_nav=False)
+        offered = frozenset(core_reflect_actions(**base, **{gate: True}))
+        closed = frozenset(core_reflect_actions(**base))
+        assert experience_action_offered(word, offered)
+        assert not experience_action_offered(word, closed)

@@ -527,6 +527,9 @@ export const EXPERIENCE_ACTION_LABELS: Readonly<Record<string, string>> = {
   read_document: "整篇取样",
   browse_sections: "章节目录",
   read_section: "按章节读取",
+  find_documents: "按主题找文档",
+  paper_cards: "论文卡片",
+  extract_fields: "逐篇提取",
 };
 
 /**
