@@ -97,3 +97,62 @@ def test_pg_publish_skips_a_canonical_whose_row_another_transaction_holds(
     assert (again.status, again.model_calls, again.rewritten) == ("done", 0, 1)
     assert new.calls == 2
     assert cases._texts(repo, nb)["MOSFET"] == "model-new::MOSFET"
+
+
+def test_pg_a_canonical_held_only_in_part_is_not_written_in_part(repo, postgres_settings):
+    """Three MOSFET members, the third quoting the first word for word.
+    Another transaction holds the third member's row: what the publish holds
+    still yields the same input (the duplicate quote adds nothing), so only the
+    unlocked row count in the same transaction can tell the canonical was not
+    held whole. MOSFET is skipped as moved -- none of its rows written -- and
+    cascode is written; the rerun finishes MOSFET with no model call."""
+    nb = cases.build_notebook(repo)
+    cases._add_source(repo, nb, "s3")
+    repo.store_kg(nb, "s3", [cases._concept("a3", "Mosfet", "mosfet is a transistor")], [])
+    repo._runtime.knowledge_lifecycle.rebuild_unified_kg(nb, force=True)
+    (mosfet,) = [name for name in cases.descriptions(repo, nb) if name.lower() == "mosfet"]
+    with repo._runtime.database.connect() as db:
+        row = db.execute(
+            "SELECT cc.id FROM concept_clusters cc JOIN knowledge_objects k "
+            "ON k.id=cc.member_object_id WHERE cc.notebook_id=%s AND k.source_id='s3' "
+            "AND cc.generation=(SELECT cluster_generation FROM unified_kg_state "
+            "WHERE notebook_id=%s)", (nb, nb)).fetchone()
+        members = db.execute(
+            "SELECT COUNT(*) AS n FROM concept_clusters WHERE notebook_id=%s "
+            "AND canonical_name=%s AND generation=(SELECT cluster_generation "
+            "FROM unified_kg_state WHERE notebook_id=%s)", (nb, mosfet, nb)).fetchone()["n"]
+    assert row is not None and members == 3
+    new = cases.DescModel("model-new")
+    bind_chat_client(repo, cases.WORKLOAD, new)
+    with psycopg.connect(postgres_settings.database_url) as holder:
+        holder.execute("SELECT id FROM concept_clusters WHERE id=%s FOR UPDATE",
+                       (row["id"],)).fetchone()
+        report = cases.rewrite(repo, nb)
+        holder.rollback()
+    assert (report.status, report.rewritten, report.moved) == ("incomplete", 1, 1)
+    assert cases._texts(repo, nb)[mosfet] == f"model-old::{mosfet}"  # no row of it written
+    assert cases._texts(repo, nb)["cascode"] == "model-new::cascode"
+    again = cases.rewrite(repo, nb)
+    assert (again.status, again.model_calls, again.rewritten) == ("done", 0, 1)
+    assert cases._texts(repo, nb)[mosfet] == f"model-new::{mosfet}"
+
+
+def test_pg_pages_are_bounded_by_rows_and_drop_the_rebuild_checkpoint_once(repo, monkeypatch):
+    cases.assert_pages_are_bounded_by_rows_and_drop_the_rebuild_checkpoint_once(
+        repo, monkeypatch)
+
+
+def test_pg_hub_canonicals_are_written_in_batches(repo, monkeypatch):
+    cases.assert_hub_canonicals_are_written_in_batches(repo, monkeypatch)
+
+
+def test_pg_a_hub_stops_when_the_state_moves_after_its_verification(repo, monkeypatch):
+    cases.assert_a_hub_stops_when_the_state_moves_after_its_verification(repo, monkeypatch)
+
+
+def test_pg_kg_delete_drops_the_staged_texts_only(repo):
+    cases.assert_kg_delete_drops_the_staged_texts_only(repo)
+
+
+def test_pg_a_completed_notebook_is_answered_from_its_record(repo):
+    cases.assert_a_completed_notebook_is_answered_from_its_record(repo)

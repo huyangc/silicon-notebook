@@ -104,10 +104,29 @@ def test_cli_rewrites_resumes_and_reports_exit_status(repo, monkeypatch, capsys)
     assert cases._texts(repo, nb)["cascode"] == "model-new::cascode"
 
 
-def test_cli_interrupt_exits_130_and_the_rerun_continues(repo, monkeypatch, capsys):
+def test_cli_interrupt_exits_130_at_once_and_the_rerun_continues(repo, monkeypatch, capsys):
+    """Ctrl-C leaves through ``_hard_exit`` (``os._exit``): neither the
+    repository close nor interpreter shutdown, both of which wait for model
+    calls still in flight, runs first."""
+    from app.scripts import rewrite_concept_descriptions
+
+    exits = []
+
+    def hard_exit(code):
+        exits.append((code, closed[:]))
+        raise SystemExit(code)
+
+    closed = []
+    monkeypatch.setattr(rewrite_concept_descriptions, "_hard_exit", hard_exit)
     nb = cases.build_notebook(repo)
     cases.bind_chat_client(repo, cases.WORKLOAD, cases.DescModel("model-new", interrupt_after=1))
-    assert _cli(repo, monkeypatch, nb) == 130
+    from app.services import maintenance_cli
+
+    monkeypatch.setattr(repo, "close", lambda: closed.append(True))
+    monkeypatch.setattr(maintenance_cli, "create_repository", lambda _settings: repo)
+    with pytest.raises(SystemExit):
+        rewrite_concept_descriptions.main([nb])
+    assert exits == [(130, [])]  # before the repository close
     assert "run the same command again" in capsys.readouterr().err
     resumed = cases.DescModel("model-new")
     cases.bind_chat_client(repo, cases.WORKLOAD, resumed)
@@ -173,3 +192,56 @@ def test_rewrite_computes_the_rebuild_signature_on_messy_quotes(repo):
     repo._runtime.knowledge_lifecycle.rebuild_unified_kg(nb, force=True)
     assert new.calls == 1
     assert cases._texts(repo, nb)[name] == f"model-new::{name}"
+
+
+# ------------------------------------------------- review follow-ups (2026-10-28)
+def test_pages_are_bounded_by_rows_and_drop_the_rebuild_checkpoint_once(repo, monkeypatch):
+    cases.assert_pages_are_bounded_by_rows_and_drop_the_rebuild_checkpoint_once(
+        repo, monkeypatch)
+
+
+def test_hub_canonicals_are_written_in_batches(repo, monkeypatch):
+    cases.assert_hub_canonicals_are_written_in_batches(repo, monkeypatch)
+
+
+def test_a_hub_stops_when_the_state_moves_after_its_verification(repo, monkeypatch):
+    cases.assert_a_hub_stops_when_the_state_moves_after_its_verification(repo, monkeypatch)
+
+
+def test_kg_delete_drops_the_staged_texts_only(repo):
+    cases.assert_kg_delete_drops_the_staged_texts_only(repo)
+
+
+def test_a_completed_notebook_is_answered_from_its_record(repo):
+    cases.assert_a_completed_notebook_is_answered_from_its_record(repo)
+
+
+def test_an_interrupt_does_not_wait_for_calls_in_flight(repo):
+    cases.assert_an_interrupt_does_not_wait_for_calls_in_flight(repo)
+
+
+def test_cli_a_database_error_ends_one_notebook_and_the_run_goes_on(repo, monkeypatch, capsys):
+    """A lock / statement timeout or a deadlock inside one notebook: that
+    notebook reports ``error`` with the class name, the next one runs, the
+    summary line still prints, and the exit status is the incomplete one."""
+    first = cases.build_notebook(repo, "first", prefix="a-")
+    second = cases.build_notebook(repo, "second", prefix="b-")
+    cases.bind_chat_client(repo, cases.WORKLOAD, cases.DescModel("model-new"))
+    lifecycle = repo._runtime.knowledge_lifecycle
+    real = lifecycle.rewrite_concept_descriptions
+
+    class LockNotAvailable(Exception):
+        pass
+
+    def flaky(notebook_id, **kwargs):
+        if notebook_id == first:
+            raise LockNotAvailable("canceling statement due to lock timeout on K-mosfet")
+        return real(notebook_id, **kwargs)
+
+    monkeypatch.setattr(lifecycle, "rewrite_concept_descriptions", flaky)
+    assert _cli(repo, monkeypatch, "--all") == 1
+    out = capsys.readouterr().out
+    assert f'"notebook_id": "{first}", "status": "error", "error": "LockNotAvailable"' in out
+    assert "lock timeout" not in out and "mosfet" not in out.lower()
+    assert "rewrite-descriptions done" in out and f'"incomplete_notebooks": ["{first}"]' in out
+    assert cases._texts(repo, second)["MOSFET"] == "model-new::MOSFET"

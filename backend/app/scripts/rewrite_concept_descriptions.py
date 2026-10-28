@@ -18,20 +18,27 @@
   (与「刷新图谱」的单飞同一把);有重建在跑时本库报 busy,稍后重跑即可。
 
 退出码:0 完成(或 dry run);1 未完成(有失败、被 --limit 截断、发布时输入已变化、
-有重建在跑),重跑即可;2 参数错误、笔记本不存在、描述阶段关闭或未绑定
+有重建在跑,或某个库遇到数据库异常——锁超时、语句超时、死锁等,该库记 ``error`` 与异常
+类名后接着处理下一个库),重跑即可;2 参数错误、笔记本不存在、描述阶段关闭或未绑定
 ``kg_concept_description`` 模型;3 库不在本构建的 schema 版本(本命令从不迁移);
-130 被中断。运维手册:``docs/operations_zh.md`` 的「换描述模型或提示词后重写概念描述」。
+130 被中断(已返回的结果先暂存,不等在途的模型调用,进程立即退出)。
+运维手册:``docs/operations_zh.md`` 的「换描述模型或提示词后重写概念描述」。
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import List, Optional, Sequence
 
 from app.core.config import get_settings
 from app.services.kg.concept_description_rewrite import ConceptDescriptionRewriteUnavailable
 from app.services.maintenance_cli import MaintenanceCliError, open_cli_repository
+
+#: How an interrupted run leaves: at once, without joining the model calls in
+#: flight or closing the provider (both wait for those calls). Tests replace it.
+_hard_exit = os._exit
 
 _TOTAL_KEYS = (
     "canonicals", "up_to_date", "to_rewrite", "model_calls", "generated",
@@ -72,47 +79,73 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     settings = get_settings()
     totals = {key: 0 for key in _TOTAL_KEYS}
     incomplete: List[str] = []
+    errors: List[dict] = []
     try:
         with open_cli_repository(settings) as repository:
-            lifecycle = repository._runtime.knowledge_lifecycle
-            targets = (repository.maintenance.all_notebook_ids()
-                       if args.all else [args.notebook_id])
-            budget = args.limit
-            for notebook_id in targets:
-                try:
-                    lifecycle.get_notebook(notebook_id)
-                except KeyError:
-                    if args.all:
-                        continue  # deleted while the run walked the list
-                    print(f"error: unknown notebook {notebook_id}", file=sys.stderr)
-                    return 2
-                report = lifecycle.rewrite_concept_descriptions(
-                    notebook_id, dry_run=args.dry_run, limit=budget,
-                    progress=None if args.dry_run else _progress(notebook_id))
-                if budget is not None:
-                    budget = max(0, budget - report.model_calls)
-                for key in _TOTAL_KEYS:
-                    totals[key] += getattr(report, key)
-                if report.status in ("busy", "incomplete"):
-                    incomplete.append(notebook_id)
-                if report.canonicals or not args.all:
-                    line = {k: v for k, v in report.as_dict().items() if k != "version"}
-                    print("[rewrite-descriptions] " + json.dumps(line, ensure_ascii=False),
-                          flush=True)
+            try:
+                code = _run(repository, args, totals, incomplete, errors)
+            except KeyboardInterrupt:
+                print("interrupted: finished results are staged; run the same command "
+                      "again to continue", file=sys.stderr, flush=True)
+                sys.stdout.flush()
+                _hard_exit(130)
+                return 130  # reachable only when a test replaces _hard_exit
+            if code:
+                return code
     except ConceptDescriptionRewriteUnavailable as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except MaintenanceCliError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return exc.exit_code
-    except KeyboardInterrupt:
-        print("interrupted: finished results are staged; run the same command again "
-              "to continue", file=sys.stderr)
-        return 130
     label = "dry-run" if args.dry_run else "done"
     print(f"rewrite-descriptions {label}: " + json.dumps(
-        {**totals, "incomplete_notebooks": incomplete}, ensure_ascii=False), flush=True)
+        {**totals, "incomplete_notebooks": incomplete, "errors": errors},
+        ensure_ascii=False), flush=True)
     return 1 if incomplete else 0
+
+
+def _run(repository, args, totals: dict, incomplete: List[str], errors: List[dict]) -> int:
+    """Every target notebook in turn. A database failure inside one notebook
+    (a lock or statement timeout, a deadlock victim, a dropped connection)
+    ends that notebook as ``error`` with the exception's class name and the
+    run goes on with the next; it counts as incomplete (exit 1)."""
+    lifecycle = repository._runtime.knowledge_lifecycle
+    targets = repository.maintenance.all_notebook_ids() if args.all else [args.notebook_id]
+    budget = args.limit
+    for notebook_id in targets:
+        try:
+            lifecycle.get_notebook(notebook_id)
+        except KeyError:
+            if args.all:
+                continue  # deleted while the run walked the list
+            print(f"error: unknown notebook {notebook_id}", file=sys.stderr)
+            return 2
+        try:
+            report = lifecycle.rewrite_concept_descriptions(
+                notebook_id, dry_run=args.dry_run, limit=budget,
+                progress=None if args.dry_run else _progress(notebook_id))
+        except ConceptDescriptionRewriteUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- per notebook, reported by class name
+            failure = {"notebook_id": notebook_id, "status": "error",
+                       "error": type(exc).__name__}
+            errors.append(failure)
+            incomplete.append(notebook_id)
+            print("[rewrite-descriptions] " + json.dumps(failure, ensure_ascii=False),
+                  flush=True)
+            continue
+        if budget is not None:
+            budget = max(0, budget - report.model_calls)
+        for key in _TOTAL_KEYS:
+            totals[key] += getattr(report, key)
+        if report.status in ("busy", "incomplete"):
+            incomplete.append(notebook_id)
+        if report.canonicals or not args.all:
+            line = {k: v for k, v in report.as_dict().items() if k != "version"}
+            print("[rewrite-descriptions] " + json.dumps(line, ensure_ascii=False),
+                  flush=True)
+    return 0
 
 
 if __name__ == "__main__":

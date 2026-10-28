@@ -128,7 +128,7 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "不需代次谓词"),
     "backend/app/repositories/sqlite/sharing_store.py": (3, 0, 0, 3, 0,
         "PG 孪生同注记"),
-    "backend/app/repositories/postgres/unified_kg_store.py": (34, 10, 8, 29, 13,
+    "backend/app/repositories/postgres/unified_kg_store.py": (36, 10, 8, 29, 13,
         "kg rewrite-descriptions(2026-10-28):``concept_description_member_page`` 与 "
         "``concept_description_publish_rows`` 读调用方给定的那一代(规划时从状态行读到的"
         "已发布代,作为参数 generation = %s 绑定)——B 类(读指定代);发布事务先经 "
@@ -136,6 +136,9 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "(cluster 谓词 +1)并核对它仍等于规划时的代,不等即整页不写;"
         "``rewrite_concept_description`` 按本事务刚锁住的行 id 写(UPDATE,无谓词,"
         "行就是那一代的行)。concept_clusters 出现数 +3、cluster 谓词 +1;"
+        "评审跟进(10-28):``concept_description_row_counts`` 读同一指定代(B 类),"
+        "``lock_concept_cluster_rows`` 按行 id 加锁(行即该代的行,无谓词),"
+        "concept_clusters 出现数再 +2;"
         "对比兄弟名 R3(计划 2026-10-23 T2):``comparison_peer_members`` 按兄弟簇 id "
         "读首窗口活成员(LATERAL 有界 seek;R4 的焦点成员读也走它),A 类读、配 cluster "
         "谓词,concept_clusters 出现数与 cluster 谓词各 +1;"
@@ -169,7 +172,7 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "谓词各多一次;社区摘要退役删掉 set_community_summary(UPDATE "
         "communities,按 id 写、无谓词)与 community_reports(A 类读,配 "
         "community 谓词),communities 出现数 -2、community 谓词 -1"),
-    "backend/app/repositories/sqlite/unified_kg_store.py": (35, 10, 9, 29, 13,
+    "backend/app/repositories/sqlite/unified_kg_store.py": (37, 10, 9, 29, 13,
         "PG 孪生同注记(两侧 members 出现数差异来自 SQLite 无窗口函数的"
         "community_overview_on 分岔;concept_clusters 出现数比 PG 多 1:SQLite 没有 "
         "LATERAL,``comparison_peer_members`` 用外层 JOIN + 相关 ``rowid IN (… LIMIT ?)`` "

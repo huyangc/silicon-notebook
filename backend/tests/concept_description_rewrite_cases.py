@@ -135,7 +135,9 @@ def _staged(repo, notebook_id):
             "SELECT input_version, item_key FROM kg_rebuild_checkpoint "
             "WHERE notebook_id=? AND stage=?"),
             (notebook_id, CONCEPT_DESC_REWRITE_STAGE)).fetchall()
-    return {(r["input_version"], r["item_key"]) for r in rows}
+    # Staged texts only; the completion record has its own scenario.
+    return {(r["input_version"], r["item_key"]) for r in rows
+            if r["item_key"] != "~complete"}
 
 
 def rewrite(repo, notebook_id, **kwargs):
@@ -266,9 +268,13 @@ def assert_failed_inputs_are_fail_soft(repo, caplog):
     failures = [r.getMessage() for r in caplog.records
                 if "concept description rewrite failed" in r.getMessage()]
     assert len(failures) == 1 and "RuntimeError" in failures[0]
-    # Ids and the class name only: neither the exception text nor any quote.
-    assert "model down" not in failures[0] and "cascode stage" not in failures[0]
-    assert "boosts" not in failures[0]
+    assert "input=" in failures[0] and "sig=" in failures[0]
+    # The class name, an input number and a signature prefix only: no form of
+    # the concept name (canonical ids are normalized names, K-cascode), no
+    # quote, no exception text -- anywhere in what the run logged.
+    logged = " ".join(r.getMessage() for r in caplog.records).lower()
+    assert "cascode" not in logged and "k-" not in logged
+    assert "model down" not in logged and "boosts" not in logged
 
     fixed = DescModel("model-new")
     bind_chat_client(repo, WORKLOAD, fixed)
@@ -402,3 +408,193 @@ def _published(repo, notebook_id):
             db, notebook_id)
     return {str(r["canonical_id"]): (r["canonical_description"], r["canonical_desc_sig"])
             for r in rows}
+
+
+# ------------------------------------------------- review follow-ups (2026-10-28)
+def _rewrite_module():
+    from app.services.kg import concept_description_rewrite
+
+    return concept_description_rewrite
+
+
+def _name_of(repo, notebook_id, canonical_id):
+    with repo._runtime.database.connect() as db:
+        return db.execute(_sql(repo,
+            "SELECT MIN(canonical_name) AS n FROM concept_clusters "
+            "WHERE notebook_id=? AND canonical_id=?"), (notebook_id, canonical_id)).fetchone()["n"]
+
+
+def assert_pages_are_bounded_by_rows_and_drop_the_rebuild_checkpoint_once(repo, monkeypatch):
+    """Pages are cut by the plan's row counts (two 2-row canonicals at a
+    2-row bound: two pages, two bumps), and the rebuild's own description
+    checkpoint is dropped once for the whole publish, not per page."""
+    module = _rewrite_module()
+    nb = build_notebook(repo)
+    _kg, cluster_seq = _state(repo, nb)
+    monkeypatch.setattr(module, "_PUBLISH_PAGE_ROWS", 2)
+    store = repo._runtime.knowledge_lifecycle.unified_kg
+    prunes = []
+    real_prune = store.checkpoint_prune_stage
+
+    def counting_prune(notebook_id, stage, keep_version, drop_keys):
+        prunes.append((stage, keep_version))
+        return real_prune(notebook_id, stage, keep_version, drop_keys)
+
+    monkeypatch.setattr(store, "checkpoint_prune_stage", counting_prune)
+    bind_chat_client(repo, WORKLOAD, DescModel("model-new"))
+    report = rewrite(repo, nb)
+    assert (report.status, report.rewritten) == ("done", 2)
+    assert _state(repo, nb)[1] == cluster_seq + 2
+    assert prunes.count(("concept_desc", None)) == 1
+
+
+def assert_hub_canonicals_are_written_in_batches(repo, monkeypatch):
+    """A canonical larger than a page is verified lock-free and written in
+    row batches; the result is the same as a page write."""
+    module = _rewrite_module()
+    nb = build_notebook(repo)
+    signatures = {name: {s for _d, s in pairs} for name, pairs in descriptions(repo, nb).items()}
+    monkeypatch.setattr(module, "_PUBLISH_PAGE_ROWS", 1)
+    bind_chat_client(repo, WORKLOAD, DescModel("model-new"))
+    report = rewrite(repo, nb)
+    assert (report.status, report.rewritten, report.moved) == ("done", 2, 0)
+    after = descriptions(repo, nb)
+    assert after["MOSFET"] == {("model-new::MOSFET", s) for s in signatures["MOSFET"]}
+    assert after["cascode"] == {("model-new::cascode", s) for s in signatures["cascode"]}
+
+
+def assert_a_hub_stops_when_the_state_moves_after_its_verification(repo, monkeypatch):
+    """Any graph write between a hub's lock-free verification and its batches
+    (here a KG mutation bump, as every object/relation writer makes) stops the
+    hub before it writes: nothing of it is published, it counts as moved."""
+    module = _rewrite_module()
+    nb = build_notebook(repo)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(module, "_PUBLISH_PAGE_ROWS", 1)
+    store = lifecycle.unified_kg
+    real_rows = store.concept_description_publish_rows
+    touched = []
+
+    def rows_then_write(db, notebook_id, generation, canonical_ids, *, lock_rows=True):
+        rows = real_rows(db, notebook_id, generation, canonical_ids, lock_rows=lock_rows)
+        if not lock_rows and not touched:
+            touched.extend(canonical_ids)
+            lifecycle._mark_unified_kg_dirty(notebook_id)
+        return rows
+
+    monkeypatch.setattr(store, "concept_description_publish_rows", rows_then_write)
+    bind_chat_client(repo, WORKLOAD, DescModel("model-new"))
+    report = rewrite(repo, nb)
+    assert len(touched) == 1
+    assert (report.status, report.moved, report.rewritten) == ("incomplete", 1, 1)
+    stopped = _name_of(repo, nb, touched[0])
+    texts = _texts(repo, nb)
+    assert texts[stopped] == f"model-old::{stopped}"
+    other = ({"MOSFET", "cascode"} - {stopped}).pop()
+    assert texts[other] == f"model-new::{other}"
+
+
+def assert_kg_delete_drops_the_staged_texts_only(repo):
+    nb = build_notebook(repo)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    bind_chat_client(repo, WORKLOAD, DescModel("model-new"))
+    assert rewrite(repo, nb).status == "done"
+    assert _staged(repo, nb)
+    lifecycle.unified_kg.checkpoint_put(
+        nb, "v-rebuild", "merge_review", [("pair", {"decision": "keep"})],
+        "2026-10-28T00:00:00")
+    lifecycle.delete_notebook_kg(nb)
+    assert _staged(repo, nb) == set()
+    with repo._runtime.database.connect() as db:
+        kept = db.execute(_sql(repo,
+            "SELECT stage FROM kg_rebuild_checkpoint WHERE notebook_id=?"), (nb,)).fetchall()
+    assert [r["stage"] for r in kept] == ["merge_review"]
+
+
+def assert_a_completed_notebook_is_answered_from_its_record(repo):
+    """After a run completes, a rerun / dry run reads nothing while the
+    notebook is unchanged -- and the answer equals a full read. Any graph
+    write voids the record: then the full read decides, and it differs from
+    what the rows alone would suggest (an evidence edit leaves every row's
+    stored signature and text exactly as before)."""
+    module = _rewrite_module()
+    from app.services.knowledge_lifecycle import _concept_desc_sig
+
+    nb = build_notebook(repo)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    bind_chat_client(repo, WORKLOAD, DescModel("model-new"))
+    first = rewrite(repo, nb)
+    assert first.status == "done"
+    store = lifecycle.unified_kg
+    pages = []
+    real_page = store.concept_description_member_page
+
+    def counting_page(*args, **kwargs):
+        pages.append(1)
+        return real_page(*args, **kwargs)
+
+    store.concept_description_member_page = counting_page
+    try:
+        dry = rewrite(repo, nb, dry_run=True)
+        again = rewrite(repo, nb)
+        assert pages == []
+        assert (dry.plans, dry.canonicals, dry.up_to_date, dry.model_calls) == (0, 2, 2, 0)
+        assert (again.status, again.plans, again.up_to_date) == ("done", 0, 2)
+        # The same answer as a full read.
+        staged = store.checkpoint_load(nb, first.version, "concept_desc_rewrite")
+        staged.pop("~complete", None)
+        full = module.ConceptDescriptionRewrite(lifecycle, signature=_concept_desc_sig)._plan(
+            nb, staged)
+        assert len(full.items) == 2 and all(item[2] for item in full.items)
+        assert full.pending == {}
+
+        # An evidence edit (a writer that, like every one, moves kg_mutation_seq).
+        with repo._runtime.database.write() as db:
+            oid = db.execute(_sql(repo,
+                "SELECT id FROM knowledge_objects WHERE notebook_id=? AND source_id=? "
+                "AND object_type='concept' ORDER BY id"), (nb, "s2")).fetchall()[0]["id"]
+            evidence = json.dumps([{"source_id": "s", "quoted_span": "an edited quote",
+                                    "element_id": "e", "location_label": "1"}])
+            update = _sql(repo, "UPDATE knowledge_objects SET evidence=? WHERE id=?")
+            db.execute(update.replace("evidence=%s", "evidence=%s::jsonb"), (evidence, oid))
+            lifecycle._mark_unified_kg_dirty_in_tx(db, nb)
+        before = len(pages)
+        recheck = rewrite(repo, nb, dry_run=True)
+        assert len(pages) > before and recheck.plans == 1
+        # The rows alone would still say "done" (one signature, the staged text) ...
+        assert all(len(pairs) == 1 for pairs in descriptions(repo, nb).values())
+        # ... the full read does not: one canonical's input changed.
+        assert (recheck.up_to_date, recheck.model_calls) == (1, 1)
+    finally:
+        del store.concept_description_member_page
+
+
+def assert_an_interrupt_does_not_wait_for_calls_in_flight(repo):
+    import time
+
+    import pytest
+
+    nb = build_notebook(repo)
+    release = threading.Event()
+
+    class SlowAndInterrupted(DescModel):
+        def chat_json(self, messages, schema):
+            content = messages[0]["content"]
+            if "Concept: cascode" in content:
+                release.wait(30)  # a model call still running at the interrupt
+            elif "Concept: MOSFET" in content:
+                time.sleep(0.2)
+                raise KeyboardInterrupt
+            return super().chat_json(messages, schema)
+
+    repo._runtime.models.parallelism_by_workload = {WORKLOAD: 2}
+    bind_chat_client(repo, WORKLOAD, SlowAndInterrupted("model-new"))
+    started = time.perf_counter()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            rewrite(repo, nb)
+        assert time.perf_counter() - started < 5
+        workers = [t for t in threading.enumerate() if t.name.startswith("kg-desc-rewrite")]
+        assert workers and all(t.daemon for t in workers)
+    finally:
+        release.set()

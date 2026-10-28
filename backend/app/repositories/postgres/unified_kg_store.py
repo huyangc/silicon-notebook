@@ -101,10 +101,7 @@ from app.domain.kg_analysis_contracts import (
     check_artifact_payloads,
     check_mark_kind,
 )
-from app.domain.concept_description_rewrite import (
-    CONCEPT_DESC_REWRITE_STAGE,
-    REBUILD_DESC_CHECKPOINT_STAGE,
-)
+from app.domain.concept_description_rewrite import CONCEPT_DESC_REWRITE_STAGE
 from app.domain.kg_merge_seed import check_concept_seed_version
 from app.domain.knowledge_contracts import (
     CLUSTER_OBJECT_TYPES,
@@ -564,16 +561,18 @@ class UnifiedKgStore:
     @staticmethod
     def concept_description_publish_rows(
         db: Any, notebook_id: str, generation: int, canonical_ids: Sequence[str],
+        *, lock_rows: bool = True,
     ) -> List[Any]:
-        """The rows of ``canonical_ids`` in ``generation`` that this transaction
-        can lock, each with ``live`` / ``evidence`` as in
-        ``concept_description_member_page`` (``evidence`` read for live rows
-        only). ``FOR UPDATE OF cc SKIP LOCKED``:
-        a row another transaction holds (a source delete, a Knowhow
-        reprojection pruning members and blanking the description) is left out
-        instead of waited on, so the caller recomputes the input from what it
-        holds and skips any canonical whose input no longer matches -- it never
-        waits on a row lock, and a row it skipped is never written."""
+        """The rows of ``canonical_ids`` in ``generation``, each with ``live`` /
+        ``evidence`` as in ``concept_description_member_page`` (``evidence``
+        read for live rows only). With ``lock_rows`` (a publish page), only the
+        rows this transaction can lock: ``FOR UPDATE OF cc SKIP LOCKED`` -- a
+        row another transaction holds (a source delete, a Knowhow reprojection
+        pruning members and blanking the description) is left out instead of
+        waited on; the caller compares what it holds with
+        ``concept_description_row_counts`` and skips any canonical it does not
+        hold whole, or whose input no longer matches. Without (a hub's
+        lock-free verification read), every row."""
         ids = list(canonical_ids)
         if not ids:
             return []
@@ -592,10 +591,50 @@ class UnifiedKgStore:
             "AND k.notebook_id=cc.notebook_id "
             "WHERE cc.notebook_id=%s AND cc.object_type='concept' AND cc.generation=%s "
             f"AND {member_of('cc.canonical_id', bound)} "
-            "ORDER BY cc.canonical_id, cc.member_object_id "
-            "FOR UPDATE OF cc SKIP LOCKED",
+            "ORDER BY cc.canonical_id, cc.member_object_id"
+            + (" FOR UPDATE OF cc SKIP LOCKED" if lock_rows else ""),
             (notebook_id, int(generation), bound.param),
         ).fetchall()
+
+    @staticmethod
+    def concept_description_row_counts(
+        db: Any, notebook_id: str, generation: int, canonical_ids: Sequence[str],
+    ) -> Dict[str, int]:
+        """How many rows each of ``canonical_ids`` has in ``generation``, read
+        without locking -- rows another transaction holds count too, which is
+        what lets a publish page see that SKIP LOCKED left part of a canonical
+        out."""
+        ids = list(canonical_ids)
+        if not ids:
+            return {}
+        bound = bind_ids(ids)
+        rows = execute_ids(
+            db,
+            "SELECT cc.canonical_id, COUNT(*) AS n FROM concept_clusters cc "
+            "WHERE cc.notebook_id=%s AND cc.object_type='concept' AND cc.generation=%s "
+            f"AND {member_of('cc.canonical_id', bound)} GROUP BY cc.canonical_id",
+            (notebook_id, int(generation), bound.param),
+        ).fetchall()
+        return {str(row["canonical_id"]): int(row["n"]) for row in rows}
+
+    @staticmethod
+    def lock_concept_cluster_rows(
+        db: Any, notebook_id: str, row_ids: Sequence[str],
+    ) -> List[str]:
+        """Lock the given cluster rows for this transaction, skipping any row
+        another transaction holds (``SKIP LOCKED``: never waits); returns the
+        ids it holds. A hub canonical's batch writes only when it holds all."""
+        ids = list(row_ids)
+        if not ids:
+            return []
+        bound = bind_ids(ids)
+        rows = execute_ids(
+            db,
+            "SELECT cc.id FROM concept_clusters cc WHERE cc.notebook_id=%s "
+            f"AND {member_of('cc.id', bound)} FOR UPDATE OF cc SKIP LOCKED",
+            (notebook_id, bound.param),
+        ).fetchall()
+        return [str(row["id"]) for row in rows]
 
     @staticmethod
     def rewrite_concept_description(
@@ -616,17 +655,6 @@ class UnifiedKgStore:
             (description, sig, notebook_id, bound.param, description, sig),
         )
         return int(cursor.rowcount or 0)
-
-    @staticmethod
-    def drop_description_checkpoints(db: Any, notebook_id: str) -> None:
-        """Drop the rebuild description stage's checkpoint (every version), in
-        the caller's transaction. The rebuild reuses it before the published
-        descriptions, so a rewrite that publishes must take it away with the
-        old texts (``REBUILD_DESC_CHECKPOINT_STAGE``)."""
-        db.execute(
-            "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=%s AND stage=%s",
-            (notebook_id, REBUILD_DESC_CHECKPOINT_STAGE),
-        )
 
     @staticmethod
     def canonical_relation_seed_rows(db: Any, notebook_id: str):
@@ -1453,12 +1481,20 @@ class UnifiedKgStore:
                 (notebook_id, CONCEPT_DESC_REWRITE_STAGE))
 
     def checkpoint_prune_stage(
-        self, notebook_id: str, stage: str, keep_version: str, drop_keys: Sequence[str],
+        self, notebook_id: str, stage: str, keep_version: "str | None",
+        drop_keys: Sequence[str],
     ) -> None:
-        """收敛一个阶段:删掉它在其它版本下的全部行,以及 ``keep_version`` 下
-        ``drop_keys`` 这些 item(一个写事务)。描述重写整库完成后调用。"""
+        """收敛一个阶段(一个写事务):删掉它在 ``keep_version`` 以外各版本下的全部
+        行,以及 ``keep_version`` 下 ``drop_keys`` 这些 item。``keep_version`` 为
+        None 时删掉该阶段的全部行。描述重写整库完成后用它收敛自己的暂存;发布前
+        用它(None)删掉 rebuild 的描述 checkpoint。"""
         keys = list(drop_keys)
         with self.database.write() as db:
+            if keep_version is None:
+                db.execute(
+                    "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=%s AND stage=%s",
+                    (notebook_id, stage))
+                return
             db.execute(
                 "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=%s AND stage=%s "
                 "AND input_version<>%s",
