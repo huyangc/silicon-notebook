@@ -267,11 +267,20 @@ CardResult.status ∈ ready | generated | not_paper | meta_pending | failed | de
 items[]: handle(p1…), source_id, title, pub_year, venue, authors(≤3), tier(strong|related),
          reasons[title|paper_title|keywords|summary|author|venue|passages:N],
          best_passage{chunk_id, text≤240}, card_status(ready|missing|not_paper|failed)
-counts: strong, related, filtered_scope_total
-coverage: lexical_complete(bool), semantic_recall_capped(bool), next_cursor
+counts: strong, related, filtered_scope_total, meta_pending_excluded, meta_pending_unchecked
+coverage: lexical_complete(bool), semantic_recall_capped(bool), skipped_libraries{notebook_id: reason}, next_cursor
 ```
 
-- `lexical_complete=true`：过滤后范围内每篇都被元数据腿检查过。
+- `lexical_complete=true`：过滤后范围内每篇都被元数据腿检查过。以下任一情况为 `false`：
+  - 有年份/会议/作者过滤，而范围内有**元数据还没抽**的合格论文被这些过滤排除（无法判断它们是否满足条件），
+    数量报在 `meta_pending_excluded`；
+  - 给了 `terms`，而范围内有元数据未抽的论文（它们只能在标题/摘要上被检查，论文标题/关键词/作者查不到），
+    数量报在 `meta_pending_unchecked`；
+  - 有参与库在本次调用中被跳过（读失败或超时），列在 `skipped_libraries`。
+  Agent 据此说明「还有 N 篇论文的元数据尚未抽取，可能有遗漏」。
+- 非当前笔记本的参与库沿用联邦检索的「只看暖索引」判据：不冷加载 scale 索引、不全表暴力，没有暖索引时走有界 FTS
+  并如实报 `fts_degraded`；每个库的读取有失败隔离与时限。
+- 同一次运行内按参数指纹缓存排序结果，翻页只切片；作用域读只取 id 与计数，完整行只为入档候选与本页补读。
 - `semantic_recall_capped=true`：第 400 个召回片段仍高于 `related` 阈值，可能还有漏网的论文。
   这时 Agent 必须在回答里说「可能还有更多」，不得声称已列全（与 `prompts.py:1533` 的完整性规则同一口径）。
 - 每页 20 篇（Agent 与 MCP 相同）；每次调用重算排序，翻页靠游标里的偏移量 + 参数指纹，参数变了游标作废。
@@ -295,6 +304,10 @@ MCP 侧的集合 = 凭证白名单内、主人当下可读的单个笔记本的�
      再加上开头 2 个元素（标题/摘要）作上下文。
   2. 一次 `paper_metadata` 模型调用，schema：`{"values":[{"field_index":0,"value":"…","anchor":"<chunk_or_element_id>"}]}`。
   3. 校验：`anchor` 必须是输入里的 id；值里含数字的按 §4.2 的数值接地规则校验，不通过就丢弃并记审计。
+     抽取值常是带设定的短句（「COCO 2017: 42.1 AP」），所以按「数字组」逐组接地：只有 `± e × ^` 这类紧贴的数学连接符
+     把数字连成一组，`:`、`/`、括号、空格两侧分开接地；句中的个位整数只要求在原文出现，整个值只是一个个位整数时
+     仍按 `ambiguous_value` 丢弃。引用挂在片段里**真正包含该值的那个元素**上（找不到才退回片段首元素）。
+     多字段时片段名额按字段轮流分配（每个字段至少 `12 // 字段数` 个），不按字段顺序先到先得。
 - 并发、优先级、取消、队列超时处理与 §4.5 相同；单次上限按档位（§8）。
 - **不缓存**：临时字段是问题相关的，每次运行重新算。
 - 适用于非论文：不检查 `is_paper`。
