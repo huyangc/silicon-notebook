@@ -171,3 +171,11 @@ def test_a_crash_right_after_publish_reads_as_imported(world):
 
 def test_admins_are_not_counted_and_tables_cannot_hide_more_than_exist(world):
     cases.check_admins_are_not_counted_and_tables_cannot_hide_more_than_exist(world)
+
+
+def test_a_sweep_never_removes_a_live_upload(world):
+    cases.check_a_sweep_never_removes_a_live_upload(world)
+
+
+def test_a_sweep_never_removes_the_files_of_a_deleted_running_export(world):
+    cases.check_a_sweep_never_removes_the_files_of_a_deleted_running_export(world)

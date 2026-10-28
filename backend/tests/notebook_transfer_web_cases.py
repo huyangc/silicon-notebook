@@ -1479,3 +1479,69 @@ def check_admins_are_not_counted_and_tables_cannot_hide_more_than_exist(world: W
     with pytest.raises(NotebookImportError, match="Knowhow"):
         count(forged)
     assert upload(world, forged.read_bytes(), world.owner).status_code == 400
+
+
+# --------------------------------------------- live files survive a sweep
+
+
+def check_a_sweep_never_removes_a_live_upload(world: World) -> None:
+    """An upload whose admission checks outlast the TTL -- its part file
+    untouched meanwhile -- still holds its reservation: neither a concurrent
+    sweep nor the one ``start_import`` runs removes the file, and it imports."""
+    from app.api import notebook_transfer_routes as routes
+
+    data = archive_bytes(world)
+    ttl = world.repo.settings.notebook_transfer_ttl_seconds
+    real_count = routes.archive_document_count
+    swept: list[list[str]] = []
+
+    def slow_count(path, **kwargs):
+        # The checks took longer than the TTL: the file is that old by now.
+        world.clock.advance(ttl + 60)
+        old = world.clock() - ttl - 30
+        os.utime(path, (old, old))
+        world.jobs.sweep()  # a concurrent sweep (the timer, another request)
+        swept.append([p.name for p in Path(path).parent.iterdir()])
+        return real_count(path, **kwargs)
+
+    world.monkeypatch.setattr(routes, "archive_document_count", slow_count)
+    imported = upload(world, data)
+    assert imported.status_code == 202, imported.text
+    assert imported.json()["state"] == "succeeded", imported.json()
+    assert swept and any(name.endswith(".upload.part") for name in swept[0]), swept
+    assert world.jobs._reserved == {}
+
+
+def check_a_sweep_never_removes_the_files_of_a_deleted_running_export(world: World) -> None:
+    """A deleted export still writing keeps its part file through a sweep, however
+    old it looks; the run removes it when it stops."""
+    from app.services.notebook_transfer import export as export_module
+
+    _captured, start = _run_on_a_thread(world)
+    entered, release = threading.Event(), threading.Event()
+    real_check = export_module._ArchiveWriter._check
+
+    def paused(self) -> None:
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(timeout=30)
+        real_check(self)
+
+    ttl = world.repo.settings.notebook_transfer_ttl_seconds
+    exports = world.storage / "transfers" / "exports"
+    with world.monkeypatch.context() as patched:
+        patched.setattr(export_module._ArchiveWriter, "_check", paused)
+        job = export(world).json()
+        thread = start()
+        assert entered.wait(timeout=30)
+        assert world.client.delete(
+            f"/api/notebook-transfers/{job['id']}", headers=world.owner).json()["outcome"] == "cancelled"
+        (part,) = [p for p in exports.iterdir() if p.name.startswith(job["id"])]
+        world.clock.advance(ttl + 60)
+        old = world.clock() - ttl - 30
+        os.utime(part, (old, old))
+        world.jobs.sweep()
+        assert part.exists(), "a sweep removed the part file of a run still writing it"
+        release.set()
+        thread.join(timeout=60)
+    assert not part.exists()
