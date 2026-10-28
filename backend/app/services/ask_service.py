@@ -131,6 +131,15 @@ from app.services.chunk_federation import (
 )
 from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
 from app.services.document_read_answer import document_read_block_reserve
+from app.services.paper_card_answer import (
+    PaperCardEvidence,
+    compose_paper_answer,
+    paper_digest_block,
+    paper_digest_reserve,
+    registered_keys as paper_registered_keys,
+    sectioned_paper_prefix,
+    with_registration as with_paper_registration,
+)
 # A leaf that imports nothing from ``app`` (see its module docstring): reading
 # the detached turn costs one import and creates no edge to the participant
 # override module this file is barred from.
@@ -934,7 +943,7 @@ def _synthesis_step_detail(
             key: counts[key]
             for key in (
                 "included_document_reads", "included_spreadsheets",
-                "included_report_evidence",
+                "included_report_evidence", "included_paper_cards",
             )
             if key in counts
         },
@@ -1144,6 +1153,7 @@ class _ReasoningStageRun:
     chains: Any = _UNSET
     enumerations: Any = _UNSET
     document_reads: Any = _UNSET
+    paper_tools: Any = _UNSET
     collection_map_text: Any = _UNSET
     outline: Any = _UNSET
     outline_evidence: Any = _UNSET
@@ -1259,6 +1269,7 @@ class _ReasoningDraftRun:
     enumeration_block_dropped: Any = _UNSET
     collection_item_citations: Any = _UNSET
     document_read_block_dropped: Any = _UNSET
+    paper_evidence: Any = _UNSET
     # ``_draft_sectioned_attempt``
     outline_slices: Any = _UNSET
     outline_skipped: Any = _UNSET
@@ -1325,10 +1336,19 @@ class AskService:
     # 无 intent 跟进改写的预检超时(秒):见 resolve_reasoning_followup。
     _FOLLOWUP_PRECHECK_TIMEOUT_SECONDS = 20.0
     _DOCUMENT_READ_KEY_BASE = 7000
+    # 论文卡片字段与抽取值引用的元素(``paper_card_answer.PAPER_CARD_KEY_BASE``,
+    # k9001–k9999,规格 2026-10-28 §7.2)。放在 9000 而不是 8000:`read_document`
+    # 的号段(7000 起)整体留在它之下,可用性判定按「≤ 9000」算。与检索侧
+    # ``reasoning_retrieval.PAPER_CARD_KEY_BASE``、``ask_evidence`` 同值,由
+    # ``test_paper_card_answer`` 钉住。
+    _PAPER_CARD_KEY_BASE = 9000
     # 关联报告复原证据(计划 2026-10-21 D1)沿用原生号段:``(首号, 末号)``,未加节
     # 偏移。每类从该段 id_map 已占的最大号之后续编(``_append_report_evidence``),
     # 越过末号的条目不进 prompt、计入回执的「超出预算」。KG 段止于 1999:2001+ 归
-    # 推导链(``render_follow_chain_context``)。
+    # 推导链(``render_follow_chain_context``)。论文卡片段(k9001+)不是复原段:
+    # 报告引过的卡片元素按元素复原进 4001+,不复用 9000 段的摘要行(那是模型写的
+    # 摘要,不是原文,规则 15 要求对照原文核对);``kind_for_key`` 把 9000 段判成
+    # ``paper_card``,所以复原时不会把它当成同一个元素复用。
     _REPORT_KEY_BANDS = {
         RESTORED_KIND_CHUNK: (1, _MIX_KG_KEY_BASE - 1),
         RESTORED_KIND_KG: (_MIX_KG_KEY_BASE + 1, 1999),
@@ -4882,6 +4902,7 @@ class AskService:
         included_collections = 0
         included_spreadsheets = 0
         included_document_reads = 0
+        included_paper_cards = 0
         for key in source_map:
             try:
                 key_num = int(key[1:]) - key_offset
@@ -4891,7 +4912,10 @@ class AskService:
             # 的话每一段原文摘录都会被算成一行清单。6000 段在这里只有表格结果
             # (经 structured_map 进来),单独计数,不再算成集合清单行;外部证据
             # 也在 6000 段,但它是在 source_map/kg_map 合并之后才拼进 id_map 的。
-            if key_num >= self._DOCUMENT_READ_KEY_BASE:
+            # 9000+(论文卡片摘要里的键)最先判,同一条理由。
+            if key_num >= self._PAPER_CARD_KEY_BASE:
+                included_paper_cards += 1
+            elif key_num >= self._DOCUMENT_READ_KEY_BASE:
                 included_document_reads += 1
             elif key_num >= self._EXTERNAL_KEY_BASE:
                 included_spreadsheets += 1
@@ -4901,7 +4925,7 @@ class AskService:
                 included_elements += 1
         included_chunks = (len(source_map) - included_elements
                            - included_collections - included_spreadsheets
-                           - included_document_reads)
+                           - included_document_reads - included_paper_cards)
         counts = {
             "included_kg": included_kg,
             "included_chunks": included_chunks,
@@ -4912,6 +4936,10 @@ class AskService:
             # 之前逐键相等(恒零地写进去会改掉每一条既有答案的持久化 payload)。
             **({"included_document_reads": included_document_reads}
                if included_document_reads else {}),
+            # 论文卡片摘要真正进 prompt 的键数,同样**稀疏**。登记进 id_map 但
+            # 不进 prompt 的那些键(表格用)不算在这里。
+            **({"included_paper_cards": included_paper_cards}
+               if included_paper_cards else {}),
             # 进 prompt 的表格分析结果数,同样**稀疏**:没有表格结果的一轮
             # counts 逐键不变。
             **({"included_spreadsheets": included_spreadsheets}
@@ -4991,6 +5019,7 @@ class AskService:
         trailing_chunks=(),
         citation_lookups: "CitationLookups | None" = None,
         report: "ReportTurn | None" = None,
+        paper: "PaperCardEvidence | None" = None,
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
@@ -5050,6 +5079,14 @@ class AskService:
         ``answer_prompt(report_block=...)``;只出现在单次合成里(D8:读入报告的
         轮次不按节合成)。None = 接入前逐字行为。
 
+        ``paper``:本 run 论文工具的证据(``paper_card_answer.PaperCardEvidence``)。
+        摘要块已经由调用方经 ``structured_block`` 送进 prompt;这里做三件事:登记
+        的全部键在模型正文**之后**并入 ``id_map``(不占结构化侧预算,与外部证据
+        同理),``paper_table`` 版式时 prompt 加「表格由系统生成」规则、正文拼成
+        「覆盖说明 + 模型综述 + 表格」(节模式不拼:表格由
+        ``_answer_reasoning_sections`` 在第一节之前放一次),最后才解析锚点。
+        None = 接入前逐字行为。
+
         """
         context = self._assemble_reasoning_context(
             notebook_id, question, top_hits, elements,
@@ -5099,6 +5136,7 @@ class AskService:
                 external_rules=has_external,
                 peer_notebooks=subjectless_run_active(),
                 report_block=report.enter_prompt() if report is not None else "",
+                paper_table=paper is not None and paper.paper_table,
             )}],
             ANSWER_SCHEMA_HINT,
             timeout=self.settings.reasoning_timeout_seconds,
@@ -5122,8 +5160,11 @@ class AskService:
         # **清洗本身是必需的**(codex PR#407 R3 P1):按节解析只决定谁能拿到锚点,
         # 而前端是拿正文里的标记去查**合并后**的引用表 —— 不清洗,第二节那个 `[k1]`
         # 会绑到第一节的无关证据上,按节解析防住的误绑从渲染这道后门回来。
+        id_map = with_paper_registration(id_map, paper)
         if sectioned:
             answer = _keep_only_section_markers(answer, set(id_map))
+        else:
+            answer = compose_paper_answer(answer, paper)
         # 锚点按**本节自己的** id_map 解析(节模式下 id_map 只含本节证据)。合并
         # 之后再统一解析拼好的全文是错的:一节写出别节号段的 `[k]`(它根本没见过
         # 那个号)只可能是幻觉,合并解析会把它一本正经地绑到别节的证据上,而按节
@@ -5147,8 +5188,15 @@ class AskService:
         external_evidence=(),
         external_sink: set | None = None,
         citation_lookups: "CitationLookups | None" = None,
+        paper: "PaperCardEvidence | None" = None,
     ):
         """按节合成(设计文档 §3.1):每节一次合成调用,只喂该节绑定的证据。
+
+        ``paper``(论文工具的证据,规格 2026-10-28 §7.3):卡片证据只给**第 0 节**
+        (偏移 0,登记键 k9001+ 落在它自己的号段里)——摘要块经 ``structured_block``
+        送进它的 prompt、跨论文对比只由它写;第 1 节起不给摘要(那些键不属于后面
+        各节的号段,``_keep_only_section_markers`` 也会删掉)。表格只出现一次,放在
+        第一节之前,它的标记按登记表解析成锚点。
 
         返回 ``_SectionedSynthesis``;**任何一节失败就返回 None**,由调用方整体
         回退到单次合成。绝不半篇拼接:少写一节的答案与「这一节没有内容」在屏幕上
@@ -5211,11 +5259,15 @@ class AskService:
         for item in slices:
             section_counts: dict = {}
             section_baseline: dict = {}
+            section_paper = paper if item.index == 0 else None
+            digest, digest_map = paper_digest_block(
+                section_paper, limits.chunk_context_chars // 2)
 
             def _synth_section(
                 item=item,
                 section_counts=section_counts,
                 section_baseline=section_baseline,
+                section_paper=section_paper, digest=digest, digest_map=digest_map,
             ):
                 text_, grounded_, anchors_, _counts = self._answer_reasoning(
                     notebook_id, question, item.hits, item.elements, history,
@@ -5236,6 +5288,8 @@ class AskService:
                     external_sink=admitted_external,
                     trailing_chunks=item.exact_chunks,
                     citation_lookups=citation_lookups,
+                    structured_block=digest, structured_map=digest_map,
+                    paper=section_paper,
                 )
                 return text_, grounded_, anchors_
 
@@ -5271,7 +5325,8 @@ class AskService:
                 section_llm_grounded,
                 self.settings.evidence_tau_low,
                 self.settings.evidence_tau_high,
-                exact_evidence_keys=self._external_exact_keys(section_anchors),
+                exact_evidence_keys=(self._external_exact_keys(section_anchors)
+                                     | paper_registered_keys(section_paper)),
             )
             section_is_grounded = section_level == "grounded"
             section_grounding_detail.append({
@@ -5322,8 +5377,10 @@ class AskService:
             merged_counts["external_dropped"] = max(
                 0, len(external_evidence) - len(admitted_external)
             )
+        answer_text, merged_anchors = self._with_sectioned_paper_table(
+            outline_answer_text(rendered), merged_anchors, paper)
         return _SectionedSynthesis(
-            answer=outline_answer_text(rendered),
+            answer=answer_text,
             # 这里仅汇总模型自报供全局 classify_evidence 使用;真正的逐节判定已经
             # 独立落在 section_grounding,后续整体档位再按其全/部分/零支撑确定性封顶。
             llm_grounded=grounded,
@@ -5333,6 +5390,74 @@ class AskService:
             section_grounding=section_grounding_detail,
             baseline_assemblies=baseline_assemblies,
         )
+
+    def _with_sectioned_paper_table(self, answer: str, anchors: list, paper) -> tuple:
+        """The sectioned answer led by the paper table (once, before the first
+        section) and its anchors -- the table's markers bound against the
+        registration, first, then the sections' (a key both carry kept once).
+        Without a table: ``(answer, anchors)`` unchanged."""
+        prefix = sectioned_paper_prefix(paper)
+        if not prefix or not answer:
+            return answer, anchors
+        table_anchors = self._parse_answer_anchors(prefix, dict(paper.id_map))
+        keys = {anchor.key for anchor in table_anchors}
+        return (f"{prefix}\n\n{answer}",
+                table_anchors + [a for a in anchors if a.key not in keys])
+
+    def _paper_card_evidence(self, stage) -> "PaperCardEvidence | None":
+        """The run's paper-tool evidence for synthesis (``paper_card_answer``):
+        every card / extracted-value element registered under k9001+ through
+        ``collection_item_citations`` (one bounded hydration, participant and
+        ceiling checks, read attestation) and, for ``paper_table``, the table.
+        ``None`` without paper tools -- and when building it fails: then no key,
+        no digest and no table exist, never a table whose markers bind to
+        nothing (logged by class name, the answer proceeds as prose)."""
+        tools = getattr(stage, "paper_tools", None)
+        if tools is None:
+            return None
+        from app.services.paper_card_answer import build_paper_card_evidence
+
+        notebook_id = stage.prepared.notebook_id
+        try:
+            return build_paper_card_evidence(
+                tools,
+                read_citations=lambda items: self.evidence_context.collection_item_citations(
+                    items, active_notebook_id=notebook_id),
+                tier_of=self.evidence_context.tier_map,
+                table_rows=stage.prepared.limits.paper_table_rows,
+            )
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - the answer survives as prose
+            self.event_log.logger.warning(
+                "paper card evidence failed (%s)", type(exc).__name__)
+            return None
+
+    def _add_paper_digest(self, structured_block: str, structured_map: dict, paper,
+                          answer_client, limits, knowhow_block_len: int, room,
+                          read_reserve: int) -> str:
+        """Append the paper digest after the enumeration preview and before the
+        document reads (spec §7.2 order), within the structured side's caps --
+        the same shared / partition caps ``_assemble_document_read_block``
+        applies, and ``room`` -- less what the document-read block reserved.
+        Whole papers only (``paper_digest_block``); nothing that fits, no block."""
+        if paper is None or not answer_client.configured:
+            return structured_block
+        from app.services.collection_enumeration_answer import (
+            COLLECTION_MAP_BLOCK_MAX_CHARS,
+        )
+        chunk_chars = int(limits.chunk_context_chars)
+        limit = min(int(knowhow_block_len) + (2 if knowhow_block_len else 0) + chunk_chars // 2,
+                    chunk_chars - COLLECTION_MAP_BLOCK_MAX_CHARS - 4)
+        if room is not None:
+            limit = min(limit, int(room))
+        joiner = 2 if structured_block else 0
+        digest, digest_map = paper_digest_block(
+            paper, limit - len(structured_block) - joiner - int(read_reserve))
+        if not digest:
+            return structured_block
+        structured_map.update(digest_map)
+        return concat(structured_block, Glue("\n\n"), digest) if structured_block else digest
 
     def _unconfigured_model_response(self, notebook_id: str, question: str,
                                      conversation_id: str, mode: str,
@@ -7627,6 +7752,7 @@ class AskService:
             enumerations = result.enumerations
             # 本 run 的按篇原文取样产物(含见证失败的空产物)。同款原样带出。
             document_reads = result.document_reads
+            paper_tools = result.paper_tools  # 论文工具的产物(无则 None),同款原样带出
             # 本 run 的集合地图。run 内已经建过一次(计数走有界缓存),这里
             # 带出来直接进合成上下文,不重建。
             collection_map_text = result.collection_map_text
@@ -7645,6 +7771,7 @@ class AskService:
             )
             enumerations = []
             document_reads = []
+            paper_tools = None
             collection_map_text = ""
             reasoning_outline = []
             reasoning_outline_evidence = []
@@ -7655,6 +7782,7 @@ class AskService:
         run.top_hits, run.elements, run.trace = top_hits, elements, trace
         run.chunks, run.chains = chunks, chains
         run.enumerations, run.document_reads = enumerations, document_reads
+        run.paper_tools = paper_tools
         run.collection_map_text = collection_map_text
         run.outline, run.outline_evidence = reasoning_outline, reasoning_outline_evidence
         run.historical_chunks = historical_reasoning_chunks
@@ -7771,6 +7899,7 @@ class AskService:
             chains=tuple(run.ready("chains")),
             enumerations=tuple(run.ready("enumerations")),
             document_reads=tuple(run.ready("document_reads")),
+            paper_tools=run.ready("paper_tools"),
             collection_map_text=run.ready("collection_map_text"),
             outline=tuple(run.ready("outline")),
             outline_evidence=tuple(run.ready("outline_evidence")),
@@ -7982,14 +8111,17 @@ class AskService:
 
     def _assemble_structured_evidence(
         self, stage, answer_client, collection_map_prompt_block: str,
+        paper: "PaperCardEvidence | None" = None,
     ) -> tuple:
         """The structured side of the reasoning source partition, kept out of
         the reserved passages' way.
 
-        Four blocks share ``chunk_context_chars`` with the passage segment and
+        Five blocks share ``chunk_context_chars`` with the passage segment and
         are assembled before it: the Knowhow preview
         (``structured_prompt_block``), the enumeration preview (its
-        ``enumeration_sub_budget``), sampled document reads
+        ``enumeration_sub_budget``, less the reserves of the two blocks after
+        it), the paper digest (``_add_paper_digest``: ``paper``, the run's
+        ``PaperCardEvidence``; whole papers only), sampled document reads
         (``_assemble_document_read_block``'s shared / partition caps) and the
         spreadsheet block (``_add_sheet_prompt``'s ``max_chars``).  Rendered
         against the whole partition they could leave the reserved passages
@@ -8030,12 +8162,12 @@ class AskService:
             len(collection_map_prompt_block) + 2
             if collection_map_prompt_block else 0)) if floor else None
         memo: dict = {}
-        historical = self._render_structured_side(stage, answer_client, None, memo)
+        historical = self._render_structured_side(stage, answer_client, None, memo, paper)
         if room is None or len(historical[0]) <= room:
             return historical
-        return self._render_structured_side(stage, answer_client, room, memo)
+        return self._render_structured_side(stage, answer_client, room, memo, paper)
 
-    def _render_structured_side(self, stage, answer_client, room, memo) -> tuple:
+    def _render_structured_side(self, stage, answer_client, room, memo, paper=None) -> tuple:
         """One rendering of the structured side (see
         ``_assemble_structured_evidence``).  ``room=None`` is the historical
         inline segment of ``_draft_reasoning_response``, moved verbatim;
@@ -8129,7 +8261,8 @@ class AskService:
                     # 预留要从**半预算上限**里扣,不是从整份预算里扣:整份预算
                     # 减掉两千字仍远大于一半,夹到一半后花名册照样拿满 15000。
                     read_reserve = document_read_block_reserve(
-                        stage.document_reads)
+                        stage.document_reads) + paper_digest_reserve(
+                            paper, limits.chunk_context_chars)
                     enum_budget_chars = max(0, enumeration_sub_budget(
                         chunk_context_chars=limits.chunk_context_chars,
                         structured_block_len=len(structured_block),
@@ -8187,6 +8320,9 @@ class AskService:
             except Exception:
                 typed_collection_result_sets = []
                 enumeration_block_dropped = False
+        structured_block = self._add_paper_digest(
+            structured_block, structured_map, paper, answer_client, limits,
+            knowhow_block_len, room, document_read_block_reserve(stage.document_reads))
         structured_block, document_read_block_dropped = (
             self._assemble_document_read_block(
                 stage.document_reads, structured_block, structured_map,
@@ -8447,10 +8583,14 @@ class AskService:
             _collection_map_block(collection_map_text)
             if answer_client.configured else ""
         )
+        paper = self._paper_card_evidence(stage)  # 论文工具的登记与表格(见其 docstring)
         (structured_block, structured_map, typed_collection_result_sets,
          enumeration_block_dropped, collection_item_citations,
          document_read_block_dropped) = self._assemble_structured_evidence(
-            stage, answer_client, collection_map_prompt_block)
+            stage, answer_client, collection_map_prompt_block, paper)
+        if paper is not None:  # 登记的引用卡按锚点的 object_id(元素 id)发
+            collection_item_citations.update(paper.citations)
+        run.paper_evidence = paper
         run.answer, run.llm_grounded, run.anchors = answer, llm_grounded, anchors
         run.synth_failed, run.synthesis_ran = synth_failed, synthesis_ran
         run.synthesis_started = synthesis_started
@@ -8533,6 +8673,7 @@ class AskService:
                         external_evidence=stage.external_evidence,
                         external_sink=admitted_external,
                         citation_lookups=run_lookups,
+                        paper=run.ready("paper_evidence"),
                     )
         run.outline_slices, run.outline_skipped = outline_slices, outline_skipped
         run.outline_attempted, run.outline_planned = outline_attempted, outline_planned
@@ -8565,6 +8706,7 @@ class AskService:
         outline_attempted = run.ready("outline_attempted")
         sectioned = run.ready("sectioned")
         outline_err_mark = run.ready("outline_err_mark")
+        paper = run.ready("paper_evidence")
         def _synth_reasoning():
             # counts_sink 在模型调用前就被 _answer_reasoning 填充:合成模型
             # 抛错/吐畸形 JSON 时,synthesis 步仍能报出真实装配计数而非全零。
@@ -8583,7 +8725,8 @@ class AskService:
                 baseline_sink=reasoning_baseline,
                 external_evidence=stage.external_evidence,
                 external_sink=admitted_external,
-                style_block=style_block, citation_lookups=run_lookups, report=report)
+                style_block=style_block, citation_lookups=run_lookups, report=report,
+                paper=paper)
             return ans, llm_grounded_, anchors_
 
         # 按节合成失败(某一节两次都吐不出内容)→ 整体回退单次合成,已经产出
@@ -8610,7 +8753,8 @@ class AskService:
         elif answer_client.configured and (
                 top_hits or elements or chunks or chains or memory_hits
                 or structured_batch is not None or enumerations
-                or collection_map_prompt_block or stage.external_evidence or report):
+                or collection_map_prompt_block or stage.external_evidence or report
+                or paper is not None):
             # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
             fallback_err_mark = len(_err_sink)
             answer, llm_grounded, anchors, _ok = self._answer_with_retry(
@@ -8771,7 +8915,8 @@ class AskService:
             key
             for key, context in structured_map.items()
             if context.get("source_id") and context.get("element_id")
-        } | self._external_exact_keys(anchors) | report_cards.exact_keys
+        } | self._external_exact_keys(anchors) | report_cards.exact_keys | (
+            paper_registered_keys(run.ready("paper_evidence")))
         evidence_level, top_relevance = classify_evidence(
             evidence_pool, anchors, llm_grounded,
             self.settings.evidence_tau_low, self.settings.evidence_tau_high,
@@ -9069,9 +9214,10 @@ class AskService:
         trace = list(stage.trace)
         raise_if_cancelled(cancel_event)
         map_block = collection_map_block(stage.collection_map_text)
+        paper = self._paper_card_evidence(stage)  # 摘要块同答案路径;表格不是证据
         (structured_block, structured_map, _result_sets, _enumeration_dropped,
          _collection_citations, _read_dropped) = self._assemble_structured_evidence(
-            stage, _EvidenceAssemblyClient(), map_block)
+            stage, _EvidenceAssemblyClient(), map_block, paper)
         common = {
             "conversation_id": prepared.conversation_id,
             "retrieval_query": prepared.research_question,
@@ -9082,6 +9228,7 @@ class AskService:
             stage.top_hits or stage.elements or stage.chunks or stage.chains
             or stage.memory_hits or stage.structured_batch is not None
             or stage.enumerations or map_block or stage.external_evidence
+            or paper is not None
         )
         context = None
         if retrieved or report is not None:

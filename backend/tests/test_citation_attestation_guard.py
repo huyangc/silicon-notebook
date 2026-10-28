@@ -210,6 +210,12 @@ REGISTRY = {
     ("services/collection_enumeration_answer.py", "_preview_evidence", 'dict:"element_id"'): (
         "read-registered", _COLLECTION_PROOF,
         "copies the element of the citation collection_item_citations minted", 1),
+    ("services/paper_card_answer.py", "build_paper_card_evidence", 'dict:"element_id"'): (
+        "read-registered",
+        _COLLECTION_PROOF + (
+            ("calls", AS, "AskService._paper_card_evidence", "collection_item_citations"),),
+        "paper-card / extracted-value elements, keyed only from the citation "
+        "collection_item_citations minted for them", 1),
     ("services/kg/follow_chain.py", "render_follow_chain_context", 'dict:"element_id"'): (
         "pointer-registered", _CHAIN_PROOF, "chain hop primary evidence", 1),
     (RS, "_hop_without_dead_primary", "splat:element_id"): (

@@ -163,6 +163,37 @@ class ReasoningRunInput:
 
 
 @dataclass(frozen=True, slots=True)
+class PaperToolsSnapshot:
+    """The paper tools' outcomes of one run (spec 2026-10-28 §7), handed to
+    answer assembly: the run's effective ``answer_layout`` (and why a
+    requested table fell back), one ``find_sources`` outcome per call, the
+    latest card per source and one extraction outcome per call.  Typed
+    ``object`` like the evidence tuples -- this layer transfers them, it
+    does not read their shape (``paper_card_answer`` does)."""
+
+    answer_layout: str = "prose"
+    answer_layout_fallback: str = ""
+    finds: tuple[object, ...] = ()
+    cards: tuple[object, ...] = ()
+    extractions: tuple[object, ...] = ()
+
+    @classmethod
+    def from_result(cls, result: object) -> "PaperToolsSnapshot | None":
+        """``None`` for a run that used none of the tools, so every such run's
+        envelopes compare equal to the ones from before the tools existed."""
+        snapshot = cls(
+            answer_layout=str(getattr(result, "answer_layout", "") or "prose"),
+            answer_layout_fallback=str(
+                getattr(result, "answer_layout_fallback", "") or ""),
+            finds=tuple(getattr(result, "paper_finds", ()) or ()),
+            cards=tuple(getattr(result, "paper_cards", ()) or ()),
+            extractions=tuple(getattr(result, "paper_extractions", ()) or ()),
+        )
+        return snapshot if (snapshot.finds or snapshot.cards
+                            or snapshot.extractions) else None
+
+
+@dataclass(frozen=True, slots=True)
 class ReasoningEvidenceSnapshot:
     """Immutable ownership transfer from retrieval to answer assembly.
 
@@ -192,6 +223,9 @@ class ReasoningEvidenceSnapshot:
     # behind (the run's feedback ledger needs those; synthesis drops them).
     # Defaulted and appended last for the same reason as the field above.
     document_reads: tuple[object, ...] = ()
+    # ``PaperToolsSnapshot`` of the run, ``None`` when no paper tool ran.
+    # Defaulted and appended last for the same reason as the fields above.
+    paper_tools: PaperToolsSnapshot | None = None
 
     @classmethod
     def from_result(cls, result: object) -> "ReasoningEvidenceSnapshot":
@@ -218,6 +252,7 @@ class ReasoningEvidenceSnapshot:
             document_reads=tuple(
                 getattr(result, "document_reads", ()) or ()
             ),
+            paper_tools=PaperToolsSnapshot.from_result(result),
         )
 
 
@@ -285,6 +320,10 @@ class ResponseDraftInput:
     # drafted answer.  The empty-product outcomes ride along too; answer
     # assembly filters them out (see ``document_read_answer``).
     document_reads: tuple[object, ...] = ()
+    # The run's ``PaperToolsSnapshot`` (``None``: no paper tool ran).  Cards
+    # and extracted values are citable and may lay the answer out as a table,
+    # so they ride this envelope too (``paper_card_answer``).
+    paper_tools: PaperToolsSnapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)

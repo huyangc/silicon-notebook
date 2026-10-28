@@ -353,6 +353,21 @@ ATTACHED_REPORT_ANSWER_RULE = (
     f"copy {REPORT_EVIDENCE_NOT_LOADED} into your answer.\n"
 )
 
+#: Rule 16 (spec 2026-10-28 §7.3), only in a turn whose answer is laid out as
+#: the deterministic paper table (``answer_prompt(paper_table=True)``).
+PAPER_TABLE_ANSWER_RULE = (
+    "16. The system builds the paper table itself: a coverage line goes "
+    "before your answer, and after it a table with one row per expanded "
+    "paper (its metrics and key contributions, each with its [k] marker) "
+    "plus the list of related papers that were not expanded. Do NOT write "
+    "that table or re-list the papers one by one. Write only an overview of "
+    "what these papers address and a comparison across them (approaches, "
+    "trade-offs, which results are comparable and under which settings), "
+    "citing the same [k] markers the paper digests carry. When a coverage "
+    "note in the evidence says the list may be incomplete, never claim it "
+    "is complete.\n"
+)
+
 
 def answer_prompt(
     question: str,
@@ -367,6 +382,7 @@ def answer_prompt(
     external_rules: bool = False,
     peer_notebooks: bool = False,
     report_block: str = "",
+    paper_table: bool = False,
 ) -> str:
     """按节合成的四个形参是 **keyword-only**:三个既有位置参数(question/context/
     history)是所有调用方的形状,把模式开关也做成位置参数,只会让「第四个位置传了
@@ -389,6 +405,11 @@ def answer_prompt(
     (报告不是证据、不得引用报告本身、复述前先核对它引用的知识条目、无支撑时
     明说),并把报告块放在历史之后、节级指令之前;为空时(没挂报告、报告本轮不可
     读、或未走到合成)输出与接入这个特性之前逐字节相等。
+
+    ``paper_table`` (规格 2026-10-28 §7.3) 是第五个例子:本轮版式为论文表、且确有
+    表格时为真,追加规则 16(表格与未展开清单由系统拼在答案之后,模型只写综述与
+    跨论文对比、可引用摘要里的同一批 kN、不重复列表);为假时输出与接入这个特性
+    之前逐字节相等。
 
     """
     history_section = (
@@ -491,6 +512,7 @@ def answer_prompt(
         "as established fact what the body only inferred.\n"
         f"{external_section}"
         f"{report_rule}"
+        f"{PAPER_TABLE_ANSWER_RULE if paper_table else ''}"
         "\n"
         f"{history_section}"
         f"{report_section}"

@@ -190,6 +190,25 @@ def _env_file_preflight() -> None:
         "参照 .env.example 创建,或忽略本警告(容器纯环境变量部署)。", env_path)
 
 
+def _document_read_band_preflight(settings: Settings) -> None:
+    """`read_document` 的号段(k7001 起,每次读取占一个元素池宽)必须整体落在论文
+    卡片段(k9001+)之下;``REASONING_MAX_DOCUMENT_READS × DOCUMENT_OVERVIEW_MAX_ELEMENTS``
+    超过 2000 时检索侧会把这个动作整体关掉(``document_read_active``)。那是配置
+    错误、不是运行期状态,所以在启动时说一次,不靠运行期的静默缺席去猜。"""
+    from app.services.paper_card_answer import (
+        DOCUMENT_READ_BAND_WIDTH,
+        document_read_band_overflow,
+    )
+
+    reads = int(settings.reasoning_max_document_reads)
+    elements = int(settings.document_overview_max_elements)
+    if document_read_band_overflow(reads, elements):
+        logger.warning(
+            "REASONING_MAX_DOCUMENT_READS × DOCUMENT_OVERVIEW_MAX_ELEMENTS = %d × %d "
+            "超过 %d:read_document 的号段会越进论文卡片段,该动作本次部署不提供;"
+            "请调小其中一个。", reads, elements, DOCUMENT_READ_BAND_WIDTH)
+
+
 def _model_bindings_preflight(settings: Settings) -> None:
     """启动期硬校验 MODEL_SERVICES_CONFIG 的绑定表,缺/多都拒绝启动。
 
@@ -256,6 +275,7 @@ def create_app() -> FastAPI:
     _env_file_preflight()
     settings = get_settings()
     _model_bindings_preflight(settings)
+    _document_read_band_preflight(settings)
 
     bind_host = os.environ.get("BACKEND_HOST", os.environ.get("HOST", "127.0.0.1"))
     mcp_public_url = os.environ.get(
