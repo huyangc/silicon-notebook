@@ -137,6 +137,7 @@ from app.services.paper_card_answer import (
     paper_digest_block,
     paper_digest_reserve,
     registered_keys as paper_registered_keys,
+    roster_omitted_for,
     sectioned_paper_prefix,
     with_registration as with_paper_registration,
 )
@@ -8296,12 +8297,17 @@ class AskService:
                     delivered = delivered_outcomes(
                         enumerations, typed_collection_result_sets)
 
+                    # 论文表由 find_sources 定了覆盖说明时,花名册预览不进合成:它的
+                    # 「previewed N of M」会让模型另写一句与覆盖说明矛盾的范围声明。
+                    omit = roster_omitted_for(paper)
+
                     def _preview(budget):
                         return enumeration_prompt_block(
                             delivered,
                             inline_rows=limits.inline_answer_rows,
                             budget_chars=budget,
                             citations_by_item_id=collection_item_citations,
+                            omit_collections=omit,
                         )
                     preview = _preview(enum_budget_chars)
                     # 挤占时(room 非空)才收紧,半分区上限仍按整份分区算。只为
@@ -8336,7 +8342,9 @@ class AskService:
                         # 存在(上面 typed_collection_result_sets 不受影响),
                         # 只是这一轮没能把它塞进合成证据——这条轨迹detail是
                         # 唯一挂点(trace 已闭合,不能另起一条独立 trace 步)。
-                        enumeration_block_dropped = True
+                        # 整份按 ``omit`` 刻意省略的不算被挤掉。
+                        enumeration_block_dropped = any(
+                            o.collection not in omit for o in delivered)
             except (AskCancelled, RetrievalControlError):
                 raise
             except Exception:

@@ -799,8 +799,16 @@ def enumeration_prompt_block(
     inline_rows: int,
     budget_chars: int,
     citations_by_item_id: Mapping[str, object] | None = None,
+    omit_collections: frozenset = frozenset(),
 ) -> EnumerationPreview:
     """Bound the enumeration preview injected into answer synthesis.
+
+    ``omit_collections`` names collections whose outcomes are left out of the
+    preview entirely (``shown_rows`` 0, no header, no rows): a paper-table
+    answer whose papers came from ``find_sources`` leaves the document roster
+    out -- its coverage line, not a roster preview, says how complete the
+    list is (spec 2026-10-28 §7.3).  The notes are written only when an outcome
+    they speak about remains.
 
     Mirrors ``structured_prompt_block``: a coverage header the model can
     quote, followed by item lines, both bounded — ``inline_rows`` shared
@@ -826,7 +834,11 @@ def enumeration_prompt_block(
     if not outcomes:
         return EnumerationPreview(text="", shown_rows=[])
     budget = max(0, int(budget_chars))
-    quota = _row_quota(outcomes, inline_rows)
+    # An omitted outcome is split nothing: the allowance goes to what is shown.
+    kept_quota = iter(_row_quota(
+        [o for o in outcomes if o.collection not in omit_collections], inline_rows))
+    quota = [0 if o.collection in omit_collections else next(kept_quota)
+             for o in outcomes]
     blocks: List[str] = []
     used = 0
     shown_rows: List[int] = [0] * len(outcomes)
@@ -846,16 +858,20 @@ def enumeration_prompt_block(
         used += len(text) + joiner_cost
         return True
 
-    try_commit(_INSTRUCTION_LINE)
+    kept = [outcome for outcome in outcomes if outcome.collection not in omit_collections]
+    if kept:
+        try_commit(_INSTRUCTION_LINE)
     # Only when a document roster is actually in this run — see the constant.
     # Tried after the disclosure note and, like it, not load-bearing: a budget
     # too small for it still lets the outcome blocks themselves through, because
     # a list without its granularity hint is far better than a hint without its
     # list.
-    if any(outcome.collection == "sources" for outcome in outcomes):
+    if any(outcome.collection == "sources" for outcome in kept):
         try_commit(_SOURCE_GRANULARITY_LINE)
 
     for index, outcome in enumerate(outcomes):
+        if outcome.collection in omit_collections:
+            continue
         for shown in range(quota[index], -1, -1):
             candidate = _outcome_block(
                 outcome, shown=shown, key_start=next_key

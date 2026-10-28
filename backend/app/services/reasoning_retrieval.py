@@ -98,14 +98,14 @@ from app.services.reasoning_paper_tools import (
     ANSWER_LAYOUT_PROSE, EXTRACT_FROM_SOURCES_ACTION, FIND_SOURCES_ACTION,
     GET_PAPER_CARDS_ACTION, PAPER_TOOL_ACTIONS, FoundSourcesOutcome,
     PaperCardOutcome, PaperExtractionItem, PaperExtractionOutcome, PaperHandles,
-    answer_layout_value, card_anchor_ids, card_has_content, extraction_value_count,
-    missing_paper_tool_argument, paper_tool_text_fields, paper_tools_note,
-    parse_paper_tool_arguments, resolve_answer_layout, resolve_source_tokens,
-    year_value,
+    answer_layout_value, cap_find_terms, card_anchor_ids, card_has_content, clip,
+    extraction_value_count, missing_paper_tool_argument, paper_tool_text_fields,
+    paper_tools_note, parse_paper_tool_arguments, resolve_answer_layout,
+    resolve_source_tokens, year_value,
 )
 from app.services.source_finder import (
-    FIND_SOURCES_PAGE_SIZE, FindSourcesCursorError, FindSourcesError,
-    FindSourcesRequest,
+    FIND_SOURCES_MAX_TERMS, FIND_SOURCES_PAGE_SIZE, FindSourcesCursorError,
+    FindSourcesError, FindSourcesRequest,
 )
 from app.services.reasoning_actions import (
     ENUMERATE_SCOPE_ALL, ENUMERATE_SCOPE_CURRENT_NOTEBOOK, ENUMERATE_SCOPES,
@@ -7709,8 +7709,15 @@ class ReasoningRetriever:
                 "find_sources_unavailable",
                 "find_sources 本次不可用(本 run 的次数已用完或未提供),请用已有句柄继续或直接作答")
             return
+        terms, dropped = cap_find_terms(decision.find_sources_terms, FIND_SOURCES_MAX_TERMS)
+        if dropped:
+            # 超出上限的词截掉而不是整次拒绝(可接受偏差做兼容);MCP 直调仍由服务拒绝。
+            state.paper_log.append(
+                f"find_sources.terms 最多 {FIND_SOURCES_MAX_TERMS} 个,这次按前 "
+                f"{FIND_SOURCES_MAX_TERMS} 个执行;没有使用:"
+                + "、".join(f"「{clip(term, 32)}」" for term in dropped))
         request = FindSourcesRequest(
-            query=decision.find_sources_query, terms=decision.find_sources_terms,
+            query=decision.find_sources_query, terms=terms,
             year_from=year_value(decision.find_sources_year_from),
             year_to=year_value(decision.find_sources_year_to),
             venue=decision.find_sources_venue, author=decision.find_sources_author,

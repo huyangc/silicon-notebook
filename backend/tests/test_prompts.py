@@ -851,6 +851,30 @@ def test_answer_layout_rides_the_card_or_the_extraction_gate():
     assert "from find_sources" not in extract_only
 
 
+def test_find_sources_usage_states_the_term_limit_and_skips_a_redundant_roster():
+    """T7:模型给 7、8 个 terms 被整次拒绝(prompt 没写上限);拿到无缺口的
+    find_sources 结果后又列一遍整库花名册「确认完整」。"""
+    from app.services.prompts import (
+        FIND_SOURCES_PROMPT_MAX_TERMS,
+        FIND_SOURCES_PROMPT_TERM_MAX_CHARS,
+        reflect_prompt,
+    )
+    from app.services.source_finder import (
+        FIND_SOURCES_MAX_TERMS,
+        FIND_SOURCES_TERM_MAX_CHARS,
+    )
+
+    assert (FIND_SOURCES_PROMPT_MAX_TERMS, FIND_SOURCES_PROMPT_TERM_MAX_CHARS) == (
+        FIND_SOURCES_MAX_TERMS, FIND_SOURCES_TERM_MAX_CHARS)
+    roster = "do NOT also list the whole document roster"
+    with_roster = reflect_prompt("q", "c", element_kinds=("table",), find_sources_cap=2)
+    assert "at most 6 terms, each at most 64 characters" in with_roster
+    assert roster in with_roster and "lexical coverage complete" in with_roster
+    # 没有枚举动作的 run 不提一个它没有的花名册。
+    without = reflect_prompt("q", "c", find_sources_cap=2)
+    assert "at most 6 terms" in without and roster not in without
+
+
 def test_answer_layout_gate_alone_keeps_only_the_field_and_its_line():
     """Budgets spent (both tool caps 0) but the run offered them: only the
     ``answer_layout`` field and line remain; closed it is byte-identical."""

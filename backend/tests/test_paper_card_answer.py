@@ -33,6 +33,8 @@ from app.services.paper_card_answer import (
     compose_paper_answer,
     document_read_band_overflow,
     paper_digest_block,
+    roster_omitted_for,
+    value_with_unit,
 )
 from app.services.paper_card_service import CardResult
 from app.services.paper_extraction import ExtractionResult, FieldValue
@@ -223,7 +225,7 @@ def test_table_escapes_cells_caps_items_and_marks_only_registered_keys():
     # s1-002(第二条贡献)读不回:它在表里不得出标记。
     paper = _evidence(tools, drop={_eid("s1", 2)})
     lines = _table_lines(paper.table)
-    assert lines[0] == f"| 论文 | 年份 / 会议 | 主要技术指标 | 关键创新点 | {FIELD} |"
+    assert lines[0] == "| 论文 | 年份 / 会议 | 主要技术指标 | 关键创新点 | 补充字段 |"
     row = lines[2]
     # 标题里的 `|` 与换行都已转义,整行仍是 5 格。
     assert "Gated ｜ Widgets Net" in row
@@ -231,15 +233,15 @@ def test_table_escapes_cells_caps_items_and_marks_only_registered_keys():
     assert "2024 / CVPR" in row
     # 指标至多 3 条、贡献至多 2 条。
     assert "第四条指标不进表" not in row and "第三条贡献不进表" not in row
-    assert "top-1 85.2%（ImageNet）" in row and "latency 12ms（A100）" in row
+    assert "top-1 85.2%（ImageNet） vs ViT-B 81.8" in row and "latency 12 ms（A100）" in row
     # 只给已登记的 key 出标记;每个标记都在登记表里。
     keys = set(_MARKER.findall(paper.table))
     assert keys and keys <= set(paper.id_map)
     assert _eid("s1", 2) not in {paper.id_map[k]["element_id"] for k in keys}
     assert "第二条贡献" in row and "第二条贡献 [" not in row
-    # 抽取值作为额外一列,引用它自己的那个元素。
+    # 抽取值并进「补充字段」一列(「字段: 值 [kN]」),引用它自己的那个元素。
     value_key = paper.keys[_eid("s1", 5)]
-    assert f"COCO 2017: 42.1 AP [{value_key}]" in row
+    assert f"{FIELD}: COCO 2017: 42.1 AP [{value_key}]" in row
 
 
 def test_a_long_cell_is_cut_before_its_marker_and_stays_within_the_limit():
@@ -713,7 +715,10 @@ def test_extracted_fields_past_the_table_width_are_named():
                                     element_id=_eid("s1", i)) for i, f in enumerate(fields)),
         )),))
     paper = _evidence(_tools(extractions=[extraction]))
-    assert _table_lines(paper.table)[0].endswith("| 字段0 | 字段1 | 字段2 | 字段3 |")
+    lines = _table_lines(paper.table)
+    assert lines[0].endswith("| 关键创新点 | 补充字段 |")
+    assert all(f"字段{i}: v{i}" in lines[2] for i in range(4))
+    assert "字段4" not in lines[2]
     assert paper.coverage.endswith("另有 2 个临时字段未列入表：字段4、字段5。")
 
 
@@ -803,3 +808,108 @@ def test_one_card_per_element_when_k4001_and_k9xxx_cite_the_same_element(repo, m
     anchored = [a for a in response.anchors if a.element_id == element.element_id]
     assert {a.key for a in anchored} == {"k4001", "k9001"}
     assert sum(1 for c in response.citations if c.element_id == element.element_id) == 1
+
+
+# ------------------------------------------------------------------ T7 acceptance fixes
+
+
+@pytest.mark.parametrize("value, unit, text", [
+    # T7 真模型表里拼成一团的写法(「21.4AP」「79GPU days」「412steps」「26FPS」)。
+    ("21.4", "AP", "21.4 AP"), ("79", "GPU days", "79 GPU days"),
+    ("412", "steps", "412 steps"), ("26", "FPS", "26 FPS"), ("2.40", "USD", "2.40 USD"),
+    ("19.4", "meV", "19.4 meV"), ("2.99", "bits/dim", "2.99 bits/dim"),
+    # 符号单位贴着数字。
+    ("85.2", "%", "85.2%"), ("4", "×", "4×"), ("90", "°", "90°"), ("3.5", "x", "3.5x"),
+    ("12", "", "12"), ("", "ms", "ms"),
+])
+def test_value_and_unit_are_spaced_only_before_a_word_unit(value, unit, text):
+    assert value_with_unit(value, unit) == text
+
+
+def _metric_card(source_id: str, metrics: list) -> dict:
+    card = _card(source_id)
+    card["metrics"] = metrics
+    return card
+
+
+def test_metric_cell_reads_name_value_unit_setting_vs_baseline_in_table_and_digest():
+    """T7 cascaded-diffusion 那一行:本文方法的成绩带测量条件,基线只出现在 vs 之后。"""
+    e = _eid("s1", 3)
+    card = _metric_card("s1", [
+        {"name": "FID", "value": "3.52", "unit": "", "setting": "ImageNet 256, 250 steps",
+         "compared_to": "BigGAN-deep 6.95", "anchor": e},
+        {"name": "LVIS AP rare", "value": "21.4", "unit": "AP",
+         "setting": "LVIS v1", "compared_to": "", "anchor": e},
+        {"name": "speed", "value": "26", "unit": "FPS", "setting": "COCO val", "anchor": e},
+    ])
+    paper = _evidence(_tools(cards=[_card_outcome("nb", "s1", "Cascaded", card)]))
+    row = _table_lines(paper.table)[2]
+    key = paper.keys[e]
+    assert f"FID 3.52（ImageNet 256, 250 steps） vs BigGAN-deep 6.95 [{key}]" in row
+    assert f"LVIS AP rare 21.4 AP（LVIS v1） [{key}]" in row
+    assert f"speed 26 FPS（COCO val） [{key}]" in row
+    digest, _map = paper_digest_block(paper, 10_000)
+    assert "Metric: LVIS AP rare 21.4 AP（LVIS v1）" in digest
+    assert "21.4AP" not in digest and "26FPS" not in paper.table
+
+
+def test_extracted_values_share_one_column_and_rows_without_values_show_a_dash():
+    tools = _tools(
+        cards=[_card_outcome("nb", "s1", "有卡片", _card("s1")),
+               _card_outcome("nb", "s2", "卡片失败", {}, status="failed")],
+        extractions=[_extraction("nb", "s2", "卡片失败", "8.5 meV/Å")],
+    )
+    lines = _table_lines(_evidence(tools).table)
+    assert lines[0] == "| 论文 | 年份 / 会议 | 主要技术指标 | 关键创新点 | 补充字段 |"
+    assert all(line.count("|") == 6 for line in lines)
+    assert lines[2].endswith(" | — |")
+    assert f"| {FIELD}: 8.5 meV/Å [" in lines[3]
+
+
+def test_no_extra_column_when_no_inline_row_has_an_extracted_value():
+    tools = _tools(
+        cards=[_card_outcome("nb", f"s{i}", f"论文{i}", _card(f"s{i}")) for i in range(2)],
+        extractions=[_extraction("nb", "s9", "只在表外", "v")],
+    )
+    paper = _evidence(tools, rows=2)
+    lines = _table_lines(paper.table)
+    assert lines[0] == "| 论文 | 年份 / 会议 | 主要技术指标 | 关键创新点 |"
+    assert all(line.count("|") == 5 for line in lines)
+    assert "补充字段" not in paper.table
+
+
+def test_rule_16_makes_the_coverage_line_authoritative_over_the_model():
+    """T7:5/6 题正文自称「本次只预览了其中 32 篇」,与系统覆盖说明矛盾。"""
+    for rule in (PAPER_TABLE_ANSWER_RULE, PAPER_TABLE_SECTION_RULE):
+        assert "coverage line" in rule and "authoritative" in rule
+        assert "read, previewed or listed" in rule
+
+
+def test_the_roster_preview_is_left_out_only_for_a_find_sources_paper_table(repo, monkeypatch):
+    import app.services.collection_enumeration_answer as cea
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+
+    omitted: list = []
+    monkeypatch.setattr(cea, "typed_collection_results", lambda *a, **k: [])
+    monkeypatch.setattr(cea, "delivered_outcomes", lambda *a, **k: [])
+    monkeypatch.setattr(cea, "apply_synthesis_preview_counts", lambda *a, **k: None)
+    monkeypatch.setattr(cea, "enumeration_prompt_block", lambda *a, omit_collections, **k: (
+        omitted.append(omit_collections)
+        or SimpleNamespace(text="", evidence_by_id={}, shown_rows={})))
+    service = repo._runtime.ask_service()
+    monkeypatch.setattr(service.evidence_context, "collection_item_citations",
+                        lambda *a, **k: {})
+    stage = SimpleNamespace(
+        prepared=SimpleNamespace(limits=ask_retrieval_limits("standard"), notebook_id="nb"),
+        structured_batch=None, enumerations=[SimpleNamespace(items=())],
+        spreadsheet_results=[], document_reads=())
+    cards = [_card_outcome("nb", "s1", "A", _card("s1"))]
+    searched = _evidence(_tools(finds=[_find([_found("nb", "s1", "A")])], cards=cards))
+    direct = _evidence(_tools(cards=cards))
+    prose = _evidence(_tools(layout=ANSWER_LAYOUT_PROSE,
+                             finds=[_find([_found("nb", "s1", "A")])], cards=cards))
+    client = SimpleNamespace(configured=True)
+    for paper in (searched, direct, prose, None):
+        service._render_structured_side(stage, client, None, {}, paper)
+    assert omitted == [frozenset({"sources"}), frozenset(), frozenset(), frozenset()]
+    assert roster_omitted_for(searched) == frozenset({"sources"})

@@ -16,6 +16,7 @@ from app.services.paper_cards import (
     MAX_CARD_ANCHORS,
     MAX_CONTRIBUTIONS,
     MAX_METRICS,
+    PAPER_CARD_VERSION,
     TLDR_MAX_CHARS,
     CardInputElement,
     card_is_empty,
@@ -230,6 +231,17 @@ def test_malformed_shapes_degrade_without_raising():
     assert card["tldr"] is None and card["problem"] is None
     assert [m["value"] for m in card["metrics"]] == ["85.2"]
     assert card["datasets"] == []
+
+
+def test_prompt_keeps_metrics_to_the_papers_own_method():
+    """T7:基线数值(BigGAN-deep 6.95、SchNet 14.0 meV)被当成本文成绩列出,
+    setting 填成了另一列的列名。卡片版本随 prompt 一起加一(旧卡读取时失效)。"""
+    prompt = paper_card_prompt("[e1] table · Table 1\nx")
+    assert "THIS paper's own proposed method ONLY" in prompt
+    assert "baseline, a prior method or an ablation row is NOT a metric" in prompt
+    assert "\"compared_to\" of the metric it is compared with" in prompt
+    assert "never the header of another column" in prompt
+    assert PAPER_CARD_VERSION == 2
 
 
 def test_prompt_carries_the_input_block():
