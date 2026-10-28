@@ -221,6 +221,7 @@ def _git_main_root() -> Path:
     return path.resolve().parent
 
 
+@pytest.mark.process_contract
 def test_label_files_inside_the_main_checkout_are_refused():
     inside = _git_main_root() / "labels-should-not-be-here.json"
     code, output = _run(["sweep", "--labels", inside])
