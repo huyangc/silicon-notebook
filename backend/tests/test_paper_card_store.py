@@ -66,6 +66,10 @@ def test_failed_never_overwrites_a_ready_card_of_the_same_basis(env):
     cases.assert_failed_never_overwrites_a_ready_card_of_the_same_basis(env)
 
 
+def test_a_stale_basis_is_refused_and_keeps_the_newer_card(env):
+    cases.assert_a_stale_basis_is_refused_and_keeps_the_newer_card(env)
+
+
 def test_failed_for_another_card_version_overwrites(env):
     cases.assert_failed_for_another_card_version_overwrites(env)
 
@@ -74,8 +78,75 @@ def test_attempts_count_in_sql_and_reset_on_ready(env):
     cases.assert_attempts_count_in_sql_and_reset_on_ready(env)
 
 
-def test_generation_utc_is_max_element_stamp_in_utc(env):
-    cases.assert_generation_utc_is_max_element_stamp_in_utc(env)
+def test_attempts_restart_when_basis_or_version_changes(env):
+    cases.assert_attempts_restart_when_basis_or_version_changes(env)
+
+
+def test_unknown_status_is_rejected_before_any_sql(env):
+    cases.assert_unknown_status_is_rejected_before_any_sql(env)
+
+
+def test_card_basis_is_the_max_element_stamp(env):
+    cases.assert_card_basis_is_the_catalog_witness_on_sqlite_and_max_stamp_in_general(env)
+
+
+def test_card_bases_batch_matches_the_single_read(env):
+    cases.assert_card_bases_batch_matches_the_single_read(env)
+
+
+def test_sqlite_card_basis_is_the_catalog_witness_verbatim(env, tmp_path):
+    """No time-zone interpretation: the basis is the raw ``MAX(created_at)`` text,
+    character for character what the catalog's witness token is."""
+    from app.repositories.sqlite.catalog_store import CatalogStore
+
+    env.seed()
+    env.element("e-naive", "2026-10-28T20:00:00.123456")  # naive text, as the clock writes
+    basis = env.store.source_card_basis(cases.SRC)
+    assert basis == "2026-10-28T20:00:00.123456"
+    with env.connect() as db:
+        assert env.store.source_card_bases(db, [cases.SRC]) == {cases.SRC: basis}
+    catalog = CatalogStore(env.store.database, new_id=lambda prefix: prefix, now=lambda: cases.NOW)
+    assert catalog.source_element_generation(cases.SRC) == basis
+    raw = env.rows("SELECT MAX(created_at) AS m FROM source_elements WHERE source_id=?", (cases.SRC,))
+    assert raw[0]["m"] == basis
+
+
+def test_paper_cards_read_plan_stays_on_the_primary_key(env):
+    """Like ``test_paper_meta_hydration_plan_stays_on_source_id``: the ``+notebook_id``
+    narrowing keeps the page-level IN list driving through the primary key, with
+    and without ``sqlite_stat1`` (production has none)."""
+    env.seed()
+    env.card()
+    captured: list[tuple[str, list]] = []
+    with env.connect() as db:
+        original = db.execute
+
+        def spy(sql, params=()):
+            if "source_paper_cards" in str(sql):
+                captured.append((str(sql), list(params)))
+            return original(sql, params)
+
+        db.execute = spy
+        try:
+            env.store.paper_cards_for_sources(db, [cases.SRC, "src-x"], notebook_id=cases.NB)
+        finally:
+            del db.execute
+        assert len(captured) == 1
+        sql, params = captured[0]
+        assert "+notebook_id = ?" in sql and params[-1] == cases.NB
+
+        def plan() -> str:
+            return "\n".join(r["detail"] for r in db.execute(f"EXPLAIN QUERY PLAN {sql}", params))
+
+        for with_stats in (False, True):
+            if with_stats:
+                env.run("ANALYZE", ())
+            text = plan()
+            assert (
+                "SEARCH source_paper_cards USING INDEX sqlite_autoindex_source_paper_cards_1 "
+                "(source_id=?)" in text
+            ), (with_stats, text)
+            assert "idx_source_paper_cards_nb" not in text, (with_stats, text)
 
 
 def test_utc_iso_renders_aware_and_naive_stamps_as_utc():

@@ -2174,10 +2174,20 @@ class SourceStorePort(Protocol):
         write never overwrites a ``ready`` row of the same basis and card version;
         ``attempts`` is incremented in SQL on ``failed`` and reset on ``ready``."""
         ...
-    def source_element_generation_utc(self, source_id: str) -> str:
-        """``MAX(source_elements.created_at)`` of the source as a UTC ISO string on
-        both backends (``""`` without elements): the paper cards' ``basis``,
-        independent of the PostgreSQL session time zone."""
+    def source_card_basis(self, source_id: str) -> str:
+        """The paper card ``basis`` of one source: its element-generation witness
+        (``MAX(source_elements.created_at)``; ``""`` without elements). PostgreSQL
+        renders it as a UTC ISO string (independent of the session time zone);
+        SQLite returns the raw text, verbatim the ``CatalogStore.source_element_generation``
+        token. Bases are only compared within one backend. Callers must compute a
+        card's basis with this method or ``source_card_bases`` (never
+        ``CatalogStore.source_element_generation``) and must pass ``upsert_paper_card``
+        the very witness value that guarded their sampling."""
+        ...
+    def source_card_bases(self, db: object, source_ids: Sequence[str]) -> dict[str, str]:
+        """Batched ``source_card_basis`` on the CALLER's connection: one
+        ``GROUP BY source_id`` per batch (PostgreSQL <= 1024 ids, SQLite <= 900).
+        A source without elements is absent from the result (treat as ``""``)."""
         ...
     def visible_document_count(self, notebook_id: str) -> int: ...
 
