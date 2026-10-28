@@ -144,3 +144,64 @@
 
 - 入库：0 次 chat（拦截 120 次逻辑调用），嵌入 80 次。
 - 6 题：chat 请求 **86 次**（逻辑 84 + 重试 2），远低于 220 的上限；每题 12–16 次。
+
+## 复跑验证（2026-10-28）
+
+被测 HEAD `3cc284fab`（含 T7 修复：卡片提示词 v2 区分本文指标与 `compared_to` 基线、覆盖说明为准 + 用过 find_sources 时合成不给来源清单、
+单位留空格、单列「补充字段」、terms 上限、不再冗余枚举来源清单）。用户批准：standard 档只复跑 diffusion、molgraph 各一次，上限 40 次 chat 调用。
+
+做法同上：全新一次性 SQLite（卡片在 `PAPER_CARD_VERSION=2` 下重新生成），同一套 harness 与入库方式（入库 0 次 chat，嵌入 80 次 / 600 条），
+运行后删除数据库与配置副本。配置副本除上文两处补齐外，还删掉了已退役的 `kg_community_summary` 绑定——rebase 后的代码对退役绑定改为拒绝启动，
+**主 checkout 的 `.local/model-services.toml` 也需要删掉这一行**。
+
+### 指标
+
+| 主题 | 墙钟 | chat 请求 | reflect 轮数 | 动作顺序 | find_sources（强/相关/列出） | 卡片 生成/就绪/失败/推迟 | 抽取 | 表格行 | 召回 | 误报（均在未展开清单） |
+|---|---|---|---|---|---|---|---|---|---|---|
+| diffusion | 46.2 s（首跑 68.4） | 13（首跑 16） | 3（首跑 5） | find → cards → answer | 6/2/8 | 6/0/0/0 | — | 6 | 7/7 | rag-01 |
+| molgraph | 78.9 s（首跑 57.6） | 13（首跑 16） | 4（首跑 6） | find(拒) → find → cards → answer | 4/3/7 | 6/0/0/0 | — | 6 | 6/6 | det-05 |
+
+- chat 合计 **26 次**（逻辑 25 + 重试 1），上限 40。按工作负载：`reasoning_agent` 9、`paper_metadata` 12、`evidence_refine` 2、`ask_answer` 2。
+  嵌入查询 10 次、重排 6 次。
+- 卡片生成 4.1–4.3 s/批（6 篇）。molgraph 墙钟变长主要在最终合成（49.2 s，首跑 26.7 s；本次综述写得更长），不在论文工具。
+
+### 逐项核对
+
+1. **基线混入：已修好。** 两张表 12 行、所有指标格的主数值都是原文表里 `(ours)` 那一行的值（逐格对照引用元素原文与行名），
+   基线一律以「vs 行名 数值」出现，例如 `FID 3.52（ImageNet 256, 250 sampling steps） vs BigGAN-deep 6.95; Single-stage diffusion 10.94`、
+   `QM9 U0 MAE 19.4 meV（QM9 U0） vs SchNet 14.0; Kernel ridge regression 128.0`、
+   `FID 3.55（CIFAR-10, 2 steps） vs DDIM 4.67 (50 steps); Progressive distillation 5.58 (2 steps)`。**没有残留的基线冒充本文数值的格子。**
+2. **正文的来源数声明：已修好。** 两篇正文都没有「只预览了 N 篇」「共有 40 篇」之类的声明，与覆盖说明不矛盾。
+   但见下文残留问题 B：回答末尾出现系统追加的「本次回答未验证完整性，不能视为全部结果。」
+3. **find_sources 拒绝 / 冗余枚举：** 两题都没有再调用 `enumerate_elements`。没有因 terms 数量被拒（各次 5–6 个 terms）。
+   但 molgraph 第一次 `find_sources` 仍被拒，原因换成了参数放错层级，见残留问题 A。
+4. **单位与「补充字段」：** 单位已留空格（`21.4 AP`、`8.5 meV/A`、`0.0864 eV`、`79 GPU days`）。小瑕疵：`GPU days 79 GPU days`（指标名与单位重复）；
+   `Params 2.1 M … vs SchNet 1.8M`（本文值拆成 `2.1 M`，基线保留原文 `1.8M`，同格写法不一）。
+   **「补充字段」列本次未被触发**：两题都没有调用 `extract_from_sources`，表格只有四列固定列，无法在真模型上验证这一列的渲染。
+5. **召回：** diffusion 7/7（x-robdif 在未展开清单），molgraph 6/6；误报各 1 篇，均在未展开清单（related 线待 T10 校准）。
+6. **数字接地：** 两张表 12 行、71 个数字（含 vs 基线值与指标名里的数字），逐个在 `[kN]` 所指元素原文里找到，**0 处违规**。
+   脚本自动比对报的 3 处「未命中」都是正则把 `32x32`、`MD17` 里的数字拆错，原文均原样出现。
+
+### 残留问题（含复现）
+
+**A. reflect 把 find_sources 的参数平铺在顶层时，整次调用作废（缺陷）。**
+
+- molgraph 首轮 reflect 返回（原文）：
+  `{"sufficient":false,"next_action":"find_sources","query":"graph neural networks for molecular property prediction","terms":["graph neural network","molecular property prediction","message passing","molecule","GNN"],"scope":"current_notebook","kind":"papers","answer_layout":"paper_table","reason":"…"}`
+  ——`query` / `terms` / `scope` / `kind` 没有放进 `find_sources:{…}`。执行器读嵌套键得到空请求，
+  `source_finder` 抛「find_sources needs a query, terms or at least one filter」，轨迹为 `find_sources_invalid`，多花一轮 reflect（约 2 s、1 次 chat）。
+  下一轮模型改成嵌套形式后成功。首跑 2 次被拒是 terms 超限（已修），这次是另一种形状偏差。
+- 复现：让 reflect 返回上面这种 `next_action=find_sources` 且 `find_sources` 键缺失、参数在顶层的 payload。
+- 建议（按「可接受偏差做兼容」）：`next_action=find_sources` 且嵌套对象缺失或为空时，回退读取顶层同名键（`query`、`terms`、`year_from`… 、`kind`、`scope`）；
+  注意顶层 `query` 也是其他动作的字段，回退只在 `next_action=find_sources` 时生效。
+
+**B. 不再枚举来源清单后，论文表回答末尾总会出现「本次回答未验证完整性，不能视为全部结果。」（需拍板）**
+
+- 两题回答末尾都有这句（`completeness_notice`），而顶部覆盖说明是「共找到 N 篇相关论文…其中 M 篇展开了要点」，没有「可能还有更多」，
+  两题的 `find_sources` 都是 `semantic_recall_capped=false`、`lexical_complete=true`。
+- 原因：`ask_service.py` 里抑制这句免责的条件之一是「至少一张 `complete=True` 且非空的集合枚举结果」。首跑 5/6 题做了冗余的来源清单枚举，恰好满足条件；
+  T7 修复去掉了冗余枚举，于是论文表回答一律带这句（首跑里唯一没枚举的 detection 题同样带了）。
+- 这不算错误（规格要求未展开或召回触顶时不得声称列全，这里也有未展开的论文），但与覆盖说明的口径是两套。
+  可选：把「find_sources 未触顶 + lexical_complete + 无未展开」也算作抑制条件；或保留免责，把它并进覆盖说明那一行，避免首尾两处说法。由用户决定。
+
+**C. 小瑕疵**：`GPU days 79 GPU days`、`2.1 M` 与 `1.8M` 写法不一（见第 4 项）；「补充字段」列需要一个会触发抽取的题目才能在真模型上验证。
