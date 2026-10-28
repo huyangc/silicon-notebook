@@ -6,6 +6,7 @@ import { performApiRequest } from "./api-client.ts";
 import { getToken } from "./auth";
 import { itemSig, currentSigs, doneMessage, pruneSigs, pendingView, askElapsedLabel, pendingItemOrigin, transferLabel } from "./pending-actions";
 import { bellDeletionHint, bellDeletionLabel } from "./notebook-deletion-copy.ts";
+import { TransferBellActions } from "./notebook-transfer-panel.tsx";
 
 // 「进行中的提问」在铃铛打开时的重算间隔。快照只在提问起止时推送,已进行时长要
 // 自己走时钟;只在面板打开且真有在途提问时起表,关掉即停。
@@ -23,9 +24,13 @@ export type PendingItem = {
   type:
     | "report_outline" | "governance" | "index" | "paper_meta" | "share_request" | "ask"
     | "notebook_pending_delete" | "notebook_transfer";
-  // notebook_transfer:网页导出/导入笔记本的作业(job_id、state、kind)。完整面板在
-  // 后续前端里;这里只呈现一句状态,不带任何操作。
+  // notebook_transfer:网页导出/导入笔记本的作业(job_id、state、kind、phase)。行内只给
+  // 两种动作:完成的导出「下载」、已经发布的导入「打开笔记本」(TransferBellActions);
+  // 完整的进度与取消在设置里的「导出」一节和「导入」弹窗。
   kind?: "export" | "import";
+  phase?: string;
+  // 失败作业的稳定码(其余为 ""):发布之后才失败的导入(笔记本已在)靠它认出来。
+  failure_code?: string;
   // notebook_pending_delete:正在一天删除窗口里、与我有关的笔记本(我是主人,或我在那里
   // 有记忆)。计入未读;点击在通知面板展开该笔记本的操作。
   delete_after?: string;
@@ -50,7 +55,8 @@ export type PendingItem = {
   title?: string;
   count?: number;
   state?: string;
-  progress?: number | { done: number; total: number };  // index 是 %，paper_meta 是 {done,total}
+  // index 是 %，paper_meta 是 {done,total};notebook_transfer 是 {bytes} / {rows,rows_total},铃铛不读它。
+  progress?: number | { done: number; total: number } | Record<string, number>;
   _key?: string;  // 客户端 done 项用
 };
 export type DoneToast = { notebook_id: string; notebook_name: string; ts: number; kind?: string; text?: string };
@@ -379,11 +385,23 @@ export function PendingBell(props: {
                       onClick={() => dismissGroup(g.items.map(itemSig))}>×</span>
               </div>
               {g.items.map((it, idx) => it.type === "notebook_transfer" ? (
-                // 只呈现状态:没有跳转、没有操作(仅「关掉」这一条铃铛自己的功能)。
-                <div className="pending-row pending-row-static" key={`${g.key}-${idx}`} data-testid="pending-transfer-row">
+                // 行本身不跳转(导出条目的 notebook_id 是被导出的那本,点进去不是用户要的);
+                // 动作是行内那几个字:「下载」「打开笔记本」,外加铃铛自己的「×」。
+                // 按作业身份做 key(不按下标):行内「下载」持有自己的在途与结果,前面的条目
+                // 一消失,按下标的 key 会把这份状态错交给下一条。
+                <div className="pending-row pending-row-static" key={itemSig(it)} data-testid="pending-transfer-row">
                   <span className="pending-row-main">
                     {pendingItemOrigin(it) && <span className="pending-row-nb">{pendingItemOrigin(it)}</span>}
                     <span className="pending-row-label">{labelFor(it)}</span>
+                    <TransferBellActions
+                      kind={it.kind}
+                      state={it.state}
+                      phase={it.phase}
+                      failureCode={it.failure_code}
+                      jobId={it.job_id ?? ""}
+                      notebookId={it.notebook_id ?? ""}
+                      onOpenNotebook={() => { setOpen(false); onOpenItem(it); }}
+                    />
                   </span>
                   <span className="pending-row-x" title="关掉"
                         onClick={() => dismissItem(itemSig(it))}>×</span>

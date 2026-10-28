@@ -8,13 +8,18 @@
 //     卡片菜单的「导出笔记本」打开 `NotebookExportModal`,里面是同一节。
 //   * `NotebookImportModal` —— 「＋ 新建」旁「导入」打开的根弹窗(只呈现 page 持有的
 //     `useNotebookImport`)。
+//   * `TransferBellActions` —— 待确认中心里导出/导入那一行的动作(下载 / 打开笔记本)。
 //
 // 每颗会持续的按钮在途时禁用并换成进行中的字,结果写在它旁边(AGENTS.md「Interactive
 // feedback」);关闭入口任何时候都不禁用(无退路弹窗契约:作业在服务端接着跑)。
 
+import { useCallback, useEffect, useRef, useState } from "react";
+
 import { FloatingModalCard } from "./floating-modal-card.tsx";
 import {
+  DOWNLOAD_FAILED_TEXT,
   REEMBED_NOTICE,
+  downloadNotebookExport,
   exportReportNotes,
   formatTransferBytes,
   formatTransferDeadline,
@@ -26,10 +31,13 @@ import {
   transferPhaseText,
   transferProgressDetail,
   transferProgressText,
+  transferRequestErrorText,
   type NotebookTransferJob,
 } from "./notebook-transfer-api.ts";
 import { useImportUpload, useImportUploadBusy, type UploadSnapshot } from "./notebook-import-upload.ts";
+import { importPublished } from "./notebook-transfer-phases.ts";
 import {
+  DOWNLOAD_STARTED_HOLD_MS,
   useNotebookExport,
   type NotebookImportView,
 } from "./use-notebook-transfer.ts";
@@ -415,4 +423,83 @@ function ImportJobRow({
       </div>
     </div>
   );
+}
+
+// ======================================================================== 铃铛
+
+/**
+ * 铃铛一行的动作:完成的导出 → 「下载」(一次性票据 + 浏览器原生下载);已经发布的导入 →
+ * 「打开笔记本」。其余状态没有动作(只有铃铛自己的「×」)。
+ */
+export function TransferBellActions({
+  kind,
+  state,
+  phase,
+  failureCode = "",
+  jobId,
+  notebookId,
+  onOpenNotebook,
+}: {
+  kind?: string;
+  state?: string;
+  phase?: string;
+  /** 失败作业的稳定码:发布之后才失败的导入(笔记本已在)与什么都没留下的导入靠它分开。 */
+  failureCode?: string;
+  jobId: string;
+  notebookId: string;
+  onOpenNotebook: () => void;
+}) {
+  const [downloading, setDownloading] = useState(false);
+  // 同步闸:同一渲染周期里的双击要在 disabled 生效前就挡住(每一下都会换一张票据)。
+  const downloadingRef = useRef(false);
+  const [result, setResult] = useState<"idle" | "started" | "failed">("idle");
+  const [failure, setFailure] = useState("");
+  useEffect(() => {
+    if (result !== "started") return;
+    const timer = window.setTimeout(() => setResult("idle"), DOWNLOAD_STARTED_HOLD_MS);
+    return () => window.clearTimeout(timer);
+  }, [result]);
+  const download = useCallback(async () => {
+    if (downloadingRef.current) return;
+    downloadingRef.current = true;
+    setDownloading(true);
+    setResult("idle");
+    setFailure("");
+    try {
+      await downloadNotebookExport(jobId);
+      setResult("started");
+    } catch (error) {
+      setResult("failed");
+      setFailure(transferRequestErrorText(error, {
+        404: "这次导出已经过期或被删除，请重新导出。",
+      }, DOWNLOAD_FAILED_TEXT));
+    } finally {
+      downloadingRef.current = false;
+      setDownloading(false);
+    }
+  }, [jobId]);
+
+  if (kind === "export" && state === "succeeded") {
+    return (
+      <span className="pending-row-actions">
+        <button
+          type="button"
+          className={result === "started" ? "link-button inline-action transfer-button-done" : "link-button inline-action"}
+          disabled={downloading}
+          onClick={() => { void download(); }}
+        >
+          {downloading ? "准备下载…" : result === "started" ? "已开始下载" : "下载"}
+        </button>
+        {result === "failed" && <span className="transfer-error" role="alert">{failure}</span>}
+      </span>
+    );
+  }
+  if (importPublished({ kind, notebook_id: notebookId, phase, failure_code: failureCode })) {
+    return (
+      <span className="pending-row-actions">
+        <button type="button" className="link-button inline-action" onClick={onOpenNotebook}>打开笔记本</button>
+      </span>
+    );
+  }
+  return null;
 }
