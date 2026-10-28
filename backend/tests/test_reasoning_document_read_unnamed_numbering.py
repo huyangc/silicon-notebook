@@ -362,14 +362,14 @@ def test_a_run_with_a_different_read_cap_lists_that_many_untitled_documents(repo
 # --------------------------------------------------- 章节导航回显带号(e2e)
 
 
-def _seed_sectioned(repo, notebook_id, source_id, sections):
-    """一篇无标题来源 + 按章节路径切好的 chunk(章节导航读的是 chunks.section_path)。"""
+def _seed_sectioned(repo, notebook_id, source_id, sections, title=""):
+    """一篇来源(默认无标题) + 按章节路径切好的 chunk(章节导航读的是 chunks.section_path)。"""
     with repo._write() as db:
         db.execute(
             "INSERT INTO sources (id,notebook_id,title,source_type,status,"
             "parse_status,summary,created_at,updated_at) "
-            "VALUES (?,?,'','markdown','extracted','extracted','',?,?)",
-            (source_id, notebook_id, NOW, NOW))
+            "VALUES (?,?,?,'markdown','extracted','extracted','',?,?)",
+            (source_id, notebook_id, title, NOW, NOW))
         for index, (path, text) in enumerate(sections):
             db.execute(
                 "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
@@ -417,6 +417,26 @@ def test_section_navigation_echoes_the_numbered_untitled_title(repo):
     assert read[0].detail["result_ids"] == [f"{roster[1]}-c1"]
     assert f"章节目录:《{wanted}》" in llm.reflect_prompts[2]
     assert f"已浏览《{wanted}》" in llm.reflect_prompts[2]
+
+
+def test_section_navigation_echo_of_same_titled_documents_is_unchanged(repo):
+    """这次只给**无名**文档的章节回显带号:同名真标题(「周报（第 2 篇）」能解析到那
+    一篇)的目录与读取回显仍是它的真实标题,与改前相同。"""
+    notebook = repo.create_notebook(NotebookCreate(name="同名导航"))
+    for index in range(2):
+        _seed_sectioned(repo, notebook.id, f"d-{index}", (
+            ("1 概述", f"第{index}篇概述。"), ("2 结论", f"第{index}篇结论。")),
+            title="周报")
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(), _browse("周报（第 2 篇）"), _read_section("s2"), ANSWER,
+    ], plan=PLAN)
+    result = _reader(repo, llm).run(notebook.id, "这个库讲了什么", "")
+
+    browse = [s for s in result.trace if s.step_type == "browse_sections"]
+    read = [s for s in result.trace if s.step_type == "read_section"]
+    assert browse[0].detail["source"] == "周报"
+    assert read[0].detail["source"] == "周报"
+    assert "章节目录:《周报》" in llm.reflect_prompts[2]
 
 
 def test_reading_a_section_by_numbered_source_title_echoes_that_title(repo):
