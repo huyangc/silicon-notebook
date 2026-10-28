@@ -49,7 +49,7 @@ function job(over: Partial<NotebookTransferJob> = {}): NotebookTransferJob {
     id: "xfer-1", kind: "export", state: "running", phase: "writing", notebook_id: "nb1",
     notebook_name: "封装工艺库", created_at: "", finished_at: null, expires_at: null,
     progress: { bytes: 2 * 1024 * 1024 }, archive_bytes: 0, downloadable: false, downloaded: false,
-    report: null, reembed: null, index: null, failure_code: "", ...over,
+    report: null, reembed: null, index: null, failure_code: "", client_upload_id: "", ...over,
   };
 }
 

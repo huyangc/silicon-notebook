@@ -16,6 +16,8 @@ import {
   startNotebookExport,
   ARCHIVE_TOO_NEW_TEXT,
   DOWNLOAD_FRAME_HOLD_MS,
+  UPLOAD_IN_PROGRESS_TEXT,
+  uploadStillInProgress,
   REPAIR_HINT,
   FOLLOWUP_GENERIC,
   importReportNotes,
@@ -169,12 +171,14 @@ test("上传:原始 application/zip 请求体、带会话头、名字进 query�
   const debug = vi.spyOn(console, "debug").mockImplementation(() => undefined);
   const progress = vi.fn();
   const file = new File([new Uint8Array(10)], "库.snbk");
-  const pending = uploadNotebookImport(file, { name: "  新名字 ", onProgress: progress });
+  const pending = uploadNotebookImport(file, { name: "  新名字 ", uploadId: "up-test-0001", onProgress: progress });
   const xhr = xhrs[0];
   expect(xhr.method).toBe("POST");
   expect(xhr.url).toBe(`http://127.0.0.1:8000/api/notebook-imports?name=${encodeURIComponent("新名字").replace(/%20/g, "+")}`);
   expect(xhr.headers["Content-Type"]).toBe("application/zip");
   expect(xhr.headers.Authorization).toBe("Bearer tok-1");
+  // 上传标识走请求头(不进 query、不进日志)。
+  expect(xhr.headers["X-Upload-Id"]).toBe("up-test-0001");
   expect(xhr.body).toBe(file);
   xhr.upload.onprogress?.({ loaded: 4, total: 10, lengthComputable: true } as ProgressEvent);
   expect(progress).toHaveBeenCalledWith(4, 10);
@@ -203,7 +207,7 @@ test("上传失败:后端写给用户的中文(409 文档上限 / 名额满)原�
   ];
   for (const [status, detail, headers, expected] of cases) {
     const xhrs = installFakeXhr();
-    const pending = uploadNotebookImport(file, { name: "" }).catch((caught: unknown) => caught);
+    const pending = uploadNotebookImport(file, { name: "", uploadId: "up-test-0001" }).catch((caught: unknown) => caught);
     xhrs[0].respond(status, JSON.stringify({ detail }), headers);
     const error = await pending;
     expect(transferRequestErrorText(error, IMPORT_UPLOAD_ERRORS, "fallback")).toBe(expected);
@@ -217,13 +221,13 @@ test("上传:更新版本的部署写的文件(400 + archive_too_new)说「请�
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   const file = new File([new Uint8Array(3)], "a.snbk");
   const xhrs = installFakeXhr();
-  const newer = uploadNotebookImport(file, { name: "" }).catch((caught: unknown) => caught);
+  const newer = uploadNotebookImport(file, { name: "", uploadId: "up-test-0001" }).catch((caught: unknown) => caught);
   xhrs[0].respond(400, JSON.stringify({ detail: { code: "archive_too_new", message: "x" } }));
   expect(transferRequestErrorText(await newer, IMPORT_UPLOAD_ERRORS)).toBe(ARCHIVE_TOO_NEW_TEXT);
   expect(ARCHIVE_TOO_NEW_TEXT).toContain("请先升级本部署再导入");
   // 普通 400(文件坏了)仍是坏文件那一句,不提升级。
   const xhrs2 = installFakeXhr();
-  const broken = uploadNotebookImport(file, { name: "" }).catch((caught: unknown) => caught);
+  const broken = uploadNotebookImport(file, { name: "", uploadId: "up-test-0001" }).catch((caught: unknown) => caught);
   xhrs2[0].respond(400, JSON.stringify({ detail: "x" }));
   const brokenText = transferRequestErrorText(await broken, IMPORT_UPLOAD_ERRORS);
   expect(brokenText).toBe(IMPORT_UPLOAD_ERRORS[400]);
@@ -269,18 +273,39 @@ test("补全检索数据没完成:只有没补完的全是段/内容块那两条
   }
 });
 
+test("上传:同一个上传标识的上一次上传还在处理(409 upload_in_progress)能被认出来,与名额满分开", async () => {
+  vi.spyOn(console, "debug").mockImplementation(() => undefined);
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const file = new File([new Uint8Array(3)], "a.snbk");
+  const xhrs = installFakeXhr();
+  const racing = uploadNotebookImport(file, { name: "", uploadId: "up-test-0001" }).catch((caught: unknown) => caught);
+  xhrs[0].respond(409, JSON.stringify({ detail: { code: "upload_in_progress", message: "x" } }));
+  const error = await racing;
+  expect(uploadStillInProgress(error)).toBe(true);
+  expect(transferRequestErrorText(error, IMPORT_UPLOAD_ERRORS)).toBe(UPLOAD_IN_PROGRESS_TEXT);
+  const xhrs2 = installFakeXhr();
+  const busy = uploadNotebookImport(file, { name: "", uploadId: "up-test-0001" }).catch((caught: unknown) => caught);
+  xhrs2[0].respond(409, JSON.stringify({ detail: "你已有 2 个导出或导入正在进行，请等其中一个完成后再试。" }), "x-user-message: 1\r\n");
+  expect(uploadStillInProgress(await busy)).toBe(false);
+});
+
+test("作业解析带回 client_upload_id", () => {
+  expect(parseTransferJob(job({ kind: "import", client_upload_id: "up-xyz-123" }))?.client_upload_id).toBe("up-xyz-123");
+  expect(parseTransferJob(job())?.client_upload_id).toBe("");
+});
+
 test("上传:中止得到 AbortError,网络失败得到兜底文案", async () => {
   const xhrs = installFakeXhr();
   const controller = new AbortController();
   const file = new File([new Uint8Array(3)], "a.snbk");
-  const aborted = uploadNotebookImport(file, { name: "", signal: controller.signal }).catch((caught: unknown) => caught);
+  const aborted = uploadNotebookImport(file, { name: "", uploadId: "up-test-0001", signal: controller.signal }).catch((caught: unknown) => caught);
   controller.abort();
   const abortError = await aborted;
   expect(xhrs[0].aborted).toBe(true);
   expect((abortError as DOMException).name).toBe("AbortError");
 
   vi.spyOn(console, "error").mockImplementation(() => undefined);
-  const failed = uploadNotebookImport(file, { name: "" }).catch((caught: unknown) => caught);
+  const failed = uploadNotebookImport(file, { name: "", uploadId: "up-test-0001" }).catch((caught: unknown) => caught);
   xhrs[1].fail();
   expect(transferRequestErrorText(await failed, IMPORT_UPLOAD_ERRORS, "上传没有完成")).toBe("上传没有完成");
 });

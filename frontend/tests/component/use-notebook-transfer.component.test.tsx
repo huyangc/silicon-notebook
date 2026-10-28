@@ -36,7 +36,7 @@ function job(over: Partial<NotebookTransferJob> = {}): NotebookTransferJob {
     id: "xfer-1", kind: "export", state: "running", phase: "writing", notebook_id: "nb1",
     notebook_name: "封装工艺库", created_at: "", finished_at: null, expires_at: null,
     progress: { bytes: 1024 }, archive_bytes: 0, downloadable: false, downloaded: false,
-    report: null, reembed: null, index: null, failure_code: "", ...over,
+    report: null, reembed: null, index: null, failure_code: "", client_upload_id: "", ...over,
   };
 }
 
@@ -538,4 +538,34 @@ test("导出记忆的请求本身抛错:结果落在那几个字旁边,不悄悄
   expect(result.current.view.memoryExporting).toBe(false);
   expect(result.current.view.memoryResult).toBe("failed");
   expect(result.current.view.memoryText).toBe("记忆没有导出，请重试。");
+});
+
+
+test("说不准之后重传同一个文件:带同一个上传标识,服务端回的已有作业只占一行", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { result } = renderImport();
+  await waitFor(() => expect(result.current.view.limitBytes).toBe(LIMIT));
+  const chosen = new File([new Uint8Array(10)], "a.snbk");
+  act(() => result.current.chooseFile(chosen));
+  let cut: (error: unknown) => void = () => undefined;
+  let sent: () => void = () => undefined;
+  api.uploadNotebookImport.mockImplementationOnce((_file: File, options: { onBodySent: () => void }) => {
+    sent = options.onBodySent;
+    return new Promise((_, reject) => { cut = reject; });
+  });
+  act(() => result.current.start());
+  await waitFor(() => expect(api.uploadNotebookImport).toHaveBeenCalledTimes(1));
+  // 请求体传完、连接断了、作业还没出现:说不准,文件仍选着。
+  api.listNotebookTransfers.mockResolvedValueOnce([]);
+  await act(async () => { sent(); cut(new TypeError("Failed to fetch")); await Promise.resolve(); });
+  await waitFor(() => expect(result.current.view.uploadError).toContain("可能已被接收"));
+  expect(result.current.view.file).toBe(chosen);
+  const firstId = api.uploadNotebookImport.mock.calls[0][1].uploadId;
+  // 这时作业已经在服务端登记了(列表里看得到),用户又点了一次。
+  const existing = imp("existing", { client_upload_id: firstId });
+  api.uploadNotebookImport.mockResolvedValueOnce(existing);
+  act(() => result.current.start());
+  await waitFor(() => expect(result.current.view.jobs.map((item) => item.id)).toEqual(["existing"]));
+  expect(api.uploadNotebookImport.mock.calls[1][1].uploadId).toBe(firstId);
+  expect(result.current.view.uploadError).toBe("");
 });

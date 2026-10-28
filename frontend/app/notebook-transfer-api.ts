@@ -58,6 +58,8 @@ export type NotebookTransferJob = {
   index: Record<string, unknown> | null;
   /** 失败原因的稳定码(`error.code`);没有失败为 ""。原因的文案见 `transferFailureText`。 */
   failure_code: string;
+  /** 导入:建出它的那次上传的上传标识(`X-Upload-Id`);没有为 ""。 */
+  client_upload_id: string;
 };
 
 export type TransferDeleteOutcome = "deleted" | "cancelled" | "kept" | "pending";
@@ -129,6 +131,7 @@ export function parseTransferJob(value: unknown): NotebookTransferJob | null {
     reembed: isRecord(value.reembed) ? value.reembed : null,
     index: isRecord(value.index) ? value.index : null,
     failure_code: failureCodeOf(value),
+    client_upload_id: text(value.client_upload_id),
   };
 }
 
@@ -186,6 +189,13 @@ export async function deleteNotebookTransfer(jobId: string): Promise<TransferDel
 export type ImportUploadOptions = {
   /** 新笔记本的名字;空串沿用导出时的名字。 */
   name: string;
+  /**
+   * 这一串上传尝试的标识(`X-Upload-Id`):同一个标识再传一次,服务端回已经建出的那个作业、
+   * 不读请求体,所以重传不会多出一本。它也是事后认领「这次上传建出的是哪个作业」的唯一凭据。
+   */
+  uploadId: string;
+  /** 请求体已经整个交给网络。 */
+  onBodySent?: () => void;
   signal?: AbortSignal;
   onProgress?: (sent: number, total: number) => void;
 };
@@ -201,12 +211,20 @@ export async function uploadNotebookImport(
     contentType: "application/zip",
     signal: options.signal,
     onProgress: options.onProgress,
+    onBodySent: options.onBodySent,
+    headers: { [UPLOAD_ID_HEADER]: options.uploadId },
   });
   if (!response.ok) {
     // 一个更新版本的部署写的文件:后端用结构化 detail 的稳定码说(不带出处头),补救是
     // 升级本部署,不是换一个文件——按码给我们自己的那句话。
     if (response.status === 400 && (await structuredCode(response.clone())) === "archive_too_new") {
       throw humanizedError(ARCHIVE_TOO_NEW_TEXT, 400);
+    }
+    // 同一个标识的上一次上传还在服务端接收/检查:这一次没有被接收,上一次结果未定。
+    if (response.status === 409 && (await structuredCode(response.clone())) === "upload_in_progress") {
+      const error = humanizedError(UPLOAD_IN_PROGRESS_TEXT, 409);
+      stillInProgress.add(error);
+      throw error;
     }
     await throwHumanizedHttpError(response, TAG);
   }
@@ -224,6 +242,16 @@ async function structuredCode(response: Response): Promise<string> {
 }
 
 export const ARCHIVE_TOO_NEW_TEXT = "这个文件来自更新版本的部署，请先升级本部署再导入。";
+
+/** 上传标识的请求头(后端 `notebook_transfer_routes.UPLOAD_ID_HEADER`)。 */
+export const UPLOAD_ID_HEADER = "X-Upload-Id";
+export const UPLOAD_IN_PROGRESS_TEXT = "上一次上传的这个文件还在处理中，请稍后查看导入记录。";
+const stillInProgress = new WeakSet<Error>();
+
+/** 这个错误是不是「同一个上传标识的上一次上传还在处理」(409 upload_in_progress)。 */
+export function uploadStillInProgress(error: unknown): boolean {
+  return error instanceof Error && stillInProgress.has(error);
+}
 
 // ------------------------------------------------------------------ 下载
 

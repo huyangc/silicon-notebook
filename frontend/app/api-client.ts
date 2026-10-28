@@ -130,6 +130,10 @@ export type ApiUploadOptions = {
   signal?: AbortSignal;
   /** Bytes handed to the network so far, and the total (when the browser knows it). */
   onProgress?: (sent: number, total: number) => void;
+  /** The whole request body has been handed to the network (`xhr.upload` load). */
+  onBodySent?: () => void;
+  /** Extra request headers (never logged). */
+  headers?: Record<string, string>;
 };
 
 /**
@@ -147,7 +151,7 @@ export function performApiUpload(
   body: Blob,
   options: ApiUploadOptions,
 ): Promise<Response> {
-  const { tag, contentType, signal, onProgress } = options;
+  const { tag, contentType, signal, onProgress, onBodySent, headers: extraHeaders } = options;
   const url = resolveApiUrl(path);
   const sentToken = getToken();
   return new Promise<Response>((resolve, reject) => {
@@ -162,6 +166,8 @@ export function performApiUpload(
     xhr.open("POST", url);
     for (const [name, value] of Object.entries(authHeaders())) xhr.setRequestHeader(name, value);
     xhr.setRequestHeader("Content-Type", contentType);
+    for (const [name, value] of Object.entries(extraHeaders ?? {})) xhr.setRequestHeader(name, value);
+    if (onBodySent) xhr.upload.onload = () => onBodySent();
     if (onProgress) {
       xhr.upload.onprogress = (event) => onProgress(event.loaded, event.lengthComputable ? event.total : body.size);
     }
