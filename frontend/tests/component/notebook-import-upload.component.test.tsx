@@ -27,7 +27,8 @@ vi.mock("../../app/page-reload.ts", () => ({
 
 const {
   importUpload, useImportUpload, useImportUploadBusy, IMPORT_UPLOAD_UNSURE_TEXT, IMPORT_STOP_UNSURE_TEXT,
-  IMPORT_PRECHECK_STOP_UNSURE_TEXT, IMPORT_RESPONSE_UNSURE_TEXT,
+  IMPORT_PRECHECK_STOP_UNSURE_TEXT, IMPORT_RESPONSE_UNSURE_TEXT, IMPORT_NOT_CREATED_TEXT,
+  RECONCILE_INTERVAL_MS, RECONCILE_WINDOW_MS,
 } = await import("../../app/notebook-import-upload.ts");
 const { IMPORT_UPLOAD_CUT_TEXT, IMPORT_UPLOAD_FAILED_TEXT, TRANSFER_BUSY_TEXT } = await import(
   "../../app/notebook-transfer-api.ts"
@@ -655,4 +656,70 @@ test("第一次尝试就被确定拒绝:换标识之前也先按标识对账(有
   await attempt;
   expect(outcomes).toEqual([{ kind: "uploaded", job: active("already", "import", first.uploadId), fileName: "库.snbk" }]);
   stop();
+});
+
+
+test("说不准之后,后台按上传标识接着对账:作业晚些登记出来就认领它", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const { outcomes, stop } = collect();
+    const chosen = file();
+    const uploadId = await leaveUnsure(chosen);
+    expect(outcomes).toEqual([{ kind: "unsure", text: IMPORT_UPLOAD_UNSURE_TEXT }]);
+    // 第一次对账还没有,第二次有了。
+    api.listNotebookTransfers.mockResolvedValueOnce([]).mockResolvedValueOnce([active("late", "import", uploadId)]);
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS + 10);
+    expect(outcomes).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS + 10);
+    expect(outcomes.at(-1)).toEqual({ kind: "uploaded", job: active("late", "import", uploadId), fileName: "库.snbk" });
+    // 认领到就停:不再读。
+    const calls = api.listNotebookTransfers.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 3);
+    expect(api.listNotebookTransfers.mock.calls.length).toBe(calls);
+    stop();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("说不准之后对账到时限也没看到作业:说没建出来,可以重传,重传仍用同一个标识", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const { outcomes, stop } = collect();
+    const chosen = file();
+    const uploadId = await leaveUnsure(chosen);
+    api.listNotebookTransfers.mockResolvedValue([active("other-tab", "import", "up-other-tab-1")]);
+    await vi.advanceTimersByTimeAsync(RECONCILE_WINDOW_MS + RECONCILE_INTERVAL_MS * 2);
+    expect(outcomes.at(-1)).toEqual({ kind: "not_created", text: IMPORT_NOT_CREATED_TEXT });
+    expect(outcomes.filter((outcome) => (outcome as { kind: string }).kind === "not_created")).toHaveLength(1);
+    api.listNotebookTransfers.mockResolvedValue([]);
+    const retry = controllableUpload();
+    const again = importUpload.start(chosen, "", 1024);
+    await vi.waitFor(() => expect(retry.uploadId).not.toBe(""));
+    expect(retry.uploadId).toBe(uploadId);
+    retry.resolve(active("x", "import", uploadId));
+    await again;
+    stop();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("登出、或这一串开始新的一次尝试:后台对账停下", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const { outcomes, stop } = collect();
+    await leaveUnsure(file());
+    importUpload.reset();
+    const calls = api.listNotebookTransfers.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 3);
+    expect(api.listNotebookTransfers.mock.calls.length).toBe(calls);
+    expect(outcomes).toHaveLength(1);
+    stop();
+  } finally {
+    vi.useRealTimers();
+  }
 });

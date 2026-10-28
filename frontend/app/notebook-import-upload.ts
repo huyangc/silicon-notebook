@@ -55,7 +55,9 @@ export type UploadOutcome =
   | { kind: "stopped" }
   | { kind: "failed"; text: string }
   /** 连接断了,而服务器有没有接收这次上传说不准:不能当失败,也不能叫人马上重传。 */
-  | { kind: "unsure"; text: string };
+  | { kind: "unsure"; text: string }
+  /** 说不准之后对账到时限,服务器始终没有建出这次的导入:可以重传(仍用同一个标识,无害)。 */
+  | { kind: "not_created"; text: string };
 
 type Listener = () => void;
 
@@ -115,6 +117,16 @@ export const IMPORT_UPLOAD_UNSURE_TEXT = "连接中断，导入可能已被接�
 /** 停止了、而请求体可能已经整个到了服务器:同一个意思。 */
 export const IMPORT_STOP_UNSURE_TEXT = "已停止上传，但文件可能已经传完、导入可能已被接收；请先看下方的导入记录，再决定是否重传。";
 
+/** 说不准之后对账到时限、还是没看到作业时那句话。 */
+export const IMPORT_NOT_CREATED_TEXT = "服务器没有建出这次的导入，可以重传。";
+/** 说不准之后,每隔多久按上传标识对一次账。 */
+export const RECONCILE_INTERVAL_MS = 4000;
+/**
+ * 对账的时限:服务器收完请求体之后检查文件、数文档、建作业,最多也就这么久(网页导入上限
+ * 之内的文件);过了它还没看到作业,就是没建出来。
+ */
+export const RECONCILE_WINDOW_MS = 3 * 60_000;
+
 /** 服务器回了话、却不是认得出的确定拒绝(网关超时、5xx……)时那句话。 */
 export const IMPORT_RESPONSE_UNSURE_TEXT = "服务器没有给出明确结果，导入可能已被接收；请先看下方的导入记录，再决定是否重传。";
 /** 已经停在预检那一步、而上一次带这个标识的上传结果未定时那句话。 */
@@ -145,6 +157,55 @@ function endChain(file: File): void {
 /** 这一串尝试的结局说不准:标识留着,下一次(哪怕被打断)也不能当作确定没导入。 */
 function leaveUnresolved(file: File): void {
   if (chain?.file === file) chain.unresolved = true;
+}
+
+/**
+ * 说不准之后的后台对账:每隔 `RECONCILE_INTERVAL_MS` 按上传标识读一次作业,直到认领到
+ * (交出 `uploaded`)、到了 `RECONCILE_WINDOW_MS`(交出 `not_created`,标识留着)、这一串
+ * 又开始了一次新的尝试、换了文件,或登出。弹窗开不开都在跑:它不住在 React 里。
+ */
+let reconciler: { timer: ReturnType<typeof setTimeout> | null } | null = null;
+
+function stopReconcile(): void {
+  if (reconciler?.timer) clearTimeout(reconciler.timer);
+  reconciler = null;
+}
+
+function startReconcile(file: File): void {
+  stopReconcile();
+  const own = chain;
+  if (own === null || own.file !== file) return;
+  const handle: { timer: ReturnType<typeof setTimeout> | null } = { timer: null };
+  reconciler = handle;
+  const deadline = Date.now() + RECONCILE_WINDOW_MS;
+  const alive = () => reconciler === handle && chain === own;
+  const tick = async () => {
+    handle.timer = null;
+    if (!alive()) return;
+    const job = await jobOfUpload(own.uploadId);
+    if (!alive()) return;
+    if (job) {
+      reconciler = null;
+      endChain(file);
+      deliver({ kind: "uploaded", job, fileName: file.name });
+      return;
+    }
+    if (Date.now() >= deadline) {
+      // 没建出来:标识照旧留着——再传一次用的还是它,服务端那边即便晚到也只会认成同一个。
+      reconciler = null;
+      deliver({ kind: "not_created", text: IMPORT_NOT_CREATED_TEXT });
+      return;
+    }
+    handle.timer = setTimeout(() => { void tick(); }, RECONCILE_INTERVAL_MS);
+  };
+  handle.timer = setTimeout(() => { void tick(); }, RECONCILE_INTERVAL_MS);
+}
+
+/** 交出一个「说不准」:标识留着,并在后台接着按标识对账。 */
+function deliverUnsure(file: File, text: string): void {
+  leaveUnresolved(file);
+  deliver({ kind: "unsure", text });
+  startReconcile(file);
 }
 
 /**
@@ -220,6 +281,8 @@ export const importUpload = {
    */
   async start(file: File, name: string, limitBytes: number | null): Promise<void> {
     if (snapshot !== null) return;
+    // 新的一次尝试接手:后台对账让给它(同一串的话,这次尝试自己会按标识认领)。
+    stopReconcile();
     const mine = ++generation;
     const own = new AbortController();
     controller = own;
@@ -281,7 +344,8 @@ export const importUpload = {
       const interrupted = isAbort(error) || error instanceof TypeError;
       if (interrupted && !requestStarted) {
         // 停在预检那一步:这一次的请求根本没发出。标识留着;上一次的结果未定就照实说。
-        deliver(carried ? { kind: "unsure", text: IMPORT_PRECHECK_STOP_UNSURE_TEXT } : { kind: "stopped" });
+        if (carried) deliverUnsure(file, IMPORT_PRECHECK_STOP_UNSURE_TEXT);
+        else deliver({ kind: "stopped" });
       } else if (interrupted) {
         let outcome = await settleInterrupted(uploadId, isAbort(error), bodySent, file, limitBytes);
         if (!current()) return;
@@ -289,9 +353,12 @@ export const importUpload = {
         if (carried && outcome.kind !== "uploaded") {
           outcome = { kind: "unsure", text: isAbort(error) ? IMPORT_STOP_UNSURE_TEXT : IMPORT_UPLOAD_UNSURE_TEXT };
         }
-        if (outcome.kind === "unsure") leaveUnresolved(file);
-        else endChain(file);
-        deliver(outcome);
+        if (outcome.kind === "unsure") {
+          deliverUnsure(file, outcome.text);
+        } else {
+          endChain(file);
+          deliver(outcome);
+        }
       } else if (uploadRefusedForSure(error)) {
         // 白名单里的确定拒绝(后端在建作业之前说的)。有些拒绝(格式、按声明长度的 413)发生在
         // 服务端按标识去重之前,证明不了这个标识下没有作业——换标识之前先按标识对账,第一次
@@ -317,13 +384,9 @@ export const importUpload = {
           endChain(file);
           deliver({ kind: "uploaded", job, fileName: file.name });
         } else {
-          leaveUnresolved(file);
-          deliver({
-            kind: "unsure",
-            text: uploadStillInProgress(error)
-              ? transferRequestErrorText(error, {}, IMPORT_UPLOAD_UNSURE_TEXT)
-              : IMPORT_RESPONSE_UNSURE_TEXT,
-          });
+          deliverUnsure(file, uploadStillInProgress(error)
+            ? transferRequestErrorText(error, {}, IMPORT_UPLOAD_UNSURE_TEXT)
+            : IMPORT_RESPONSE_UNSURE_TEXT);
         }
       }
     } finally {
@@ -344,6 +407,7 @@ export const importUpload = {
   /** 登出:中止上传,丢掉一切(包括还没人拿走的结局),下一个人从空白开始。 */
   reset(): void {
     generation += 1;
+    stopReconcile();
     chain = null;
     controller?.abort();
     controller = null;

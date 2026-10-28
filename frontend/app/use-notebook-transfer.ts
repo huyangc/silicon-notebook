@@ -429,6 +429,8 @@ export function useNotebookImport(options: {
       setName("");
       setFileInputKey((key) => key + 1);
       setUploadError("");
+      // 说不准之后后台对账认领到了:工具栏上的「导入待确认」也就有了着落。
+      setUploadAttention("");
       setNotice({ text: "文件已上传，正在导入；进度见下方。关掉这个窗口不影响导入。", jobId: job.id });
     } else if (outcome.kind === "stopped") {
       setUploadError("");
@@ -436,7 +438,8 @@ export function useNotebookImport(options: {
     } else {
       setNotice({ text: "" });
       setUploadError(outcome.text);
-      // 弹窗关着时失败(或说不准)的:结果要落在发起它的那颗按钮(工具栏「导入」)上。
+      // 弹窗关着时失败(或说不准)的:结果要落在发起它的那颗按钮(工具栏「导入」)上。对账到
+      // 时限也没建出作业(`not_created`)按失败说:没有作业,可以重传。
       if (!openRef.current) setUploadAttention(outcome.kind === "unsure" ? "unsure" : "failed");
     }
   }), [announce]);
