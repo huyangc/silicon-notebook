@@ -9,11 +9,16 @@ from typing import Callable
 from app.domain.citation_origin import foreign_notebook_id
 from app.domain.source_positions import MAX_POSITIONS_PER_READ
 from app.models.ask import Citation
-from app.repositories.ports import SourceStorePort
+from app.repositories.ports import RepositoryDatabasePort, SourceStorePort
 from app.services.cancellation import CancelEvent, raise_if_cancelled
 from app.services.collection_enumeration import SourceItem
 from app.services.context_spans import entry_lines
 from app.services.evidence_attestation import attest_read
+from app.services.paper_cards import (
+    CardInputElement,
+    card_element_cost,
+    render_card_input,
+)
 from app.services.source_scope import citation_active_id
 
 
@@ -281,3 +286,181 @@ def prepare_source_overview(
         )
     _attest_cited(elements, citations)
     return SourceOverview(entry_lines(lines, empty=""), id_map, citations, note)
+
+
+# ------------------------------------------------------------ paper card input
+#
+# 论文卡片的输入采样(规格 docs/superpowers/specs/2026-10-28-paper-cards-find-sources-design_zh.md
+# §4.3):开头 40% → 表格(按文档顺序,单表截断 1500 字,最多 6 张)→ 余下按 spread
+# 均匀取样(含最后一个元素)。与 ``prepare_source_overview`` 同一套分页读取与生成见证,
+# 不另起读取路径;确定性、可复现。
+
+PAPER_CARD_OPENING_SHARE = 0.4
+PAPER_CARD_TABLE_MAX_CHARS = 1500
+PAPER_CARD_MAX_TABLES = 6
+_CARD_OPENING_PAGE = 24
+_CARD_TABLE_PAGE = 12
+# spread 段按「每个元素大约这么多字」决定取几个位置;实际份额按剩余预算均分。
+_CARD_SPREAD_ELEMENT_CHARS = 600
+_CARD_SPREAD_MAX_ELEMENTS = 32
+# 截断后正文短于这个数就不放(只剩头行的元素对模型没有用)。
+_CARD_MIN_TEXT_CHARS = 120
+
+
+@dataclass(frozen=True)
+class PaperCardSample:
+    """``status``:``ok`` 有输入;``empty`` 没有可读原文;``changed`` 读取期间内容变了。
+    ``basis`` 是守护这次采样的生成见证值(``generation_reader`` 在读取前给出、读取后
+    复核相等),写卡必须用它,不能另读一次。"""
+
+    status: str
+    basis: str
+    elements: tuple[CardInputElement, ...]
+    input_block: str
+    total_elements: int
+
+    @property
+    def input_chars(self) -> int:
+        return len(self.input_block)
+
+
+class _CardBudget:
+    def __init__(self, total: int) -> None:
+        self.total = total
+        self.used = 0
+        self.elements: list[CardInputElement] = []
+        self.ids: set[str] = set()
+
+    @property
+    def remaining(self) -> int:
+        return self.total - self.used
+
+    def fit(self, element_id: str, element_type: str, location_label: str,
+            text: str, *, limit: int, cap: int | None = None) -> bool:
+        """把一个元素按 ``limit``(本段还能用的字数)截断后放进来;放不下返回 False。"""
+        if element_id in self.ids:
+            return True
+        text = (text or "").strip()
+        if not text:
+            return True
+        if cap is not None:
+            text = text[:cap]
+        handle = f"e{len(self.elements) + 1}"
+        room = min(limit, self.remaining) - card_element_cost(handle, element_type, location_label, "")
+        if room < min(len(text), _CARD_MIN_TEXT_CHARS):
+            return False
+        text = text[:room]
+        self.elements.append(CardInputElement(handle, element_id, element_type, location_label, text))
+        self.ids.add(element_id)
+        self.used += card_element_cost(handle, element_type, location_label, text)
+        return True
+
+
+def _card_opening(sources: SourceStorePort, source_id: str, budget: _CardBudget,
+                  limit: int, cancel_event: CancelEvent) -> tuple[int, int, bool]:
+    """开头段:从位置 0 顺序分页读,直到本段预算用完。返回 (total, 下一个未读位置, 计数稳定)。"""
+    spent_before = budget.used
+    offset = 0
+    total = None
+    stable = True
+    while True:
+        raise_if_cancelled(cancel_event)
+        page = sources.source_elements_page(source_id, offset=offset, limit=_CARD_OPENING_PAGE)
+        if total is None:
+            total = page.total_count
+        stable = stable and page.total_count == total
+        if not page.items:
+            return total, offset, stable
+        for element in page.items:
+            if element.source_id != source_id:
+                offset += 1
+                continue
+            share = limit - (budget.used - spent_before)
+            cap = PAPER_CARD_TABLE_MAX_CHARS if element.element_type == "table" else None
+            if not budget.fit(element.id, element.element_type, element.location_label,
+                              element.text, limit=share, cap=cap):
+                return total, offset, stable
+            offset += 1
+        if offset >= total:
+            return total, offset, stable
+
+
+def _card_tables(database: RepositoryDatabasePort, sources: SourceStorePort,
+                 source_id: str, budget: _CardBudget, cancel_event: CancelEvent) -> None:
+    """表格段:按文档顺序取表格元素(长表的续段不算新表),跳过开头段已放的。"""
+    taken = 0
+    after = None
+    with database.connect() as db:
+        while taken < PAPER_CARD_MAX_TABLES:
+            raise_if_cancelled(cancel_event)
+            rows = sources.element_page_rows(db, source_id, "table", after, _CARD_TABLE_PAGE)
+            for row in rows:
+                if row["id"] in budget.ids:
+                    continue
+                if not budget.fit(row["id"], "table", row["location_label"] or "", row["text"] or "",
+                                  limit=budget.remaining, cap=PAPER_CARD_TABLE_MAX_CHARS):
+                    return
+                taken += 1
+                if taken >= PAPER_CARD_MAX_TABLES:
+                    return
+            if len(rows) < _CARD_TABLE_PAGE:
+                return
+            after = (rows[-1]["created_at"], rows[-1]["id"])
+
+
+def _card_spread(sources: SourceStorePort, source_id: str, budget: _CardBudget,
+                 start: int, total: int, cancel_event: CancelEvent) -> bool:
+    """spread 段:在开头段之后的位置里均匀取样(必含最后一个元素),份额按剩余预算均分。"""
+    candidates = list(range(start, total))
+    if not candidates or budget.remaining < _CARD_MIN_TEXT_CHARS:
+        return True
+    count = min(len(candidates), _CARD_SPREAD_MAX_ELEMENTS,
+                max(1, budget.remaining // _CARD_SPREAD_ELEMENT_CHARS))
+    if count == 1:
+        positions = [candidates[-1]]
+    else:
+        positions = sorted({candidates[i * (len(candidates) - 1) // (count - 1)] for i in range(count)})
+    read_at, stable = _read_positions(sources, source_id, positions, total, cancel_event)
+    picked = [element for position in positions for element in read_at.get(position, ())
+              if element.source_id == source_id and element.id not in budget.ids
+              and (element.text or "").strip()]
+    for index, element in enumerate(picked):
+        share = budget.remaining // (len(picked) - index)
+        cap = PAPER_CARD_TABLE_MAX_CHARS if element.element_type == "table" else None
+        budget.fit(element.id, element.element_type, element.location_label, element.text,
+                   limit=share, cap=cap)
+    return stable
+
+
+def sample_paper_card_input(
+    sources: SourceStorePort,
+    database: RepositoryDatabasePort,
+    source_id: str,
+    budget_chars: int,
+    *,
+    generation_reader: Callable[[str], str],
+    cancel_event: CancelEvent = None,
+) -> PaperCardSample:
+    """论文卡片的确定性输入采样(规格 §4.3),输入块不超过 ``budget_chars`` 字。
+
+    ``generation_reader`` 必须是论文卡片的 basis 读取函数
+    (``SourceStorePort.source_card_basis``):它在读取前给出见证值、读取后复核,
+    两次不等(或分页期间元素数变化)返回 ``changed``;返回的 ``basis`` 就是那个守护值。
+    调用方负责来源授权。
+    """
+    raise_if_cancelled(cancel_event)
+    before = generation_reader(source_id)
+    budget = _CardBudget(max(0, int(budget_chars)))
+    opening_limit = int(budget.total * PAPER_CARD_OPENING_SHARE)
+    total, opening_end, stable = _card_opening(sources, source_id, budget, opening_limit, cancel_event)
+    if not total:
+        return PaperCardSample("empty", before, (), "", 0)
+    _card_tables(database, sources, source_id, budget, cancel_event)
+    stable = _card_spread(sources, source_id, budget, opening_end, total, cancel_event) and stable
+    raise_if_cancelled(cancel_event)
+    if not stable or generation_reader(source_id) != before:
+        return PaperCardSample("changed", before, (), "", total)
+    if not budget.elements:
+        return PaperCardSample("empty", before, (), "", total)
+    elements = tuple(budget.elements)
+    return PaperCardSample("ok", before, elements, render_card_input(elements), total)

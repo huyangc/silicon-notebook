@@ -110,6 +110,7 @@ RUNTIME_ATTRIBUTES = [
     "notebook_transfers",
     "notebook_summaries",
     "on_source_vectors_written",
+    "paper_cards",
     "parser_provider_chain",
     "pending_actions_service",
     "queries",

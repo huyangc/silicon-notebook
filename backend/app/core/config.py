@@ -675,6 +675,15 @@ class Settings(BaseSettings):
     # LLM 调用,接地校验后入库(source_paper_meta/source_authors)。
     paper_meta_enabled: bool = Field(True, validation_alias="PAPER_META_ENABLED")
     paper_meta_head_chars: int = Field(4000, validation_alias="PAPER_META_HEAD_CHARS")
+    # --- 论文卡片(paper cards):is_paper=1 的来源在用到时懒生成的逐篇结构化要点,
+    # 复用 paper_metadata 模型绑定(docs/superpowers/specs/2026-10-28-paper-cards-find-sources-design_zh.md §4)。
+    # PAPER_CARD_ENABLED 是部署级开关(关闭时只读已缓存的有效卡片、不再生成);
+    # INPUT_CHARS 是单次调用的原文采样字数上限;MAX_WORKERS 再与该服务的并行度取小;
+    # RETRY_SECONDS 是同一内容版本生成失败后的冷却(连续 3 次失败后固定 24 小时)。
+    paper_card_enabled: bool = Field(True, validation_alias="PAPER_CARD_ENABLED")
+    paper_card_input_chars: int = Field(16000, ge=2000, validation_alias="PAPER_CARD_INPUT_CHARS")
+    paper_card_max_workers: int = Field(4, ge=1, le=16, validation_alias="PAPER_CARD_MAX_WORKERS")
+    paper_card_retry_seconds: int = Field(3600, ge=0, validation_alias="PAPER_CARD_RETRY_SECONDS")
 
     embed_dim: int = Field(1024, validation_alias="EMBED_DIM")
     # 运行时向量维度(MRL 前缀截断 + re-normalize):所有相似度/矩阵/ANN 在截断后

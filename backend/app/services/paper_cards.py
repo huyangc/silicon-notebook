@@ -1,0 +1,379 @@
+"""论文卡片:prompt / schema hint / 输入块渲染与零 LLM 接地校验(纯函数)。
+
+设计见 ``docs/superpowers/specs/2026-10-28-paper-cards-find-sources-design_zh.md``
+§4.1–§4.3。卡片是由原文确定性派生的缓存:模型只能引用本次输入采样里出现过的
+元素,指标数值归一化后必须以完整数字 token 出现在它所引用的元素**送给模型的那段
+文本**里(表格截断后的文本,不是全文元素),否则丢弃并记审计。无 DB / 网络依赖。
+
+输入块里每个元素用短句柄 ``e1``、``e2`` … 标注(而不是 35 字符的元素 id):句柄是
+本次采样的局部名字,校验时一一映射回真实元素 id,卡片里存的永远是元素 id。模型
+回填的若是元素 id 本身(而非句柄),同样接受——合法性只看它是否在本次输入里。
+"""
+from __future__ import annotations
+
+import re
+import unicodedata
+from dataclasses import dataclass
+from typing import Any, Iterable, Mapping
+
+from app.core.model_values import as_text
+
+# prompt / schema / 校验规则 / 采样口径任何一项变化都要加一:旧卡片在读取时
+# 因版本不等自动失效(规格 §4.4「有效性在读取时判定」),不写清理代码。
+PAPER_CARD_VERSION = 1
+
+# 示例里不写 null、空列表只给字符串列表字段(本 hint 一个都没有,所以每个列表都
+# 给一个示例项):否则严格 schema 投影整体回落 JSON 模式(json-hint-strict-alignment)。
+# 根字段在严格模式下不可为 null,所以「原文没有」由 prose 约定为 text 写 null / 列表写 []。
+PAPER_CARD_SCHEMA_HINT = (
+    '{"tldr":{"text":"","anchors":["e1"]},'
+    '"problem":{"text":"","anchors":["e1"]},'
+    '"method":{"text":"","anchors":["e1"]},'
+    '"contributions":[{"text":"","anchors":["e1"]}],'
+    '"metrics":[{"name":"","value":"","unit":"","setting":"","compared_to":"","anchor":"e1"}],'
+    '"datasets":[{"name":"","anchors":["e1"]}]}'
+)
+
+# §4.1 长度与条数上限。文字超长由校验截断(不丢字段);条数超出的尾部丢弃并记审计。
+TLDR_MAX_CHARS = 300
+PROBLEM_MAX_CHARS = 400
+METHOD_MAX_CHARS = 400
+CONTRIBUTION_MAX_CHARS = 200
+MAX_CONTRIBUTIONS = 5
+MAX_METRICS = 12
+MAX_DATASETS = 8
+MAX_CARD_ANCHORS = 24
+# 规格只给出 name/setting/compared_to「只截断长度」,没给数;取单元格能放下的量级。
+METRIC_NAME_MAX_CHARS = 80
+METRIC_VALUE_MAX_CHARS = 40
+METRIC_UNIT_MAX_CHARS = 16
+METRIC_SETTING_MAX_CHARS = 120
+METRIC_COMPARED_MAX_CHARS = 120
+DATASET_NAME_MAX_CHARS = 120
+
+# §4.1 anchor 裁剪的保留顺序。
+ANCHOR_FIELD_ORDER = ("tldr", "metrics", "contributions", "method", "problem", "datasets")
+
+_TEXT_FIELD_CAPS = {
+    "tldr": TLDR_MAX_CHARS,
+    "problem": PROBLEM_MAX_CHARS,
+    "method": METHOD_MAX_CHARS,
+}
+
+
+@dataclass(frozen=True)
+class CardInputElement:
+    """一个送进模型的采样元素。``text`` 是**送给模型的那段文本**(已截断),
+    指标接地只在它上面判定。"""
+
+    handle: str
+    element_id: str
+    element_type: str
+    location_label: str
+    text: str
+
+
+def card_element_header(handle: str, element_type: str, location_label: str) -> str:
+    label = " ".join(str(location_label or "").split())[:80]
+    kind = str(element_type or "text")
+    return f"[{handle}] {kind}" + (f" · {label}" if label else "") + "\n"
+
+
+def card_element_cost(handle: str, element_type: str, location_label: str, text: str) -> int:
+    """一个元素在输入块里占的字符数(含头行与段间空行),采样按它记预算。"""
+    return len(card_element_header(handle, element_type, location_label)) + len(text) + 2
+
+
+def render_card_input(elements: Iterable[CardInputElement]) -> str:
+    return "\n\n".join(
+        card_element_header(e.handle, e.element_type, e.location_label) + e.text
+        for e in elements
+    )
+
+
+def paper_card_prompt(input_block: str) -> str:
+    return (
+        "Summarise an academic paper into a structured card, using ONLY the "
+        "excerpts below.\n"
+        "Each excerpt starts with a handle in brackets, e.g. [e3]. Every "
+        "\"anchors\" / \"anchor\" value must be such a handle (e.g. \"e3\") of an "
+        "excerpt that actually states the content.\n"
+        "Rules:\n"
+        "- Use ONLY the excerpts. Even if you recognise the paper, do NOT fill "
+        "in anything from memory. When the excerpts do not show something, "
+        "write null for that text and [] for that list.\n"
+        f"- tldr: one or two sentences (<= {TLDR_MAX_CHARS} characters). "
+        f"problem / method: <= {PROBLEM_MAX_CHARS} characters each.\n"
+        f"- contributions: at most {MAX_CONTRIBUTIONS} key innovations, each "
+        f"<= {CONTRIBUTION_MAX_CHARS} characters.\n"
+        f"- metrics: at most {MAX_METRICS} main quantitative results. \"value\" "
+        "is the number EXACTLY as printed in the cited excerpt (e.g. \"85.2\"); "
+        "put the unit (%, x, ms, ...) in \"unit\", the benchmark / dataset / "
+        "split in \"setting\", and the baseline it is compared against (if "
+        "stated) in \"compared_to\". \"anchor\" is the ONE excerpt (often a "
+        "table) where that number appears.\n"
+        f"- datasets: at most {MAX_DATASETS} datasets or benchmarks used.\n"
+        "- Write the text in the language of the paper.\n"
+        "- Return JSON only.\n\n"
+        f"Excerpts:\n{input_block}"
+    )
+
+
+# ---------------------------------------------------------------- numbers
+
+# 千分位:逗号两侧都是数字,且右侧恰好三位后不再接数字。
+_THOUSANDS_RE = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+# 完整数字 token:前后都不是数字;点号连接的数字串整体算一个 token(185.23、1.2.3),
+# 所以 85.2 不会命中 185.23 或 85.23。字母、%、×、x 等都是 token 边界。
+_NUMBER_RE = re.compile(r"(?<![\d.])\d+(?:\.\d+)*(?!\d)")
+
+
+def _canonical_number(token: str) -> str:
+    """单个小数点的 token 去小数尾零与整数前导零(85.20 == 85.2,07 == 7);
+    多个点号的(版本号形状)原样保留。"""
+    if token.count(".") > 1:
+        return token
+    whole, _, frac = token.partition(".")
+    whole = whole.lstrip("0") or "0"
+    frac = frac.rstrip("0")
+    return f"{whole}.{frac}" if frac else whole
+
+
+def _normalize_numeric_text(text: str) -> str:
+    """全角转半角(NFKC)并去千分位逗号。"""
+    return _THOUSANDS_RE.sub("", unicodedata.normalize("NFKC", text or ""))
+
+
+def number_tokens(text: str) -> list[str]:
+    """文本里全部完整数字 token 的规范形(按出现顺序)。"""
+    return [_canonical_number(m.group(0)) for m in _NUMBER_RE.finditer(_normalize_numeric_text(text))]
+
+
+def value_grounded(value: str, element_text: str) -> bool:
+    """指标值接地:值里至少有一个数字 token,且每个数字 token(规范形)都以完整
+    token 出现在元素文本里。单位与符号不参与比对(``85.2%`` 与 ``85.2`` 相同)。"""
+    wanted = number_tokens(value)
+    if not wanted:
+        return False
+    present = set(number_tokens(element_text))
+    return all(token in present for token in wanted)
+
+
+# ---------------------------------------------------------------- verify
+
+def _scalar_text(value: Any) -> str:
+    """字符串取 strip;数字(JSON 模式下模型可能把数值写成 number)转字符串。"""
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        return repr(value) if isinstance(value, float) else str(value)
+    return as_text(value)
+
+
+def _cap(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit].rstrip()
+
+
+class _AnchorResolver:
+    """句柄或元素 id → 元素 id;不在本次输入里的返回 ``""``。"""
+
+    def __init__(self, elements: Iterable[CardInputElement]) -> None:
+        self.by_handle: dict[str, CardInputElement] = {}
+        self.by_id: dict[str, CardInputElement] = {}
+        for element in elements:
+            self.by_handle[element.handle.lower()] = element
+            self.by_id[element.element_id] = element
+
+    def resolve(self, raw: Any) -> CardInputElement | None:
+        token = as_text(raw)
+        if not token:
+            return None
+        if token in self.by_id:
+            return self.by_id[token]
+        return self.by_handle.get(token.strip("[]【】 ").lower())
+
+
+def _anchor_list(raw: Any, resolver: _AnchorResolver, invalid: list[str]) -> list[str]:
+    values = raw if isinstance(raw, list) else ([raw] if isinstance(raw, str) else [])
+    kept: list[str] = []
+    for value in values:
+        element = resolver.resolve(value)
+        if element is None:
+            text = _scalar_text(value)
+            if text:
+                invalid.append(text[:80])
+            continue
+        if element.element_id not in kept:
+            kept.append(element.element_id)
+    return kept
+
+
+def _note(dropped: dict, field: str, reason: str, value: Any = "") -> None:
+    entry = {"reason": reason}
+    text = _scalar_text(value) if not isinstance(value, dict) else _scalar_text(
+        value.get("text") or value.get("name") or value.get("value"))
+    if text:
+        entry["value"] = text[:120]
+    dropped.setdefault(field, []).append(entry)
+
+
+def _text_item(raw: Any, cap: int, resolver: _AnchorResolver, field: str, dropped: dict) -> dict | None:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        # 没有 anchors 的裸字符串:形状降级,但没有合法引用,按规则丢弃。
+        if raw.strip():
+            _note(dropped, field, "no_valid_anchor", raw)
+        return None
+    if not isinstance(raw, Mapping):
+        return None
+    text = _scalar_text(raw.get("text"))
+    invalid: list[str] = []
+    anchors = _anchor_list(raw.get("anchors"), resolver, invalid)
+    if invalid:
+        dropped.setdefault("invalid_anchors", []).extend(invalid)
+    if not text:
+        return None
+    if not anchors:
+        _note(dropped, field, "no_valid_anchor", text)
+        return None
+    return {"text": _cap(text, cap), "anchors": anchors}
+
+
+def _metric_item(raw: Any, resolver: _AnchorResolver, dropped: dict) -> dict | None:
+    if not isinstance(raw, Mapping):
+        return None
+    value = _scalar_text(raw.get("value"))
+    name = _scalar_text(raw.get("name"))
+    if not value:
+        if name:
+            _note(dropped, "metrics", "no_value", name)
+        return None
+    anchor_raw = raw.get("anchor")
+    if anchor_raw is None and isinstance(raw.get("anchors"), list) and raw.get("anchors"):
+        anchor_raw = raw["anchors"][0]  # 形状降级:anchors 列表取第一个
+    element = resolver.resolve(anchor_raw)
+    if element is None:
+        if _scalar_text(anchor_raw):
+            dropped.setdefault("invalid_anchors", []).append(_scalar_text(anchor_raw)[:80])
+        _note(dropped, "metrics", "no_valid_anchor", value)
+        return None
+    if not value_grounded(value, element.text):
+        _note(dropped, "metrics", "value_not_in_anchor", value)
+        return None
+    return {
+        "name": _cap(name, METRIC_NAME_MAX_CHARS),
+        "value": _cap(value, METRIC_VALUE_MAX_CHARS),
+        "unit": _cap(_scalar_text(raw.get("unit")), METRIC_UNIT_MAX_CHARS),
+        "setting": _cap(_scalar_text(raw.get("setting")), METRIC_SETTING_MAX_CHARS),
+        "compared_to": _cap(_scalar_text(raw.get("compared_to")), METRIC_COMPARED_MAX_CHARS),
+        "anchor": element.element_id,
+    }
+
+
+def _dataset_item(raw: Any, resolver: _AnchorResolver, dropped: dict) -> dict | None:
+    if not isinstance(raw, Mapping):
+        return None
+    name = _scalar_text(raw.get("name"))
+    invalid: list[str] = []
+    anchors = _anchor_list(raw.get("anchors"), resolver, invalid)
+    if invalid:
+        dropped.setdefault("invalid_anchors", []).extend(invalid)
+    if not name:
+        return None
+    if not anchors:
+        _note(dropped, "datasets", "no_valid_anchor", name)
+        return None
+    return {"name": _cap(name, DATASET_NAME_MAX_CHARS), "anchors": anchors}
+
+
+def _bounded_list(raw: Any, limit: int, build, field: str, dropped: dict) -> list[dict]:
+    items = [item for item in (build(value) for value in (raw if isinstance(raw, list) else [])) if item]
+    for extra in items[limit:]:
+        _note(dropped, field, "over_limit", extra)
+    return items[:limit]
+
+
+def _cap_anchors(card: dict, dropped: dict) -> None:
+    """去重后全卡最多 ``MAX_CARD_ANCHORS`` 个 anchor,按 ``ANCHOR_FIELD_ORDER`` 保留;
+    已保留的 anchor 被后面的条目复用不另计。裁掉 anchor 后变空的条目整条丢弃。"""
+    kept: set[str] = set()
+
+    def admit(anchor: str) -> bool:
+        if anchor in kept:
+            return True
+        if len(kept) >= MAX_CARD_ANCHORS:
+            return False
+        kept.add(anchor)
+        return True
+
+    for field in ANCHOR_FIELD_ORDER:
+        value = card[field]
+        if field == "metrics":
+            metrics = []
+            for metric in value:
+                if admit(metric["anchor"]):
+                    metrics.append(metric)
+                else:
+                    _note(dropped, field, "anchor_cap", metric)
+            card[field] = metrics
+            continue
+        items = [value] if isinstance(value, dict) else (value if isinstance(value, list) else [])
+        survivors = []
+        for item in items:
+            item["anchors"] = [a for a in item["anchors"] if admit(a)]
+            if item["anchors"]:
+                survivors.append(item)
+            else:
+                _note(dropped, field, "anchor_cap", item)
+        if isinstance(value, dict) or value is None:
+            card[field] = survivors[0] if survivors else None
+        else:
+            card[field] = survivors
+
+
+def card_is_empty(card: Mapping[str, Any]) -> bool:
+    return not any(card.get(field) for field in ANCHOR_FIELD_ORDER)
+
+
+def verify_paper_card(
+    parsed: Mapping[str, Any], input_elements: Iterable[CardInputElement]
+) -> tuple[dict, dict]:
+    """接地校验,返回 ``(card, dropped)``。
+
+    - 每个 ``anchors`` / ``anchor`` 必须是本次输入里的句柄或元素 id,非法的删掉;
+      清掉后一个都不剩的文字字段 / 条目整条丢弃。
+    - 指标还要求 ``value`` 的数字 token 以完整 token 出现在该元素送给模型的文本里。
+    - 长度超限截断,条数超限丢尾部,全卡 anchor 去重后最多 24 个(按字段顺序保留)。
+    - 返回的 ``card`` 字段齐全:``tldr/problem/method`` 为 ``{"text","anchors"}`` 或
+      ``None``,其余为列表;整张卡全空时由调用方按生成失败处理(``card_is_empty``)。
+    - ``dropped`` 按字段记被丢条目与原因码,另有 ``invalid_anchors``;与 ``paper_meta``
+      同一审计信封口径,由调用方写进 ``raw_json["dropped"]``。
+    """
+    resolver = _AnchorResolver(input_elements)
+    dropped: dict = {}
+    data = parsed if isinstance(parsed, Mapping) else {}
+    card: dict[str, Any] = {
+        field: _text_item(data.get(field), cap, resolver, field, dropped)
+        for field, cap in _TEXT_FIELD_CAPS.items()
+    }
+    card["contributions"] = _bounded_list(
+        data.get("contributions"), MAX_CONTRIBUTIONS,
+        lambda raw: _text_item(raw, CONTRIBUTION_MAX_CHARS, resolver, "contributions", dropped),
+        "contributions", dropped,
+    )
+    card["metrics"] = _bounded_list(
+        data.get("metrics"), MAX_METRICS,
+        lambda raw: _metric_item(raw, resolver, dropped), "metrics", dropped,
+    )
+    card["datasets"] = _bounded_list(
+        data.get("datasets"), MAX_DATASETS,
+        lambda raw: _dataset_item(raw, resolver, dropped), "datasets", dropped,
+    )
+    _cap_anchors(card, dropped)
+    ordered = {field: card[field] for field in ("tldr", "problem", "method", "contributions", "metrics", "datasets")}
+    return ordered, dropped
+
+
+def dropped_count(dropped: Mapping[str, Any]) -> int:
+    return sum(len(v) if isinstance(v, list) else 1 for v in dropped.values())
