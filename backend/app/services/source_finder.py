@@ -111,6 +111,38 @@ PEER_BUDGET_LIBRARIES = 2
 SEMANTIC_SKIP_PREFIX = "semantic:"
 
 
+#: The title of a source that has neither a paper title, a stored title nor a
+#: file name: a raw source id is never shown as a title.
+UNTITLED_SOURCE = "（未命名文档）"
+
+
+def source_display_title(
+    meta: Optional[Mapping[str, Any]], listing: Mapping[str, Any],
+) -> str:
+    """The one display-title rule of a found / requested source: the extracted
+    paper title, else the stored title (``presented_source_title``), else the
+    file name, else ``UNTITLED_SOURCE``."""
+    return (
+        str((meta or {}).get("paper_title") or "").strip()
+        or presented_source_title(
+            listing.get("title"), source_type=listing.get("source_type"),
+            source_id=listing.get("id"),
+        ).strip()
+        or str(listing.get("file_name") or "").strip()
+        or UNTITLED_SOURCE
+    )
+
+
+@dataclass(frozen=True)
+class SourceDisplay:
+    """What a source is shown as: title, publication year (``None``: unknown)
+    and venue."""
+
+    title: str
+    pub_year: Optional[int]
+    venue: str
+
+
 class FindSourcesError(ValueError):
     """The request is malformed (the caller maps it to a refusal)."""
 
@@ -830,6 +862,41 @@ class SourceFinder:
         return sorted(kept, key=_relevance_order)
 
     # -------------------------------------------------------------- hydrate
+    def display_metadata(
+        self, keys: Sequence[Tuple[str, str]],
+    ) -> Dict[Tuple[str, str], SourceDisplay]:
+        """``{(notebook_id, source_id): SourceDisplay}`` for sources named
+        without a ``find_sources`` sighting (a raw id handed straight to the
+        card / extraction tools): the same title rule as a found source and
+        the paper metadata of the source's OWN library, batched per owning
+        library on one connection.  The caller passes only pairs it already
+        resolved inside the run's source ceiling; a pair whose source is not
+        stored in that library is left out."""
+        by_notebook: Dict[str, List[str]] = {}
+        for notebook_id, source_id in dict.fromkeys(keys):
+            by_notebook.setdefault(str(notebook_id), []).append(str(source_id))
+        out: Dict[Tuple[str, str], SourceDisplay] = {}
+        if not by_notebook:
+            return out
+        with self._database.connect() as db:
+            for notebook_id, ids in by_notebook.items():
+                listings = {
+                    str(row["id"]): dict(row)
+                    for row in self._sources.source_listing_rows(db, ids)
+                    if str(row["notebook_id"]) == notebook_id
+                }
+                metas = self._sources.paper_meta_for_sources(
+                    db, list(listings), notebook_id=notebook_id) if listings else {}
+                for source_id, listing in listings.items():
+                    meta = metas.get(source_id)
+                    year = (meta or {}).get("pub_year")
+                    out[(notebook_id, source_id)] = SourceDisplay(
+                        title=source_display_title(meta, listing),
+                        pub_year=int(year) if isinstance(year, int) else None,
+                        venue=str((meta or {}).get("venue") or "").strip(),
+                    )
+        return out
+
     def _hydrate(
         self, page: Sequence[_Candidate], offset: int,
     ) -> Tuple[FoundSource, ...]:
@@ -871,10 +938,7 @@ class SourceFinder:
             reasons = ordered_fields(row["matches"]) + (
                 (f"passages:{candidate.hits}",) if candidate.hits else ()
             )
-            title = str((meta or {}).get("paper_title") or "") or presented_source_title(
-                listing.get("title"), source_type=listing.get("source_type"),
-                source_id=source_id,
-            )
+            title = source_display_title(meta, {**listing, "id": source_id})
             items.append(FoundSource(
                 rank=offset + position + 1,
                 source_id=source_id,

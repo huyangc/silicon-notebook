@@ -51,6 +51,7 @@ from app.services.reasoning_paper_tools import (
     card_has_content,
     find_coverage_gaps,
 )
+from app.services.source_finder import UNTITLED_SOURCE
 
 # The paper-card evidence band (spec §7.2): k9001..k9999.  Mirrored (not
 # imported) by ``AskService._PAPER_CARD_KEY_BASE``, ``ask_evidence`` and
@@ -205,12 +206,26 @@ def _all_fields(extractions: Sequence[Any]) -> tuple:
     return tuple(fields)
 
 
-def paper_rows(tools: Any) -> tuple[tuple, tuple]:
+def unsighted_keys(tools: Any) -> list:
+    """``(notebook_id, source_id)`` of the carded / extracted sources no
+    ``find_sources`` result names (a raw id handed straight to the tools):
+    their display metadata is read separately (``read_display``)."""
+    found = _find_index(tools.finds)
+    keys = [(o.result.notebook_id, o.result.source_id) for o in tools.cards]
+    keys += [(item.result.notebook_id, item.result.source_id)
+             for outcome in tools.extractions for item in outcome.items]
+    return [key for key in dict.fromkeys(keys) if key not in found]
+
+
+def paper_rows(tools: Any, display: Optional[Mapping] = None) -> tuple[tuple, tuple]:
     """``(rows, fields)``: cards in first-request order, then the papers that
     only have extracted values, in extraction order.  Every extracted field is
     kept (the digest and the registration read them all); the table's width
-    limit is applied only when the table renders."""
+    limit is applied only when the table renders.  A row's title / year /
+    venue come from its ``find_sources`` sighting, else from ``display``
+    (``SourceDisplay`` per key); a raw source id is never shown as a title."""
     found = _find_index(tools.finds)
+    display = display or {}
     fields = _all_fields(tools.extractions)
     values: dict = {}
     titles: dict = {}
@@ -227,11 +242,12 @@ def paper_rows(tools: Any) -> tuple[tuple, tuple]:
     seen: set = set()
 
     def add(key, title, card) -> None:
-        item = found.get(key)
+        item = found.get(key) or display.get(key)
         fields_here = values.get(key) or {}
         rows.append(PaperRow(
             notebook_id=key[0], source_id=key[1],
-            title=_text(title) or _text(getattr(item, "title", "")) or key[1],
+            title=(_text(title) or _text(getattr(item, "title", ""))
+                   or UNTITLED_SOURCE),
             year=str(getattr(item, "pub_year", "") or ""),
             venue=_text(getattr(item, "venue", "")),
             card=card,
@@ -300,7 +316,7 @@ def _found_row(item: Any) -> PaperRow:
     """A found document as a registration row (no card, no values)."""
     return PaperRow(
         notebook_id=item.notebook_id, source_id=item.source_id,
-        title=_text(item.title) or item.source_id,
+        title=_text(item.title) or UNTITLED_SOURCE,
         year=str(item.pub_year or ""), venue=_text(item.venue), card={},
     )
 
@@ -311,7 +327,7 @@ def _found_without_row(tools: Any, rows: Sequence[PaperRow], limit: int) -> tupl
     ``(titles, total)`` of the others (``()`` when none)."""
     have = {(row.notebook_id, row.source_id) for row in rows}
     items = [item for key, item in _find_index(tools.finds).items() if key not in have]
-    rest = [_clean(item.title) or item.source_id for item in items[limit:]]
+    rest = [_clean(item.title) or UNTITLED_SOURCE for item in items[limit:]]
     return (tuple(items[:limit]),
             (tuple(rest[:UNEXPANDED_TITLES]), len(rest)) if rest else ())
 
@@ -325,6 +341,7 @@ def build_paper_card_evidence(
     tier_of: Callable[[list], Mapping[str, str]],
     table_rows: int,
     for_answer: bool = True,
+    read_display: Optional[Callable[[list], Mapping]] = None,
 ) -> Optional[PaperCardEvidence]:
     """Register the run's paper evidence; ``None`` when there is nothing to show.
 
@@ -332,14 +349,18 @@ def build_paper_card_evidence(
     the enumeration-row shape (``object_id`` + ``evidence_element_ids`` +
     ``notebook_id`` + ``tier``); an element is kept only when its citation names
     the very source the card or the value belongs to.  ``tier_of(notebook_ids)``
-    is the library tier map.
+    is the library tier map.  ``read_display(keys)`` resolves
+    ``{(notebook_id, source_id): SourceDisplay}`` for the sources no
+    ``find_sources`` result names (``SourceFinder.display_metadata``).
 
     ``for_answer=False`` (the retrieval-only output: there is no answer and so
     no table) registers only what the digest can show, and renders no table.
     """
     if tools is None:
         return None
-    rows, fields = paper_rows(tools)
+    unsighted = unsighted_keys(tools) if read_display is not None else []
+    display = dict(read_display(unsighted) or {}) if unsighted else {}
+    rows, fields = paper_rows(tools, display)
     if not rows and not tools.finds:
         return None
     layout = str(getattr(tools, "answer_layout", "") or "")
@@ -588,7 +609,7 @@ def _found_line(item: Any, keys: Mapping[str, str]) -> str:
     """``kN: 《title》 · year / venue · tier — passage`` when the best passage's
     element registered, else the keyless ``《title》 · year / venue · tier``."""
     facts = " / ".join(part for part in (str(item.pub_year or ""), _clean(item.venue)) if part)
-    head = f"《{_clean(item.title) or item.source_id}》" + (f" · {facts}" if facts else "")
+    head = f"《{_clean(item.title) or UNTITLED_SOURCE}》" + (f" · {facts}" if facts else "")
     head += f" · {_TIER_LABELS.get(item.tier, 'related')}"
     key = keys.get(_passage_element(item), "")
     passage = getattr(item, "best_passage", None)
@@ -622,7 +643,7 @@ def _findings_block(paper: PaperCardEvidence, budget_chars: int) -> tuple[str, l
         if key:
             shown.append(key)
     listed_items = len(starts)
-    titles = [_clean(item.title) or item.source_id for item in paper.found[listed_items:]]
+    titles = [_clean(item.title) or UNTITLED_SOURCE for item in paper.found[listed_items:]]
     total = len(titles)
     if paper.found_rest:
         titles.extend(paper.found_rest[0])
@@ -778,7 +799,7 @@ def _unexpanded_titles(tools: Any, rows: Sequence[PaperRow], table_rows: int,
             if key in seen:
                 continue
             seen.add(key)
-            titles.append(_clean(item.title) or item.source_id)
+            titles.append(_clean(item.title) or UNTITLED_SOURCE)
     if not titles:
         return ()
     return tuple(titles[:UNEXPANDED_TITLES]), len(titles)

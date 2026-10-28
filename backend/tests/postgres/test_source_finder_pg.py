@@ -45,6 +45,8 @@ test_semantic_tiers_use_the_configured_lines = (
 test_the_lexical_only_lane_needs_two_passages_and_ignores_the_lines = (
     cases.test_the_lexical_only_lane_needs_two_passages_and_ignores_the_lines)
 test_the_order_is_total_and_deterministic = cases.test_the_order_is_total_and_deterministic
+test_display_metadata_reads_each_source_in_its_own_library = (
+    cases.test_display_metadata_reads_each_source_in_its_own_library)
 test_a_semantic_lane_without_vectors_tiers_like_the_lexical_only_lane = (
     cases.test_a_semantic_lane_without_vectors_tiers_like_the_lexical_only_lane)
 test_only_passages_with_a_vector_similarity_reach_the_relevance_lines = (

@@ -47,7 +47,12 @@ from app.services.model_work import (
     model_failure_reason,
 )
 from app.services.paper_card_service import parse_model_object
-from app.services.paper_cards import card_element_header, ground_prose_numbers, number_tokens
+from app.services.paper_cards import (
+    cap_number_safe,
+    card_element_header,
+    ground_prose_numbers,
+    number_tokens,
+)
 from app.services.retrieval_run import (
     current_retrieval_run,
     holding_fanout_slot,
@@ -228,19 +233,10 @@ def _field_index(raw: Any) -> int | None:
     return int(text) if text.isdigit() else None
 
 
-def _numberish(ch: str) -> bool:
-    return ch.isdigit() or ch in ".,"
-
-
 def cap_value(value: str, limit: int = EXTRACT_VALUE_MAX_CHARS) -> str:
-    """截到 ``limit`` 字;切点落在数字中间(两侧都是数字/小数点/千分位)时退到这个数之前,
-    绝不留下半个数(``36.2`` 截成 ``36.`` 会变成另一个数)。"""
-    if len(value) <= limit:
-        return value
-    cut = limit
-    while cut > 0 and _numberish(value[cut - 1]) and _numberish(value[cut]):
-        cut -= 1
-    return value[:cut].rstrip()
+    """``paper_cards.cap_number_safe`` at the extraction value limit: never
+    half a number."""
+    return cap_number_safe(value, limit)
 
 
 def _citing_element(excerpt: Excerpt, value: str) -> str:

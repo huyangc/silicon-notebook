@@ -16,6 +16,8 @@ from app.services.paper_cards import (
     MAX_CARD_ANCHORS,
     MAX_CONTRIBUTIONS,
     MAX_METRICS,
+    METRIC_COMPARED_MAX_CHARS,
+    METRIC_VALUE_MAX_CHARS,
     PAPER_CARD_VERSION,
     TLDR_MAX_CHARS,
     CardInputElement,
@@ -170,6 +172,41 @@ def test_grounding_uses_the_truncated_text_shown_to_the_model():
     assert dropped["metrics"][0]["reason"] == "value_not_in_anchor"
 
 
+def test_an_overlong_number_is_dropped_not_stored_cut():
+    # Codex repro: "0." + 38 zeros + "1234" is in the anchor and grounds as
+    # written, but cutting it to 40 characters would store zero.
+    tiny = "0." + "0" * 38 + "1234"
+    assert len(tiny) > METRIC_VALUE_MAX_CHARS
+    anchor = CardInputElement("e1", "el-a", "table", "Table 1", f"| Ours | {tiny} |")
+    card, dropped = verify_paper_card({"metrics": [_metric(tiny, anchor="e1")]}, (anchor,))
+    assert card["metrics"] == []
+    assert [d["reason"] for d in dropped["metrics"]] == ["value_too_long"]
+
+
+def test_an_overlong_value_is_bounded_before_it_is_grounded():
+    # The number survives the bound: the stored value is what was grounded.
+    tail = " accuracy on the held out validation split of ImageNet"
+    value = "85.2" + tail
+    card, dropped = verify_paper_card({"metrics": [_metric(value)]}, ELEMENTS)
+    stored = card["metrics"][0]["value"]
+    assert len(stored) <= METRIC_VALUE_MAX_CHARS and stored.startswith("85.2 ")
+    assert number_tokens(stored) == ["85.2"] and value_grounded(stored, E2.text)
+    # A number cut off by the bound loses the metric (it was part of the value).
+    cut = "85.2" + " " * (METRIC_VALUE_MAX_CHARS - 6) + "1234"
+    card, dropped = verify_paper_card({"metrics": [_metric(cut)]}, ELEMENTS)
+    assert card["metrics"] == []
+    assert [d["reason"] for d in dropped["metrics"]] == ["value_too_long"]
+
+
+def test_compared_to_is_never_cut_inside_a_number():
+    metric = _metric("85.2")
+    metric["compared_to"] = "x" * (METRIC_COMPARED_MAX_CHARS - 2) + " 6.95"
+    card, _dropped = verify_paper_card({"metrics": [metric]}, ELEMENTS)
+    compared = card["metrics"][0]["compared_to"]
+    assert len(compared) <= METRIC_COMPARED_MAX_CHARS
+    assert not compared.endswith(("6", "6.", "6.9"))
+
+
 def test_lengths_truncate_and_counts_cap():
     long_text = "x" * (TLDR_MAX_CHARS + 50)
     card, dropped = verify_paper_card({
@@ -241,7 +278,13 @@ def test_prompt_keeps_metrics_to_the_papers_own_method():
     assert "baseline, a prior method or an ablation row is NOT a metric" in prompt
     assert "\"compared_to\" of the metric it is compared with" in prompt
     assert "never the header of another column" in prompt
-    assert PAPER_CARD_VERSION == 2
+    assert PAPER_CARD_VERSION >= 2
+
+
+def test_the_card_version_follows_the_bound_before_ground_rule():
+    """v3: a metric value is bounded (number-safe) before it is grounded, so
+    v2 cards that may hold a cut number are invalidated on read."""
+    assert PAPER_CARD_VERSION == 3
 
 
 def test_prompt_carries_the_input_block():
