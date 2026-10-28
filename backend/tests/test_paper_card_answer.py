@@ -21,6 +21,7 @@ from app.models.schemas import AskRequest, NotebookCreate
 from app.services import ask_evidence
 from app.services import reasoning_retrieval as rr_module
 from app.services.ask_service import AskService
+from app.services.citation_markers import MARKER_RE, marker_keys
 from app.services.embedding import FakeEmbedder
 from app.services.outline_synthesis import OUTLINE_SECTION_KEY_STRIDE
 from app.services.paper_card_answer import (
@@ -35,7 +36,11 @@ from app.services.paper_card_answer import (
 )
 from app.services.paper_card_service import CardResult
 from app.services.paper_extraction import ExtractionResult, FieldValue
-from app.services.prompts import PAPER_TABLE_ANSWER_RULE, answer_prompt
+from app.services.prompts import (
+    PAPER_TABLE_ANSWER_RULE,
+    PAPER_TABLE_SECTION_RULE,
+    answer_prompt,
+)
 from app.services.reasoning_paper_tools import (
     ANSWER_LAYOUT_PAPER_TABLE,
     ANSWER_LAYOUT_PROSE,
@@ -221,8 +226,8 @@ def test_table_escapes_cells_caps_items_and_marks_only_registered_keys():
     assert lines[0] == f"| 论文 | 年份 / 会议 | 主要技术指标 | 关键创新点 | {FIELD} |"
     row = lines[2]
     # 标题里的 `|` 与换行都已转义,整行仍是 5 格。
-    assert "Gated \\| Widgets Net" in row
-    assert len(re.findall(r"(?<!\\)\|", row)) == 6
+    assert "Gated ｜ Widgets Net" in row
+    assert row.count("|") == 6
     assert "2024 / CVPR" in row
     # 指标至多 3 条、贡献至多 2 条。
     assert "第四条指标不进表" not in row and "第三条贡献不进表" not in row
@@ -381,8 +386,10 @@ class _AnswerLLM:
     configured = True
     model = "stub"
 
-    def __init__(self):
+    def __init__(self, answer=None):
         self.prompts: list[str] = []
+        # ``answer(prompt) -> str`` overrides the default "cite the first key".
+        self.answer = answer
 
     def chat_json(self, messages, schema_hint, **kwargs):
         content = messages[-1]["content"]
@@ -393,14 +400,16 @@ class _AnswerLLM:
         if '"relevant"' in schema_hint:  # evidence_refine: nothing to prepend
             return json.dumps({"relevant": []})
         self.prompts.append(content)
+        if self.answer is not None:
+            return json.dumps({"answer": self.answer(content), "grounded": True})
         keys = re.findall(r"(?m)^(k\d+):", content)
         cite = f"[{keys[0]}]" if keys else ""
         return json.dumps({"answer": f"这些论文都在做门控{cite}。", "grounded": True})
 
 
-def _ask(repo, notebook_id, result, monkeypatch, *, effort="standard"):
+def _ask(repo, notebook_id, result, monkeypatch, *, effort="standard", answer=None):
     monkeypatch.setattr(ReasoningRetriever, "run", lambda self, *a, **k: result)
-    llm = _AnswerLLM()
+    llm = _AnswerLLM(answer)
     for service in ("reasoning_agent", "evidence_refine", "ask_answer"):
         bind_chat_client(repo, service, llm)
     response = repo._runtime.ask_service().ask_reasoning(
@@ -416,10 +425,16 @@ def _element_rows(repo, ids):
     return repo._runtime.source_store.evidence_elements(list(ids))
 
 
+def _all_marker_keys(text: str) -> set:
+    """Every key of every marker form ``MARKER_RE`` accepts (``[k1]``,
+    ``【k1】``, ``(k1)``, ``（k1）``) -- what the frontend binds."""
+    return {key for marker in MARKER_RE.findall(text) for key in marker_keys(marker)}
+
+
 def _assert_every_marker_resolves(repo, response):
     """表里与正文里的每个 [kN] 都解析成锚点,锚点指向真实元素,且有引用卡。"""
     anchors = {anchor.key: anchor for anchor in response.anchors}
-    keys = set(_MARKER.findall(response.answer))
+    keys = _all_marker_keys(response.answer)
     assert keys and keys <= set(anchors), keys - set(anchors)
     rows = _element_rows(repo, [anchors[k].element_id for k in keys])
     cited = {c.element_id for c in response.citations}
@@ -538,8 +553,9 @@ def test_sectioned_answer_renders_the_table_once_before_the_first_section(repo, 
     response, llm = _ask(repo, notebook.id, result, monkeypatch, effort="exhaustive")
     assert len(llm.prompts) == 2, "两节两次合成"
     first, second = llm.prompts
-    assert PAPER_DIGEST_GUIDANCE in first and PAPER_TABLE_ANSWER_RULE in first
-    assert PAPER_DIGEST_GUIDANCE not in second and PAPER_TABLE_ANSWER_RULE not in second
+    assert PAPER_DIGEST_GUIDANCE in first and PAPER_TABLE_SECTION_RULE in first
+    assert PAPER_TABLE_ANSWER_RULE not in first
+    assert PAPER_DIGEST_GUIDANCE not in second and PAPER_TABLE_SECTION_RULE not in second
     answer = response.answer
     assert answer.count("| 论文 | 年份 / 会议 |") == 1
     assert answer.startswith("> 本表展开了 1 篇文档的要点")
@@ -586,3 +602,204 @@ def test_report_restore_does_not_reuse_a_paper_card_digest_line(repo):
     assert ask_evidence.kind_for_key("k9001", id_map) == "paper_card"
     new_keys = [k for k in partition.id_map if k not in id_map]
     assert new_keys and all(4000 < int(k[1:]) < 5000 for k in new_keys)
+
+
+# ------------------------------------------------------------ review round 1
+
+_FAKE_MARKERS = "见 [k4001] 【k4002】 (k1) （k2）"
+
+
+def test_every_marker_form_in_card_text_is_neutralised_in_table_and_digest():
+    card = _card("s1")
+    card["metrics"][0]["name"] = f"top-1 {_FAKE_MARKERS}"
+    card["contributions"][0]["text"] = f"贡献 {_FAKE_MARKERS}"
+    card["tldr"]["text"] = f"摘要 {_FAKE_MARKERS}"
+    tools = _tools(cards=[_card_outcome("nb", "s1", f"标题 {_FAKE_MARKERS}", card)],
+                   extractions=[_extraction("nb", "s1", "t", f"42.1 {_FAKE_MARKERS}")])
+    paper = _evidence(tools)
+    assert _all_marker_keys(paper.table) <= set(paper.id_map)
+    assert _all_marker_keys(paper.coverage) == set()
+    digest, digest_map = paper_digest_block(paper, 100000)
+    assert _all_marker_keys(digest) == set()          # no marker in the digest text
+    assert "〖k4002" in paper.table and "﹙k1" in paper.table
+
+
+def test_card_text_markers_never_bind_end_to_end(repo, monkeypatch):
+    notebook = repo.create_notebook(NotebookCreate(name="论文库"))
+    _seed(repo, notebook.id, "s0", "论文0")
+    card = _card("s0")
+    card["metrics"][0]["name"] = f"top-1 {_FAKE_MARKERS}"
+    element = RetrievedElement(
+        element_id=_eid("s0", 7), source_id="s0", source_title="论文0",
+        location_label="p8", element_type="paragraph", text="直接元素", score=0.9)
+    result = ReasoningResult(
+        elements=[element], answer_layout=ANSWER_LAYOUT_PAPER_TABLE,
+        paper_cards=[_card_outcome(notebook.id, "s0", f"论文0 {_FAKE_MARKERS}", card)])
+    response, _llm = _ask(repo, notebook.id, result, monkeypatch)
+    anchor_keys = {a.key for a in response.anchors}
+    assert "k4001" not in anchor_keys and "k1" not in anchor_keys
+    _assert_every_marker_resolves(repo, response)
+
+
+def test_a_backslash_in_cell_text_cannot_split_the_row_and_year_venue_is_capped():
+    card = _card("s1")
+    card["metrics"][0]["name"] = r"误差 \|W\|_F"
+    found = _found("nb", "s1", r"范数 \|W\| 论文", venue="V" * 500)
+    paper = _evidence(_tools(finds=[_find([found])],
+                             cards=[_card_outcome("nb", "s1", "", card)]))
+    header, _sep, row = _table_lines(paper.table)[:3]
+    assert row.count("|") == header.count("|") == 5
+    assert len(row.split(" | ")[1]) <= TABLE_CELL_CHARS
+
+
+def test_only_anchors_the_answer_can_show_are_registered():
+    card = _card("s1", wide=True)
+    card["contributions"][0]["anchors"] = [_eid("s1", 3), _eid("s1", 24)]
+    tools = _tools(cards=[_card_outcome("nb", "s1", "T", card)])
+    table = {row["element_id"] for row in _evidence(tools).id_map.values()}
+    # tl;dr, 2 contributions (2 anchors on the first), 3 metrics.
+    assert table == {_eid("s1", i) for i in (0, 3, 24, 4, 8, 9, 10)}
+    digest_only = build_paper_card_evidence(
+        tools, read_citations=_reader(), tier_of=lambda ids: {}, table_rows=12,
+        for_answer=False)
+    assert {r["element_id"] for r in digest_only.id_map.values()} == table - {_eid("s1", 24)}
+    assert not digest_only.table and not digest_only.paper_table
+
+
+def test_a_hallucinated_paper_key_in_model_text_is_dropped_not_bound(repo, monkeypatch):
+    notebook = repo.create_notebook(NotebookCreate(name="论文库"))
+    for i in range(2):
+        _seed(repo, notebook.id, f"s{i}", f"论文{i}")
+    cards = []
+    for i in range(2):
+        card = _card(f"s{i}")
+        card["contributions"][0]["anchors"].append(_eid(f"s{i}", 6))
+        cards.append(_card_outcome(notebook.id, f"s{i}", f"论文{i}", card))
+    result = ReasoningResult(answer_layout=ANSWER_LAYOUT_PAPER_TABLE, paper_cards=cards)
+
+    def answer(prompt):
+        # k9003 = s0's second contribution anchor: registered, shown only by the
+        # table, never in the prompt -- so the model cannot have seen it.
+        assert not re.search(r"(?m)^k9003:", prompt)
+        answer.made_up = "k9003"
+        return "综述 [k9003]。"
+
+    response, _llm = _ask(repo, notebook.id, result, monkeypatch, answer=answer)
+    model_part = response.answer.split("\n\n")[1]
+    assert model_part.startswith("综述") and answer.made_up not in model_part
+    assert answer.made_up in response.answer          # ...the table carries it legitimately
+    _assert_every_marker_resolves(repo, response)
+
+
+def test_the_table_still_follows_a_failed_synthesis(repo, monkeypatch):
+    notebook = repo.create_notebook(NotebookCreate(name="论文库"))
+    _seed(repo, notebook.id, "s0", "论文0")
+    result = ReasoningResult(
+        answer_layout=ANSWER_LAYOUT_PAPER_TABLE,
+        paper_cards=[_card_outcome(notebook.id, "s0", "论文0", _card("s0"))])
+    response, _llm = _ask(repo, notebook.id, result, monkeypatch, answer=lambda prompt: "")
+    assert response.llm_mode == "synthesis_failed"
+    assert response.answer.startswith("本次答案合成未产出内容")
+    assert "| 论文 |" in response.answer and "| 论文 |" in response.conclusion
+    _assert_every_marker_resolves(repo, response)
+
+
+def test_extracted_fields_past_the_table_width_are_named():
+    fields = tuple(f"字段{i}" for i in range(6))
+    extraction = PaperExtractionOutcome(fields=fields, items=(PaperExtractionItem(
+        handle="p1", title="T", result=ExtractionResult(
+            notebook_id="nb", source_id="s1", status="extracted",
+            fields=tuple(FieldValue(field_index=i, field=f, value=f"v{i}",
+                                    element_id=_eid("s1", i)) for i, f in enumerate(fields)),
+        )),))
+    paper = _evidence(_tools(extractions=[extraction]))
+    assert _table_lines(paper.table)[0].endswith("| 字段0 | 字段1 | 字段2 | 字段3 |")
+    assert paper.coverage.endswith("另有 2 个临时字段未列入表：字段4、字段5。")
+
+
+def test_a_paper_listed_by_two_requests_counts_once_under_its_best_tier():
+    first = _find([_found("nb", "s1", "A", tier="related")])
+    second = FoundSourcesOutcome(
+        request=FindSourcesRequest(query="另一种说法"),
+        result=FindSourcesResult(
+            items=(_found("nb", "s1", "A", tier="strong"),), strong=1, related=0,
+            filtered_scope_total=1, lexical_complete=True, semantic_recall_capped=False,
+            next_cursor="", lanes={}),
+        handles=("p2",))
+    cards = [_card_outcome("nb", "s1", "A", _card("s1")),
+             _card_outcome("nb", "s9", "直接读的", _card("s9"))]
+    paper = _evidence(_tools(finds=[first, second], cards=cards))
+    assert paper.coverage == ("> 共找到 1 篇相关论文（强相关 1 篇、相关 0 篇），"
+                              "其中 1 篇展开了要点（另有 1 篇直接按来源读取）。")
+
+
+def test_table_rows_outside_the_digest_resolve_through_the_registration(repo, monkeypatch):
+    """标准档 40 张卡:摘要装不下全部,表里没进摘要的行仍然靠登记表解析。"""
+    notebook = repo.create_notebook(NotebookCreate(name="大库"))
+    cards = []
+    for i in range(40):
+        _seed(repo, notebook.id, f"w{i}", f"宽论文{i}", n=24)
+        card = _card(f"w{i}", wide=True)
+        card["tldr"]["text"] = "长摘要" * 100       # each digest entry hits its 600 cap
+        # A second anchor per contribution: shown by the table cell only.
+        for n, entry in enumerate(card["contributions"]):
+            entry["anchors"].append(_eid(f"w{i}", 20 + n))
+        cards.append(_card_outcome(notebook.id, f"w{i}", f"宽论文{i}", card))
+    result = ReasoningResult(answer_layout=ANSWER_LAYOUT_PAPER_TABLE, paper_cards=cards)
+    response, llm = _ask(repo, notebook.id, result, monkeypatch)
+    prompt_keys = set(re.findall(r"(?m)^(k\d+):", llm.prompts[0]))
+    shown = len(re.findall(r"《宽论文\d+》", llm.prompts[0]))
+    assert 0 < shown < 40, "the digest must not fit every paper"
+    keys = _assert_every_marker_resolves(repo, response)
+    assert keys - prompt_keys, "some table keys never reached the prompt"
+
+
+def test_the_digest_reserve_shrinks_the_enumeration_preview_budget(repo, monkeypatch):
+    import app.services.ask_service as ask_service_module
+    import app.services.collection_enumeration_answer as cea
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+
+    budgets: list[int] = []
+    monkeypatch.setattr(cea, "typed_collection_results", lambda *a, **k: [])
+    monkeypatch.setattr(cea, "delivered_outcomes", lambda *a, **k: [])
+    monkeypatch.setattr(cea, "apply_synthesis_preview_counts", lambda *a, **k: None)
+    monkeypatch.setattr(cea, "enumeration_prompt_block", lambda *a, budget_chars, **k: (
+        budgets.append(budget_chars) or SimpleNamespace(text="", evidence_by_id={}, shown_rows={})))
+    service = repo._runtime.ask_service()
+    monkeypatch.setattr(service.evidence_context, "collection_item_citations",
+                        lambda *a, **k: {})
+    limits = ask_retrieval_limits("standard")
+    stage = SimpleNamespace(
+        prepared=SimpleNamespace(limits=limits, notebook_id="nb"), structured_batch=None,
+        enumerations=[SimpleNamespace(items=())], spreadsheet_results=[], document_reads=())
+    paper = _evidence(_tools(cards=[_card_outcome("nb", "s1", "A", _card("s1"))]))
+    client = SimpleNamespace(configured=True)
+    service._render_structured_side(stage, client, None, {}, None)
+    service._render_structured_side(stage, client, None, {}, paper)
+    reserve = ask_service_module.paper_digest_reserve(paper, limits.chunk_context_chars)
+    assert reserve > 0 and budgets[0] - budgets[1] == reserve
+
+
+def test_section_mode_rule_16_wording_and_one_shot_bytes():
+    sectioned = answer_prompt("q", "k1: x", sectioned=True, section_title="一",
+                              section_index=1, section_total=2, paper_table=True)
+    assert PAPER_TABLE_SECTION_RULE in sectioned and PAPER_TABLE_ANSWER_RULE not in sectioned
+    one_shot = answer_prompt("q", "k1: x", paper_table=True)
+    assert PAPER_TABLE_ANSWER_RULE in one_shot and PAPER_TABLE_SECTION_RULE not in one_shot
+    assert PAPER_TABLE_ANSWER_RULE.startswith("16. The system builds the paper table itself")
+
+
+def test_one_card_per_element_when_k4001_and_k9xxx_cite_the_same_element(repo, monkeypatch):
+    notebook = repo.create_notebook(NotebookCreate(name="论文库"))
+    _seed(repo, notebook.id, "s0", "论文0")
+    element = RetrievedElement(
+        element_id=_eid("s0", 0), source_id="s0", source_title="论文0",
+        location_label="p1", element_type="paragraph", text="论文0 原文第 1 段", score=0.9)
+    result = ReasoningResult(
+        elements=[element], answer_layout=ANSWER_LAYOUT_PROSE,
+        paper_cards=[_card_outcome(notebook.id, "s0", "论文0", _card("s0"))])
+    response, _llm = _ask(repo, notebook.id, result, monkeypatch,
+                          answer=lambda prompt: "原文 [k4001]。摘要 [k9001]。")
+    anchored = [a for a in response.anchors if a.element_id == element.element_id]
+    assert {a.key for a in anchored} == {"k4001", "k9001"}
+    assert sum(1 for c in response.citations if c.element_id == element.element_id) == 1

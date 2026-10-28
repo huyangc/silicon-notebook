@@ -367,6 +367,24 @@ PAPER_TABLE_ANSWER_RULE = (
     "note in the evidence says the list may be incomplete, never claim it "
     "is complete.\n"
 )
+#: Rule 16 for the first section of a sectioned synthesis (the only section
+#: that sees the paper digests): the table sits before the first section.
+PAPER_TABLE_SECTION_RULE = (
+    "16. The system places a paper table (one row per expanded paper, with "
+    "its [k] markers) and the list of related papers it did not expand "
+    "BEFORE the first section of this answer. Do NOT reproduce that table or "
+    "re-list the papers one by one. Write this section's own content as "
+    "instructed below; you may add a short comparison across the papers "
+    "(approaches, trade-offs, comparable results), citing the same [k] "
+    "markers the paper digests carry. Never claim the paper list is complete "
+    "when a coverage note in the evidence says it may not be.\n"
+)
+
+
+def _paper_table_rule(paper_table: bool, sectioned: bool) -> str:
+    if not paper_table:
+        return ""
+    return PAPER_TABLE_SECTION_RULE if sectioned else PAPER_TABLE_ANSWER_RULE
 
 
 def answer_prompt(
@@ -408,8 +426,9 @@ def answer_prompt(
 
     ``paper_table`` (规格 2026-10-28 §7.3) 是第五个例子:本轮版式为论文表、且确有
     表格时为真,追加规则 16(表格与未展开清单由系统拼在答案之后,模型只写综述与
-    跨论文对比、可引用摘要里的同一批 kN、不重复列表);为假时输出与接入这个特性
-    之前逐字节相等。
+    跨论文对比、可引用摘要里的同一批 kN、不重复列表;``sectioned`` 时换成节模式的
+    措辞:表格在第一节之前,本节照常写自己的内容、可附跨论文对比);为假时输出与
+    接入这个特性之前逐字节相等。
 
     """
     history_section = (
@@ -512,7 +531,7 @@ def answer_prompt(
         "as established fact what the body only inferred.\n"
         f"{external_section}"
         f"{report_rule}"
-        f"{PAPER_TABLE_ANSWER_RULE if paper_table else ''}"
+        f"{_paper_table_rule(paper_table, sectioned)}"
         "\n"
         f"{history_section}"
         f"{report_section}"
