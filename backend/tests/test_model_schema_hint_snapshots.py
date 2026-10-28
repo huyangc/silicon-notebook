@@ -37,6 +37,8 @@ _APP = Path(__file__).resolve().parents[1] / "app"
 # (path under app/, literal hint, schema name or None for JSON-mode fallback,
 #  root fields that may never be null)
 _LITERAL_HINTS: tuple[tuple[str, str, str | None, tuple[str, ...]], ...] = (
+    ('eval/find_sources_calibrate.py', '{"label":"strong|related|unrelated","reason":""}',
+     'model_response_2b3dd00f0b7dd0c1', ('label', 'reason')),
     ('eval/inference.py', '{"correctness":0,"inference_quality":0,"grounding_consistency":true,"fabricated_citation":false,"reason":""}',
      'model_response_6edbc3ff91a9fa41', ('correctness', 'fabricated_citation', 'grounding_consistency', 'inference_quality', 'reason')),
     ('scripts/gen_recall_gold.py', '{"question":""}',
@@ -74,6 +76,8 @@ _LITERAL_HINTS: tuple[tuple[str, str, str | None, tuple[str, ...]], ...] = (
      'model_response_4528a3c79c4aaee2', ('ok',)),
     ('services/paper_cards.py', '{"tldr":{"text":"","anchors":["e1"]},"problem":{"text":"","anchors":["e1"]},"method":{"text":"","anchors":["e1"]},"contributions":[{"text":"","anchors":["e1"]}],"metrics":[{"name":"","value":"","unit":"","setting":"","compared_to":"","anchor":"e1"}],"datasets":[{"name":"","anchors":["e1"]}]}',
      'model_response_bce52f4a4bdd0287', ('contributions', 'datasets', 'method', 'metrics', 'problem', 'tldr')),
+    ('services/paper_extraction.py', '{"values":[{"field_index":0,"value":"","anchor":"c1"}]}',
+     'model_response_32bc10e27cbde210', ('values',)),
     ('services/paper_meta.py', '{"is_paper":true,"title":"","authors":[{"name":"","affiliations":[""]}],"venue":"","year":2024,"doi":"","keywords":[""]}',
      'model_response_6ed0a223d30c606d', ('is_paper',)),
     ('services/plugin_ask_engine.py', '{"text":""}',
