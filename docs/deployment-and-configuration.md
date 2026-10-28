@@ -1456,7 +1456,8 @@ NOTEBOOK_TRANSFER_TTL_SECONDS    # how long a finished job and its export file a
   `GET /api/system/config` (`notebook_transfer_max_bytes`); the backend's streaming 413 stays
   authoritative.
 - **Disk.** Uploads and exports are written under `<storage>/transfers/`; allow, per active
-  user, two files of the web limit in flight plus the finished exports kept for
+  user, one web-limit-sized file per active job they may hold (the per-user cap is in the
+  product reference) plus the finished exports kept for
   `NOTEBOOK_TRANSFER_TTL_SECONDS`.
 
 **Welcome question suggestions:**

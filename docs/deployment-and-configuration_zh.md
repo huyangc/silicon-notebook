@@ -1117,7 +1117,7 @@ NOTEBOOK_TRANSFER_TTL_SECONDS    # 已结束的作业及其导出文件保留多
   既要重启后端，也要重新构建前端；离线包（`scripts/pack.sh`）按最大值 1024 构建，运行时 `.env` 可以取任何合法值。
   Next 反代把上传整段缓存在内存里，这就是上限只到 1024、调大上限会多占前端内存的原因。浏览器从
   `GET /api/system/config`（`notebook_transfer_max_bytes`）读后端解析后的值；后端的流式 413 始终是最终裁决。
-- **磁盘。** 上传与导出写在 `<storage>/transfers/` 下；按每个活跃用户「两个网页上限大小的在途文件」加上保留
+- **磁盘。** 上传与导出写在 `<storage>/transfers/` 下；按每个活跃用户「每个可同时进行的作业一个网页上限大小的在途文件」（每人上限见产品参考）加上保留
   `NOTEBOOK_TRANSFER_TTL_SECONDS` 的已完成导出预留空间。
 
 **欢迎页候选问题：**

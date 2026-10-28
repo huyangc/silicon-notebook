@@ -1736,11 +1736,17 @@ mount edges are only counted). Derived layers outside the closure (topic communi
 scale index, the graph view index) are rebuilt on the importing side. On import:
 
 - **Vectors** are compared per embedding workload by `(model, dim)`: equal to this
-  deployment's binding, they are kept byte for byte; otherwise they are dropped and embedded
-  again after the notebook is published. A web import embeds them in the background: the
-  notebook can be opened at once, and until the job finishes Ask may find less than it will
-  (missing vectors leave only keyword recall for those rows). Generated-question vectors
-  that cannot be kept are embedded before publishing.
+  deployment's binding, they are kept byte for byte; otherwise they are dropped. After the
+  notebook is published a re-embedding run covers every leg whose rows the import wrote
+  (chunks, elements, knowledge objects, relations; a Knowhow table counts for chunks, objects
+  and relations), whatever the verdicts, because an archive can lack vectors its source
+  never computed; each leg fills only what is missing, so with matching models it usually
+  makes no model call. A web import runs it in the background: the notebook can be opened at
+  once, and until the run finishes Ask may find less than it will (rows still without a
+  vector are reached by keyword recall only). Generated-question vectors that cannot be kept
+  are embedded with `chunk_embedding` before publishing; when that workload is unbound or the
+  call fails, those questions are dropped and their chunks are marked for the question index
+  again.
 - **The knowledge graph** is carried as it is; Knowhow tables are projected again.
 - **A source still being parsed** when it was exported arrives failed and must be parsed
   again; the job report says how many (`sources_reset`).
@@ -1757,10 +1763,10 @@ runbook (preflight rules, strict references, exit status) is in
 | --- | --- | --- |
 | `POST /api/notebooks/{id}/export` | `notebook:export` (owner; allowed on a mirror) | **202** + the job. While the caller's export of this notebook is still queued or running, the same job comes back. **413** when the notebook's source files (Memory left out) already exceed the web limit; **409** when the caller has no free job slot; 404 for a caller without the capability. |
 | `POST /api/notebook-imports?name=` | any signed-in user | The body is the raw archive with `Content-Type: application/zip`, streamed to disk. `name` (at most 200 characters) renames the new notebook; empty keeps the exported name. **202** + the job. Optional `X-Upload-Id` header (8–64 of `A-Z a-z 0-9 _ -`). |
-| `GET /api/notebook-imports/uploads/{upload_id}` | the caller | What became of the caller's upload with that `X-Upload-Id`: `{"status": "job", "job": …}`, `{"status": "receiving"}` (still being received or checked; it may still become a job) or `{"status": "none"}` (also for another user's id). 400 for a malformed id. |
+| `GET /api/notebook-imports/uploads/{upload_id}` | the caller | What became of the caller's upload with that `X-Upload-Id`: `{"status": "job", "job": …}`, `{"status": "receiving", "job": null}` (still being received or checked; it may still become a job) or `{"status": "none", "job": null}` (also for another user's id). 400 for a malformed id. |
 | `GET /api/notebook-transfers` | the caller | `{"jobs": [...]}`, the caller's export and import jobs, newest first. |
 | `GET /api/notebook-transfers/{job}` | the caller | One job; another user's job is 404 like a missing one. |
-| `POST /api/notebook-transfers/{job}/download-ticket` | the caller | `{url, expires_at}` for a finished export; 409 while it is not finished. |
+| `POST /api/notebook-transfers/{job}/download-ticket` | the caller | `{url, expires_at}` for a `succeeded` export; **409** for any other job of the caller (an export still running, failed or cancelled, and every import). |
 | `GET /api/notebook-transfers/download?ticket=` | the ticket | Streams the file once (see tickets below). No authorization header. |
 | `DELETE /api/notebook-transfers/{job}` | the caller | Cancels an active job or deletes a finished one with its files: `{id, outcome, kept_notebook_id}`. |
 
@@ -1799,10 +1805,31 @@ phase is `project` or later, or the failure is one of the two follow-up codes), 
 | `invalid_archive` | The importer refused the file (the message names what is wrong, never its content). |
 | `archive_too_new` | The file comes from a newer build; upgrade this deployment. |
 | `import_reaped` | The import's placeholder was reaped mid-way (its heartbeat lapsed); importing again may succeed. |
-| `import_followup_failed` | The notebook was published, but the work after it (Knowhow projection, re-embedding, index request) did not finish; the notebook stays. |
+| `import_followup_failed` | The notebook was published, then the job's own run stopped on an unexpected error before it could finish; the notebook stays. An ordinary follow-up problem is **not** this code: see "Reading a succeeded import" below. |
 | `not_started` | The job could not be queued. |
 | `export_interrupted` / `import_interrupted` | A server restart ended the job before it finished; nothing of an import remains. |
 | `import_followup_interrupted` | A restart came after the notebook was published; the notebook stays, do not import it again. |
+
+**Reading a succeeded import.** Once the notebook is published, problems in the work after it
+do not fail the job: it ends `succeeded` and says what is incomplete in three fields.
+
+- `report.projection_failures`: the ids of Knowhow tables whose projection failed (the
+  notebook and the tables' rows are imported; the table's 「重新同步」 rebuilds it). The import
+  panel shows how many.
+- `reembed`: `null` when the import named no leg; otherwise `{run_id, state, legs, progress,
+  error}`. `state` is `succeeded`, `failed` (the run failed, or could not even be submitted,
+  then with only `legs` and the exception class in `error`), or `running` when the run had not
+  finished after the job's wait of **24 hours** (`REEMBED_WAIT_SECONDS`); `progress` holds one
+  entry per leg. The import panel says the search data is still incomplete and, when only the
+  chunk and element legs are missing, names the dashboard's 「补齐向量」.
+- `index`: `{"state": "requested"}` once the re-embedding succeeded (or no leg was needed) and
+  the scale-index request was made -- `maybe_auto_index` decides whether a build is due;
+  `{"state": "failed", "error": <exception class>}` when that request failed;
+  `{"state": "skipped", "reason": "reembed_not_done" | "reembed_still_running"}` when the
+  re-embedding did not succeed, because an index over missing vectors would be incomplete.
+
+The operator steps that complete such a notebook are in
+[operations](./operations.md#web-notebook-export-and-import-jobs).
 
 **Limits.**
 
@@ -1832,8 +1859,11 @@ browser navigates to it in a hidden frame, so the page is never replaced) and an
 same 404 for every refusal: unknown, replayed or expired ticket, a job that expired or was
 deleted, or a user who was disabled. The response carries `Cache-Control: no-store`,
 `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff` and
-`Content-Disposition` with `filename*=UTF-8''<notebook name>.snbk` (ASCII fallback
-`<notebook id>.snbk`). The export counts as `downloaded` once the stream was sent whole; it
+`Content-Disposition` with `filename*=UTF-8''<notebook name>.snbk` (the name with path
+separators, reserved and control characters made `_`, at most 120 characters, the notebook id
+when nothing is left) plus a plain `filename=` for older clients: the name's ASCII characters
+only, quotes, slashes and control characters made `_`, and `<notebook id>.snbk` instead when
+that stem keeps no Latin letter (an all-Chinese name). The export counts as `downloaded` once the stream was sent whole; it
 can be downloaded again until it expires. The query strings of the download and of the import
 upload never reach a log.
 
@@ -1848,7 +1878,8 @@ its next progress step while it has not published.
 **After a server restart** a job that was queued or running is failed (`*_interrupted`); an
 import whose notebook had been published says so and keeps its notebook id, and its
 re-embedding is not resubmitted -- the notebook's own repair (the dashboard's 「补齐向量」)
-fills the chunk and element vectors; the operator runbook covers the rest
+fills the chunk and element vectors; the operator runbook covers the rest, including the
+same steps for `import_followup_failed` and for a succeeded import that reports incomplete work
 ([operations](./operations.md#web-notebook-export-and-import-jobs)). Finished jobs survive
 until they expire.
 
