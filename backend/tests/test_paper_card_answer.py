@@ -25,6 +25,7 @@ from app.services.citation_markers import MARKER_RE, marker_keys
 from app.services.embedding import FakeEmbedder
 from app.services.outline_synthesis import OUTLINE_SECTION_KEY_STRIDE
 from app.services.paper_card_answer import (
+    FINDINGS_GUIDANCE,
     PAPER_CARD_KEY_BASE,
     PAPER_DIGEST_GUIDANCE,
     TABLE_CELL_CHARS,
@@ -54,7 +55,12 @@ from app.services.reasoning_paper_tools import (
 )
 from app.services.reasoning_retrieval import OutlineSection, ReasoningResult, ReasoningRetriever
 from app.services.retrieval import RetrievedElement
-from app.services.source_finder import FindSourcesRequest, FindSourcesResult, FoundSource
+from app.services.source_finder import (
+    BestPassage,
+    FindSourcesRequest,
+    FindSourcesResult,
+    FoundSource,
+)
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients, bind_chat_client
 
@@ -104,11 +110,16 @@ def _card(source_id: str, *, wide: bool = False) -> dict:
     }
 
 
-def _found(notebook_id, source_id, title, *, tier="strong", year=2024, venue="CVPR"):
+def _found(notebook_id, source_id, title, *, tier="strong", year=2024, venue="CVPR",
+           passage=None):
+    """``passage``: the element index of the best passage (``None``: none)."""
+    best = None if passage is None else BestPassage(
+        chunk_id=f"{source_id}-c{passage}", text=f"{title} 的最佳片段",
+        element_ids=(_eid(source_id, passage),))
     return FoundSource(
         rank=1, source_id=source_id, notebook_id=notebook_id, title=title,
         pub_year=year, venue=venue, authors=(), tier=tier, reasons=("title",),
-        best_passage=None, card_status="ready",
+        best_passage=best, card_status="ready",
     )
 
 
@@ -492,6 +503,74 @@ def _assert_every_marker_resolves(repo, response):
         assert rows[anchor.element_id]["source_id"] == anchor.source_id
         assert anchor.element_id in cited
     return keys
+
+
+def test_a_find_only_run_still_gives_synthesis_its_findings():
+    # Cards were deferred: no row, but the search succeeded.
+    found = [_found("nb", "s1", "甲", passage=2), _found("nb", "s2", "乙", tier="related"),
+             *(_found("nb", f"t{i}", f"其余{i}") for i in range(3))]
+    cards = [_card_outcome("nb", "s1", "甲", {}, status="deferred")]
+    paper = _evidence(_tools(layout=ANSWER_LAYOUT_PROSE, finds=[_find(found)], cards=cards),
+                      rows=2)
+    assert paper is not None and not paper.rows and not paper.table
+    key = paper.keys[_eid("s1", 2)]
+    digest, shown = paper_digest_block(paper, 10_000)
+    assert digest.startswith(FINDINGS_GUIDANCE)
+    assert "共找到 5 篇相关论文（强相关 4 篇、相关 1 篇）" in digest
+    assert f"{key}: 《甲》 · 2024 / CVPR · strong — 甲 的最佳片段" in digest
+    assert "\n《乙》 · 2024 / CVPR · related" in digest         # no passage: title only
+    assert "Other found documents (not expanded): 其余0、其余1、其余2" in digest
+    assert set(shown) == {key} and shown[key]["element_id"] == _eid("s1", 2)
+    # A passage whose element no longer reads back is a title, not a key.
+    stale = _evidence(_tools(finds=[_find(found)]), rows=2, drop={_eid("s1", 2)})
+    assert not stale.keys and "\n《甲》 · 2024 / CVPR · strong" in paper_digest_block(
+        stale, 10_000)[0]
+
+
+def test_findings_are_whole_entries_within_the_budget():
+    found = [_found("nb", f"s{i}", f"论文{i}", passage=1) for i in range(6)]
+    paper = _evidence(_tools(finds=[_find(found)]), rows=6)
+    full, full_shown = paper_digest_block(paper, 10_000)
+    full_lines = full.splitlines()
+    assert len(full_shown) == 6
+    small, shown = paper_digest_block(paper, len(full) - 5)
+    assert len(small) <= len(full) - 5
+    # Every line kept is a whole line of the full block; the last entries go.
+    assert set(small.splitlines()[:-1]) <= set(full_lines)
+    assert 0 < len(shown) < 6
+    # The cut entries are still named, by title, in the rest list.
+    assert small.splitlines()[-1].startswith("Other found documents (not expanded): ")
+    # Not even the head fits: nothing.
+    assert paper_digest_block(paper, len(FINDINGS_GUIDANCE)) == ("", {})
+
+
+def test_find_only_prose_answer_end_to_end(repo, monkeypatch):
+    notebook = repo.create_notebook(NotebookCreate(name="论文库"))
+    for i in range(3):
+        _seed(repo, notebook.id, f"s{i}", f"论文{i}")
+    found = [_found(notebook.id, f"s{i}", f"论文{i}", passage=1) for i in range(3)]
+    result = ReasoningResult(
+        answer_layout=ANSWER_LAYOUT_PROSE, paper_finds=[_find(found)],
+        paper_cards=[_card_outcome(notebook.id, "s0", "论文0", {}, status="deferred")])
+    response, llm = _ask(repo, notebook.id, result, monkeypatch, completeness_required=True)
+    prompt = llm.prompts[0]
+    assert FINDINGS_GUIDANCE in prompt and PAPER_DIGEST_GUIDANCE not in prompt
+    assert "共找到 3 篇相关论文（强相关 3 篇、相关 0 篇）" in prompt
+    assert all(f"《论文{i}》" in prompt for i in range(3))
+    keys = _assert_every_marker_resolves(repo, response)
+    assert all(int(k[1:]) > PAPER_CARD_KEY_BASE for k in keys)
+    # No table was rendered by the system, so the coverage line is not the
+    # answer's completeness statement: the generic warning stays.
+    assert "| 论文 |" not in response.answer
+    assert "本次回答未验证完整性" in response.answer
+
+
+def test_a_prose_run_without_paper_tools_has_no_findings(repo, monkeypatch):
+    notebook = repo.create_notebook(NotebookCreate(name="论文库"))
+    _seed(repo, notebook.id, "s0", "论文0")
+    _response, llm = _ask(repo, notebook.id, ReasoningResult(), monkeypatch)
+    assert all(FINDINGS_GUIDANCE not in prompt and PAPER_DIGEST_GUIDANCE not in prompt
+               for prompt in llm.prompts)
 
 
 def test_paper_table_answer_end_to_end(repo, monkeypatch):

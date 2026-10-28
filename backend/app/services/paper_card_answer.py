@@ -18,6 +18,13 @@ This module is the seam between those outcomes and the answer, the way
   paper a compact block (title, year / venue, tl;dr, two contributions, three
   metrics, extracted values, each line under its own ``kN``; about
   ``DIGEST_PAPER_CHARS``), inside the structured-side budget, whole papers only;
+* **findings** (part of the digest block) -- whenever the run called
+  ``find_sources``, independent of cards: the coverage line, up to
+  ``table_rows`` found documents that have no card row (title, year / venue,
+  tier, and the best passage under its own ``kN`` when its element registers;
+  otherwise the title only, not citable) and the remaining found titles.  A
+  successful search the cards could not follow (generation deferred or
+  unavailable, the search was the last step) still reaches the answer model;
 * **table** (``render_paper_table`` / ``coverage_line``) -- when the run's
   ``answer_layout`` is ``paper_table`` the answer is composed by code: the
   coverage line, the model's overview and comparison, the deterministic table
@@ -80,6 +87,15 @@ PAPER_DIGEST_GUIDANCE = (
     "is not established.]"
 )
 
+FINDINGS_GUIDANCE = (
+    "[Document search results (find_sources) of this turn: the coverage line "
+    "states how many documents were found; then the found documents, each "
+    "with its tier (strong / related). An entry under [kN] carries its best "
+    "matching passage and can be cited with that marker; an entry without a "
+    "key is a title only -- name it, but do not attribute content to it.]"
+)
+_TIER_LABELS = {"strong": "strong", "related": "related"}
+
 _EMPTY_CELL = "—"
 _NEWLINES = re.compile(r"[\r\n]+")
 
@@ -127,6 +143,12 @@ class PaperCardEvidence:
     # out of the table and counted in ``unverified``.
     listed: tuple = ()
     unverified: int = 0
+    # ``find_sources`` findings for synthesis (independent of cards): the
+    # coverage line, up to ``table_rows`` found documents without a card row
+    # (``FoundSource``), and ``(titles, total)`` of the rest.
+    findings_coverage: str = ""
+    found: tuple = ()
+    found_rest: tuple = ()
     # The run called ``find_sources``: the coverage line states the topic's
     # coverage from it (``roster_omitted_for``).
     searched: bool = False
@@ -268,6 +290,32 @@ def _requested_anchors(rows: Sequence[PaperRow], *, table: bool) -> list[tuple[s
     return list(wanted.items())[:PAPER_CARD_MAX_KEYS]
 
 
+def _passage_element(item: Any) -> str:
+    passage = getattr(item, "best_passage", None)
+    ids = tuple(getattr(passage, "element_ids", ()) or ()) if passage is not None else ()
+    return str(ids[0]) if ids else ""
+
+
+def _found_row(item: Any) -> PaperRow:
+    """A found document as a registration row (no card, no values)."""
+    return PaperRow(
+        notebook_id=item.notebook_id, source_id=item.source_id,
+        title=_text(item.title) or item.source_id,
+        year=str(item.pub_year or ""), venue=_text(item.venue), card={},
+    )
+
+
+def _found_without_row(tools: Any, rows: Sequence[PaperRow], limit: int) -> tuple:
+    """``(found, rest)``: the found documents without a card row, first
+    sighting in request order -- the first ``limit`` in full, ``rest`` as
+    ``(titles, total)`` of the others (``()`` when none)."""
+    have = {(row.notebook_id, row.source_id) for row in rows}
+    items = [item for key, item in _find_index(tools.finds).items() if key not in have]
+    rest = [_clean(item.title) or item.source_id for item in items[limit:]]
+    return (tuple(items[:limit]),
+            (tuple(rest[:UNEXPANDED_TITLES]), len(rest)) if rest else ())
+
+
 # ----------------------------------------------------------- registration
 
 def build_paper_card_evidence(
@@ -292,11 +340,19 @@ def build_paper_card_evidence(
     if tools is None:
         return None
     rows, fields = paper_rows(tools)
-    if not rows:
+    if not rows and not tools.finds:
         return None
     layout = str(getattr(tools, "answer_layout", "") or "")
     table = for_answer and layout == ANSWER_LAYOUT_PAPER_TABLE
+    found, found_rest = _found_without_row(tools, rows, max(0, int(table_rows)))
     requested = _requested_anchors(rows, table=table)
+    wanted = {element_id for element_id, _row in requested}
+    for item in found:
+        element_id = _passage_element(item)
+        if element_id and element_id not in wanted \
+                and len(requested) < PAPER_CARD_MAX_KEYS:
+            wanted.add(element_id)
+            requested.append((element_id, _found_row(item)))
     tiers = dict(tier_of(sorted({row.notebook_id for _eid, row in requested})) or {}) \
         if requested else {}
     items = [
@@ -341,7 +397,12 @@ def build_paper_card_evidence(
         table_rows=max(0, int(table_rows)),
         searched=bool(tools.finds),
         listed=listed, unverified=len(rows) - len(listed),
+        found=found, found_rest=found_rest,
     )
+    if tools.finds:
+        evidence = dataclasses.replace(
+            evidence,
+            findings_coverage=coverage_line(tools, evidence).removeprefix("> "))
     if not table:
         return evidence
     unexpanded = _unexpanded_titles(tools, listed, evidence.table_rows, rows)
@@ -489,8 +550,10 @@ def paper_digest_block(
     """The digest block for ``budget_chars`` and the id_map entries it shows.
 
     Whole papers only, in row order, stopping at the first that does not fit:
-    a paper left out still appears in the table, never half-digested.
-    ``("", {})`` when not even one paper fits (the block is all or nothing).
+    a paper left out still appears in the table, never half-digested.  Then,
+    when the run called ``find_sources``, the findings (``_findings_block``)
+    in what is left.  ``("", {})`` when neither a paper nor the findings'
+    head fits.
     """
     if paper is None or budget_chars <= 0:
         return "", {}
@@ -506,11 +569,78 @@ def paper_digest_block(
         blocks.append(text)
         shown.extend(keys)
         used += 2 + len(text)
-    if not blocks:
+    parts: list[str] = []
+    if blocks:
+        parts.append(concat(PAPER_DIGEST_GUIDANCE, Glue("\n"), joined(blocks, "\n\n")))
+    spent = len(parts[0]) if parts else 0
+    findings, finding_keys = _findings_block(
+        paper, budget_chars - spent - (2 if parts else 0))
+    if findings:
+        parts.append(findings)
+        shown.extend(finding_keys)
+    if not parts:
         return "", {}
-    body = joined(blocks, "\n\n")
-    return (concat(PAPER_DIGEST_GUIDANCE, Glue("\n"), body),
+    return (joined(parts, "\n\n"),
             {key: dict(paper.id_map[key]) for key in dict.fromkeys(shown)})
+
+
+def _found_line(item: Any, keys: Mapping[str, str]) -> str:
+    """``kN: 《title》 · year / venue · tier — passage`` when the best passage's
+    element registered, else the keyless ``《title》 · year / venue · tier``."""
+    facts = " / ".join(part for part in (str(item.pub_year or ""), _clean(item.venue)) if part)
+    head = f"《{_clean(item.title) or item.source_id}》" + (f" · {facts}" if facts else "")
+    head += f" · {_TIER_LABELS.get(item.tier, 'related')}"
+    key = keys.get(_passage_element(item), "")
+    passage = getattr(item, "best_passage", None)
+    text = _clean(getattr(passage, "text", "")) if key else ""
+    if not key:
+        return head
+    return f"{key}: {head} — {text}" if text else f"{key}: {head}"
+
+
+def _findings_block(paper: PaperCardEvidence, budget_chars: int) -> tuple[str, list[str]]:
+    """The ``find_sources`` findings (module docstring), whole entries only:
+    guidance and coverage first (``("", [])`` when not even they fit), then
+    each found document while it fits, then the remaining titles while they
+    fit -- a title left out is counted in that list's total."""
+    if not paper.findings_coverage or budget_chars <= 0:
+        return "", []
+    lines = [FINDINGS_GUIDANCE, paper.findings_coverage]
+    used = sum(len(line) + 1 for line in lines) - 1
+    if used > budget_chars:
+        return "", []
+    starts: list[int] = []
+    shown: list[str] = []
+    for item in paper.found:
+        line = _found_line(item, paper.keys)
+        if used + 1 + len(line) > budget_chars:
+            break
+        starts.append(len(lines))
+        lines.append(line)
+        used += 1 + len(line)
+        key = paper.keys.get(_passage_element(item), "")
+        if key:
+            shown.append(key)
+    listed_items = len(starts)
+    titles = [_clean(item.title) or item.source_id for item in paper.found[listed_items:]]
+    total = len(titles)
+    if paper.found_rest:
+        titles.extend(paper.found_rest[0])
+        total += int(paper.found_rest[1])
+    if titles:
+        head = "Other found documents (not expanded): "
+        kept: list[str] = []
+        for title in titles[:UNEXPANDED_TITLES]:
+            tail = f" (of {total} in all)" if total > len(kept) + 1 else ""
+            line = head + "、".join([*kept, title]) + tail
+            if used + 1 + len(line) > budget_chars:
+                break
+            kept.append(title)
+        if kept:
+            tail = f" (of {total} in all)" if total > len(kept) else ""
+            starts.append(len(lines))
+            lines.append(head + "、".join(kept) + tail)
+    return entry_lines(lines, starts=starts), shown
 
 
 def paper_digest_reserve(paper: Optional[PaperCardEvidence], chunk_context_chars: int) -> int:
