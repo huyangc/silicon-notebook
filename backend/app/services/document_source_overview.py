@@ -16,6 +16,7 @@ from app.services.context_spans import entry_lines
 from app.services.evidence_attestation import attest_read
 from app.services.paper_cards import (
     CardInputElement,
+    cap_number_safe,
     card_element_cost,
     render_card_input,
 )
@@ -343,13 +344,17 @@ class _CardBudget:
         text = (text or "").strip()
         if not text:
             return True
+        # 两处截断都不许切进数字:模型只看到截断后的文本、接地也按它判,``85.23`` 截成
+        # ``85.2`` 会让一个原文里没有的数通过接地并被缓存成「已核实」。
         if cap is not None:
-            text = text[:cap]
+            text = cap_number_safe(text, cap)
         handle = f"e{len(self.elements) + 1}"
         room = min(limit, self.remaining) - card_element_cost(handle, element_type, location_label, "")
         if room < min(len(text), _CARD_MIN_TEXT_CHARS):
             return False
-        text = text[:room]
+        text = cap_number_safe(text, room)
+        if not text:
+            return False
         self.elements.append(CardInputElement(handle, element_id, element_type, location_label, text))
         self.ids.add(element_id)
         self.used += card_element_cost(handle, element_type, location_label, text)

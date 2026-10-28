@@ -382,3 +382,28 @@ def test_sampling_reports_a_change_of_the_witness(repo):
     assert sample.status == "changed"
     assert sample.basis == "before"
     assert sample.elements == ()
+
+
+
+# ------------------------------------------------- number-safe input bounds
+
+
+@pytest.mark.parametrize("where", ["table_cap", "budget_room"])
+def test_card_input_never_ends_inside_a_number(where):
+    from app.services.document_source_overview import _CardBudget
+
+    padding = "x" * (PAPER_CARD_TABLE_MAX_CHARS - 4)
+    text = padding + "85.23 top-1"
+    if where == "table_cap":
+        budget = _CardBudget(100_000)
+        assert budget.fit("el-1", "table", "Table 1", text, limit=100_000, cap=PAPER_CARD_TABLE_MAX_CHARS)
+    else:
+        budget = _CardBudget(100_000)
+        # the remaining-budget cut lands inside "85.23"
+        from app.services.paper_cards import card_element_cost
+        overhead = card_element_cost("e1", "table", "Table 1", "")
+        assert budget.fit("el-1", "table", "Table 1", text, limit=overhead + len(padding) + 4)
+    [shown] = budget.elements
+    assert not shown.text.endswith("85.2") and "85.2" not in shown.text
+    card, dropped = verify_paper_card({"metrics": [_metric("85.2", anchor="e1")]}, (shown,))
+    assert card["metrics"] == [] and dropped
