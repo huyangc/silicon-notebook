@@ -147,9 +147,14 @@ export const IMPORT_PRECHECK_STOP_UNSURE_TEXT = "已停止。上一次上传可�
  * 串有了确定的结局为止:说不准有没有被接收(`unsure`)时,再传这同一个文件仍用同一个标识
  * ——服务端认出它,回已经建出的那个作业,不读请求体,不会多出一本。
  *
- * 只有确定的结局才换标识(`endChain`):已接收(含按标识认领到)、确定没被接收、服务端明确
- * 拒绝且这个标识下确实没有作业。预检里的拒绝(名额满了、作业读不到)与预检时的停止都**不是**
- * 确定的结局。换了文件不结束旧的一串:它在后台接着对账,只是不再和表单绑在一起。
+ * 一串**只能**经 `retireChain` 结束(换标识),而它只收服务端给出的凭据(`ChainProof`):
+ *   (a) 服务端拿出了带这个标识的作业(上传的 202、预检列表里的那一行、去向接口说 `job`);
+ *   (b) 服务端的去向接口说这个标识 `none`——第一次尝试被白名单拒绝之后读到一次,或后台对账
+ *       隔开 `NONE_CONFIRM_MS` 读到两次(中间没有 `receiving`)。
+ * 除此之外——白名单拒绝(尤其是重传时)、断线、停止、预检拒绝、作业列表里「没看到」——一律
+ * 不结束、不换标识:请求可能还缓存在代理里,或还占着服务端的预留,换了标识重传就会多出一本。
+ * 换了文件不结束旧的一串(它脱离表单、在后台接着对账);登出(`reset`)丢掉全部。
+ * 守卫 `notebook-import-chain-guard` 钉住:删除一串、生成或改写标识只发生在这几处。
  */
 type Chain = {
   file: File;
@@ -173,10 +178,18 @@ function chainFor(file: File): Chain {
 
 const originOf = (file: File): UploadOrigin => ({ file, uploadId: chains.get(file)?.uploadId ?? "" });
 
-/** 这一串尝试有了确定的结局:下一次上传用新的标识。 */
-function endChain(file: File): void {
+/** 结束一串(下一次上传换新标识)的凭据:只能出自服务端的回答。 */
+export type ChainProof =
+  /** 服务端拿出了带这个标识的作业。 */
+  | { kind: "job"; job: NotebookTransferJob }
+  /** 服务端的去向接口说这个标识 `none`(见 `Chain` 上方的两种情形)。 */
+  | { kind: "server_none" };
+
+/** 唯一结束一串、换掉标识的地方。凭据只能是服务端的回答(`ChainProof`)。 */
+export function retireChain(file: File, proof: ChainProof): void {
   const found = chains.get(file);
   if (!found) return;
+  if (proof.kind === "job" && proof.job.client_upload_id && proof.job.client_upload_id !== found.uploadId) return;
   stopReconcile(found);
   chains.delete(file);
 }
@@ -231,7 +244,7 @@ function startReconcile(file: File, firstDelay: number = RECONCILE_INTERVAL_MS):
     if (!alive()) return;
     const origin = { file, uploadId: own.uploadId };
     if (answer?.status === "job") {
-      endChain(file);
+      retireChain(file, { kind: "job", job: answer.job });
       deliver({ kind: "uploaded", job: answer.job, fileName: file.name }, origin);
       return;
     }
@@ -381,7 +394,7 @@ export const importUpload = {
       // 先按标识对账:上一次尝试其实已经被接收(它的作业可能正占着一个名额)——认领它,不再上传。
       const adopted = jobs?.find((job) => job.kind === "import" && job.client_upload_id === uploadId);
       if (adopted) {
-        endChain(file);
+        retireChain(file, { kind: "job", job: adopted });
         deliver({ kind: "uploaded", job: adopted, fileName: file.name }, origin);
         return;
       }
@@ -409,7 +422,7 @@ export const importUpload = {
         },
       });
       if (!current()) return;
-      endChain(file);
+      retireChain(file, { kind: "job", job });
       deliver({ kind: "uploaded", job, fileName: file.name }, origin);
     } catch (error) {
       if (!current()) return;
@@ -428,23 +441,33 @@ export const importUpload = {
         if (outcome.kind === "unsure") {
           deliverUnsure(file, outcome.text);
         } else {
-          endChain(file);
+          // 认领到作业就以它为凭据结束这一串;「没被接收」出自作业列表里没看到,那不是凭据:
+          // 标识留着(再传同一个文件仍用它,无害)。
+          if (outcome.kind === "uploaded") retireChain(file, { kind: "job", job: outcome.job });
           deliver(outcome, origin);
         }
       } else if (uploadRefusedForSure(error)) {
-        // 白名单里的确定拒绝(后端在建作业之前说的)。有些拒绝(格式、按声明长度的 413)发生在
-        // 服务端按标识去重之前,证明不了这个标识下没有作业——换标识之前先按标识对账,第一次
-        // 尝试也一样:认领到就交出它,读不到就把标识留着。
+        // 白名单里的确定拒绝(后端在建作业之前说的)只说明**这一次请求**没被接收。有些拒绝(格式、
+        // 按声明长度的 413)早于服务端按标识去重,而上一次带这个标识的请求可能还缓存在代理里、
+        // 或还占着服务端的预留——所以先问服务端这个标识的去向:
+        // * `job`:认领它;
+        // * 重传(上一次结果未定):拒绝照实说,标识留着,后台接着对账;
+        // * 第一次尝试:去向接口说 `none` 才结束这一串;读不到或 `receiving` 就留着。
         if (httpErrorStatus(error) === 413) forgetTransferLimit();
         const text = transferRequestErrorText(error, IMPORT_UPLOAD_ERRORS, IMPORT_UPLOAD_FAILED_TEXT);
-        const job = await jobOfUpload(uploadId);
+        const answer = await uploadStatusOf(uploadId);
         if (!current()) return;
-        if (job) {
-          endChain(file);
-          deliver({ kind: "uploaded", job, fileName: file.name }, origin);
+        if (answer?.status === "job") {
+          retireChain(file, { kind: "job", job: answer.job });
+          deliver({ kind: "uploaded", job: answer.job, fileName: file.name }, origin);
         } else {
-          if (job === null) endChain(file);
           deliver({ kind: "failed", text }, origin);
+          if (carried || answer?.status === "receiving") {
+            leaveUnresolved(file);
+            startReconcile(file);
+          } else if (answer?.status === "none") {
+            retireChain(file, { kind: "server_none" });
+          }
         }
       } else {
         // 其余一切回答(5xx、502/503/504、408、429、不认得的状态码或正文、没有认得的码的
@@ -453,7 +476,7 @@ export const importUpload = {
         const job = await jobOfUpload(uploadId);
         if (!current()) return;
         if (job) {
-          endChain(file);
+          retireChain(file, { kind: "job", job });
           deliver({ kind: "uploaded", job, fileName: file.name }, origin);
         } else {
           deliverUnsure(file, uploadStillInProgress(error)
