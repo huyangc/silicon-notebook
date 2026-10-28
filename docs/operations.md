@@ -1053,10 +1053,13 @@ model label + description prompt fingerprint":
 - descriptions a rebuild generated under the new model are not staged, so the command generates
   them once more (included in the dry run's count);
 - a notebook whose last run ended `done` is not read again while nothing in it has changed: the
-  run stores the notebook's change counters with the result, and a later run or dry run under the
-  same model and prompt answers from them at once (`plans` = 0 in its line). Any write to the
-  notebook's graph or merge result in between voids that record and the notebook is planned in
-  full, so the answer is always the one a full read would give.
+  run stores a fingerprint with the result -- the notebook's two change counters, its published
+  generation and reset epoch, and its published cluster row count -- and a later run or dry run
+  under the same model and prompt answers from it at once (`plans` = 0 in its line; one
+  primary-key read and one index-only count). Any write that moves a counter voids the record,
+  and so does the one known writer that moves none of them -- a reparse with KG extraction
+  switched off, which deletes a source's objects together with their cluster rows (the row count
+  changes). Another model or prompt never answers from a record written under the previous one.
 
 Once a notebook completes, staged rows of other model/prompt versions and rows no longer matching
 any concept are deleted. Deleting the notebook's knowledge graph deletes this command's staged
@@ -1075,9 +1078,12 @@ with the next notebook. Exit status: `0` done (or a dry run); `1` incomplete (fa
 cut, concepts whose input changed before publishing, a rebuild in flight, or a notebook that ended
 in `error`) — rerun; `2` a usage error, an unknown notebook, `KG_CONCEPT_DESC_ENABLED=false` or no
 model bound to `kg_concept_description`; `3` the database is not at this build's schema (the
-command never migrates); `130` interrupted — the results already returned are staged and the
-process exits at once, without waiting for model calls still in flight (those are generated again
-on the next run). Each notebook ends with one JSON line of counts (`canonicals` / `up_to_date` /
+command never migrates); `130` interrupted — every model call that had returned when the
+interrupt was handled is staged (also those not yet taken up by the run), then the process exits
+at once through `os._exit`, without waiting for the calls still in flight (their results are
+lost and generated again on the next run) and without closing the model provider, so the
+provider's health observations of those abandoned calls are lost too. A publish interrupted by
+Ctrl-C releases its claim first. Each notebook ends with one JSON line of counts (`canonicals` / `up_to_date` /
 `to_rewrite` / `model_calls` / `generated` / `failed` / `remaining` / `rewritten` / `moved` /
 `plans`) and one `kg_concept_description_rewrite` event; the closing summary line also lists
 `incomplete_notebooks` and `errors`.
@@ -1103,9 +1109,11 @@ never seeds) and neither needs nor accepts `--confirm-service-stopped`:
   one until the next run, both descriptions of that concept;
 - every page and batch that changes rows advances `cluster_mutation_seq` once, in its own commit
   (the published-generation write rule). A large notebook therefore advances it by about
-  rows ÷ 2,000 within a minute or two: KG caches keyed on it are rebuilt once on the next read
-  (not once per advance), and the analysis panel's merge-dependent artifacts show that many
-  generations behind until the next 更新分析;
+  rows ÷ 2,000 within a minute or two. A KG cache keyed on it is rebuilt on the first read after
+  an advance, so with steady online retrieval against that notebook a large notebook's caches
+  (the PPR graph, cluster map and the like) can be rebuilt up to rows ÷ 2,000 times during one
+  publish -- run large notebooks off-peak. The analysis panel's merge-dependent artifacts show
+  that many generations behind until the next 更新分析;
 - if a rebuild is running when it publishes, that notebook reports `busy` and nothing is written
   (the results are staged; a later rerun only publishes, with no model call); if a rebuild
   published a new generation after the plan, it re-plans on the new generation and publishes
