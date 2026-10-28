@@ -19,6 +19,15 @@
 
 非目标：双向同步、冲突合并、跨环境问答历史迁移、目标端反向回写。
 
+**与单文件导出/导入的边界。** 笔记本单文件导出/导入（`.snbk`，网页与 `scripts/cli.sh notebook
+export|inspect|import`；契约见 [产品/API](./product-and-api_zh.md#笔记本导出与导入snbk)，运行手册见
+[运维](./operations_zh.md#笔记本单文件导入)）是与本同步**相互独立**的另一条路：它不用 `sync_origin`
+镜像围栏、不保留源 id、不映射用户名、不带记忆，也不读写变更日志、水位或导出租约；导入得到的是一本换新
+id、归导入者所有、可编辑的本地笔记本，此后不会被任何同步包刷新。两者只共享中立的可移植行编码
+（`app.domain.portable_rows`，`app.migration.sync.package` 再导出）。同步来的镜像**可以**被导出
+（`notebook:export` 在围栏表里放行，见 §5），导入那份文件同样得到一本独立的本地笔记本；导入的哨兵行
+`status='importing'` 恒是 `sync_origin=''`，过期收割从不碰正在导入的同步镜像。
+
 ## 2. 现状摸底要点
 
 以下事实决定了方案形态，改动前先核对它们仍然成立。
@@ -191,7 +200,8 @@ users 不同步但导入时可能**创建**：见 §4。
   MCP/Agent 面的内容写工具接同一围栏。
 - 放行：notebook:grant、notebook:configure、scale_index:write（kg_index/kg_viz 是目标端自有的
   派生产物，§6 要求目标端重建，重建与取消必须在镜像上可用）、reports:write、
-  agent_profile:write，以及问答、
+  agent_profile:write、notebook:export（网页导出单本笔记本只读这本库；见 §1 末「与单文件
+  导出/导入的边界」），以及问答、
   报告、反馈、全局问答、记忆候选的创建与确认（目标端用户自己的记忆是交互数据，id 不会与
   源端相撞，两边共存）。记忆是两端都写的唯一同步表：源端产生的记忆行以源端为准，目标端
   对它的确认、修改会在下一次同步被覆盖，删除会被重新插入；目标端自己产生的记忆行不在

@@ -843,6 +843,7 @@ Knowhow 单元格历史（已披露的最近条数上限）、Agent 调用/观�
 | 管理授权边、改名、图谱 Schema 覆盖 | | ✓ | ✓ |
 | 挂载配置、`share_token` 链接分享（撤链接连带踢只读成员） | | | ✓ |
 | 删库、转让 owner | | | ✓ |
+| 把笔记本导出为 `.snbk` 文件（`notebook:export`） | | | ✓ |
 
 P2 兑现了这两格。内容管理能力（来源增删/重解析、构建触发、knowhow/知识治理/命令目录
 写）以及 `notebook:manage` 现在解析到 **admin 档**——owner ∪
@@ -1060,7 +1061,8 @@ scale_index 各与其母格同为 admin，mount 与 configure 同为 owner）；
 `notebook:manage`、`notebook:mount`、`notebook:delete`（镜像只能由导入器退役）。放行：
 `notebook:grant` 与 `notebook:configure`（目标端自己的可见性由目标端管理，`share_token` 是目标端
 自有列）、`scale_index:write`（检索索引是目标端自有的派生产物，不在同步闭包里，重建又恰恰是目标端
-唯一的修复手段）、`reports:write`、`agent_profile:write`，以及全部读、问答、报告、反馈与记忆候选路径。
+唯一的修复手段）、`reports:write`、`agent_profile:write`、`notebook:export`（导出只读这本库，导入导出文件得到的
+是一本独立的本地笔记本），以及全部读、问答、报告、反馈与记忆候选路径。
 
 **安全方法一律豁免。** 这张表的谓词是「该能力的**写**端点会不会改同步层内容」，所以挡的能力底下
 的 `GET`/`HEAD`/`OPTIONS` 永远不被围栏碰：`GET .../scale-index/status`、
@@ -1258,6 +1260,112 @@ token 时 `share_token` 为空串，并且**不计算** copy-stats：那是一�
 - **不做判定缓存。** 单次判定是若干带索引的 `EXISTS` 探测（grants 按 `notebook_id` 或
   `(principal_type, principal_id)`，`group_members` 按主键或 `user_id`），与现状同量级；
   热路径不新增全表扫描。
+
+## 笔记本导出与导入（`.snbk`）
+
+一本笔记本可以导出为一个 `.snbk` 文件（zip 包，格式 `silicon-notebook.notebook-archive`，版本 1），
+再在本部署或另一个部署里导入为一本**独立的新笔记本**：全新的 id，归导入者所有，可以像他自己的任何笔记本
+一样编辑，与导出的那本此后互不相干。同一个文件可以导入任意多次，每次都是另一本。这不是
+[跨环境同步](./incremental-sync-design.md)：导入从不设置 `sync_origin`、从不沿用 id、也从不被刷新；同步来的
+镜像本身也可以导出。
+
+**文件里带什么**，与深拷贝的闭包完全相同：笔记本行、材料与原文件、附件、论文元数据、元素、切块与生成问题、
+四张向量表、知识图谱（对象、事实、关系；概念簇按[深拷贝](#深拷贝一律不带-memory)同一套规则）、笔记本自己的
+对象类型以及它的图谱用到的部署级自定义类型、Knowhow 表及其格子代码。它从不带 Memory 及其派生内容、会话、
+回答、报告、反馈、成员、授权边、分享链接或挂载的参考库（挂载边只计数）。闭包以外的派生层（主题板块、scale
+索引、图谱视图索引）由导入端重建。导入时：
+
+- **向量**按 embedding workload 比较 `(model, dim)`：与本部署的绑定一致就逐字节保留；不一致就丢弃，在笔记本
+  发布后重新嵌入。网页导入在后台嵌入：笔记本立刻能打开，作业完成前问答可能找不全（缺向量的行只剩关键词召回）。
+  生成问题的向量保留不了时，在发布前重新嵌入。
+- **知识图谱**原样带过来；Knowhow 表重新投影。
+- 导出时**还在解析的来源**到达时是失败状态，需要重新解析；作业报告给出条数（`sources_reset`）。
+- 更新版本的构建写出的文件（格式版本更新，或带有本部署没有的列）在本部署升级之前一律拒绝。
+
+管理员也可以在命令行导出与导入，不受网页上限约束；运行手册（预检规则、严格引用、退出码）见
+[运维文档](./operations_zh.md#笔记本单文件导入)。
+
+### 端点
+
+| 端点 | 谁可以 | 契约 |
+| --- | --- | --- |
+| `POST /api/notebooks/{id}/export` | `notebook:export`（owner；镜像放行） | **202** + 作业。调用者对这本的导出仍在排队或运行时，拿回的就是那一个作业。笔记本的原文件（不算 Memory）已经超过网页上限时 **413**；调用者没有空闲的作业名额时 **409**；没有这个能力 404。 |
+| `POST /api/notebook-imports?name=` | 任何登录用户 | 请求体是原始导出文件，`Content-Type: application/zip`，流式落盘。`name`（最多 200 字符）给新笔记本改名，空串沿用导出时的名字。**202** + 作业。可选请求头 `X-Upload-Id`（8–64 个 `A-Z a-z 0-9 _ -`）。 |
+| `GET /api/notebook-imports/uploads/{upload_id}` | 调用者 | 调用者带这个 `X-Upload-Id` 的上传后来怎样了：`{"status": "job", "job": …}`、`{"status": "receiving"}`（还在接收或检查，之后仍可能建出作业）或 `{"status": "none"}`（别人的标识也是它）。格式不对 400。 |
+| `GET /api/notebook-transfers` | 调用者 | `{"jobs": [...]}`：调用者的导出与导入作业，新的在前。 |
+| `GET /api/notebook-transfers/{job}` | 调用者 | 一个作业；别人的作业与不存在的一样是 404。 |
+| `POST /api/notebook-transfers/{job}/download-ticket` | 调用者 | 已完成的导出给 `{url, expires_at}`；还没完成 409。 |
+| `GET /api/notebook-transfers/download?ticket=` | 票据 | 凭票据流式返回文件一次（见下文票据），不要求鉴权头。 |
+| `DELETE /api/notebook-transfers/{job}` | 调用者 | 取消进行中的作业，或删除已结束的作业连同文件：`{id, outcome, kept_notebook_id}`。 |
+
+**导入的状态码**，按判定先后：请求体不是 `application/zip` **415**；声明的 `Content-Length` 超过网页上限
+**413**（一个字节都不读）；`X-Upload-Id` 格式不对 **400**；没有空闲作业名额，或同一标识的上传还在接收或检查
+（`{"code": "upload_in_progress"}`）**409**；流式接收超过网页上限的那一刻 **413**；请求体为空 **400**；zip
+目录表明解压后超过网页上限的十倍 **413**（什么都不解压）；更新版本的构建写出的文件
+**400** `{"code": "archive_too_new", "message"}`（办法是升级）；不是导出文件或已损坏 **400**；文档上限（见下）
+**409**；其余 **202**。任何拒绝都归还作业名额并删掉已接收的字节。带着调用者已有作业的 `X-Upload-Id` 重传，
+直接回那个作业（202）、不读请求体，所以重传永远不会多出一本。
+
+**作业形状**（`NotebookTransferJob`）：`id`、`kind`（`export` / `import`）、`state`（`queued` → `running` →
+`succeeded` / `failed` / `cancelled`）、`phase`（导出：`queued`、`writing`、`done`；导入：`queued`、
+`preflight`、`files`、`rows`、`validate`、`publish`、`project`、`reembed`、`index`、`done`）、`notebook_id`
+（导出：被导出的笔记本；导入：从隐藏占位行提交起就是新笔记本——阶段到 `project` 及以后，或失败码是两种后续失败
+之一时才能打开）、`notebook_name`、`created_at`、`updated_at`、`finished_at`、`expires_at`、`progress`（导出
+中是 `{bytes}`，导入写行时是 `{rows, rows_total}`）、`archive_bytes`、`downloadable`、`downloaded`、`report`
+（计数与 id，从不含路径）、`reembed`、`index`、`error`（`{code, message}`）与 `client_upload_id`。
+
+**失败码**（`error.code`；`message` 是一句完整的中文）：
+
+| 码 | 含义 |
+| --- | --- |
+| `cancelled` | 被 `DELETE` 停下；什么都不留。 |
+| `too_large` | 导出文件在写入中超过网页上限。 |
+| `notebook_missing` | 笔记本不存在或正在删除。 |
+| `export_failed` / `import_failed` | 运行失败；导入什么都不留。 |
+| `invalid_archive` | 导入器拒绝了这个文件（原因说清哪里不对，从不引用文件内容）。 |
+| `archive_too_new` | 文件来自更新版本的构建；先升级本部署。 |
+| `import_reaped` | 导入的占位行中途被收割（心跳停了）；重新导入可能成功。 |
+| `import_followup_failed` | 笔记本已经发布，但之后的工作（Knowhow 投影、重新嵌入、索引请求）没有完成；笔记本保留。 |
+| `not_started` | 作业没能排进队列。 |
+| `export_interrupted` / `import_interrupted` | 服务重启使作业没有完成；导入什么都不留。 |
+| `import_followup_interrupted` | 重启发生在笔记本发布之后；笔记本保留，不要再导入一份。 |
+
+**上限。**
+
+- `NOTEBOOK_TRANSFER_WEB_MAX_MB`（默认 512，1..1024）同时约束一个导出文件与一次上传；浏览器从
+  `GET /api/system/config` 的 `notebook_transfer_max_bytes` 读同一个值，选文件后先在本地核对。更大的笔记本走
+  管理员命令行。
+- **每人同时两个作业。** 一个用户同时排队或运行的导出/导入作业最多 2 个；正在接收的上传在读请求体之前就占一个
+  名额，被取消的作业在它的运行真正停下之前继续占着名额。
+- **同一本的导出。** 同一用户对这本的导出还在进行时再次导出，拿回的就是那一个；一次导出完成后，同一用户对这本
+  更早完成的导出被它取代（连同文件删除）。
+- **非管理员的文档上限。** 不是管理员的用户，不能导入文档数超过他每本笔记本文档上限（用户覆盖值，否则全局默认，
+  见[账号与使用统计](#账号与使用统计)）的文件：409，请管理员导入。文件里每一条 `sources` 行都算（含
+  `promotion` 来源），只有 Memory 来源（导入会拒绝它们）和 Knowhow 表自己的隐藏来源不算；管理员不受这条约束。
+- **过期。** 已结束的作业及其导出文件保留 `NOTEBOOK_TRANSFER_TTL_SECONDS`（默认一天）；`expires_at` 给出期限。
+
+**下载票据。** 票据是 32 字节随机数，服务端只在内存里存它的 sha256，绑定作业与用户；60 秒内有效，**单次使用**：
+兑换一次就作废，不论结果。下载不要求鉴权头（浏览器在隐藏的 iframe 里导航过去，当前页永远不会被替换），任何
+拒绝都回同一个 404：未知、重放或过期的票据，已过期或被删的作业，被停用的用户。响应带 `Cache-Control: no-store`、
+`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff`，`Content-Disposition` 为
+`filename*=UTF-8''<笔记本名>.snbk`（ASCII 回退 `<笔记本 id>.snbk`）。整段流发送完毕才算 `downloaded`；过期前
+可以再次下载。下载与导入上传的 query 都不进日志。
+
+**删除结果。** `deleted`（已结束的作业及其文件已删）、`cancelled`（进行中的作业已停；什么都不留）、`kept`（导入
+已经发布了笔记本：笔记本保留、归调用者，`kept_notebook_id` 给出它，后续处理照常跑完）或 `pending`（运行中的导入
+30 秒内没有落定：作业仍可读取，最终是 `cancelled`，或在此期间已发布、带着笔记本继续）。取消是协作式的：导出在下一页
+行或下一块文件处停下；导入在尚未发布时的下一个进度点停下。
+
+**服务重启之后**，排队或运行中的作业判为失败（`*_interrupted`）；笔记本已经发布的导入会说明这一点并保留笔记本
+id，它的重新嵌入不会重新提交——笔记本自己的修复（看板的「补齐向量」）补段与内容块的向量，其余见运维手册
+（[运维文档](./operations_zh.md#网页导出与导入作业)）。已结束的作业保留到过期。
+
+**待确认中心（铃铛）。** 铃铛在「导出与导入」组里列出每个进行中的作业、尚未下载的已完成导出、失败的作业（直到
+过期），已完成的导出给「下载」，笔记本已发布的导入给「打开笔记本」。导入成功即离开铃铛。
+
+**浏览器入口。** 库主在笔记本设置弹窗的「导出」一节导出；镜像没有设置弹窗，库主从卡片菜单的「导出笔记本」导出。
+「导入」在笔记本列表工具栏「＋ 新建」旁边，打开导入弹窗（选文件、可选的新名字、导入记录）。界面文案说「检索数据」，
+不说向量 / embedding / chunk（[词汇表](./ui-vocabulary.md)）。
 
 ## Knowhow 表
 
@@ -3763,7 +3871,8 @@ MCP 任务**签发限时链接（`answer_links` 表，SQLite v94 / PostgreSQL `0
 - `POST /api/notebooks/{id}/sources/reparse` —— 体检修复：批量重新解析指定来源（空源/缺片段），后台复用既有解析管线，按 notebook 作用域过滤入参
 - `POST /api/notebooks/{id}/backfill-vectors` —— 体检修复：后台补齐该库缺失的检索向量（只补缺失、幂等，仅嵌入：不重新解析，也不改写知识图谱）。文档切块用切块嵌入模型、Knowhow 表的切块用 Knowhow 嵌入模型，均按批嵌入。只有能补出向量的才计为缺失：空白切块从不计入，所属表已不存在的 Knowhow 隐藏来源也不计入。只有该缺口对应的嵌入模型已配置时才受理，否则与健康的库一样返回 `accepted: false`。它与后台重新嵌入作业共用每本笔记本一份的运行，运行中再次请求会并入，不会另起一份。
 - `POST /api/notebooks/{id}/paper-meta/backfill` —— owner 触发的论文元数据补抽（后台、幂等可续跑），返回 `{queued}`；LLM 未配置 409。来源面板的「补全论文信息」按钮**只在确有活可干时显示**：`NotebookSummary` 的 `paper_meta_missing`（仅单库 `GET /api/notebooks/{id}` 精确回填，按补抽排队同口径的 EXISTS 探针计算；列表投影与旧后端为 `null`＝未计算）为 `false` 且当前可见来源页没有 `paper_meta_status="missing"` 的行时隐藏；`null`/缺失按旧行为继续显示（隐藏只能由显式的 `false` 触发），补抽运行期间保持可见以承载「补全中…」态
-- `GET /api/system/config` —— 登录后可读的非敏感浏览器配置；当前返回 `source_upload_max_bytes`（来源选择器使用的部署上限字节值）、`source_upload_max_files_per_batch`（固定的单次请求文件数护栏），以及供 Markdown 压缩包上传配对预检使用（见上文「引用附图（本段附图）」）的 `source_image_max_bytes` / `source_image_max_per_source`（镜像 `MINERU_MAX_IMAGE_BYTES` / `MINERU_MAX_IMAGES_PER_SOURCE`；旧后端缺字段时为 `null`，含义是「拿不到这个上限，交给服务端护栏兜底」；`0` 是合法值，语义是「一张都不持久化」，等效于图片存储关闭）与 `source_images_enabled`（镜像 `MINERU_RETURN_IMAGES`；缺字段按 `true` 处理，因为该开关此前从不存在，不能让旧部署凭空弹出假警告）
+- `GET /api/system/config` —— 登录后可读的非敏感浏览器配置；当前返回 `source_upload_max_bytes`（来源选择器使用的部署上限字节值）、`source_upload_max_files_per_batch`（固定的单次请求文件数护栏），以及供 Markdown 压缩包上传配对预检使用（见上文「引用附图（本段附图）」）的 `source_image_max_bytes` / `source_image_max_per_source`（镜像 `MINERU_MAX_IMAGE_BYTES` / `MINERU_MAX_IMAGES_PER_SOURCE`；旧后端缺字段时为 `null`，含义是「拿不到这个上限，交给服务端护栏兜底」；`0` 是合法值，语义是「一张都不持久化」，等效于图片存储关闭）与 `source_images_enabled`（镜像 `MINERU_RETURN_IMAGES`；缺字段按 `true` 处理，因为该开关此前从不存在，不能让旧部署凭空弹出假警告），以及 `notebook_transfer_max_bytes`（解析后的 `NOTEBOOK_TRANSFER_WEB_MAX_MB`，网页导出/导入上限）
+- 笔记本导出与导入：`POST /api/notebooks/{id}/export`、`POST /api/notebook-imports`、`GET /api/notebook-imports/uploads/{upload_id}`、`GET /api/notebook-transfers[/{job}]`、`POST /api/notebook-transfers/{job}/download-ticket`、`GET /api/notebook-transfers/download?ticket=`、`DELETE /api/notebook-transfers/{job}` —— 契约见[笔记本导出与导入](#笔记本导出与导入snbk)。
 - `GET /api/system/extensions` —— 登录后可读的 build-time workspace UI contribution 元数据投影。响应只含 API version、稳定的 plugin/display/version/contribution 标识、实时 availability，以及 `disabled | unavailable | null` 三态固定原因；绝不下发 capability 名、依赖/信任拓扑、endpoint、路径、凭据或异常文本。production 已把既有 Agent Profile 入口注册为 `workspace.side_panel` 的 `builtin.ask_agent_profile.workspace_panel`。浏览器只在 workspace 成功提交后按 actor generation 读取一次；集合页和未登录不调用，同用户切库复用，旧后端/缺行/不可用均 fail closed。插件入口点击前不读取 Agent Profile 数据。
 - `GET /api/me/release-notes` —— 登录后可读；返回 `{available, build: {version, ordinal} | null, notes: [{id, ordinal, level, audience, title, body}], more_count}`：该用户可见、待看的重点说明最多五条（`change` 或 `feature`，最新在前，同序号按 id），以及其余待看重点说明与 `fix` 说明的条数。`available=false`（没有可用清单）不写库；从未记录过基线的用户会被静默记一份基线并返回空列表。见[系统更新通知](#系统更新通知)。
 - `GET /api/me/release-notes/history` —— 登录后可读；返回 `{available, build, notes}`：该用户可见、序号不超过当前构建的全部说明（含 `internal`），最新在前。不读也不写用户状态。

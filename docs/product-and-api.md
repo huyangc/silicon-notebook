@@ -1086,6 +1086,7 @@ Two in-group levels plus the notebook owner:
 | Manage authorization edges, rename, graph-schema overrides | | ✓ | ✓ |
 | Mount configuration, `share_token` link sharing (unsharing also drops all read-only members) | | | ✓ |
 | Delete the notebook, transfer ownership | | | ✓ |
+| Export the notebook to a `.snbk` file (`notebook:export`) | | | ✓ |
 
 P2 delivers those two cells. Content-management capabilities (source add/delete/
 re-parse, build triggers, knowhow/knowledge-governance/command-catalog writes) and
@@ -1420,6 +1421,8 @@ Allowed: `notebook:grant` and `notebook:configure` (the target environment manag
 its own visibility, and `share_token` is a target-local column), `scale_index:write`
 (a retrieval index is a target-local derived artifact outside the sync closure, and
 rebuilding it is the target end's only repair), `reports:write`, `agent_profile:write`,
+`notebook:export` (an export only reads the notebook; importing the file creates an
+independent local notebook),
 plus every read, Ask, report, feedback and memory-candidate path.
 
 **Safe methods are always exempt.** The table's predicate is "do this capability's
@@ -1711,6 +1714,154 @@ Report creation follows **read** access, and reports are isolated **per creator*
   probes (grants by `notebook_id` or `(principal_type, principal_id)`,
   `group_members` by primary key or `user_id`), which is the same order as the
   previous predicate; hot paths add no full-table scan.
+
+## Notebook export and import (`.snbk`)
+
+A notebook can be exported to one `.snbk` file (a zip archive, format
+`silicon-notebook.notebook-archive`, version 1) and imported, on this deployment or another
+one, as a **new, independent notebook**: fresh ids, owned by the importer, editable like any
+notebook of theirs, with no link back to the exported one. The same file can be imported any
+number of times; every import is another notebook. This is not
+[cross-environment sync](./incremental-sync-design.md): an import never sets `sync_origin`,
+never reuses an id and is never refreshed, and a sync mirror can itself be exported.
+
+**What the file carries** is exactly the deep copy's closure: the notebook row, materials and
+their original files, attachments, paper metadata, elements, chunks and generated questions,
+the four vector tables, the knowledge graph (objects, facts, relations, concept clusters by the
+same rules as a [deep copy](#a-deep-copy-never-carries-memory)), the notebook's own object
+types plus the deployment-wide custom types its graph uses, and Knowhow tables with their
+cell code. It never carries Memory or anything derived from one, conversations, answers,
+reports, feedback, members, grants, the share link or mounted reference libraries (the
+mount edges are only counted). Derived layers outside the closure (topic communities, the
+scale index, the graph view index) are rebuilt on the importing side. On import:
+
+- **Vectors** are compared per embedding workload by `(model, dim)`: equal to this
+  deployment's binding, they are kept byte for byte; otherwise they are dropped and embedded
+  again after the notebook is published. A web import embeds them in the background: the
+  notebook can be opened at once, and until the job finishes Ask may find less than it will
+  (missing vectors leave only keyword recall for those rows). Generated-question vectors
+  that cannot be kept are embedded before publishing.
+- **The knowledge graph** is carried as it is; Knowhow tables are projected again.
+- **A source still being parsed** when it was exported arrives failed and must be parsed
+  again; the job report says how many (`sources_reset`).
+- A file written by a newer build (a newer format version, or a column this deployment
+  lacks) is refused until this deployment is upgraded.
+
+Administrators can also export and import from the command line, without the web limits; the
+runbook (preflight rules, strict references, exit status) is in
+[operations](./operations.md#single-file-notebook-import).
+
+### Endpoints
+
+| Endpoint | Who | Contract |
+| --- | --- | --- |
+| `POST /api/notebooks/{id}/export` | `notebook:export` (owner; allowed on a mirror) | **202** + the job. While the caller's export of this notebook is still queued or running, the same job comes back. **413** when the notebook's source files (Memory left out) already exceed the web limit; **409** when the caller has no free job slot; 404 for a caller without the capability. |
+| `POST /api/notebook-imports?name=` | any signed-in user | The body is the raw archive with `Content-Type: application/zip`, streamed to disk. `name` (at most 200 characters) renames the new notebook; empty keeps the exported name. **202** + the job. Optional `X-Upload-Id` header (8–64 of `A-Z a-z 0-9 _ -`). |
+| `GET /api/notebook-imports/uploads/{upload_id}` | the caller | What became of the caller's upload with that `X-Upload-Id`: `{"status": "job", "job": …}`, `{"status": "receiving"}` (still being received or checked; it may still become a job) or `{"status": "none"}` (also for another user's id). 400 for a malformed id. |
+| `GET /api/notebook-transfers` | the caller | `{"jobs": [...]}`, the caller's export and import jobs, newest first. |
+| `GET /api/notebook-transfers/{job}` | the caller | One job; another user's job is 404 like a missing one. |
+| `POST /api/notebook-transfers/{job}/download-ticket` | the caller | `{url, expires_at}` for a finished export; 409 while it is not finished. |
+| `GET /api/notebook-transfers/download?ticket=` | the ticket | Streams the file once (see tickets below). No authorization header. |
+| `DELETE /api/notebook-transfers/{job}` | the caller | Cancels an active job or deletes a finished one with its files: `{id, outcome, kept_notebook_id}`. |
+
+**Import status codes**, in the order they are decided: **415** a body that is not
+`application/zip`; **413** a declared `Content-Length` above the web limit (before anything is
+read); **400** a malformed `X-Upload-Id`; **409** no free job slot, or
+`{"code": "upload_in_progress"}` while an upload with the same id is still being received or
+checked; **413** the moment the streamed body passes the web limit; **400** an empty body;
+**413** when the zip directory says the archive inflates past ten times the web limit (nothing
+is decompressed); **400** `{"code": "archive_too_new", "message"}` for a file from a newer
+build (the remedy is an upgrade); **400** a file that is not an archive or is damaged;
+**409** the document limit (below); otherwise **202**. Every refusal gives the job slot back and
+removes the received bytes. A retry carrying an `X-Upload-Id` the caller already has a job for
+is answered with that job (202) without reading the body, so a retry never creates a second
+import.
+
+**Job shape** (`NotebookTransferJob`): `id`, `kind` (`export` / `import`), `state` (`queued` →
+`running` → `succeeded` / `failed` / `cancelled`), `phase` (export: `queued`, `writing`,
+`done`; import: `queued`, `preflight`, `files`, `rows`, `validate`, `publish`, `project`,
+`reembed`, `index`, `done`), `notebook_id` (the exported notebook; for an import the new
+notebook from the moment its hidden placeholder is committed -- it can be opened once the
+phase is `project` or later, or the failure is one of the two follow-up codes), `notebook_name`,
+`created_at`, `updated_at`, `finished_at`, `expires_at`, `progress` (`{bytes}` while exporting,
+`{rows, rows_total}` while an import writes rows), `archive_bytes`, `downloadable`,
+`downloaded`, `report` (counts and ids, never a path), `reembed`, `index`, `error`
+(`{code, message}`) and `client_upload_id`.
+
+**Failure codes** (`error.code`; `message` is a complete Chinese sentence):
+
+| Code | Meaning |
+| --- | --- |
+| `cancelled` | Stopped by `DELETE`; nothing of it remains. |
+| `too_large` | The export file grew past the web limit while being written. |
+| `notebook_missing` | The notebook is gone or being deleted. |
+| `export_failed` / `import_failed` | The run failed; the import left nothing. |
+| `invalid_archive` | The importer refused the file (the message names what is wrong, never its content). |
+| `archive_too_new` | The file comes from a newer build; upgrade this deployment. |
+| `import_reaped` | The import's placeholder was reaped mid-way (its heartbeat lapsed); importing again may succeed. |
+| `import_followup_failed` | The notebook was published, but the work after it (Knowhow projection, re-embedding, index request) did not finish; the notebook stays. |
+| `not_started` | The job could not be queued. |
+| `export_interrupted` / `import_interrupted` | A server restart ended the job before it finished; nothing of an import remains. |
+| `import_followup_interrupted` | A restart came after the notebook was published; the notebook stays, do not import it again. |
+
+**Limits.**
+
+- `NOTEBOOK_TRANSFER_WEB_MAX_MB` (default 512, 1..1024) bounds one export file and one
+  upload; the browser reads it as `notebook_transfer_max_bytes` from `GET /api/system/config`
+  and checks a selected file before uploading. Larger notebooks go through the administrator
+  CLI.
+- **Two active jobs per user.** A user has at most 2 export/import jobs queued or running at
+  once; an upload being received holds a slot before its body is read, and a cancelled job
+  holds its slot until its run has really stopped.
+- **Same-notebook exports.** Exporting a notebook again while the same user's export of it is
+  active returns that job; a finished export replaces (and deletes) the same user's older
+  finished exports of that notebook.
+- **Document limit for non-administrators.** A user who is not an administrator cannot import a
+  file with more documents than their per-notebook document limit (the per-user override,
+  else the global default, see [Accounts and usage](#accounts-and-usage)): 409, import it
+  through an administrator. Every `sources` row of the archive counts, a `promotion` source
+  included, except a Memory source (the import refuses those) and a Knowhow table's own hidden
+  source; administrators are not held to the limit.
+- **Expiry.** A finished job, and its export file, is kept `NOTEBOOK_TRANSFER_TTL_SECONDS`
+  (default one day); `expires_at` says until when.
+
+**Download tickets.** A ticket is 32 random bytes of which the server keeps only the sha256,
+in memory, bound to the job and the user; it is valid for 60 seconds and **single-use**:
+redeeming it spends it whatever the outcome. The download needs no authorization header (the
+browser navigates to it in a hidden frame, so the page is never replaced) and answers the
+same 404 for every refusal: unknown, replayed or expired ticket, a job that expired or was
+deleted, or a user who was disabled. The response carries `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff` and
+`Content-Disposition` with `filename*=UTF-8''<notebook name>.snbk` (ASCII fallback
+`<notebook id>.snbk`). The export counts as `downloaded` once the stream was sent whole; it
+can be downloaded again until it expires. The query strings of the download and of the import
+upload never reach a log.
+
+**Delete outcomes.** `deleted` (a finished job and its files are gone), `cancelled` (an active
+job was stopped; nothing of it stays), `kept` (an import had already published its notebook:
+the notebook stays the caller's, `kept_notebook_id` names it, and its follow-up still runs) or
+`pending` (a running import that had not settled after 30 seconds: the job stays readable and
+ends `cancelled`, or carries on with its notebook if it published meanwhile). Cancellation is
+cooperative: an export stops at its next page of rows or block of a file; an import stops at
+its next progress step while it has not published.
+
+**After a server restart** a job that was queued or running is failed (`*_interrupted`); an
+import whose notebook had been published says so and keeps its notebook id, and its
+re-embedding is not resubmitted -- the notebook's own repair (the dashboard's 「补齐向量」)
+fills the chunk and element vectors; the operator runbook covers the rest
+([operations](./operations.md#web-notebook-export-and-import-jobs)). Finished jobs survive
+until they expire.
+
+**Pending-actions bell.** The bell lists every active job, a finished export not yet
+downloaded and a failed job (until it expires), under 「导出与导入」, with 「下载」 for a
+finished export and 「打开笔记本」 for an import whose notebook is published. A succeeded
+import leaves the bell.
+
+**Browser entry points.** The owner exports from the 「导出」 section of the notebook settings
+dialog; a mirror has no settings dialog, so its owner exports from the card menu's
+「导出笔记本」. 「导入」 sits next to 「＋ 新建」 in the notebook list toolbar and opens the import
+dialog (file, optional new name, import records). Interface copy says 「检索数据」, never
+vector/embedding/chunk ([vocabulary](./ui-vocabulary.md)).
 
 ## Knowhow tables
 
@@ -5001,7 +5152,8 @@ Key local beta APIs:
 - `POST /api/notebooks/{id}/sources/reparse` — checkup repair: batch re-parse the given sources (empty/missing-segment damage), scheduled through the existing pipeline in the background, filtered to the notebook scope.
 - `POST /api/notebooks/{id}/backfill-vectors` — checkup repair: backfill the notebook's missing retrieval vectors in the background (missing-only, idempotent, embedding-only — never re-parses and never rewrites the knowledge graph). Document chunks are embedded with the chunk embedding model and Knowhow table chunks with the Knowhow embedding model, in batches. A gap is counted only where a vector can be made: a blank chunk is never missing, and a Knowhow hidden source whose table is gone is not counted. The request is accepted only when the embedding model for the gap is configured; otherwise it answers `accepted: false` as it does for a healthy notebook. It shares one per-notebook run with the background re-embed job, so a request while a run is in flight joins it rather than starting a second one.
 - `POST /api/notebooks/{id}/paper-meta/backfill` — owner-triggered paper-metadata backfill (background, idempotent/resumable), returns `{queued}`; 409 when the LLM is not configured. The source panel's 「补全论文信息」 button is **shown only when there is work to do**: it hides when `NotebookSummary.paper_meta_missing` (filled precisely only by the single-notebook `GET /api/notebooks/{id}`, an EXISTS probe over the same predicate the backfill queue uses; `null` = not computed on list projections and older backends) is `false` **and** the visible source page has no `paper_meta_status="missing"` row. `null`/absent keeps the legacy always-visible behavior — hiding is triggered only by an explicit `false` — and the button stays visible while a backfill is running to host its 「补全中…」 state.
-- `GET /api/system/config` — authenticated, non-sensitive browser configuration; currently returns `source_upload_max_bytes`, the parsed deployment cap used by the source picker; `source_upload_max_files_per_batch`, the fixed request-count guard; and, for the markdown-bundle upload pairing pre-flight (see "Citation images (本段附图)" above), `source_image_max_bytes` / `source_image_max_per_source` (mirroring `MINERU_MAX_IMAGE_BYTES` / `MINERU_MAX_IMAGES_PER_SOURCE`; `null` on an older backend that omits them means "skip local pre-flight, the server guardrail decides", while an explicit `0` is a legal value meaning "persist no images at all" and is equivalent to image storage being off) and `source_images_enabled` (mirroring `MINERU_RETURN_IMAGES`; a missing field defaults to `true`, since the switch never previously existed and a stale frontend must not manufacture a warning against a normal deployment)
+- `GET /api/system/config` — authenticated, non-sensitive browser configuration; currently returns `source_upload_max_bytes`, the parsed deployment cap used by the source picker; `source_upload_max_files_per_batch`, the fixed request-count guard; and, for the markdown-bundle upload pairing pre-flight (see "Citation images (本段附图)" above), `source_image_max_bytes` / `source_image_max_per_source` (mirroring `MINERU_MAX_IMAGE_BYTES` / `MINERU_MAX_IMAGES_PER_SOURCE`; `null` on an older backend that omits them means "skip local pre-flight, the server guardrail decides", while an explicit `0` is a legal value meaning "persist no images at all" and is equivalent to image storage being off) and `source_images_enabled` (mirroring `MINERU_RETURN_IMAGES`; a missing field defaults to `true`, since the switch never previously existed and a stale frontend must not manufacture a warning against a normal deployment), and `notebook_transfer_max_bytes` (the parsed `NOTEBOOK_TRANSFER_WEB_MAX_MB`, the web export/import limit)
+- Notebook export and import: `POST /api/notebooks/{id}/export`, `POST /api/notebook-imports`, `GET /api/notebook-imports/uploads/{upload_id}`, `GET /api/notebook-transfers[/{job}]`, `POST /api/notebook-transfers/{job}/download-ticket`, `GET /api/notebook-transfers/download?ticket=`, `DELETE /api/notebook-transfers/{job}` — contracts in [Notebook export and import](#notebook-export-and-import-snbk).
 - `GET /api/system/extensions` — authenticated metadata-only projection for build-time workspace UI contributions. It returns API version plus stable plugin/display/version/contribution identifiers, live availability, and only `disabled | unavailable | null` as the unavailable reason. It never returns capability names, dependency/trust topology, endpoints, paths, credentials, or exception text. Production registers the existing Agent Profile launcher as `builtin.ask_agent_profile.workspace_panel` in `workspace.side_panel`. The browser reads this projection once per authenticated actor generation after a workspace commits; collection and signed-out views do not call it, notebook switches reuse it, and unavailable/missing/older servers fail closed. The contribution itself performs no Agent Profile read until the user opens the existing panel.
 - `GET /api/me/release-notes` — signed in; returns `{available, build: {version, ordinal} | null, notes: [{id, ordinal, level, audience, title, body}], more_count}`: up to five pending headline notes (`change` or `feature`, newest first, ties by id) visible to this user, and the count of further pending headline and `fix` notes. `available=false` (no usable manifest) writes nothing; a user with no recorded baseline gets one silently and an empty list. See [System update notice](#system-update-notice).
 - `GET /api/me/release-notes/history` — signed in; returns `{available, build, notes}` with every note visible to this user whose ordinal is at most the running build's, `internal` included, newest first. Reads and writes no user state.
