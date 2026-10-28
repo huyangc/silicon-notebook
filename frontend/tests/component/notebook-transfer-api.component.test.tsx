@@ -17,6 +17,7 @@ import {
   ARCHIVE_TOO_NEW_TEXT,
   DOWNLOAD_FRAME_HOLD_MS,
   UPLOAD_IN_PROGRESS_TEXT,
+  uploadRefusedForSure,
   uploadStillInProgress,
   REPAIR_HINT,
   FOLLOWUP_GENERIC,
@@ -287,6 +288,41 @@ test("上传:同一个上传标识的上一次上传还在处理(409 upload_in_p
   const busy = uploadNotebookImport(file, { name: "", uploadId: "up-test-0001" }).catch((caught: unknown) => caught);
   xhrs2[0].respond(409, JSON.stringify({ detail: "你已有 2 个导出或导入正在进行，请等其中一个完成后再试。" }), "x-user-message: 1\r\n");
   expect(uploadStillInProgress(await busy)).toBe(false);
+});
+
+test("确定拒绝是白名单:只有后端认得出地给出、又在建作业之前的那几种;其余(5xx、网关、未知、没码)都不算", async () => {
+  vi.spyOn(console, "debug").mockImplementation(() => undefined);
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const file = new File([new Uint8Array(3)], "a.snbk");
+  const json = "content-type: application/json\r\n";
+  const user = `${json}x-user-message: 1\r\n`;
+  const cases: Array<[number, string, string, boolean]> = [
+    [400, user, JSON.stringify({ detail: "这个文件无法导入：它不是笔记本导出文件，或者已经损坏。" }), true],
+    [400, json, JSON.stringify({ detail: { code: "archive_too_new", message: "x" } }), true],
+    [409, user, JSON.stringify({ detail: "你已有 2 个导出或导入正在进行，请等其中一个完成后再试。" }), true],
+    [409, user, JSON.stringify({ detail: "这个文件的文档超过每本笔记本最多 5 篇的上限；请联系管理员用命令行导入。" }), true],
+    [413, user, JSON.stringify({ detail: "导入文件超过网页导入上限（512 MB），请联系管理员用命令行导入。" }), true],
+    [415, user, JSON.stringify({ detail: "请上传笔记本导出文件（.snbk）。" }), true],
+    [403, json, JSON.stringify({ detail: "Forbidden" }), true],
+    // 说不准:
+    [409, json, JSON.stringify({ detail: { code: "upload_in_progress", message: "x" } }), false],
+    [409, json, JSON.stringify({ detail: "something" }), false],
+    [413, "content-type: text/html\r\n", "<html>Request Entity Too Large</html>", false],
+    [504, "content-type: text/html\r\n", "<html>Gateway Timeout</html>", false],
+    [502, json, JSON.stringify({ detail: "bad gateway" }), false],
+    [500, user, JSON.stringify({ detail: "x" }), false],
+    [503, json, "", false],
+    [408, json, JSON.stringify({ detail: "timeout" }), false],
+    [429, user, JSON.stringify({ detail: "请稍后再试" }), false],
+    [418, user, JSON.stringify({ detail: "我是茶壶" }), false],
+    [400, json, "not json at all", false],
+  ];
+  for (const [status, headers, body, definitive] of cases) {
+    const xhrs = installFakeXhr();
+    const pending = uploadNotebookImport(file, { name: "", uploadId: "up-test-0001" }).catch((caught: unknown) => caught);
+    xhrs[0].respond(status, body, headers);
+    expect([status, body, uploadRefusedForSure(await pending)]).toEqual([status, body, definitive]);
+  }
 });
 
 test("作业解析带回 client_upload_id", () => {

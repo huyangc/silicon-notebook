@@ -13,6 +13,8 @@ const api = vi.hoisted(() => ({
   deleteNotebookTransfer: vi.fn(),
   downloadNotebookExport: vi.fn(),
   uploadNotebookImport: vi.fn(),
+  // 这里的用例里,上传抛出的非网络错误都按「确定拒绝」处理(白名单判定的用例在 api 层)。
+  uploadRefusedForSure: vi.fn(() => true),
 }));
 vi.mock("../../app/notebook-transfer-api.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../app/notebook-transfer-api.ts")>()),

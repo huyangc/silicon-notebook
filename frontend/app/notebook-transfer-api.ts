@@ -215,30 +215,80 @@ export async function uploadNotebookImport(
     headers: { [UPLOAD_ID_HEADER]: options.uploadId },
   });
   if (!response.ok) {
-    // 一个更新版本的部署写的文件:后端用结构化 detail 的稳定码说(不带出处头),补救是
-    // 升级本部署,不是换一个文件——按码给我们自己的那句话。
-    if (response.status === 400 && (await structuredCode(response.clone())) === "archive_too_new") {
-      throw humanizedError(ARCHIVE_TOO_NEW_TEXT, 400);
+    const origin = await refusalOrigin(response.clone());
+    const definitive = isDefinitiveUploadRefusal(response.status, origin);
+    let error: unknown;
+    if (response.status === 400 && origin.code === "archive_too_new") {
+      // 一个更新版本的部署写的文件:后端用结构化 detail 的稳定码说(不带出处头),补救是
+      // 升级本部署,不是换一个文件——按码给我们自己的那句话。
+      error = humanizedError(ARCHIVE_TOO_NEW_TEXT, 400);
+    } else if (response.status === 409 && origin.code === "upload_in_progress") {
+      // 同一个标识的上一次上传还在服务端接收/检查:这一次没有被接收,上一次结果未定。
+      error = humanizedError(UPLOAD_IN_PROGRESS_TEXT, 409);
+      stillInProgress.add(error as Error);
+    } else {
+      error = await throwHumanizedHttpError(response, TAG).catch((thrown: unknown) => thrown);
     }
-    // 同一个标识的上一次上传还在服务端接收/检查:这一次没有被接收,上一次结果未定。
-    if (response.status === 409 && (await structuredCode(response.clone())) === "upload_in_progress") {
-      const error = humanizedError(UPLOAD_IN_PROGRESS_TEXT, 409);
-      stillInProgress.add(error);
-      throw error;
-    }
-    await throwHumanizedHttpError(response, TAG);
+    if (definitive && error instanceof Error) definitiveRefusals.add(error);
+    throw error;
   }
   return requireJob(await response.json());
 }
 
-async function structuredCode(response: Response): Promise<string> {
+/** 一次失败响应的出处:后端 `user_error()` 的出处头、结构化 detail 的稳定码、是不是后端
+ *  形状的 JSON(`{"detail": …}`)。 */
+export type RefusalOrigin = { userMessage: boolean; code: string; backendJson: boolean };
+
+async function refusalOrigin(response: Response): Promise<RefusalOrigin> {
+  const userMessage = response.headers.get("X-User-Message") === "1";
   try {
     const body: unknown = await response.json();
-    const detail = isRecord(body) ? body.detail : null;
-    return isRecord(detail) && typeof detail.code === "string" ? detail.code : "";
+    const detail = isRecord(body) ? body.detail : undefined;
+    return {
+      userMessage,
+      code: isRecord(detail) && typeof detail.code === "string" ? detail.code : "",
+      backendJson: isRecord(body) && detail !== undefined,
+    };
   } catch {
-    return "";
+    return { userMessage, code: "", backendJson: false };
   }
+}
+
+/**
+ * 上传被拒、而且**确定没有被接收**的那几种回答:我们自己的后端认得出来地给出、又发生在
+ * 任何作业可能存在之前(白名单,按状态码逐条列出)。
+ *
+ * 默认是**说不准**,不是「被拒」:请求体整个到了服务器之后,它还要检查文件、数文档、建作业,
+ * 这期间反向代理可能先回一个 504(或 502/503/500、408、429……),而后端照样把作业建出来。
+ * 把这种回答当成确定拒绝、换掉上传标识,下一次重传就会多出一本。所以只有下面这些——后端的
+ * 出处头(`user_error()` 的 `X-User-Message: 1`)或结构化 detail 的稳定码证明是后端说的,
+ * 且后端在建作业之前就这么说——才算确定没被接收;其余一律说不准,留着标识按它对账。
+ */
+const DEFINITIVE_UPLOAD_REFUSALS: Readonly<Record<number, (origin: RefusalOrigin) => boolean>> = {
+  // 文件是空的 / 不是导出文件或已损坏 / 上传标识格式不对(user_error),更新版本的文件(结构化码)。
+  400: (origin) => origin.userMessage || origin.code === "archive_too_new",
+  // 名额已满 / 文档超过每本笔记本的上限(user_error)。`upload_in_progress` 不在这里:说不准。
+  409: (origin) => origin.userMessage,
+  // 超过网页导入上限(user_error;Next 反代自己回的 413 没有出处头,不算)。
+  413: (origin) => origin.userMessage,
+  // 不是 application/zip(user_error)。
+  415: (origin) => origin.userMessage,
+  // 会话失效 / 没有权限:后端的 `{"detail": …}`,在读请求体之前。
+  401: (origin) => origin.backendJson,
+  403: (origin) => origin.backendJson,
+};
+
+/** 这个失败响应是不是白名单里的确定拒绝(其余一律说不准)。 */
+export function isDefinitiveUploadRefusal(status: number, origin: RefusalOrigin): boolean {
+  const rule = DEFINITIVE_UPLOAD_REFUSALS[status];
+  return Boolean(rule && rule(origin));
+}
+
+const definitiveRefusals = new WeakSet<Error>();
+
+/** 这个上传错误是不是后端在建作业之前给出的确定拒绝(`DEFINITIVE_UPLOAD_REFUSALS`)。 */
+export function uploadRefusedForSure(error: unknown): boolean {
+  return error instanceof Error && definitiveRefusals.has(error);
 }
 
 export const ARCHIVE_TOO_NEW_TEXT = "这个文件来自更新版本的部署，请先升级本部署再导入。";

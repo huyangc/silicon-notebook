@@ -33,6 +33,7 @@ import {
   listNotebookTransfers,
   transferRequestErrorText,
   uploadNotebookImport,
+  uploadRefusedForSure,
   uploadStillInProgress,
   type NotebookTransferJob,
 } from "./notebook-transfer-api.ts";
@@ -114,6 +115,8 @@ export const IMPORT_UPLOAD_UNSURE_TEXT = "连接中断，导入可能已被接�
 /** 停止了、而请求体可能已经整个到了服务器:同一个意思。 */
 export const IMPORT_STOP_UNSURE_TEXT = "已停止上传，但文件可能已经传完、导入可能已被接收；请先看下方的导入记录，再决定是否重传。";
 
+/** 服务器回了话、却不是认得出的确定拒绝(网关超时、5xx……)时那句话。 */
+export const IMPORT_RESPONSE_UNSURE_TEXT = "服务器没有给出明确结果，导入可能已被接收；请先看下方的导入记录，再决定是否重传。";
 /** 已经停在预检那一步、而上一次带这个标识的上传结果未定时那句话。 */
 export const IMPORT_PRECHECK_STOP_UNSURE_TEXT = "已停止。上一次上传可能已被接收；请先看下方的导入记录，再决定是否重传。";
 
@@ -289,24 +292,38 @@ export const importUpload = {
         if (outcome.kind === "unsure") leaveUnresolved(file);
         else endChain(file);
         deliver(outcome);
-      } else if (uploadStillInProgress(error)) {
-        // 同一个标识的上一次上传还在服务端处理:这一次没被接收,上一次的结果未定。
-        leaveUnresolved(file);
-        deliver({ kind: "unsure", text: transferRequestErrorText(error, {}, IMPORT_UPLOAD_UNSURE_TEXT) });
-      } else {
-        // 服务端明确拒绝。有些拒绝(格式、按声明长度的 413)发生在服务端按标识去重之前,不能
-        // 证明这个标识下没有作业:上一次结果未定时先按标识对账,认领到就交出它。
+      } else if (uploadRefusedForSure(error)) {
+        // 白名单里的确定拒绝(后端在建作业之前说的)。有些拒绝(格式、按声明长度的 413)发生在
+        // 服务端按标识去重之前,证明不了这个标识下没有作业——换标识之前先按标识对账,第一次
+        // 尝试也一样:认领到就交出它,读不到就把标识留着。
         if (httpErrorStatus(error) === 413) forgetTransferLimit();
         const text = transferRequestErrorText(error, IMPORT_UPLOAD_ERRORS, IMPORT_UPLOAD_FAILED_TEXT);
-        const job = carried ? await jobOfUpload(uploadId) : null;
+        const job = await jobOfUpload(uploadId);
         if (!current()) return;
         if (job) {
           endChain(file);
           deliver({ kind: "uploaded", job, fileName: file.name });
         } else {
-          // 读不到作业时这个标识下有没有作业仍未定:标识留着。
           if (job === null) endChain(file);
           deliver({ kind: "failed", text });
+        }
+      } else {
+        // 其余一切回答(5xx、502/503/504、408、429、不认得的状态码或正文、没有认得的码的
+        // 「像后端」的拒绝、409 upload_in_progress、响应读不懂):说不准——请求体可能已经到了
+        // 服务器,它可能还会建出作业。按标识对账;没认领到就留着标识,不叫人马上重传。
+        const job = await jobOfUpload(uploadId);
+        if (!current()) return;
+        if (job) {
+          endChain(file);
+          deliver({ kind: "uploaded", job, fileName: file.name });
+        } else {
+          leaveUnresolved(file);
+          deliver({
+            kind: "unsure",
+            text: uploadStillInProgress(error)
+              ? transferRequestErrorText(error, {}, IMPORT_UPLOAD_UNSURE_TEXT)
+              : IMPORT_RESPONSE_UNSURE_TEXT,
+          });
         }
       }
     } finally {

@@ -11,6 +11,8 @@ const api = vi.hoisted(() => ({
   uploadNotebookImport: vi.fn(),
   forgetTransferLimit: vi.fn(),
   uploadStillInProgress: vi.fn(() => false),
+  // 白名单判定在 api 层(那里有自己的用例);这里按用例需要直接给结论,默认「不是确定拒绝」。
+  uploadRefusedForSure: vi.fn(() => false),
 }));
 vi.mock("../../app/notebook-transfer-api.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../app/notebook-transfer-api.ts")>()),
@@ -25,7 +27,7 @@ vi.mock("../../app/page-reload.ts", () => ({
 
 const {
   importUpload, useImportUpload, useImportUploadBusy, IMPORT_UPLOAD_UNSURE_TEXT, IMPORT_STOP_UNSURE_TEXT,
-  IMPORT_PRECHECK_STOP_UNSURE_TEXT,
+  IMPORT_PRECHECK_STOP_UNSURE_TEXT, IMPORT_RESPONSE_UNSURE_TEXT,
 } = await import("../../app/notebook-import-upload.ts");
 const { IMPORT_UPLOAD_CUT_TEXT, IMPORT_UPLOAD_FAILED_TEXT, TRANSFER_BUSY_TEXT } = await import(
   "../../app/notebook-transfer-api.ts"
@@ -461,6 +463,7 @@ test("上传被 413 拒绝:忘掉记住的上限,下次重新读", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   const { humanizedError } = await import("../../app/errors.ts");
   api.uploadNotebookImport.mockRejectedValueOnce(humanizedError("文件超过网页导入上限", 413));
+  api.uploadRefusedForSure.mockReturnValueOnce(true);
   const { outcomes, stop } = collect();
   await importUpload.start(file(), "", null);
   expect(api.forgetTransferLimit).toHaveBeenCalledOnce();
@@ -559,8 +562,97 @@ test("说不准之后被服务端明确拒绝:先按标识对账,认领到就交
   const attempt = importUpload.start(chosen, "", 1024);
   await vi.waitFor(() => expect(refused.uploadId).not.toBe(""));
   api.listNotebookTransfers.mockResolvedValueOnce([active("found", "import", uploadId)]);
+  api.uploadRefusedForSure.mockReturnValueOnce(true);
   refused.reject(humanizedError("请上传笔记本导出文件（.snbk）。", 415));
   await attempt;
   expect(outcomes.at(-1)).toEqual({ kind: "uploaded", job: active("found", "import", uploadId), fileName: "库.snbk" });
+  stop();
+});
+
+
+test("请求体传完后服务器回 504 / 502 / 500(不是认得出的确定拒绝):说不准、标识留着,重传带同一个", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { humanizedError } = await import("../../app/errors.ts");
+  for (const status of [504, 502, 500]) {
+    const { outcomes, stop } = collect();
+    const chosen = file();
+    const first = controllableUpload();
+    const attempt = importUpload.start(chosen, "", 1024);
+    await vi.waitFor(() => expect(first.uploadId).not.toBe(""));
+    api.listNotebookTransfers.mockResolvedValueOnce([]);
+    first.bodySent();
+    first.reject(humanizedError("服务暂时不可用，请稍后再试", status));
+    await attempt;
+    expect(outcomes).toEqual([{ kind: "unsure", text: IMPORT_RESPONSE_UNSURE_TEXT }]);
+    const retry = controllableUpload();
+    const again = importUpload.start(chosen, "", 1024);
+    await vi.waitFor(() => expect(retry.uploadId).not.toBe(""));
+    expect(retry.uploadId).toBe(first.uploadId);
+    retry.resolve(active(`after-${status}`, "import", first.uploadId));
+    await again;
+    stop();
+  }
+});
+
+test("不认得的回答(未知状态码)也是说不准;按标识认领到作业就交出它(第一次尝试也对账)", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { humanizedError } = await import("../../app/errors.ts");
+  const { outcomes, stop } = collect();
+  const unknown = controllableUpload();
+  const attempt = importUpload.start(file(), "", 1024);
+  await vi.waitFor(() => expect(unknown.uploadId).not.toBe(""));
+  api.listNotebookTransfers.mockResolvedValueOnce([]);
+  unknown.reject(humanizedError("操作失败，请重试", 418));
+  await attempt;
+  expect(outcomes.at(-1)).toEqual({ kind: "unsure", text: IMPORT_RESPONSE_UNSURE_TEXT });
+  const gateway = controllableUpload();
+  const second = importUpload.start(file(), "", 1024);
+  await vi.waitFor(() => expect(gateway.uploadId).not.toBe(""));
+  api.listNotebookTransfers.mockResolvedValueOnce([active("created", "import", gateway.uploadId)]);
+  gateway.reject(humanizedError("服务暂时不可用，请稍后再试", 504));
+  await second;
+  expect(outcomes.at(-1)).toEqual({ kind: "uploaded", job: active("created", "import", gateway.uploadId), fileName: "库.snbk" });
+  stop();
+});
+
+test("认得出的确定拒绝(409 名额满、413):失败,对账没有这个标识的作业后换新标识", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { humanizedError } = await import("../../app/errors.ts");
+  for (const [status, text] of [
+    [409, "你已有 2 个导出或导入正在进行，请等其中一个完成后再试。"],
+    [413, "导入文件超过网页导入上限（512 MB），请联系管理员用命令行导入。"],
+  ] as const) {
+    const { outcomes, stop } = collect();
+    const chosen = file();
+    const first = controllableUpload();
+    const attempt = importUpload.start(chosen, "", 1024);
+    await vi.waitFor(() => expect(first.uploadId).not.toBe(""));
+    api.listNotebookTransfers.mockResolvedValueOnce([]);
+    api.uploadRefusedForSure.mockReturnValueOnce(true);
+    first.reject(humanizedError(text, status));
+    await attempt;
+    expect(outcomes).toEqual([{ kind: "failed", text }]);
+    const next = controllableUpload();
+    const again = importUpload.start(chosen, "", 1024);
+    await vi.waitFor(() => expect(next.uploadId).not.toBe(""));
+    expect(next.uploadId).not.toBe(first.uploadId);
+    next.resolve(active(`fresh-${status}`, "import", next.uploadId));
+    await again;
+    stop();
+  }
+});
+
+test("第一次尝试就被确定拒绝:换标识之前也先按标识对账(有些拒绝早于服务端按标识去重)", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { humanizedError } = await import("../../app/errors.ts");
+  const { outcomes, stop } = collect();
+  const first = controllableUpload();
+  const attempt = importUpload.start(file(), "", 1024);
+  await vi.waitFor(() => expect(first.uploadId).not.toBe(""));
+  api.listNotebookTransfers.mockResolvedValueOnce([active("already", "import", first.uploadId)]);
+  api.uploadRefusedForSure.mockReturnValueOnce(true);
+  first.reject(humanizedError("请上传笔记本导出文件（.snbk）。", 415));
+  await attempt;
+  expect(outcomes).toEqual([{ kind: "uploaded", job: active("already", "import", first.uploadId), fileName: "库.snbk" }]);
   stop();
 });
