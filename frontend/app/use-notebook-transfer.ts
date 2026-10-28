@@ -40,6 +40,8 @@ import {
 
 /** 进行中作业的轮询间隔(只在面板可见时)。 */
 export const TRANSFER_POLL_MS = 1500;
+/** 弹窗关着时,跟这一页上传出来、还没发布的导入的间隔(每个作业一次轻量读)。 */
+export const TRACK_POLL_MS = 5000;
 /** 「已开始下载」在按钮旁停留多久,之后按钮回到「下载」。 */
 export const DOWNLOAD_STARTED_HOLD_MS = 4000;
 
@@ -482,10 +484,14 @@ export function useNotebookImport(options: {
     return () => controller.abort();
   }, [open]);
 
-  // 弹窗打开时,轮询进行中的作业(取消/移除在途、或已经有结果的行除外)。
+  // 弹窗打开时,轮询进行中的作业(取消/移除在途、或已经有结果的行除外)。弹窗关着时,只低频
+  // 跟着这一页上传出来、还没发布的那几个:发布的那一刻报告一次新笔记本(列表随之刷新)——
+  // 导入完成后它就离开铃铛,没有别的东西会替它刷新列表。发布或结束就不再跟。
   const activeIds = open
     ? jobs.filter((job) => transferActive(job) && !notes[job.id] && !rows[job.id]?.busy).map((job) => job.id).join(",")
-    : "";
+    : jobs.filter((job) => uploadedRef.current.has(job.id) && transferActive(job)
+      && !importedNotebookReady(job) && !notes[job.id] && !rows[job.id]?.busy).map((job) => job.id).join(",");
+  const pollMs = open ? TRANSFER_POLL_MS : TRACK_POLL_MS;
   useEffect(() => {
     if (!activeIds) return;
     const generation = actorGenerationRef.current;
@@ -509,15 +515,15 @@ export function useNotebookImport(options: {
           // 一次读失败:下一轮再读。
         }
       }));
-      if (!stopped) timer = window.setTimeout(() => { void round(); }, TRANSFER_POLL_MS);
+      if (!stopped) timer = window.setTimeout(() => { void round(); }, pollMs);
     };
-    timer = window.setTimeout(() => { void round(); }, TRANSFER_POLL_MS);
+    timer = window.setTimeout(() => { void round(); }, pollMs);
     return () => {
       stopped = true;
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [activeIds, mergeJob]);
+  }, [activeIds, pollMs, mergeJob]);
 
   const fileError = importFileProblem(file, limitBytes);
 
