@@ -9798,6 +9798,36 @@
           "title": "NotebookGrantItem",
           "type": "object"
         },
+        "NotebookImportUploadStatus": {
+          "additionalProperties": false,
+          "description": "``GET /notebook-imports/uploads/{upload_id}``: what became of the caller's\nupload with that ``X-Upload-Id``. ``job``: a job carries it (``job`` is that\njob); ``receiving``: an upload with it is still being received or checked\nand may still become a job; ``none``: neither (also for an id that is not\nthe caller's).",
+          "properties": {
+            "job": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/NotebookTransferJob"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "enum": [
+                "receiving",
+                "job",
+                "none"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "title": "NotebookImportUploadStatus",
+          "type": "object"
+        },
         "NotebookRef": {
           "description": "轻量 notebook 引用 —— 参考库挂载相关接口共用。",
           "properties": {
@@ -21341,6 +21371,46 @@
             }
           },
           "summary": "Import Notebook Route"
+        }
+      },
+      "/api/notebook-imports/uploads/{upload_id}": {
+        "get": {
+          "description": "What became of the caller's upload with this ``X-Upload-Id`` -- the\nauthoritative answer after an interrupted upload, read consistently with the\nreservation turning into the job: ``job`` (with the job), ``receiving`` (still\nbeing received or checked; it may still become a job) or ``none``. An id that\nis not the caller's is ``none`` like an unknown one. A malformed id is 400.",
+          "operationId": "get_notebook_import_upload_api_notebook_imports_uploads__upload_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "upload_id",
+              "required": true,
+              "schema": {
+                "title": "Upload Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/NotebookImportUploadStatus"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Notebook Import Upload"
         }
       },
       "/api/notebook-transfers": {

@@ -490,6 +490,24 @@ class NotebookTransferJobs:
             job_id=job_id, part=self._directory("imports") / f"{job_id}{_UPLOAD_PART_SUFFIX}",
         )
 
+    def upload_status(self, user_id: str, client_upload_id: str) -> dict:
+        """What became of ``user_id``'s upload ``client_upload_id`` -- the client's
+        authoritative answer after an interrupted upload: ``{"status": "job",
+        "job": <view>}`` when a job carries the id, ``{"status": "receiving"}``
+        while an upload with the id holds its reservation (being received or
+        checked; it may still become a job), ``{"status": "none"}`` otherwise --
+        also for another user's id, so nothing is told about it. Read under the
+        lock, so it is consistent with ``start_import`` turning the reservation
+        into the job in one step."""
+        self._expire()
+        with self._lock:
+            for job in self._jobs.values():
+                if job.user_id == user_id and client_upload_id and job.client_upload_id == client_upload_id:
+                    return {"status": "job", "job": self._view(job)}
+            if client_upload_id and (user_id, client_upload_id) in self._reserved_uploads:
+                return {"status": "receiving", "job": None}
+        return {"status": "none", "job": None}
+
     def release_upload(self, job_id: str) -> None:
         """Give back the slot of an upload that did not become a job (idempotent)."""
         with self._lock:

@@ -193,3 +193,7 @@ def test_refusals_say_whether_to_upgrade_or_retry_pg(world):
 
 def test_a_retry_with_the_same_upload_id_returns_its_job_pg(world):
     cases.check_a_retry_with_the_same_upload_id_returns_its_job(world)
+
+
+def test_the_upload_status_answers_authoritatively_pg(world):
+    cases.check_the_upload_status_answers_authoritatively(world)

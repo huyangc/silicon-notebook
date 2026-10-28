@@ -195,6 +195,7 @@ def test_notebook_transfer_endpoints_have_a_domain_owner():
         "get_notebook_transfer",
         "create_notebook_transfer_ticket",
         "delete_notebook_transfer",
+        "get_notebook_import_upload",
     }
     declared = {
         route.name for route in notebook_transfer_router.routes if isinstance(route, APIRoute)
