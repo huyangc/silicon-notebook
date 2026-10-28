@@ -257,6 +257,51 @@ def test_docx_math_outside_a_paragraph_is_still_read(tmp_path):
     ]
 
 
+def _add_footnote(path: Path, footnote_body: str) -> None:
+    """Give the DOCX at `path` footnote 1 (python-docx cannot write footnotes)."""
+    w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    with zipfile.ZipFile(path) as archive:
+        members = {info.filename: archive.read(info) for info in archive.infolist()}
+    members["word/footnotes.xml"] = (
+        f'<w:footnotes xmlns:w="{w_ns}" xmlns:m="{M_NS}"><w:footnote w:id="1">'
+        f"<w:p>{footnote_body}</w:p></w:footnote></w:footnotes>"
+    ).encode()
+    members["word/_rels/document.xml.rels"] = members["word/_rels/document.xml.rels"].replace(
+        b"</Relationships>",
+        b'<Relationship Id="rIdFn" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+        b'relationships/footnotes" Target="footnotes.xml"/></Relationships>',
+    )
+    members["[Content_Types].xml"] = members["[Content_Types].xml"].replace(
+        b"</Types>",
+        b'<Override PartName="/word/footnotes.xml" ContentType="application/'
+        b'vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/></Types>',
+    )
+    members["word/document.xml"] = members["word/document.xml"].replace(
+        b"<w:t>See note</w:t></w:r>",
+        b'<w:t>See note</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r>',
+    )
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+
+
+def test_docx_footnote_math_is_converted(tmp_path):
+    path = docx_with(tmp_path / "footnote.docx", [["See note"], [("math", omath_para(frac(r("p"), r("q"))))]])
+    _add_footnote(path, '<w:r><w:t xml:space="preserve">Note </w:t></w:r>' + omath(ssup(r("x"), r("2"))))
+    texts = [(el.element_type, el.text) for el in _parse_docx(path)]
+    assert ("formula", r"\frac{p}{q}") in texts
+    assert any(kind == "paragraph" and "Note $x^{2}$" in text for kind, text in texts)
+
+
+def test_docx_text_that_looks_like_a_token_is_left_alone(tmp_path):
+    """The sentinel is chosen absent from every text part, so private-use text
+    shaped like a token can never be mistaken for one."""
+    first_private_use = ""
+    lookalike = f"{first_private_use}0{first_private_use}"
+    path = docx_with(tmp_path / "pua.docx", [[f"odd {lookalike} text"], ["v ", ("math", omath(r("y")))]])
+    assert [el.text for el in _parse_docx(path)] == [f"odd {lookalike} text", "v $y$"]
+
+
 def test_docx_python_docx_last_resort_keeps_math_inline(tmp_path, monkeypatch):
     import mammoth
 
@@ -463,6 +508,26 @@ def test_pptx_raw_xml_last_resort_keeps_math_inline_without_duplicates(tmp_path)
         ("PPTX slide 1 shape 2", r"$\sqrt{x}$"),
         ("PPTX slide 1 shape 3", "Inline $x^{2}$ here"),
     ]
+
+
+def test_pptx_raw_xml_reads_an_equation_alternate_once(tmp_path):
+    """`.//p:sp` sees both halves of the AlternateContent; a Fallback that
+    carries a text copy of the equation must not add a second element."""
+    from pptx import Presentation
+    from pptx.oxml import parse_xml
+
+    from tests.omml_testkit import MC_NS, _text_box_xml
+
+    path = pptx_with(tmp_path / "dup.pptx", [["Title box"]])
+    presentation = Presentation(str(path))
+    presentation.slides[0].shapes._spTree.append(parse_xml(
+        f'<mc:AlternateContent xmlns:mc="{MC_NS}" xmlns:a14="{A14_NS}"><mc:Choice Requires="a14">'
+        f'{_text_box_xml(500, pptx_paragraph("k=", ("math", omath(r("2")))))}</mc:Choice>'
+        f'<mc:Fallback>{_text_box_xml(500, pptx_paragraph("k=2 (picture copy)"))}</mc:Fallback>'
+        "</mc:AlternateContent>"
+    ))
+    presentation.save(str(path))
+    assert [el.text for el in parse_pptx_basic("s1", path)] == ["Title box", "k=$2$"]
 
 
 def test_math_free_pptx_output_is_unchanged(tmp_path):
