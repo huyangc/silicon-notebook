@@ -61,7 +61,7 @@ curl -s http://127.0.0.1:8000/api/ready
 
 | 用途 | 必需 scope |
 | --- | --- |
-| 搜索来源/知识对象（`search`）、读取 knowhow（`list_knowhow_tables`、`get_knowhow_discrimination`、`get_knowhow_row`）、把 `ref` 还原回原文（`read_reference`）、查看笔记本详情（`get_notebook`）、来源解析状态与构建状态（`list_sources`） | `read`（读取） |
+| 搜索来源/知识对象（`search`）、读取 knowhow（`list_knowhow_tables`、`get_knowhow_discrimination`、`get_knowhow_row`）、把 `ref` 还原回原文（`read_reference`）、查看笔记本详情（`get_notebook`）、来源解析状态与构建状态（`list_sources`）、按主题找论文并读卡片或逐篇抽取字段（`find_sources`、`get_paper_cards`、`extract_from_sources`；卡片与抽取会消耗模型配额） | `read`（读取） |
 | 读取主人本人的个人记忆（confirmed 与 candidate）、读取「AI 对这个库的理解」（`get_notebook(include="all")`） | `read`（读取） |
 | 读取你自己的问答记录（网页里问过的、Agent 发起的，单库与跨笔记本会话；`list_conversations`、`get_conversation`）与深度报告（`list_reports`、`get_report`） | `read`（读取） |
 | 向一个笔记本、或一次向 2–8 个笔记本提问并重读结果（`ask`、`get_ask`；含只检索 `output="evidence"`） | `ask`（问答；不依赖 `read`） |

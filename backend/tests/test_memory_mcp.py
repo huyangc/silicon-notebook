@@ -4673,10 +4673,10 @@ async def test_list_sources_pages_the_selected_notebooks_visible_inventory(mcp_e
             )
         db.execute(
             "INSERT INTO source_paper_meta "
-            "(source_id,notebook_id,is_paper,paper_title,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?)",
+            "(source_id,notebook_id,is_paper,paper_title,venue,pub_year,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
             (
-                "list-source-a", notebook_id, 1, "论文显示名 A",
+                "list-source-a", notebook_id, 1, "论文显示名 A", "CVPR", 2024,
                 "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
             ),
         )
@@ -4729,6 +4729,9 @@ async def test_list_sources_pages_the_selected_notebooks_visible_inventory(mcp_e
         "kg_analyzed_empty": False,
         "agent_created": False,
         "created_at": "2026-01-01T00:00:00Z",
+        "authors": [],
+        "pub_year": 2024,
+        "venue": "CVPR",
     }]
     assert second["total_count"] == 3
     assert second["next_offset"] == 2
