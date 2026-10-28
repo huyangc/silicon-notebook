@@ -215,7 +215,8 @@ PR2 基于 PR1 合入后的 master，PR3 基于 PR2；每个 PR 开之前 rebase
 
 ### T7 真模型验收（主 agent）
 
-依赖 T6。本机 deepseek-flash（单服务副本配置），用 T4 的合成论文笔记本跑规格 §8 的 6 题，standard 与 exhaustive 各一遍：
+依赖 T6。本机 deepseek-flash（单服务副本配置），用 T4 的合成论文笔记本跑规格 §8 的 6 题，**只跑 standard 档**
+（用户 2026-10-28 同意的消耗规模：约 150–180 次模型调用；exhaustive 不跑）：
 记录耗时、生成篇数、`deferred` 数、表内每个数字是否能在引用原文找到（人工核对），结果贴 PR2 描述。不达标回 T5/T6 修。
 
 **PR1 门禁**：§3 全量门禁（含组件调用审计）+ 前端 `tsc`/vitest，开 PR1，codex 闭环合入。
