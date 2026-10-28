@@ -569,7 +569,7 @@ export function useNotebookImport(options: {
     if (!file || importUpload.busy() || importFileProblem(file, limitBytes)) return;
     setUploadError("");
     setNotice({ text: "" });
-    void importUpload.start(file, name, limitBytes);
+    void importUpload.start(file, name);
   }, [file, limitBytes, name]);
 
   const stopUpload = useCallback(() => {

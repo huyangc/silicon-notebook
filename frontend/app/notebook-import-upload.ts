@@ -13,7 +13,10 @@
 // 服务器会在读请求体之前回 409 并断开,浏览器那边只看得到一次说不清原因的网络中断。
 // 每一串上传尝试带一个上传标识(`X-Upload-Id`,见 `chains`):上传被打断后只按它认领这一次
 // 建出的作业(别的标签页的导入不算),重传同一个文件也用它,服务端据此不会建第二本。
-// 确定没被接收时才说失败或「没有导入任何内容」;说不准时照实说说不准。
+// 确定没被接收时才说失败或「没有导入任何内容」;说不准时照实说说不准。上传请求一交出去
+// (`xhr.send`),停止、断开都证明不了没被接收——最后的字节可能已经发出、进度事件还没跑:
+// 进度只用来显示阶段;「没有导入任何内容」只在请求还没交出去、或服务端隔开两次说没有这个
+// 标识时才说(守卫 `notebook-import-chain-guard` 钉住)。
 //
 // 票据、文件内容都不经过这里;日志只有 api-client 那一行(路径与 query 的键)。
 
@@ -23,7 +26,6 @@ import { newClientRequestId } from "./client-request-id.ts";
 import { httpErrorStatus } from "./errors.ts";
 import { pageReloading } from "./page-reload.ts";
 import {
-  IMPORT_UPLOAD_CUT_TEXT,
   IMPORT_UPLOAD_ERRORS,
   IMPORT_UPLOAD_FAILED_TEXT,
   MAX_ACTIVE_TRANSFER_JOBS,
@@ -121,7 +123,7 @@ const isAbort = (error: unknown): boolean =>
 /** 连接断了、又判断不出服务器有没有接收时那句话:不叫人马上重传(会多出一本)。 */
 export const IMPORT_UPLOAD_UNSURE_TEXT = "连接中断，导入可能已被接收；请先看下方的导入记录，再决定是否重传。";
 /** 停止了、而请求体可能已经整个到了服务器:同一个意思。 */
-export const IMPORT_STOP_UNSURE_TEXT = "已停止上传，但文件可能已经传完、导入可能已被接收；请先看下方的导入记录，再决定是否重传。";
+export const IMPORT_STOP_UNSURE_TEXT = "已停止上传，正在向服务器确认这次是否已被接收…";
 
 /** 服务端确认没有这个标识的上传时那句话。 */
 export const IMPORT_NOT_CREATED_TEXT = "服务器没有建出这次的导入，可以重传。";
@@ -160,6 +162,8 @@ type Chain = {
   file: File;
   uploadId: string;
   unresolved: boolean;
+  /** 最近一次未定出自用户「停止上传」:服务端确认没有时说「已停止上传,没有导入任何内容」。 */
+  stopped: boolean;
   /** 这一串的后台对账(没有在跑为 `null`)。 */
   reconciler: { timer: ReturnType<typeof setTimeout> | null } | null;
 };
@@ -170,7 +174,7 @@ let activeFile: File | null = null;
 function chainFor(file: File): Chain {
   let found = chains.get(file);
   if (!found) {
-    found = { file, uploadId: newClientRequestId(), unresolved: false, reconciler: null };
+    found = { file, uploadId: newClientRequestId(), unresolved: false, stopped: false, reconciler: null };
     chains.set(file, found);
   }
   return found;
@@ -194,10 +198,15 @@ export function retireChain(file: File, proof: ChainProof): void {
   chains.delete(file);
 }
 
-/** 这一串尝试的结局说不准:标识留着,下一次(哪怕被打断)也不能当作确定没导入。 */
-function leaveUnresolved(file: File): void {
+/**
+ * 这一串尝试的结局说不准:标识留着,下一次(哪怕被打断)也不能当作确定没导入。`stopped`:
+ * 这次未定出自用户停止上传(后台对账确认服务端没有时,才说「没有导入任何内容」)。
+ */
+function leaveUnresolved(file: File, stopped: boolean = false): void {
   const found = chains.get(file);
-  if (found) found.unresolved = true;
+  if (!found) return;
+  found.unresolved = true;
+  found.stopped = stopped;
 }
 
 /**
@@ -262,9 +271,10 @@ function startReconcile(file: File, firstDelay: number = RECONCILE_INTERVAL_MS):
       } else if (firstNoneAt === null) {
         firstNoneAt = Date.now();
       } else if (Date.now() - firstNoneAt >= NONE_CONFIRM_MS) {
-        // 服务端隔开两次都说没有:没建出来。标识照旧留着——再传一次用的还是它。
+        // 服务端隔开两次都说没有:没建出来。标识照旧留着——再传一次用的还是它。用户停止的那一次,
+        // 这才是「已停止上传,没有导入任何内容」的凭据。
         own.reconciler = null;
-        deliver({ kind: "not_created", text: IMPORT_NOT_CREATED_TEXT }, origin);
+        deliver(own.stopped ? { kind: "stopped" } : { kind: "not_created", text: IMPORT_NOT_CREATED_TEXT }, origin);
         return;
       }
     }
@@ -273,9 +283,9 @@ function startReconcile(file: File, firstDelay: number = RECONCILE_INTERVAL_MS):
   handle.timer = setTimeout(() => { void tick(); }, firstDelay);
 }
 
-/** 交出一个「说不准」:标识留着,并在后台接着按标识对账。 */
-function deliverUnsure(file: File, text: string): void {
-  leaveUnresolved(file);
+/** 交出一个「说不准」:标识留着,并在后台接着按标识对账。`stopped`:出自用户停止上传。 */
+function deliverUnsure(file: File, text: string, stopped: boolean = false): void {
+  leaveUnresolved(file, stopped);
   deliver({ kind: "unsure", text }, originOf(file));
   startReconcile(file);
 }
@@ -291,43 +301,6 @@ async function jobOfUpload(uploadId: string): Promise<NotebookTransferJob | null
   } catch {
     return undefined;
   }
-}
-
-/**
- * 上传被打断(连接断了,或用户停止)之后:先按上传标识认领这一次的作业。
- *
- * * 找到了:服务器已经接收,照实交出(`uploaded`)——不能说失败或「没有导入任何内容」。
- * * 说不准(`unsure`):作业读不到;或者请求体已经整个交给了网络(服务器可能还在检查文件、
- *   作业还没登记)却还没看到它。不叫人马上重传;真要重传,用的仍是同一个标识。
- * * 确定没被接收:请求体没有传完——服务器只在读完整个请求体之后才建作业,半截的请求体
- *   一断开它就放掉名额。停止的就说停止了;断开的再说清原因(名额满了 / 只是网络 / 可能的
- *   几种原因)。
- */
-async function settleInterrupted(
-  uploadId: string,
-  stopped: boolean,
-  bodySent: boolean,
-  file: File,
-  limitBytes: number | null,
-): Promise<UploadOutcome> {
-  const job = await jobOfUpload(uploadId);
-  if (job) return { kind: "uploaded", job, fileName: file.name };
-  const unsureText = stopped ? IMPORT_STOP_UNSURE_TEXT : IMPORT_UPLOAD_UNSURE_TEXT;
-  if (job === undefined || bodySent) return { kind: "unsure", text: unsureText };
-  if (stopped) return { kind: "stopped" };
-  return { kind: "failed", text: await cutReason(file, limitBytes) };
-}
-
-/** 确定没被接收的一次断开:能说清原因就说清楚。 */
-async function cutReason(file: File, limitBytes: number | null): Promise<string> {
-  try {
-    if (activeTransferCount(await listNotebookTransfers()) >= MAX_ACTIVE_TRANSFER_JOBS) return TRANSFER_BUSY_TEXT;
-  } catch {
-    return IMPORT_UPLOAD_CUT_TEXT;
-  }
-  // 名额没满、文件也确定没超上限:那就只是网络。
-  if (limitBytes !== null && file.size <= limitBytes) return IMPORT_UPLOAD_FAILED_TEXT;
-  return IMPORT_UPLOAD_CUT_TEXT;
 }
 
 export const importUpload = {
@@ -359,10 +332,9 @@ export const importUpload = {
     return () => outcomeConsumers.delete(consumer);
   },
   /**
-   * 开始上传(已经有一次在进行就什么都不做)。`limitBytes` 只用来解释中途断开的原因;
-   * 本地预检由调用方先做。结局经 `consumeOutcomes` 交付。
+   * 开始上传(已经有一次在进行就什么都不做)。本地预检由调用方先做。结局经 `consumeOutcomes` 交付。
    */
-  async start(file: File, name: string, limitBytes: number | null): Promise<void> {
+  async start(file: File, name: string): Promise<void> {
     if (snapshot !== null) return;
     const mine = ++generation;
     const own = new AbortController();
@@ -378,10 +350,27 @@ export const importUpload = {
     const origin: UploadOrigin = { file, uploadId };
     // 上一次带这个标识的尝试结果未定:这一次没认领到作业时,也只能说说不准。
     const carried = attempt.unresolved;
-    // 上传请求已经发出 / 请求体已经整个交给了网络(`xhr.upload` 的 load):此后服务器
-    // 可能已经接收,打断之后要按上传标识认领。
+    // 上传请求已经交出去(`xhr.send` 已经调用):从这一刻起,任何停止、断开、不在白名单里的回答
+    // 都**证明不了**没被接收——浏览器可能已经把最后的字节发出去,而进度/load 事件还没来得及
+    // 跑。所以那之后只能按标识问服务端(`deliverUnsure` → 后台对账)。进度事件只用来显示阶段。
     let requestStarted = false;
-    let bodySent = false;
+    // 交出上传请求:置位与发请求在同一个函数里、中间不隔任何等待(守卫钉住)。
+    const sendUpload = (): Promise<NotebookTransferJob> => {
+      requestStarted = true;
+      return uploadNotebookImport(file, {
+        name,
+        uploadId,
+        signal: own.signal,
+        onProgress: (sent, total) => {
+          if (!current()) return;
+          const percent = percentOf(sent, total);
+          publish({ ...base, percent, stage: percent >= 100 ? "checking" : "uploading" });
+        },
+        onBodySent: () => {
+          if (current()) publish({ ...base, percent: 100, stage: "checking" });
+        },
+      });
+    };
     try {
       let jobs: NotebookTransferJob[] | null = null;
       try {
@@ -404,23 +393,7 @@ export const importUpload = {
         return;
       }
       publish({ ...base, percent: 0, stage: "uploading" });
-      requestStarted = true;
-      const job = await uploadNotebookImport(file, {
-        name,
-        uploadId,
-        signal: own.signal,
-        onProgress: (sent, total) => {
-          if (!current()) return;
-          const percent = percentOf(sent, total);
-          // 进度到了 100% 也按「请求体已经传完」算(宁可说不准,不说没导入)。
-          if (percent >= 100) bodySent = true;
-          publish({ ...base, percent, stage: percent >= 100 ? "checking" : "uploading" });
-        },
-        onBodySent: () => {
-          bodySent = true;
-          if (current()) publish({ ...base, percent: 100, stage: "checking" });
-        },
-      });
+      const job = await sendUpload();
       if (!current()) return;
       retireChain(file, { kind: "job", job });
       deliver({ kind: "uploaded", job, fileName: file.name }, origin);
@@ -429,22 +402,18 @@ export const importUpload = {
       const interrupted = isAbort(error) || error instanceof TypeError;
       if (interrupted && !requestStarted) {
         // 停在预检那一步:这一次的请求根本没发出。标识留着;上一次的结果未定就照实说。
-        if (carried) deliverUnsure(file, IMPORT_PRECHECK_STOP_UNSURE_TEXT);
+        if (carried) deliverUnsure(file, IMPORT_PRECHECK_STOP_UNSURE_TEXT, true);
         else deliver({ kind: "stopped" }, origin);
       } else if (interrupted) {
-        let outcome = await settleInterrupted(uploadId, isAbort(error), bodySent, file, limitBytes);
+        // 请求已经交出去之后被停止或断开:结果说不准,一律按标识问服务端。先看一眼作业列表——
+        // 已经在了就认领;没看到不说明任何事。
+        const job = await jobOfUpload(uploadId);
         if (!current()) return;
-        // 没认领到作业,而上一次带这个标识的尝试结果未定:这一次的「确定没被接收」不代表那一次。
-        if (carried && outcome.kind !== "uploaded") {
-          outcome = { kind: "unsure", text: isAbort(error) ? IMPORT_STOP_UNSURE_TEXT : IMPORT_UPLOAD_UNSURE_TEXT };
-        }
-        if (outcome.kind === "unsure") {
-          deliverUnsure(file, outcome.text);
+        if (job) {
+          retireChain(file, { kind: "job", job });
+          deliver({ kind: "uploaded", job, fileName: file.name }, origin);
         } else {
-          // 认领到作业就以它为凭据结束这一串;「没被接收」出自作业列表里没看到,那不是凭据:
-          // 标识留着(再传同一个文件仍用它,无害)。
-          if (outcome.kind === "uploaded") retireChain(file, { kind: "job", job: outcome.job });
-          deliver(outcome, origin);
+          deliverUnsure(file, isAbort(error) ? IMPORT_STOP_UNSURE_TEXT : IMPORT_UPLOAD_UNSURE_TEXT, isAbort(error));
         }
       } else if (uploadRefusedForSure(error)) {
         // 白名单里的确定拒绝(后端在建作业之前说的)只说明**这一次请求**没被接收。有些拒绝(格式、
