@@ -179,12 +179,6 @@ def _local(tag: Any) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def _namespace(tag: Any) -> str:
-    if not isinstance(tag, str) or not tag.startswith("{"):
-        return ""
-    return tag[1:].split("}", 1)[0]
-
-
 def _children(element: Any) -> List[Any]:
     return [child for child in element if isinstance(child.tag, str)]
 
