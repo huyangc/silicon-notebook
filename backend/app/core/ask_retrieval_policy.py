@@ -146,6 +146,20 @@ class AskRetrievalLimits:
     enum_page_size: int
     enum_pages_per_run: int
     enum_rows_per_run: int
+    # Paper tools (reasoning ``find_sources`` / ``get_paper_cards`` /
+    # ``extract_from_sources``, spec 2026-10-28 §8), all per RUN:
+    # ``find_sources_calls_per_run`` counts every call, page turns included
+    # (each page re-runs the semantic leg); ``paper_card_reads_per_run`` the
+    # documents whose cards one run may request; ``paper_card_generations_per_run``
+    # the metadata + card model calls lazily spent on them;
+    # ``extract_sources_per_run`` the per-document extraction model calls;
+    # ``paper_table_rows`` the rows the deterministic paper table inlines.
+    # ``0`` takes that tool away for the effort (overview has no extraction).
+    find_sources_calls_per_run: int
+    paper_card_reads_per_run: int
+    paper_card_generations_per_run: int
+    extract_sources_per_run: int
+    paper_table_rows: int
     overflow_semantics: Literal["explicit_partial"] = EXPLICIT_PARTIAL_OVERFLOW
 
 # Threshold table (counts are intentionally literal and reviewable here):
@@ -168,6 +182,15 @@ class AskRetrievalLimits:
 # every ``enumerate_*`` action of one reasoning run: effort buys a longer list,
 # never a wider page, and the pool is what makes the cost of "list them all"
 # a property of the selected effort rather than of the corpus.
+# Paper tools (spec 2026-10-28 §8; per-call caps: 10 cards, 8 extractions):
+#
+# effort       find_sources calls  card reads  card generations  extractions  table rows
+# overview             1                6              3              0            6
+# standard             2               12              6              6           12
+# deep                 3               20             10              8           20
+# thorough             3               30             16             12           30
+# exhaustive           4               40             24             16           40
+#
 # Enumeration limits do not shrink in overview mode: "all" still means all up
 # to the shared safety cap.  The exhaustive profile spends more reasoning effort
 # on that bounded set; it does not convert enumeration into a larger top-N.
@@ -176,31 +199,36 @@ _ASK_RETRIEVAL_LIMITS: dict[RetrievalEffort, AskRetrievalLimits] = {
         "overview",
         4, 8, 2, 12, 4, 2,
         25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 4_000, 12_000, 4,
-        50, 2, 100
+        50, 2, 100,
+        1, 6, 3, 0, 6
     ),
     "standard": AskRetrievalLimits(
         "standard",
         8, 20, 3, 36, 8, 5,
         25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 6_000, 30_000, 6,
-        50, 4, 200
+        50, 4, 200,
+        2, 12, 6, 6, 12
     ),
     "deep": AskRetrievalLimits(
         "deep",
         8, 24, 4, 48, 16, 6,
         25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 8_000, 50_000, 8,
-        50, 6, 300
+        50, 6, 300,
+        3, 20, 10, 8, 20
     ),
     "thorough": AskRetrievalLimits(
         "thorough",
         12, 32, 5, 64, 32, 8,
         25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 12_000, 80_000, 12,
-        50, 8, 400
+        50, 8, 400,
+        3, 30, 16, 12, 30
     ),
     "exhaustive": AskRetrievalLimits(
         "exhaustive",
         16, 40, 6, 96, 50, 10,
         25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 16_000, 120_000, 16,
-        50, 12, 600
+        50, 12, 600,
+        4, 40, 24, 16, 40
     ),
 }
 ASK_RETRIEVAL_LIMITS: Mapping[RetrievalEffort, AskRetrievalLimits] = (

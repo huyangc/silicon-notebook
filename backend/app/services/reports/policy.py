@@ -36,6 +36,13 @@ OUTLINE_TITLE_CHARS = 60
 OUTLINE_ID_CHARS = 32
 OUTLINE_EVIDENCE_KEY_CHARS = 48
 OUTLINE_MAX_EVIDENCE = 8
+# Paper tools (spec 2026-10-28 §8): per-CALL ceilings of ``get_paper_cards``
+# and ``extract_from_sources``.  The per-RUN ones ride the effort tier
+# (``AskRetrievalLimits``).  The extraction ceiling equals the service's own
+# request bound (``paper_extraction.EXTRACT_MAX_SOURCES``; equality pinned by
+# ``tests/test_reasoning_paper_tools.py``).
+REASONING_PAPER_CARDS_PER_CALL = 10
+REASONING_EXTRACT_SOURCES_PER_CALL = 8
 
 REASONING_PREFER_WEIGHTS: Mapping[str, tuple[float, float]] = MappingProxyType({
     "balanced": (0.4, 0.6),
@@ -87,6 +94,9 @@ class ReasoningActionPolicy:
     # — a descriptor may ask for less than the deployment allows, never more.
     # ``0`` takes the whole point away for this run.
     max_plugin_actions: int
+    # Paper tools: per-call ceilings (structural, not deployment tuning).
+    max_paper_cards_per_call: int = REASONING_PAPER_CARDS_PER_CALL
+    max_extract_sources_per_call: int = REASONING_EXTRACT_SOURCES_PER_CALL
 
     @property
     def max_pending_outline_evidence(self) -> int:
@@ -195,6 +205,8 @@ __all__ = [
     "OUTLINE_MAX_EVIDENCE",
     "OUTLINE_MAX_SECTIONS",
     "OUTLINE_TITLE_CHARS",
+    "REASONING_EXTRACT_SOURCES_PER_CALL",
+    "REASONING_PAPER_CARDS_PER_CALL",
     "REASONING_PREFER_WEIGHTS",
     "ReasoningActionPolicy",
     "ReportSufficiencyPolicy",

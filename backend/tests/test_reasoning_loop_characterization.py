@@ -526,6 +526,7 @@ def _build_retriever(scenario, repo, cancel_event):
         retriever.allow_search_chunks = False
         retriever.allow_document_read = False
         retriever.allow_section_nav = False
+        retriever.allow_paper_tools = False
         retriever.untrusted_evidence = True
         return retriever
     retriever = ReasoningRetriever.from_repository(repo, repo.settings, cancel_event)

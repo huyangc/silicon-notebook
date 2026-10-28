@@ -39,6 +39,15 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   // 曾用「章节目录」「按章节读取」,在轨迹里溢出徽章框;完整说法留给 NEXT_ACTION。
   browse_sections: "目录",
   read_section: "章节",
+  // find_documents / paper_cards / extract_fields = 论文工具三个 reflect 动作
+  // find_sources / get_paper_cards / extract_from_sources 的轨迹步(规格 2026-10-28
+  // §7.1;步类型与动作 id 分开命名,同 retrieve/add_subquery):按主题找出相关文档并
+  // 排序、读取逐篇缓存的论文要点卡片、逐篇抽取指定字段。⚠ 不用"检索"(retrieve 占了)、
+  // "取样"(read_document 占了)、"枚举"(enumerate 占了),也不用界面词汇表禁用的
+  // "抽取";两字以内,完整说法留给 NEXT_ACTION。
+  find_documents: "找文",
+  paper_cards: "卡片",
+  extract_fields: "提取",
   // outline = 大纲便签(update_outline reflect 动作写的那一步);仅 exhaustive 档
   // 且 REASONING_OUTLINE_ENABLED 开启时出现(设计文档 §3.1)。
   outline: "大纲",
@@ -133,6 +142,9 @@ const NEXT_ACTION: Record<string, string> = {
   read_document: "按篇读取原文取样",
   browse_sections: "查看章节目录",
   read_section: "按章节读取原文",
+  find_sources: "按主题找出相关文档",
+  get_paper_cards: "读取论文要点卡片",
+  extract_from_sources: "逐篇提取指定字段",
 };
 
 export type ReasoningTraceSummary = {
@@ -424,6 +436,29 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
       parts.push(`新增 ${detail.found} 段${detail.truncated ? "（只读本节前段）" : ""}`);
     }
     return parts.join(" ");
+  }
+  // find_documents(论文工具 find_sources 的步):按主题排好序的一页文档。detail 带
+  // strong/related(两档篇数)与 listed(本页篇数),listed 不是 found/count,必须排在
+  // 通用分支之前;召回触顶时说明可能还有更多。
+  if (step.step_type === "find_documents") {
+    if (typeof detail.strong !== "number" || typeof detail.related !== "number") return "";
+    const capped = detail.semantic_recall_capped ? "（可能还有更多）" : "";
+    return `强相关 ${detail.strong} 篇、相关 ${detail.related} 篇${capped}`;
+  }
+  // paper_cards(get_paper_cards 的步):found = 拿到的卡片数,generated = 其中新生成的,
+  // deferred = 推迟到下次的篇数(生成额度用完或模型暂不可用)。
+  if (step.step_type === "paper_cards") {
+    if (typeof detail.found !== "number") return "";
+    const parts = [`${detail.found} 张卡片`];
+    if (typeof detail.generated === "number" && detail.generated > 0) parts.push(`新生成 ${detail.generated} 张`);
+    if (typeof detail.deferred === "number" && detail.deferred > 0) parts.push(`推迟 ${detail.deferred} 篇`);
+    return parts.join("，");
+  }
+  // extract_fields(extract_from_sources 的步):found = 抽到的值的个数,sources = 篇数。
+  if (step.step_type === "extract_fields") {
+    if (typeof detail.found !== "number") return "";
+    const sources = typeof detail.sources === "number" ? `${detail.sources} 篇，` : "";
+    return `${sources}提取到 ${detail.found} 个值`;
   }
   if (step.step_type === "read_document") {
     const title = typeof detail.source === "string" && detail.source ? `《${detail.source}》` : "";

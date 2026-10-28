@@ -113,6 +113,17 @@ RETRIEVAL_ACTIONS: tuple[str, ...] = (
     # zero hit; ``read_section`` reports ``found`` like every evidence action.
     "browse_sections",
     "read_section",
+    # Paper tools (spec 2026-10-28 §7.1), appended for the same reason. The
+    # words are the trace step types, NOT the action ids
+    # (``find_sources`` / ``get_paper_cards`` / ``extract_from_sources``): two
+    # of those contain "source", which the scope guard below keeps out of this
+    # vocabulary by construction. ``find_documents`` reports ``listed`` (a
+    # ranked document list, not evidence: never an evidence hit or a zero hit,
+    # like ``browse_sections``); ``paper_cards`` / ``extract_fields`` report
+    # ``found``.
+    "find_documents",
+    "paper_cards",
+    "extract_fields",
 )
 
 RetrievalAction = Literal[
@@ -128,6 +139,9 @@ RetrievalAction = Literal[
     "read_document",
     "browse_sections",
     "read_section",
+    "find_documents",
+    "paper_cards",
+    "extract_fields",
 ]
 
 #: An entry's verdict. Two values, and the second one carries most of the

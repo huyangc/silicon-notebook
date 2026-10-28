@@ -697,6 +697,12 @@ def test_the_rendered_block_carries_no_id_and_no_source_or_library_name():
 #: 范围类词。任何一个出现在动作词表里,就意味着模型可以被一条经验劝去改变这次
 #: run **能读什么**——而那是用户勾选的、本特性一个字都不许碰的东西。
 _SCOPE_WORDS = ("source", "base", "scope", "notebook", "mount", "library")
+#: 名字里带 "source"、却不改变能读什么的两个论文工具动作 id(规格 2026-10-28 §7.1):
+#: 两者都只在本 run 冻结的来源天花板之内工作(执行体入口逐个校验句柄与 source_id,
+#: ``ReasoningRetriever._resolved_paper_sources``),参数里也没有范围类旋钮能放宽它。
+#: **精确 id**豁免,不是子串豁免;存储词表本身仍用不含范围词的步类型
+#: (``find_documents`` / ``extract_fields``)。
+_SCOPE_NEUTRAL_ACTION_IDS = frozenset({"find_sources", "extract_from_sources"})
 
 
 def test_none_of_the_action_tables_can_reach_retrieval_scope():
@@ -718,6 +724,8 @@ def test_none_of_the_action_tables_can_reach_retrieval_scope():
     for label, words in surfaces.items():
         assert words, label
         for word in words:
+            if label != "stored vocabulary" and word in _SCOPE_NEUTRAL_ACTION_IDS:
+                continue
             assert not any(scope in word for scope in _SCOPE_WORDS), (label, word)
 
 

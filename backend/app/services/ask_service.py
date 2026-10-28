@@ -1386,6 +1386,7 @@ class AskService:
         ),
         overview_sources=None,
         overview_source_generation=None,
+        paper_tools=None,
         note_ask_completed: "Callable[[str, str, str], None] | None" = None,
         ceiling_readers: "CeilingReaders | None" = None,
         report_followup_readers: "ReportFollowupReaders | None" = None,
@@ -1393,6 +1394,10 @@ class AskService:
         self.ask_state = ask_state
         self.overview_sources = overview_sources
         self.overview_source_generation = overview_source_generation
+        # The reasoning paper tools (``reasoning_paper_tools.ReasoningPaperTools``:
+        # find_sources / paper cards / extraction), seated only here like
+        # ``overview_sources``; ``None`` keeps every reflect turn byte-identical.
+        self.paper_tools = paper_tools
         self.retrieval = retrieval
         self.candidates = candidates
         self.evidence_context = evidence_context
@@ -7104,6 +7109,9 @@ class AskService:
             # 拿一个不该出站的串去顶。
             plugin_egress_question=egress_question,
             report_outline=report_outline,
+            # 论文工具(find_sources / get_paper_cards / extract_from_sources):
+            # 与 ``sources`` 同理,生产唯一的接线点就在这里。
+            paper_tools=self.paper_tools,
         )
 
     def _attach_gap_consult_result(

@@ -114,8 +114,10 @@ MODES: tuple[str, ...] = (
 #: 折成 `other`,而不是原样带出去——新增一个 step_type 不该悄悄扩大投影面。
 STEP_TYPES: tuple[str, ...] = (
     "answer", "browse_sections", "consult_memory", "enumerate",
-    "exact_lookup", "expand", "expand_community", "experience", "fallback",
-    "follow_chain", "gap_consult", "intent", "memory", "outline", "plan",
+    "exact_lookup", "expand", "expand_community", "experience",
+    "extract_fields", "fallback", "find_documents",
+    "follow_chain", "gap_consult", "intent", "memory",
+    "outline", "paper_cards", "plan",
     "plugin", "ppr", "profile", "read_document", "read_section", "reflect",
     "rerank", "retrieve", "search_chunks", "skip", "spreadsheet", "synthesis",
 )

@@ -147,6 +147,12 @@ CORE_REFLECT_ACTION_IDS = frozenset({
     # evidence) and one whole section read back as evidence.
     "browse_sections",
     "read_section",
+    # Paper cards / document-level search (spec 2026-10-28 §7.1): rank the
+    # run's documents about a topic, read their cached key-point cards, and
+    # extract ad-hoc fields per document.
+    "find_sources",
+    "get_paper_cards",
+    "extract_from_sources",
 })
 
 # Every TOP-LEVEL field name of the reflect schema hint, with every gate open.
@@ -179,6 +185,13 @@ REFLECT_SCHEMA_TOP_LEVEL_FIELDS = frozenset({
     # arguments under same-named top-level fields too.
     "browse_sections",
     "read_section",
+    # The three paper tools nest their arguments under same-named top-level
+    # fields; ``answer_layout`` (``prose`` / ``paper_table``) is the one
+    # top-level field of its own, offered with the card / extraction gates.
+    "find_sources",
+    "get_paper_cards",
+    "extract_from_sources",
+    "answer_layout",
 })
 
 # Keys that make ``app.core.model_schema.response_format_for_hint`` give up on
