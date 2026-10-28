@@ -1051,22 +1051,36 @@ model label + description prompt fingerprint":
   takes only the model label (the model service's `model`) and the prompt: changing only the
   service address, concurrency, key or thinking mode is not a model change and triggers nothing;
 - descriptions a rebuild generated under the new model are not staged, so the command generates
-  them once more (included in the dry run's count).
+  them once more (included in the dry run's count);
+- a notebook whose last run ended `done` is not read again while nothing in it has changed: the
+  run stores the notebook's change counters with the result, and a later run or dry run under the
+  same model and prompt answers from them at once (`plans` = 0 in its line). Any write to the
+  notebook's graph or merge result in between voids that record and the notebook is planned in
+  full, so the answer is always the one a full read would give.
 
 Once a notebook completes, staged rows of other model/prompt versions and rows no longer matching
-any concept are deleted; deleting a notebook or its knowledge graph deletes them with every other
-checkpoint; the rebuild's own checkpoint cleanup (including `--fresh`) leaves them alone.
+any concept are deleted. Deleting the notebook's knowledge graph deletes this command's staged
+rows (user ruling 2026-10-28: they were written from that graph) and keeps the rebuild's own
+checkpoint rows as before; deleting the notebook deletes all of them; the rebuild's own checkpoint
+cleanup (including `--fresh`) leaves the staged rows alone.
 
 **Failures and exit status.** A failed model call (an exception, a non-JSON reply, an empty
-description) is logged once — notebook id, canonical id and the exception class, never the prompt
-or the reply — and counted in `failed`; that concept keeps its old text, the rest are written, and
-a rerun retries the failed ones. Exit status: `0` done (or a dry run); `1` incomplete (failures, a
-`--limit` cut, concepts whose input changed before publishing, or a rebuild in flight) — rerun;
-`2` a usage error, an unknown notebook, `KG_CONCEPT_DESC_ENABLED=false` or no model bound to
-`kg_concept_description`; `3` the database is not at this build's schema (the command never
-migrates); `130` interrupted. Each notebook ends with one JSON line of counts (`canonicals` /
-`up_to_date` / `to_rewrite` / `model_calls` / `generated` / `failed` / `remaining` / `rewritten` /
-`moved`) and one `kg_concept_description_rewrite` event.
+description) is logged once — notebook id, the input's number, a prefix of its signature and the
+exception class; never the concept name (canonical ids are normalized names, so they are not
+logged either), the prompt or the reply — and counted in `failed`; that concept keeps its old
+text, the rest are written, and a rerun retries the failed ones. A database failure inside one
+notebook (a lock or statement timeout, a deadlock victim, a dropped connection) ends that notebook
+with a line `{"notebook_id": ..., "status": "error", "error": "<class name>"}` and the run goes on
+with the next notebook. Exit status: `0` done (or a dry run); `1` incomplete (failures, a `--limit`
+cut, concepts whose input changed before publishing, a rebuild in flight, or a notebook that ended
+in `error`) — rerun; `2` a usage error, an unknown notebook, `KG_CONCEPT_DESC_ENABLED=false` or no
+model bound to `kg_concept_description`; `3` the database is not at this build's schema (the
+command never migrates); `130` interrupted — the results already returned are staged and the
+process exits at once, without waiting for model calls still in flight (those are generated again
+on the next run). Each notebook ends with one JSON line of counts (`canonicals` / `up_to_date` /
+`to_rewrite` / `model_calls` / `generated` / `failed` / `remaining` / `rewritten` / `moved` /
+`plans`) and one `kg_concept_description_rewrite` event; the closing summary line also lists
+`incomplete_notebooks` and `errors`.
 
 **No service stop needed.** The command opens the database as a schema guest (never migrates,
 never seeds) and neither needs nor accepts `--confirm-service-stopped`:
@@ -1074,19 +1088,34 @@ never seeds) and neither needs nor accepts `--confirm-service-stopped`:
 - planning and generation read published data and write only their own staged rows, holding no
   lock, for as many hours as they take;
 - publishing holds the notebook's derived-generation claim once (the same cross-process single
-  flight as 刷新图谱 and `recluster_kg`), page by page in short transactions: it takes the concept
-  cluster write lock, checks that the published generation and `kg_reset_epoch` did not move,
-  re-reads the page's concept rows (on PostgreSQL `FOR UPDATE ... SKIP LOCKED`, never waiting on a
-  row someone else holds), recomputes each input from what it read, and writes **only where the
-  input still equals the one the text was generated from** — a concept that gained a member
-  (online fusion), lost a deleted source or had its members changed by a Knowhow reprojection is
-  skipped and counted in `moved`, and the rerun generates it from its new input;
+  flight as 刷新图谱 and `recluster_kg`). Each page is one short transaction of at most 2,000
+  cluster rows (counted from the plan): it takes the concept cluster write lock, checks that the
+  published generation and `kg_reset_epoch` did not move, renews the claim, re-reads the page's
+  concept rows (on PostgreSQL `FOR UPDATE ... SKIP LOCKED`, never waiting on a row someone else
+  holds), and writes a concept **only when it holds every one of its rows and its input still
+  equals the one the text was generated from** — a concept that gained a member (online fusion),
+  lost a deleted source, had its members changed by a Knowhow reprojection, or has a row another
+  transaction holds right then is skipped and counted in `moved`, and the rerun finishes it;
+- a concept with more than 2,000 rows (a hub) is checked without holding any lock and written in
+  batches of 2,000 rows, each its own short transaction that writes only while the notebook's
+  change counters are exactly the checked ones plus the batches already written. A write to the
+  notebook in between stops that hub (`moved`); its rows may then carry the old text and the new
+  one until the next run, both descriptions of that concept;
+- every page and batch that changes rows advances `cluster_mutation_seq` once, in its own commit
+  (the published-generation write rule). A large notebook therefore advances it by about
+  rows ÷ 2,000 within a minute or two: KG caches keyed on it are rebuilt once on the next read
+  (not once per advance), and the analysis panel's merge-dependent artifacts show that many
+  generations behind until the next 更新分析;
 - if a rebuild is running when it publishes, that notebook reports `busy` and nothing is written
   (the results are staged; a later rerun only publishes, with no model call); if a rebuild
   published a new generation after the plan, it re-plans on the new generation and publishes
   (at most 3 times);
 - while it publishes (usually seconds to a minute or two per notebook) an online 刷新图谱 gets the
-  same "already running" answer as when it meets another rebuild;
+  same "already running" answer as when it meets another rebuild. If the command is killed with
+  `kill -9` (or the machine fails) while publishing, the claim is not released: rebuilds of that
+  notebook answer "already running" until the claim's TTL (`KG_DERIVED_BUILD_TTL_SECONDS`,
+  4 h by default) expires or the service restarts (startup recovery clears it). Ctrl-C releases
+  it normally;
 - the command process and the serving process each have their own model scheduler, and their
   concurrency does not add up in one place: run online, the model service carries the service's own
   load plus this command's `max_concurrency`; check the service's headroom first at peak hours, or
