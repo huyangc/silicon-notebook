@@ -5,12 +5,20 @@
 1. **选片段**:全篇 chunk id 取自 ``RetrievalPort.section_outline``(上限
    ``REASONING_SECTION_OUTLINE_MAX_ROWS``,默认 4000 行;超出的长文档只在前这么多行里
    选,结果里 ``outline_truncated`` 如实标出)。``section_chunk_similarities`` 对多条
-   查询取的是**最大值**,所以每个字段单独调用一次、各取前 4 个片段,去重后最多 12 个;
-   该篇没有可用向量(返回 ``{}``)的字段回落到这一篇的 FTS
-   (``chunk_fts_search(..., allowed_source_ids=[该篇])``)。再加开头 2 个元素作上下文。
+   查询取的是**最大值**,所以每个字段单独调用一次;片段名额按排名在字段间**轮流**分配,
+   去重后最多 12 个,每个字段至少 ``12 // 字段数`` 个。第一个字段就拿不到相似度
+   (返回 ``{}``:这一篇没有可用向量)时,其余字段不再算相似度,直接走这一篇的 FTS
+   (``chunk_fts_search(..., allowed_source_ids=[该篇])``,只留大纲内的非导航片段)。
+   再加开头 2 个元素作上下文。片段按 ``REASONING_SECTION_READ_MAX_CHUNKS`` 分批按 id
+   读回,不会被单次读取上限按文档顺序截掉。
 2. **一次** ``paper_metadata`` 模型调用,schema ``EXTRACTION_SCHEMA_HINT``。
-3. **校验**(零 LLM):``anchor`` 必须是本次输入里的句柄或 id,片段映射到它的首个元素;
-   值里的数字按卡片同一套归一化规则接地(``ground_prose_numbers``),不过就丢弃并记审计。
+3. **校验**(零 LLM):``anchor`` 必须是本次输入里的句柄或 id(同一个元素 id 既是开头元素
+   又在某个片段里时,两段原文都可以作证);值先截到 300 字(不切断数字),里面的数字按
+   「数字组」接地(``ground_prose_numbers``),不过就丢弃并记审计。引用挂在片段里
+   **真正包含该值的那个元素**上,找不到才退回片段首元素。
+
+调用方不在检索运行里(MCP)时,本方法自己开一个轻量运行(``retrieval_run``):字段的查询
+向量、每篇的大纲与向量在这次调用内各只算一次,无向量事件每篇只发一次。
 
 与论文卡片的区别:**不缓存、不落库**(临时字段与问题相关,每次重算),也**不检查
 ``is_paper``**(非论文同样可用)。并发、优先级、取消、瞬时错误降级与卡片服务同一口径:
@@ -34,20 +42,25 @@ from app.core.model_values import as_text
 from app.domain.cancellation import CancelEvent, CoreCancellation, raise_if_cancelled
 from app.repositories.ports import RepositoryDatabasePort, SourceStorePort
 from app.services.model_work import (
-    INPUT_DETERMINISTIC_MODEL_ERROR_CODES,
     is_transient_model_error,
     model_artifact_scope,
-    model_error_code,
+    model_failure_reason,
 )
 from app.services.paper_card_service import parse_model_object
-from app.services.paper_cards import card_element_header, ground_prose_numbers
-from app.services.retrieval_run import holding_fanout_slot, retrieval_fanout_slot
+from app.services.paper_cards import card_element_header, ground_prose_numbers, number_tokens
+from app.services.retrieval_run import (
+    current_retrieval_run,
+    holding_fanout_slot,
+    retrieval_fanout_slot,
+    retrieval_run,
+)
 
 #: 单次调用的来源与字段上限(规格 §6)。超出的请求整体拒绝,不截断。
 EXTRACT_MAX_SOURCES = 8
 EXTRACT_MAX_FIELDS = 4
 EXTRACT_FIELD_MAX_CHARS = 80
-#: 每个字段取的片段数与每篇的片段总数(去重后)。
+#: 每个字段至少排这么多个候选片段(字段少时按 ``EXTRACT_MAX_CHUNKS // 字段数`` 放宽),
+#: 每篇的片段总数(去重后)上限。
 EXTRACT_CHUNKS_PER_FIELD = 4
 EXTRACT_MAX_CHUNKS = 12
 #: 开头作上下文的元素数(标题 / 摘要)。
@@ -74,7 +87,7 @@ class ExtractionRequestError(ValueError):
 @dataclass(frozen=True)
 class FieldValue:
     """一个字段在一篇里的结果。抽到时 ``value`` 非空、``element_id`` 是它引用的元素
-    (片段先映射到首个元素),``chunk_id`` 是引用片段时的片段 id;没抽到时 ``missing``
+    (片段里真正包含该值的那个元素,找不到时是片段首元素),``chunk_id`` 是引用片段时的片段 id;没抽到时 ``missing``
     是原因码:``not_stated``(模型没给)或校验丢弃的原因(``invalid_anchor``、
     ``value_not_in_anchor``、``ambiguous_value``、``unmapped_anchor``)。"""
 
@@ -106,7 +119,9 @@ class ExtractionResult:
 
 @dataclass(frozen=True)
 class Excerpt:
-    """送进模型的一段原文。``element_id`` 是这段对应的元素(片段为它的首个元素,可能为空)。"""
+    """送进模型的一段原文。``element_id`` 是这段对应的元素(片段为它的首个元素,可能为空);
+    片段的 ``elements`` 是它各元素的 ``(id, 全文)``(按片段顺序,只在片段有多个元素时读),
+    用来把引用挂到真正包含该值的元素上。"""
 
     handle: str
     kind: str  # "element" | "chunk"
@@ -114,6 +129,13 @@ class Excerpt:
     chunk_id: str
     label: str
     text: str
+    elements: tuple[tuple[str, str], ...] = ()
+
+    def ids(self) -> tuple[str, ...]:
+        """这段原文可以被引用的 id:片段 id、它的各元素 id,或元素自身。"""
+        own = (self.chunk_id,) if self.chunk_id else ()
+        members = tuple(eid for eid, _text in self.elements) or ((self.element_id,) if self.element_id else ())
+        return own + members
 
 
 @dataclass
@@ -173,13 +195,18 @@ def extraction_prompt(fields: Sequence[str], excerpts: Sequence[Excerpt]) -> str
     )
 
 
-def _resolver(excerpts: Iterable[Excerpt]) -> dict[str, Excerpt]:
-    table: dict[str, Excerpt] = {}
-    for excerpt in excerpts:
-        table.setdefault(excerpt.handle.lower(), excerpt)
-        for ident in (excerpt.chunk_id, excerpt.element_id):
-            if ident:
-                table.setdefault(ident, excerpt)
+def _resolver(excerpts: Iterable[Excerpt]) -> dict[str, list[Excerpt]]:
+    """句柄或 id → 可以作证的原文段。句柄唯一;一个元素 id 可能既是开头元素又在某个
+    片段里,两段都列上(片段在前:它是模型在片段里看到的那段文字)。"""
+    ordered = sorted(excerpts, key=lambda e: e.kind != "chunk")
+    table: dict[str, list[Excerpt]] = {}
+    for excerpt in ordered:
+        table.setdefault(excerpt.handle.lower(), []).append(excerpt)
+    for excerpt in ordered:
+        for ident in excerpt.ids():
+            bucket = table.setdefault(ident, [])
+            if excerpt not in bucket:
+                bucket.append(excerpt)
     return table
 
 
@@ -201,16 +228,49 @@ def _field_index(raw: Any) -> int | None:
     return int(text) if text.isdigit() else None
 
 
+def _numberish(ch: str) -> bool:
+    return ch.isdigit() or ch in ".,"
+
+
+def cap_value(value: str, limit: int = EXTRACT_VALUE_MAX_CHARS) -> str:
+    """截到 ``limit`` 字;切点落在数字中间(两侧都是数字/小数点/千分位)时退到这个数之前,
+    绝不留下半个数(``36.2`` 截成 ``36.`` 会变成另一个数)。"""
+    if len(value) <= limit:
+        return value
+    cut = limit
+    while cut > 0 and _numberish(value[cut - 1]) and _numberish(value[cut]):
+        cut -= 1
+    return value[:cut].rstrip()
+
+
+def _citing_element(excerpt: Excerpt, value: str) -> str:
+    """片段里真正包含该值的那个元素:含数字的值按 ``ground_prose_numbers`` 判,其余按
+    不区分大小写的原文包含判;都找不到时退回片段首元素。"""
+    if excerpt.kind != "chunk" or len(excerpt.elements) < 2:
+        return excerpt.element_id
+    numeric = bool(number_tokens(value))
+    folded = value.casefold()
+    for element_id, text in excerpt.elements:
+        if numeric:
+            if ground_prose_numbers(value, text) == "":
+                return element_id
+        elif folded in text.casefold():
+            return element_id
+    return excerpt.element_id
+
+
 def verify_extraction(
     parsed: Mapping[str, Any], fields: Sequence[str], excerpts: Sequence[Excerpt],
 ) -> tuple[tuple[FieldValue, ...], dict]:
     """零 LLM 校验,返回每个字段的 ``FieldValue``(按字段顺序)与审计 ``dropped``。
 
     - ``field_index`` 越界或不是整数的条目丢弃(``bad_field_index``);
+    - 值先截到 300 字(不切断数字)再校验;
     - ``anchor`` 必须是本次输入里的句柄或 id(``invalid_anchor``),片段必须能映射到元素
-      (``unmapped_anchor``);
+      (``unmapped_anchor``);一个 id 对应多段原文时任一段作证即可;
     - 值里的数字按 ``ground_prose_numbers`` 在**送给模型的那段文字**里接地;
-    - 同一字段给了多条时取第一条通过校验的;值超长截断。
+    - 引用挂在片段里真正包含该值的元素上(``_citing_element``);
+    - 同一字段给了多条时取第一条通过校验的。
     """
     table = _resolver(excerpts)
     dropped: dict = {}
@@ -221,35 +281,49 @@ def verify_extraction(
         if not isinstance(raw, Mapping):
             continue
         index = _field_index(raw.get("field_index"))
-        value = " ".join(_scalar_text(raw.get("value")).split())
+        value = cap_value(" ".join(_scalar_text(raw.get("value")).split()))
         if index is None or not 0 <= index < len(fields):
             dropped.setdefault("bad_field_index", []).append({"value": value[:120]})
             continue
         if not value or index in chosen:
             continue
         anchor = as_text(raw.get("anchor"))
-        excerpt = table.get(anchor) or table.get(anchor.strip("[]【】 ").lower())
-        reason = ""
-        if excerpt is None:
-            reason = "invalid_anchor"
-        elif not excerpt.element_id:
-            reason = "unmapped_anchor"
-        else:
-            reason = ground_prose_numbers(value, excerpt.text)
-        if reason:
+        candidates = table.get(anchor) or table.get(anchor.strip("[]【】 ").lower()) or []
+        reason = "invalid_anchor" if not candidates else ""
+        accepted: Excerpt | None = None
+        for excerpt in candidates:
+            verdict = "unmapped_anchor" if not excerpt.element_id else ground_prose_numbers(value, excerpt.text)
+            if not verdict:
+                accepted = excerpt
+                break
+            reason = reason or verdict
+        if accepted is None:
             dropped.setdefault(str(index), []).append({"reason": reason, "value": value[:120]})
             failures.setdefault(index, reason)
             continue
         chosen[index] = FieldValue(
-            index, fields[index], value=value[:EXTRACT_VALUE_MAX_CHARS].rstrip(),
-            element_id=excerpt.element_id,
-            chunk_id=excerpt.chunk_id if excerpt.kind == "chunk" else "",
+            index, fields[index], value=value,
+            element_id=_citing_element(accepted, value),
+            chunk_id=accepted.chunk_id if accepted.kind == "chunk" else "",
         )
     out = tuple(
         chosen.get(index) or FieldValue(index, text, missing=failures.get(index, "not_stated"))
         for index, text in enumerate(fields)
     )
     return out, dropped
+
+
+def _round_robin(ranked: Sequence[Sequence[str]], limit: int) -> list[str]:
+    """按排名在字段间轮流取:第 1 轮各字段的第 1 名,第 2 轮各自的第 2 名……,去重,
+    到 ``limit`` 为止。每个字段因此至少有 ``limit // 字段数`` 个自己的前几名在里面
+    (一个片段同时是两个字段的候选时,两个字段都算有它)。"""
+    picked: list[str] = []
+    depth = max((len(top) for top in ranked), default=0)
+    for rank in range(depth):
+        for top in ranked:
+            if rank < len(top) and top[rank] not in picked and len(picked) < limit:
+                picked.append(top[rank])
+    return picked
 
 
 def _dropped_count(dropped: Mapping[str, Any]) -> int:
@@ -304,6 +378,14 @@ class PaperExtractionService:
         if len(ordered) > EXTRACT_MAX_SOURCES:
             raise ExtractionRequestError(f"at most {EXTRACT_MAX_SOURCES} sources")
         raise_if_cancelled(cancel_event)
+        if current_retrieval_run() is None:
+            # MCP 等不在检索运行里的调用方:开一个轻量运行,让字段的查询向量、每篇的大纲与
+            # 向量、无向量事件在这次调用内各只算 / 发一次(没有 fan-out 上限,槽位是空操作)。
+            with retrieval_run(run_kind="paper_extraction", actor_id=actor_id, cancel_event=cancel_event):
+                return self._extract(ordered, wanted, allowed, limit, cancel_event, actor_id)
+        return self._extract(ordered, wanted, allowed, limit, cancel_event, actor_id)
+
+    def _extract(self, ordered, wanted, allowed, limit, cancel_event, actor_id) -> list[ExtractionResult]:
         permitted = {(str(nb), str(sid)) for nb, sid in allowed}
         results: dict[tuple[str, str], ExtractionResult] = {}
         try:
@@ -406,11 +488,8 @@ class PaperExtractionService:
         except Exception as exc:  # noqa: BLE001 - classified below
             if is_transient_model_error(exc):
                 raise
-            code = model_error_code(exc)
-            if code in INPUT_DETERMINISTIC_MODEL_ERROR_CODES:
-                reason = code if code == "malformed_response" else f"model_error:{code}"
-            else:
-                reason = f"model_error:{code or type(exc).__name__}"
+            reason, _deterministic = model_failure_reason(exc)
+            # 不缓存,所以确定性与全局故障一样只记 failed,不写任何行。
             return ExtractionResult(*key, "failed", reason=reason, model=model, **common)
         parsed = parse_model_object(raw)
         if parsed is None:
@@ -421,7 +500,7 @@ class PaperExtractionService:
         )
 
     def _select(self, key, fields, cancel_event) -> _Selection:
-        """开头 2 个元素 + 每字段前 4 个片段(去重 ≤12,文档顺序)。"""
+        """开头 2 个元素 + 按字段轮流分配名额的片段(去重 ≤12,文档顺序)。"""
         notebook_id, source_id = key
         retrieval = self._retrieval()
         selection = _Selection()
@@ -438,13 +517,31 @@ class PaperExtractionService:
         eligible = [row[0] for row in outline if not row[2]]
         if not eligible:
             return selection
+        ranked, lanes = self._rank_per_field(key, fields, eligible, cancel_event)
+        selection.lane = lanes.pop() if len(lanes) == 1 else "mixed"
+        picked = _round_robin(ranked, EXTRACT_MAX_CHUNKS)
+        if picked:
+            position = {chunk_id: index for index, chunk_id in enumerate(eligible)}
+            selection.excerpts.extend(self._read_passages(key, sorted(picked, key=position.__getitem__)))
+        return selection
+
+    def _rank_per_field(self, key, fields, eligible, cancel_event) -> tuple[list[list[str]], set[str]]:
+        """每个字段自己的候选排名(各 ``max(4, 12 // 字段数)`` 个)。第一个字段的相似度为空
+        (这一篇没有可用向量)就不再给其余字段算相似度,一律走单篇 FTS。"""
+        notebook_id, source_id = key
+        retrieval = self._retrieval()
         member = set(eligible)
-        picked: list[str] = []
+        per_field = max(EXTRACT_CHUNKS_PER_FIELD, EXTRACT_MAX_CHUNKS // len(fields))
+        ranked: list[list[str]] = []
         lanes: set[str] = set()
-        for text in fields:
+        vectors = True
+        for index, text in enumerate(fields):
             raise_if_cancelled(cancel_event)
+            sims: dict[str, float] = {}
             with retrieval_fanout_slot():
-                sims = retrieval.section_chunk_similarities(notebook_id, source_id, eligible, [text])
+                if vectors:
+                    sims = retrieval.section_chunk_similarities(notebook_id, source_id, eligible, [text])
+                    vectors = bool(sims) or index > 0
                 if sims:
                     lanes.add("vector")
                     top = [cid for cid, _s in sorted(sims.items(), key=lambda kv: (-kv[1], kv[0]))]
@@ -454,25 +551,45 @@ class PaperExtractionService:
                         hits = self._knowledge.chunk_fts_search(
                             db, notebook_id, text, _FTS_PROBE, allowed_source_ids=[source_id],
                         )
+                    # 只留这一篇(有界)大纲里的非导航片段。
                     top = [str(hit["chunk_id"]) for hit in hits if str(hit["chunk_id"]) in member]
-            for chunk_id in top[:EXTRACT_CHUNKS_PER_FIELD]:
-                if chunk_id not in picked and len(picked) < EXTRACT_MAX_CHUNKS:
-                    picked.append(chunk_id)
-        selection.lane = lanes.pop() if len(lanes) == 1 else "mixed"
-        if not picked:
-            return selection
-        with retrieval_fanout_slot():
-            chunks = retrieval.section_chunks(notebook_id, source_id, picked, len(picked), "")
+            ranked.append(top[:per_field])
+        return ranked, lanes
+
+    def _read_passages(self, key, picked: list[str]) -> list[Excerpt]:
+        """按 id 分批读回(每批不超过 ``REASONING_SECTION_READ_MAX_CHUNKS``,单批的上限因此
+        截不掉任何一个已选片段),再批量读多元素片段的各元素全文。"""
+        notebook_id, source_id = key
+        retrieval = self._retrieval()
+        batch = max(1, int(self._settings.reasoning_section_read_max_chunks))
+        chunks = []
+        for start in range(0, len(picked), batch):
+            ids = picked[start:start + batch]
+            with retrieval_fanout_slot():
+                chunks.extend(retrieval.section_chunks(notebook_id, source_id, ids, len(ids), ""))
+        order = {chunk_id: index for index, chunk_id in enumerate(picked)}
+        chunks.sort(key=lambda chunk: order.get(chunk.chunk_id, len(order)))
+        multi = [str(e) for chunk in chunks if len(chunk.element_ids or ()) > 1 for e in chunk.element_ids]
+        texts: dict[str, str] = {}
+        if multi:
+            with retrieval_fanout_slot():
+                rows = self._sources.evidence_elements(multi)
+            texts = {
+                element_id: str(row.get("text") or "")
+                for element_id, row in rows.items() if str(row.get("source_id") or "") == source_id
+            }
+        excerpts = []
         for index, chunk in enumerate(chunks, 1):
             text = (chunk.text or "").strip()[:EXTRACT_PASSAGE_MAX_CHARS]
             if not text:
                 continue
             element_ids = [str(e) for e in (chunk.element_ids or ()) if str(e or "")]
-            selection.excerpts.append(Excerpt(
+            members = tuple((eid, texts[eid]) for eid in element_ids if eid in texts) if len(element_ids) > 1 else ()
+            excerpts.append(Excerpt(
                 f"c{index}", "chunk", element_ids[0] if element_ids else "", chunk.chunk_id,
-                chunk.section_path or "", text,
+                chunk.section_path or "", text, members,
             ))
-        return selection
+        return excerpts
 
     # ------------------------------------------------------------ events
     def _emit_all(self, results: Iterable[ExtractionResult], n_fields: int, actor_id: str) -> None:

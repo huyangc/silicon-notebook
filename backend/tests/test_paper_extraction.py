@@ -206,10 +206,10 @@ def test_each_field_keeps_only_its_top_passages_of_a_long_source(repo, nb, servi
     fields = ["latency on phone in ms", "lookup time of the learned index"]
     [result] = _extract(service, nb, ["long-1"], fields)
     passages = [t for h, t in excerpts_of(model.prompts[0]).items() if h.startswith("c")]
-    assert len(passages) <= 2 * 4
+    assert len(passages) <= 12  # two fields share the 12 round robin (6 each at most)
     assert any("Latency on phone" in text for text in passages)
     assert any("Lookup time" in text for text in passages)
-    assert not any("precipitation" in text.lower() for text in passages)
+    assert len(passages) < len(outline)        # a selection, not the whole source
     assert result.lane == "vector"
 
 
@@ -473,3 +473,231 @@ def test_one_event_per_source_carries_ids_and_codes_only(repo, nb, service, mode
     assert first["actor_id"] == "u-1" and first["fields"] == 1 and first["extracted"] == 1
     text = json.dumps(events)
     assert "36.2" not in text and "COCO box AP" not in text
+
+
+# ------------------------------------------------------------ review round 1
+_FOUR_FIELDS = {
+    "latency on phone in ms": "Latency on phone",
+    "lookup time of the learned index": "Lookup time",
+    "CRPS of precipitation downscaling": "CRPS",
+    "PSNR and FPS of gaussian splatting": "PSNR",
+}
+
+
+def _chunk_texts(repo, nb, sid) -> dict[str, str]:
+    retrieval = repo.retrieval
+    ids = [row[0] for row in retrieval.section_outline(nb, sid)[0]]
+    out = {}
+    for start in range(0, len(ids), 10):
+        for chunk in retrieval.section_chunks(nb, sid, ids[start:start + 10], 10, ""):
+            out[chunk.chunk_id] = chunk.text.strip()
+    return out
+
+
+def test_four_fields_share_the_passage_quota_round_robin(repo, nb, service, model):
+    _long_source(repo, nb, "long-4", ["det-05", "o-index", "o-weather", "o-splat", "o-compiler"])
+    texts = _chunk_texts(repo, nb, "long-4")
+    [result] = _extract(service, nb, ["long-4"], list(_FOUR_FIELDS))
+    passages = {t.strip() for h, t in excerpts_of(model.prompts[0]).items() if h.startswith("c")}
+    assert len(passages) <= 12 and result.status == "extracted"
+    for field, marker in _FOUR_FIELDS.items():
+        assert any(marker in text for text in passages), field
+        sims = repo.retrieval.section_chunk_similarities(nb, "long-4", list(texts), [field])
+        top = [cid for cid, _s in sorted(sims.items(), key=lambda kv: (-kv[1], kv[0]))][:12 // 4]
+        # Every field keeps at least 12 // n_fields of its own best passages.
+        assert all(texts[cid] in passages for cid in top), field
+
+
+def test_the_section_read_bound_never_drops_a_fields_pick(repo, nb, service, model, monkeypatch):
+    _long_source(repo, nb, "long-2", ["det-05", "o-weather", "o-compiler", "o-index"])
+    monkeypatch.setattr(repo.settings, "reasoning_section_read_max_chunks", 2)
+    _extract(service, nb, ["long-2"], ["latency on phone in ms", "lookup time of the learned index"])
+    passages = [t for h, t in excerpts_of(model.prompts[0]).items() if h.startswith("c")]
+    assert any("Latency on phone" in text for text in passages)
+    assert any("Lookup time" in text for text in passages)
+
+
+_RESULTS_TEXTS = [
+    "Results",
+    "We evaluate the detector on COCO with the standard protocol.",
+    "Our detector reaches 36.2 box AP on COCO val, 4.6 above the baseline.",
+    "Conclusion: feature pyramids help small objects.",
+]
+
+
+def _default_chunked_source(repo, nb, sid, monkeypatch) -> list[str]:
+    """Elements chunked with the DEFAULT chunk size: one multi-element chunk.
+    Returns the element ids of the passage that holds them."""
+    default = Settings.model_fields["chunk_target_chars"].default
+    monkeypatch.setattr(repo.settings, "chunk_target_chars", default)
+    _plain_source(repo, nb, sid, _RESULTS_TEXTS)
+    repo._runtime.source_chunking.chunk_and_embed_source(sid)
+    ids = [row[0] for row in repo.retrieval.section_outline(nb, sid)[0]]
+    [chunk] = repo.retrieval.section_chunks(nb, sid, ids, 12, "")
+    return list(chunk.element_ids)
+
+
+def test_a_value_cites_the_element_of_the_passage_that_holds_it(repo, nb, service, model, monkeypatch):
+    element_ids = _default_chunked_source(repo, nb, "res-1", monkeypatch)
+    assert element_ids == [f"el-res-1-{i:03d}" for i in range(4)]  # heading + paragraphs, one chunk
+    model.reply = lambda prompt: {"values": [{"field_index": 0, "value": "36.2 box AP", "anchor": "c1"}]}
+    [result] = _extract(service, nb, ["res-1"], ["COCO box AP of the detector"])
+    value = result.fields[0]
+    assert value.value == "36.2 box AP" and value.chunk_id
+    assert value.element_id == "el-res-1-002"      # the paragraph with the number, not the heading
+
+
+def test_an_element_id_in_the_opening_and_a_passage_validates_against_both(repo, nb, service, model, monkeypatch):
+    _default_chunked_source(repo, nb, "res-2", monkeypatch)
+    # el-res-2-001 is the opening e2 (no number) AND part of the passage c1 (which
+    # shows the number): the passage the model saw vouches for the value.
+    model.reply = lambda prompt: {"values": [
+        {"field_index": 0, "value": "36.2", "anchor": "el-res-2-001"}]}
+    [result] = _extract(service, nb, ["res-2"], ["COCO box AP of the detector"])
+    assert result.fields[0].value == "36.2", result.fields[0].missing
+    assert result.fields[0].element_id == "el-res-2-002"
+
+
+class _CountingEmbedder(TopicEmbedder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.queries: list[str] = []
+
+    def embed_query(self, text):
+        self.queries.append(text)
+        return super().embed_query(text)
+
+
+def test_outside_a_run_each_field_is_embedded_once_and_each_outline_read_once(repo, nb, service, model, monkeypatch):
+    keys = seed_paper_topics(repo, nb, keys=["det-01", "det-02", "det-03"])
+    embedder = _CountingEmbedder()
+    bind_all_embedding_clients(repo, embedder)
+    chunks = repo._runtime.chunk_store
+    outline_reads: list[str] = []
+    original = chunks.source_outline_rows
+
+    def counting(db, notebook_id, source_id, max_rows):
+        outline_reads.append(source_id)
+        return original(db, notebook_id, source_id, max_rows)
+
+    monkeypatch.setattr(chunks, "source_outline_rows", counting)
+    fields = ["COCO box AP", "frames per second"]
+    results = _extract(service, nb, list(keys.values()), fields)
+    assert [r.status for r in results] == ["extracted"] * 3
+    assert sorted(q for q in embedder.queries if q in fields) == sorted(fields)
+    assert sorted(outline_reads) == sorted(keys.values())
+
+
+def test_without_vectors_the_first_field_decides_and_the_rest_go_straight_to_fts(repo, nb, service, model, monkeypatch):
+    keys = seed_paper_topics(repo, nb, keys=["asr-03"], embed=False)
+    retrieval = repo.retrieval
+    calls: list = []
+    original = retrieval.section_chunk_similarities
+
+    def spy(*args):
+        calls.append(args[3])
+        return original(*args)
+
+    monkeypatch.setattr(retrieval, "section_chunk_similarities", spy)
+    seen: list[dict] = []
+    emit = service._event_log.emit
+    monkeypatch.setattr(service._event_log, "emit", lambda e, **k: (
+        seen.append(dict(e)) if e.get("kind") == "section_vectors_unavailable" else emit(e, **k)))
+    [result] = _extract(service, nb, [keys["asr-03"]], ["latency", "word error rate", "chunk size"])
+    assert result.lane == "fts"
+    assert len(calls) == 1
+    assert len(seen) <= 1
+
+
+def _plain_source(repo, nb, sid, texts, *, doc_type="report") -> None:
+    from app.repositories.ports import SourceElementWrite
+
+    store = repo._runtime.source_store
+    store.insert_source(
+        source_id=sid, notebook_id=nb, title=f"Doc {sid}", source_type="document",
+        status="parsed", parse_status="parsed", file_name=f"{sid}.md",
+        file_path=f"/nonexistent/{sid}.md", file_size=0, file_hash=f"h-{sid}",
+        summary="", doc_type=doc_type,
+    )
+    elements = [
+        SourceElementWrite(id=f"el-{sid}-{i:03d}", element_type="text",
+                           location_label=f"p{i}", text=text, metadata={})
+        for i, text in enumerate(texts)
+    ]
+    with repo._write() as db:
+        store.replace_elements(db, sid, elements, created_at="2026-01-01T00:00:00+00:00")
+    repo._runtime.source_chunking.build_chunks_for_source(sid)
+
+
+_NOISE = "inference latency budget " * 6
+
+
+def test_the_fts_fallback_keeps_this_sources_passages_among_stronger_neighbours(repo, nb, service, model):
+    _plain_source(repo, nb, "target", [
+        "Opening title.", "Opening abstract.", "Unrelated background paragraph.",
+        "We measure the inference latency budget at 12 ms on device.",
+    ])
+    for i in range(20):
+        _plain_source(repo, nb, f"noise-{i:02d}", [_NOISE])
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb)
+    [result] = _extract(service, nb, ["target"], ["inference latency budget"])
+    passages = [t for h, t in excerpts_of(model.prompts[0]).items() if h.startswith("c")]
+    assert result.lane == "fts"
+    assert any("12 ms" in text for text in passages)
+
+
+def test_the_fts_fallback_ignores_hits_outside_the_bounded_outline(repo, nb, service, model, monkeypatch):
+    _plain_source(repo, nb, "capped", [
+        "Opening title.", "Opening abstract.",
+        "We measure the inference latency budget at 12 ms on device.",
+        *[_NOISE for _ in range(14)],
+    ])
+    repo._runtime.knowledge_query.backfill_chunk_fts(nb)
+    monkeypatch.setattr(repo.settings, "reasoning_section_outline_max_rows", 3)
+    [result] = _extract(service, nb, ["capped"], ["inference latency budget"])
+    passages = [t for h, t in excerpts_of(model.prompts[0]).items() if h.startswith("c")]
+    assert result.outline_truncated is True
+    assert any("12 ms" in text for text in passages)
+
+
+def test_an_overlong_value_is_cut_before_grounding_and_never_inside_a_number(repo, nb, service, model):
+    keys = seed_paper_topics(repo, nb, keys=["det-01"])
+    long_value = "x" * 297 + "36.2 box AP"
+    model.reply = _fixed(lambda ex: {"values": [
+        {"field_index": 0, "value": long_value, "anchor": _table_handle(ex)}]})
+    [result] = _extract(service, nb, [keys["det-01"]], ["COCO box AP"])
+    value = result.fields[0]
+    # Cut at 300 would leave "36." (a different number); the cut backs off.
+    assert value.value == "x" * 297
+    assert len(value.value) <= 300
+
+
+@pytest.mark.parametrize(("value", "text"), [
+    ("ResNet-50: 76.1% top-1", "| ResNet-50 | 76.1 | top-1 |"),
+    ("mAP@0.5: 42.1", "| mAP@0.5 | 42.1 |"),
+    ("COCO 2017: 42.1 AP", "COCO 2017 val. Ours reaches 42.1 AP"),
+    ("42.1 / 38.5 (val/test)", "| Ours | 42.1 | 38.5 |"),
+])
+def test_settings_and_numbers_ground_as_separate_runs(value, text):
+    from app.services.paper_cards import ground_prose_numbers
+
+    assert ground_prose_numbers(value, text) == ""
+
+
+class _Coded(Exception):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+@pytest.mark.parametrize(("error", "expected"), [
+    (_Coded("malformed_response"), ("malformed_response", True)),
+    (_Coded("model_context_exceeded"), ("model_error:model_context_exceeded", True)),
+    (_Coded("provider_error"), ("model_error:provider_error", True)),
+    (_Coded("provider_auth"), ("model_error:provider_auth", False)),
+    (ValueError("no code"), ("model_error:ValueError", False)),
+])
+def test_one_model_failure_classification_for_cards_and_extraction(error, expected):
+    from app.services.model_work import model_failure_reason
+
+    assert model_failure_reason(error) == expected
