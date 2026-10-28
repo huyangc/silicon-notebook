@@ -6316,6 +6316,10 @@ class KnowledgeLifecycleService:
                     owner = seed_owner.get(er["seed"])
                     if owner is None:
                         continue   # 本批没问过的 seed(理论上不会出现),不静默串组
+                    # ⚠ `kg rewrite-descriptions` computes the same input with
+                    # app.domain.concept_description_rewrite (evidence_quotes /
+                    # description_quotes); its tests pin that both produce the
+                    # same signature, so change the two together.
                     bucket = quotes_by_cid[owner]
                     for ev in json.loads(er["evidence"] or "[]"):
                         q = (ev.get("quoted_span") or "").strip()
@@ -6696,6 +6700,24 @@ class KnowledgeLifecycleService:
             superseded = self.governance_store.drop_superseded_decisions(
                 db, notebook_id, written)
         return added, done, moved, superseded
+
+    @notebook_model_artifact_scope
+    def rewrite_concept_descriptions(
+        self, notebook_id: str, *, dry_run: bool = False,
+        limit: Optional[int] = None,
+        progress: Optional[Callable[[str, int, int], None]] = None,
+    ):
+        """``kg rewrite-descriptions``: rewrite this notebook's concept
+        descriptions under the description model and prompt in force now,
+        ignoring the signature reuse (which stays as it is for every rebuild).
+        Resumable and fail-soft; see
+        ``app.services.kg.concept_description_rewrite`` for the three phases
+        and why it may run beside the serving process."""
+        from app.services.kg.concept_description_rewrite import ConceptDescriptionRewrite
+
+        self.get_notebook(notebook_id)
+        return ConceptDescriptionRewrite(self, signature=_concept_desc_sig).run(
+            notebook_id, dry_run=dry_run, limit=limit, progress=progress)
 
     @notebook_model_artifact_scope
     def rebuild_unified_kg(self, notebook_id: str,

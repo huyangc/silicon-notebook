@@ -76,6 +76,10 @@ from app.domain.kg_analysis_contracts import (
     check_artifact_payloads,
     check_mark_kind,
 )
+from app.domain.concept_description_rewrite import (
+    CONCEPT_DESC_REWRITE_STAGE,
+    REBUILD_DESC_CHECKPOINT_STAGE,
+)
 from app.domain.kg_merge_seed import check_concept_seed_version
 from app.domain.knowledge_contracts import (
     COMMUNITY_OVERVIEW_MAX,
@@ -447,6 +451,113 @@ class UnifiedKgStore:
             f"WHERE s.notebook_id=? AND s.run_id=? AND s.seed IN ({ph})",
             (notebook_id, run_id, *values),
         ).fetchall()
+
+    # ------------------------------ concept-description rewrite (kg rewrite-descriptions)
+    @staticmethod
+    def concept_description_member_page(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        generation: int,
+        *,
+        after: "Tuple[str, str] | None",
+        limit: int,
+    ) -> list:
+        """SQLite twin of the PostgreSQL page (same rows, same order, same
+        ``live`` rule). The row-value keyset is a range constraint on the
+        ``(notebook_id, canonical_id, member_object_id, ...)`` index."""
+        lo_cid, lo_member = after if after is not None else ("", "")
+        live = (
+            "(k.id IS NOT NULL AND k.status!='deprecated' AND k.object_type='concept' "
+            f"AND {_not_memory('k')})"
+        )
+        return db.execute(
+            "SELECT cc.canonical_id, cc.member_object_id, cc.canonical_name, "
+            "cc.canonical_description, cc.canonical_desc_sig, "
+            f"CASE WHEN {live} THEN 1 ELSE 0 END AS live, "
+            "k.evidence AS evidence "
+            "FROM concept_clusters cc "
+            "LEFT JOIN knowledge_objects k ON k.id=cc.member_object_id "
+            "AND k.notebook_id=cc.notebook_id "
+            "WHERE cc.notebook_id=? AND cc.object_type='concept' AND cc.generation=? "
+            "AND (cc.canonical_id, cc.member_object_id) > (?, ?) "
+            "ORDER BY cc.canonical_id, cc.member_object_id LIMIT ?",
+            (notebook_id, int(generation), lo_cid, lo_member, int(limit)),
+        ).fetchall()
+
+    @staticmethod
+    def lock_published_concept_clusters(
+        db: sqlite3.Connection, notebook_id: str,
+    ) -> "Tuple[int, int]":
+        """The published cluster generation and ``kg_reset_epoch``. On SQLite the
+        caller's write transaction already holds the database's one write lock,
+        which is what the PostgreSQL twin's advisory lock stands in for."""
+        row = db.execute(
+            "SELECT cluster_generation, COALESCE(kg_reset_epoch, 0) AS epoch "
+            "FROM unified_kg_state WHERE notebook_id=?",
+            (notebook_id,),
+        ).fetchone()
+        if row is None:
+            return 0, 0
+        return int(row["cluster_generation"]), int(row["epoch"])
+
+    @staticmethod
+    def concept_description_publish_rows(
+        db: sqlite3.Connection, notebook_id: str, generation: int,
+        canonical_ids: Sequence[str],
+    ) -> list:
+        """The rows of ``canonical_ids`` in ``generation`` (PostgreSQL twin locks
+        them with SKIP LOCKED; here the caller's write transaction already
+        excludes every other writer)."""
+        ids = list(canonical_ids)
+        if not ids:
+            return []
+        live = (
+            "(k.id IS NOT NULL AND k.status!='deprecated' AND k.object_type='concept' "
+            f"AND {_not_memory('k')})"
+        )
+        # The page's canonical ids drive the read: one index seek each.
+        bound = bind_ids(ids)
+        return db.execute(
+            "SELECT cc.id, cc.canonical_id, cc.canonical_name, "
+            f"CASE WHEN {live} THEN 1 ELSE 0 END AS live, "
+            "k.evidence AS evidence "
+            "FROM concept_clusters cc "
+            "LEFT JOIN knowledge_objects k ON k.id=cc.member_object_id "
+            "AND k.notebook_id=cc.notebook_id "
+            "WHERE cc.notebook_id=? AND cc.object_type='concept' AND cc.generation=? "
+            f"AND {drive_by('cc.canonical_id', bound)} "
+            "ORDER BY cc.canonical_id, cc.member_object_id",
+            (notebook_id, int(generation), bound.param),
+        ).fetchall()
+
+    @staticmethod
+    def rewrite_concept_description(
+        db: sqlite3.Connection, notebook_id: str, row_ids: Sequence[str],
+        description: str, sig: str,
+    ) -> int:
+        """SQLite twin: write one canonical's description and signature onto
+        the given rows; rows already holding both are left alone."""
+        ids = list(row_ids)
+        if not ids:
+            return 0
+        # The row ids drive the update: one primary-key seek each.
+        bound = bind_ids(ids)
+        cursor = db.execute(
+            "UPDATE concept_clusters SET canonical_description=?, canonical_desc_sig=? "
+            f"WHERE notebook_id=? AND {drive_by('id', bound)} "
+            "AND (canonical_description<>? OR canonical_desc_sig<>?)",
+            (description, sig, notebook_id, bound.param, description, sig),
+        )
+        return int(cursor.rowcount or 0)
+
+    @staticmethod
+    def drop_description_checkpoints(db: sqlite3.Connection, notebook_id: str) -> None:
+        """SQLite twin: drop the rebuild description stage's checkpoint (every
+        version) in the caller's transaction."""
+        db.execute(
+            "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=? AND stage=?",
+            (notebook_id, REBUILD_DESC_CHECKPOINT_STAGE),
+        )
 
     @staticmethod
     def canonical_relation_seed_rows(db: sqlite3.Connection, notebook_id: str):
@@ -1083,16 +1194,40 @@ class UnifiedKgStore:
     # 走 database.write() 即同一把全局写锁。
     def checkpoint_gc(self, notebook_id: str, input_version: str) -> None:
         """删掉本 notebook 里 input_version 不等于当前值的所有 checkpoint 行(表有界)。
-        rebuild 开头调一次:数据/算法版本一变,旧决策自动失效。"""
+        rebuild 开头调一次:数据/算法版本一变,旧决策自动失效。描述重写的暂存阶段
+        不归 rebuild 管(理由见 PG 孪生)。"""
         with self.database.write() as db:
             db.execute(
-                "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=? AND input_version!=?",
-                (notebook_id, input_version))
+                "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=? AND input_version!=? "
+                "AND stage<>?",
+                (notebook_id, input_version, CONCEPT_DESC_REWRITE_STAGE))
 
     def checkpoint_clear(self, notebook_id: str) -> None:
-        """删掉本 notebook 的全部 checkpoint(所有版本/阶段)。--fresh 用,强制两个 LLM 阶段重跑。"""
+        """删掉本 notebook 的全部 rebuild checkpoint(所有版本/阶段)。--fresh 用,强制两个
+        LLM 阶段重跑。描述重写的暂存阶段同 checkpoint_gc 一样留着。"""
         with self.database.write() as db:
-            db.execute("DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=?", (notebook_id,))
+            db.execute(
+                "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=? AND stage<>?",
+                (notebook_id, CONCEPT_DESC_REWRITE_STAGE))
+
+    def checkpoint_prune_stage(
+        self, notebook_id: str, stage: str, keep_version: str, drop_keys: Sequence[str],
+    ) -> None:
+        """SQLite twin:删掉该阶段其它版本的全部行,以及 ``keep_version`` 下的
+        ``drop_keys``(一个写事务)。"""
+        keys = list(drop_keys)
+        with self.database.write() as db:
+            db.execute(
+                "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=? AND stage=? "
+                "AND input_version<>?",
+                (notebook_id, stage, keep_version))
+            if keys:
+                # The keys drive the delete: one primary-key seek each.
+                bound = bind_ids(keys)
+                db.execute(
+                    "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=? AND stage=? "
+                    f"AND input_version=? AND {drive_by('item_key', bound)}",
+                    (notebook_id, stage, keep_version, bound.param))
 
     def checkpoint_load(
         self, notebook_id: str, input_version: str, stage: str

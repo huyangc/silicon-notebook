@@ -158,6 +158,18 @@ def _navigation_rerun(ctx, monkeypatch, spy=None):
     return navigation_backfill_cli.main(["--all-notebooks", *ctx.confirm])
 
 
+def _rewrite_descriptions(*argv: str):
+    """``kg rewrite-descriptions`` runs beside the service (no stopped-service
+    confirmation on either backend), so ``ctx.confirm`` is not passed."""
+    def invoke(ctx, monkeypatch, spy=None):
+        from app.scripts import rewrite_concept_descriptions
+
+        _fresh_settings_cache()
+        return rewrite_concept_descriptions.main(list(argv))
+
+    return invoke
+
+
 def _knowhow_md(ctx, monkeypatch, spy=None):
     module = load_script("backfill_knowhow_md")
     _patch_seams(module, monkeypatch, spy)
@@ -263,6 +275,9 @@ CASES: tuple[CliCase, ...] = (
         "kg backfill_relation_embeddings",
         _backend_wrapper("app.scripts.backfill_relation_embeddings"),
     ),
+    CliCase("kg rewrite-descriptions --dry-run",
+            _rewrite_descriptions("nb-x", "--dry-run")),
+    CliCase("kg rewrite-descriptions --all", _rewrite_descriptions("--all")),
     CliCase("backfill_global_ask_attribution", _global_attribution),
     CliCase("backfill_navigation_chunks --dry-run", _navigation_dry_run),
     CliCase("backfill_navigation_chunks", _navigation_rerun),

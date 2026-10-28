@@ -318,6 +318,11 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "UnifiedKgStore.largest_clusters": BUILD_READER,
         "UnifiedKgStore.relation_provenance_counts": BUILD_READER,
         "UnifiedKgStore.catchup_window_members": BUILD_READER,
+        # kg rewrite-descriptions: the description input of every published
+        # concept canonical; a Memory-derived member is never `live`, so its
+        # evidence never becomes a quote (same filter as stream_seed_rows)
+        "UnifiedKgStore.concept_description_member_page": BUILD_READER,
+        "UnifiedKgStore.concept_description_publish_rows": BUILD_READER,
         "_not_memory_object_ref": MEMORY_SIDE,
         # derived layer
         "UnifiedKgStore.cluster_member_rows": DERIVED_LAYER,
