@@ -629,3 +629,138 @@ def assert_no_completion_record_after_a_write_during_the_run(repo):
     # Unchanged since that full read's run? Then the following run records.
     again = rewrite(repo, nb)
     assert again.plans == 1 and rewrite(repo, nb, dry_run=True).plans == 0
+
+
+# ---------------------------------------------- review follow-ups, round 2
+def _cluster_rows(repo, notebook_id):
+    with repo._runtime.database.connect() as db:
+        return repo._runtime.knowledge_lifecycle.unified_kg.concept_clusters_count(
+            db, notebook_id)
+
+
+def assert_a_reparse_without_a_bump_voids_the_record(repo):
+    """A reparse with KG extraction switched off deletes a source's objects
+    and their cluster rows and moves neither sequence (the registered
+    no-bump path). The record must not answer for the notebook afterwards."""
+    nb = build_notebook(repo)
+    bind_chat_client(repo, WORKLOAD, DescModel("model-new"))
+    assert rewrite(repo, nb).status == "done"
+    assert rewrite(repo, nb, dry_run=True).plans == 0
+    seqs, rows = _state(repo, nb), _cluster_rows(repo, nb)
+    with repo._runtime.database.write() as db:
+        repo._runtime.knowledge.clear_source_extraction_state(
+            db, "s2", nb, clear_embeddings=True)
+    assert _state(repo, nb) == seqs and _cluster_rows(repo, nb) < rows  # no bump, rows gone
+    dry = rewrite(repo, nb, dry_run=True)
+    # A full read: both canonicals lost their s2 member, nothing is left to
+    # describe -- the record would have answered "2 up to date".
+    assert (dry.plans, dry.canonicals, dry.up_to_date) == (1, 0, 0)
+
+
+def assert_another_model_never_answers_from_the_record(repo):
+    nb = build_notebook(repo)
+    bind_chat_client(repo, WORKLOAD, DescModel("model-a"))
+    assert rewrite(repo, nb).status == "done"
+    assert rewrite(repo, nb, dry_run=True).plans == 0
+    model_b = DescModel("model-b")
+    bind_chat_client(repo, WORKLOAD, model_b)
+    dry = rewrite(repo, nb, dry_run=True)
+    assert (dry.plans, dry.up_to_date, dry.model_calls) == (1, 0, 2)
+    report = rewrite(repo, nb)
+    assert (report.plans, report.model_calls, report.rewritten) == (1, 2, 2)
+    assert model_b.calls == 2
+
+
+def assert_a_graph_delete_during_generation_leaves_no_staged_texts(repo):
+    """The knowledge graph is deleted while the model runs: nothing generated
+    from the deleted graph's evidence stays staged -- results that come back
+    after the delete are not written (the epoch-guarded put)."""
+    nb = build_notebook(repo)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    deleted = []
+
+    def delete_once(_name):
+        if not deleted:
+            deleted.append(True)
+            lifecycle.delete_notebook_kg(nb)
+
+    bind_chat_client(repo, WORKLOAD, DescModel("model-new", hook=delete_once))
+    rewrite(repo, nb)
+    assert deleted
+    with repo._runtime.database.connect() as db:
+        left = db.execute(_sql(repo,
+            "SELECT COUNT(*) AS n FROM kg_rebuild_checkpoint WHERE notebook_id=? AND stage=?"),
+            (nb, CONCEPT_DESC_REWRITE_STAGE)).fetchone()["n"]
+    assert left == 0
+
+
+def assert_rows_that_raced_a_graph_delete_are_pruned_at_the_end(repo, monkeypatch):
+    """The same delete, but the staging write races it (simulated: the put
+    ignores its epoch guard). The end of the run sees the epoch moved and
+    drops the whole stage, whatever the outcome."""
+    nb = build_notebook(repo)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    store = lifecycle.unified_kg
+    real_put = store.checkpoint_put
+
+    def unguarded_put(notebook_id, input_version, stage, rows, now, *, reset_epoch=None):
+        return real_put(notebook_id, input_version, stage, rows, now)
+
+    monkeypatch.setattr(store, "checkpoint_put", unguarded_put)
+    deleted = []
+
+    def delete_once(_name):
+        if not deleted:
+            deleted.append(True)
+            lifecycle.delete_notebook_kg(nb)
+
+    bind_chat_client(repo, WORKLOAD, DescModel("model-new", hook=delete_once))
+    rewrite(repo, nb)
+    with repo._runtime.database.connect() as db:
+        left = db.execute(_sql(repo,
+            "SELECT COUNT(*) AS n FROM kg_rebuild_checkpoint WHERE notebook_id=? AND stage=?"),
+            (nb, CONCEPT_DESC_REWRITE_STAGE)).fetchone()["n"]
+    assert deleted and left == 0
+
+
+def assert_an_interrupt_stages_results_already_queued(repo):
+    """Ctrl-C arrives while the run handles one result and another has
+    already come back (still in the queue): both are staged."""
+    import time
+
+    import pytest
+
+    nb = build_notebook(repo)
+    repo._runtime.models.parallelism_by_workload = {WORKLOAD: 2}
+    bind_chat_client(repo, WORKLOAD, DescModel("model-new"))
+    seen = []
+
+    def progress(stage, done, total):
+        if stage == "generate":
+            seen.append(done)
+            time.sleep(0.3)  # the other call returns meanwhile
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        rewrite(repo, nb, progress=progress)
+    assert seen == [1]
+    assert len(_staged(repo, nb)) == 2
+
+
+def assert_the_record_is_read_by_key(repo, monkeypatch):
+    """A notebook answered from its record never loads the version's staged
+    texts (a full load is the expensive read on a large notebook)."""
+    nb = build_notebook(repo)
+    bind_chat_client(repo, WORKLOAD, DescModel("model-new"))
+    assert rewrite(repo, nb).status == "done"
+    store = repo._runtime.knowledge_lifecycle.unified_kg
+    real_load = store.checkpoint_load
+    loads = []
+
+    def counting_load(notebook_id, input_version, stage, *, item_key=None):
+        loads.append(item_key)
+        return real_load(notebook_id, input_version, stage, item_key=item_key)
+
+    monkeypatch.setattr(store, "checkpoint_load", counting_load)
+    assert rewrite(repo, nb, dry_run=True).plans == 0
+    assert loads == ["~complete"]

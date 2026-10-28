@@ -135,10 +135,13 @@ _GRAPH_RESET_TABLES = frozenset({
 # delete job 0.87 s -> 33 s, post-commit survivor probe 26 ms -> 309 ms over
 # the dead tuples, ~5M extra sync-capture log rows for a delete with no
 # rebuild — a performance regression the read gate makes unnecessary.
-# Also kept: kg_rebuild_checkpoint (only the rebuild reads it, version-GC'd
-# before every read) -- except the rewrite command's concept_desc_rewrite rows,
-# which delete_notebook_graph_rows drops with the graph they were written from, concept_whitelist (user configuration) and the two
-# per-run scratch tables (a concurrent run would read an empty input).
+# Also kept: the rebuild's own kg_rebuild_checkpoint rows (only the rebuild
+# reads them, version-GC'd before every read), concept_whitelist (user
+# configuration) and the two per-run scratch tables (a concurrent run would
+# read an empty input). Not kept: the kg_rebuild_checkpoint rows of stage
+# concept_desc_rewrite -- the rewrite command's staged descriptions, written
+# from this graph's evidence -- which delete_notebook_graph_rows drops (user
+# ruling 2026-10-28; registry step at the end of _GRAPH_DRAIN_STEPS).
 
 # K1: drain steps that take part in the drain and in the final pass's
 # in-transaction bound probe, but NOT in the threshold-0 post-commit survivor

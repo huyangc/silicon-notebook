@@ -1508,16 +1508,19 @@ class UnifiedKgStore:
                     (notebook_id, stage, keep_version, bound.param))
 
     def checkpoint_load(
-        self, notebook_id: str, input_version: str, stage: str
+        self, notebook_id: str, input_version: str, stage: str,
+        *, item_key: "str | None" = None,
     ) -> Dict[str, dict]:
-        """载入某阶段在当前 input_version 下已完成的 item:{item_key: payload_dict}。"""
+        """载入某阶段在当前 input_version 下已完成的 item:{item_key: payload_dict}。
+        给出 ``item_key`` 时只读这一个 item(主键点查)。"""
+        key_sql, key_params = ("", ()) if item_key is None else (" AND item_key=%s", (item_key,))
         with self.database.connect() as db:
             return {
                 r["item_key"]: json_value(r["payload"], {})
                 for r in db.execute(
                     "SELECT item_key, payload FROM kg_rebuild_checkpoint "
-                    "WHERE notebook_id=%s AND input_version=%s AND stage=%s",
-                    (notebook_id, input_version, stage)).fetchall()
+                    "WHERE notebook_id=%s AND input_version=%s AND stage=%s" + key_sql,
+                    (notebook_id, input_version, stage, *key_params)).fetchall()
             }
 
     def checkpoint_put(
@@ -1527,11 +1530,23 @@ class UnifiedKgStore:
         stage: str,
         rows: List[Tuple[str, dict]],
         now: str,
-    ) -> None:
-        """把一批已完成 item 落库(一个写事务,幂等 REPLACE)。rows=[(item_key, payload_dict)]。"""
+        *,
+        reset_epoch: "int | None" = None,
+    ) -> bool:
+        """把一批已完成 item 落库(一个写事务,幂等 REPLACE)。rows=[(item_key, payload_dict)]。
+        给出 ``reset_epoch`` 时,只有本库的 ``kg_reset_epoch`` 仍等于它才写,否则一行
+        不写、返回 False。复核持 state 行 FOR SHARE:与之并发的删除知识图谱要等本事务
+        提交才能推进 epoch;它在推进之前删掉的暂存行看不到本事务的插入——这一窄窗由
+        调用方在运行结束、发现 epoch 变了时整阶段清理兜住。"""
         if not rows:
-            return
+            return True
         with self.database.write() as db:
+            if reset_epoch is not None:
+                row = db.execute(
+                    "SELECT COALESCE(kg_reset_epoch, 0) AS epoch FROM unified_kg_state "
+                    "WHERE notebook_id=%s FOR SHARE", (notebook_id,)).fetchone()
+                if (int(row["epoch"]) if row is not None else 0) != int(reset_epoch):
+                    return False
             execute_many(
                 db,
                 "INSERT INTO kg_rebuild_checkpoint "
@@ -1551,6 +1566,7 @@ class UnifiedKgStore:
                     for key, value in rows
                 ],
             )
+        return True
 
     # ---------------------------------------------------- rebuild end-state
     @staticmethod

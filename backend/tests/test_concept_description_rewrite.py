@@ -253,3 +253,69 @@ def test_a_hub_whose_input_changed_is_not_overwritten(repo, monkeypatch):
 
 def test_no_completion_record_after_a_write_during_the_run(repo):
     cases.assert_no_completion_record_after_a_write_during_the_run(repo)
+
+
+# ---------------------------------------------- review follow-ups, round 2
+def test_a_reparse_without_a_bump_voids_the_record(repo):
+    cases.assert_a_reparse_without_a_bump_voids_the_record(repo)
+
+
+def test_another_model_never_answers_from_the_record(repo):
+    cases.assert_another_model_never_answers_from_the_record(repo)
+
+
+def test_a_graph_delete_during_generation_leaves_no_staged_texts(repo):
+    cases.assert_a_graph_delete_during_generation_leaves_no_staged_texts(repo)
+
+
+def test_rows_that_raced_a_graph_delete_are_pruned_at_the_end(repo, monkeypatch):
+    cases.assert_rows_that_raced_a_graph_delete_are_pruned_at_the_end(repo, monkeypatch)
+
+
+def test_an_interrupt_stages_results_already_queued(repo):
+    cases.assert_an_interrupt_stages_results_already_queued(repo)
+
+
+def test_the_record_is_read_by_key(repo, monkeypatch):
+    cases.assert_the_record_is_read_by_key(repo, monkeypatch)
+
+
+def test_a_page_is_atomic_against_another_process_on_sqlite(repo, monkeypatch, tmp_path):
+    """Another process (its own connection to the file) resets the claim and
+    moves the reset epoch -- what a knowledge-graph delete does -- right after
+    a publish page read the published generation. Either that write has to
+    wait for the page (the page's IMMEDIATE transaction holds the write lock),
+    or, if it got in, the page must not write a single row over it."""
+    import sqlite3
+
+    nb = cases.build_notebook(repo)
+    store = repo._runtime.knowledge_lifecycle.unified_kg
+    real_lock = store.lock_published_concept_clusters
+    outside = []
+
+    def lock_then_outside_write(db, notebook_id):
+        result = real_lock(db, notebook_id)
+        if not outside:
+            other = sqlite3.connect(str(tmp_path / "t.db"), timeout=0.2)
+            try:
+                other.execute(
+                    "UPDATE unified_kg_state SET derived_building_generation=0, "
+                    "derived_building_claimed_at=NULL, kg_reset_epoch=kg_reset_epoch+1 "
+                    "WHERE notebook_id=?", (notebook_id,))
+                other.commit()
+                outside.append("committed")
+            except sqlite3.OperationalError:
+                outside.append("refused")
+            finally:
+                other.close()
+        return result
+
+    monkeypatch.setattr(store, "lock_published_concept_clusters", lock_then_outside_write)
+    cases.bind_chat_client(repo, cases.WORKLOAD, cases.DescModel("model-new"))
+    cases.rewrite(repo, nb)
+    texts = cases._texts(repo, nb)
+    if outside == ["committed"]:
+        assert texts["MOSFET"] == "model-old::MOSFET" and texts["cascode"] == "model-old::cascode"
+    else:
+        assert outside == ["refused"]
+        assert texts["MOSFET"] == "model-new::MOSFET"
