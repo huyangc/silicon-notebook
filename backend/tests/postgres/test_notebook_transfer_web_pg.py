@@ -181,3 +181,7 @@ def test_a_sweep_never_removes_a_live_upload_pg(world):
 
 def test_a_sweep_never_removes_the_files_of_a_deleted_running_export_pg(world):
     cases.check_a_sweep_never_removes_the_files_of_a_deleted_running_export(world)
+
+
+def test_a_notebook_with_an_empty_knowhow_table_round_trips_pg(world):
+    cases.check_a_notebook_with_an_empty_knowhow_table_round_trips(world)

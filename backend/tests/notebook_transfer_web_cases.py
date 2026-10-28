@@ -1472,13 +1472,56 @@ def check_admins_are_not_counted_and_tables_cannot_hide_more_than_exist(world: W
     tables = archive_cases.archive_rows(path)
     sources = len(tables["sources"])
     (table,) = tables["knowhow_tables"][:1]
+    # More distinct hidden sources than the archive holds: refused.
     forged = world.tmp / "many-tables.snbk"
     import_cases.rebuild(path, forged, rows=lambda name, rows: [
-        {**table, "id": f"{table['id']}-{index}"} for index in range(sources + 1)
+        {**table, "id": f"{table['id']}-{index}", "hidden_source_id": f"src-forged-{index}"}
+        for index in range(sources + 1)
     ] if name == "knowhow_tables" else rows)
     with pytest.raises(NotebookImportError, match="Knowhow"):
         count(forged)
     assert upload(world, forged.read_bytes(), world.owner).status_code == 400
+    # As many tables, never projected (no hidden source): they hide nothing.
+    empty = world.tmp / "many-empty-tables.snbk"
+    import_cases.rebuild(path, empty, rows=lambda name, rows: [
+        {**table, "id": f"{table['id']}-{index}", "hidden_source_id": None}
+        for index in range(sources + 1)
+    ] if name == "knowhow_tables" else rows)
+    assert count(empty) == len(
+        [r for r in tables["sources"] if r["source_type"] != "memory"]
+    )
+
+
+def check_a_notebook_with_an_empty_knowhow_table_round_trips(world: World) -> None:
+    """A Knowhow table created empty is never projected (no hidden source). A
+    non-admin's export -> download -> import of a notebook holding one -- next to
+    the world's content, and alone -- succeeds."""
+
+    def create_empty_table(notebook_id: str) -> None:
+        created = world.client.post(
+            f"/api/notebooks/{notebook_id}/knowhow",
+            json={"title": "空表", "columns": [{"name": "名称"}]},
+            headers=world.owner,
+        )
+        assert created.status_code == 200, created.text
+
+    only = second_notebook(world, "只有一张空表")
+    create_empty_table(only)
+    create_empty_table(NB)
+    for notebook_id in (only, NB):
+        job = exported(world, notebook_id=notebook_id)
+        data = download(world, job["id"])
+        path = world.tmp / f"{notebook_id}.snbk"
+        path.write_bytes(data)
+        empties = [t for t in archive_cases.archive_rows(path)["knowhow_tables"]
+                   if not t.get("hidden_source_id")]
+        assert empties, notebook_id
+        imported = upload(world, data, world.other)
+        assert imported.status_code == 202, (notebook_id, imported.text)
+        assert imported.json()["state"] == "succeeded", imported.json()
+        new_id = imported.json()["notebook_id"]
+        assert world.client.get(
+            f"/api/notebooks/{new_id}", headers=world.other).status_code == 200
 
 
 # --------------------------------------------- live files survive a sweep
