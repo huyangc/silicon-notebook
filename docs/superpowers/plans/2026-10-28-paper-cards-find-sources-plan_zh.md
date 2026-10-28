@@ -108,6 +108,10 @@ PR2 基于 PR1 合入后的 master，PR3 基于 PR2；每个 PR 开之前 rebase
 4. `PaperCardService.get_cards(...)`（规格 §4.5）：按所属库分组、入口校验来源集合、缓存命中判定（UTC basis）、
    元数据前置并计入生成上限、镜像笔记本 `meta_pending`、全部返回值显式映射、`deferred`、线程池并发、取消、
    `retrieval_fanout_slot`、队列超时/满降级、失败冷却、进程内单飞（等待在池外、轮询取消）、`paper_card` 事件。
+   - basis 一律用 T1 的卡片 basis 方法（单篇/批量），**绝不**用 `CatalogStore.source_element_generation`（PG 上按会话时区渲染）；
+     写卡用的 basis 必须是守护那次采样的同一个见证值（把卡片 basis 读取函数作为 `generation_reader` 传入采样，取它的值），
+     不能在采样之外再单独读一次；
+   - `upsert_paper_card` 返回 False 表示写入未落地（被 ready 保护或 basis 已过期），服务据此重读该行，不得假定写入成功。
 5. **装配**：在 `repository_runtime.py`（`SourceIngestionService` 与检索服务的装配处）构造 `PaperCardService`，
    暴露给检索服务与 MCP；若新增 facade 成员，跑 `--rebaseline-surface` 并说明。
 6. 配置（`app/core/config.py`）：`PAPER_CARD_INPUT_CHARS=16000`、`PAPER_CARD_MAX_WORKERS=4`、`PAPER_CARD_RETRY_SECONDS=3600`、

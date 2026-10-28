@@ -136,7 +136,7 @@ MCP 侧把同样的三个服务原样暴露成工具，由外部模型自行编�
 |---|---|---|
 | `source_id` | text PK | FK → sources，`ON DELETE CASCADE` |
 | `notebook_id` | text | FK → notebooks，`ON DELETE CASCADE` |
-| `basis` | text | 内容版本：来源元素生成见证（`source_element_generation` 同一聚合 `MAX(source_elements.created_at)`），**统一归一成 UTC ISO 字符串**再存再比——现有 PG 实现按会话时区渲染，直接存会在时区变化时让全部卡片失效 |
+| `basis` | text | 内容版本：来源元素生成见证（`source_element_generation` 同一聚合 `MAX(source_elements.created_at)`），PG 上**归一成 UTC ISO 字符串**再存再比——现有 PG 实现按会话时区渲染，直接存会在时区变化时让全部卡片失效；SQLite 上用原文本（与 catalog 见证同一口径，本来就稳定，不依赖进程时区）。basis 只在同一后端内比较；写卡用的 basis 必须是守护那次采样的同一个见证值 |
 | `card_version` | integer | prompt/schema/校验规则版本号；代码常量 `PAPER_CARD_VERSION` |
 | `status` | text | `ready` / `failed` |
 | `card` | jsonb | §4.1 的校验后内容（`failed` 时为 `{}`） |
@@ -152,12 +152,13 @@ MCP 侧把同样的三个服务原样暴露成工具，由外部模型自行编�
 - **失败冷却**：`status='failed'` 且 `updated_at` 在 `PAPER_CARD_RETRY_SECONDS`（默认 3600）内的不重试，
   直接返回 `failed`；`attempts` ≥3 后冷却加长到 24 小时。避免每次提问都对同一篇坏文档烧模型。
 - **写入竞争**：upsert 是条件写——同 `basis` 同 `card_version` 已是 `ready` 时，`failed` 不得覆盖它；
-  `attempts` 在 SQL 里自增（`attempts = source_paper_cards.attempts + 1`），不做读改写。
+  写事务里（已持来源 KEY SHARE）重读当前见证，传入的 `basis` 已过期就拒写（在途旧任务不顶掉新卡片）；
+  `attempts` 在 SQL 里自增，basis 或版本变了从 1 重新计（修复后的内容不被旧冷却压住）；`status` 只接受 `ready`/`failed`。
   加锁时来源恰好被删（锁路径抛 `KeyError`）→ 该篇返回 `not_found`。
 - **重建索引**：懒生成路径不与 staged rebuild 交互；正确性只靠 `basis` 见证——重建发布后元素见证变化，旧卡片自然失效。
 - 登记口径（缓存表，不跨环境、不进归档）：
   - 同步清单 `LOCAL`（各环境自己懒生成，免去变更捕获触发器）；
-  - shadow 清单 `LOCAL_EPHEMERAL`（迁移后元素时间戳渲染不同，复制过去也全部失配，不复制）；
+  - shadow 清单 `LOCAL_EPHEMERAL`（纯缓存，按需重新生成；跨后端 basis 口径也不同）；
   - 不进复制/导出/导入闭包（`ARCHIVE_TABLES`、`_COPY_SNAPSHOT_QUERIES`、`notebook_copy_writer`），
     相关守卫里的「不复制」名单显式列入；
   - 笔记本删除：A 类（随 notebooks 行级联，进第 3 阶段计划，`EXPECTED_PHASE_3_TABLE_COUNT` 69→70）；
