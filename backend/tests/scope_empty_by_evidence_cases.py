@@ -203,13 +203,15 @@ def case_the_passage_bound_applies_to_the_ticked_libraries_in_mount_order(
     ready(world)
     first, _ = library(world, "a-first")
     second, _ = library(world, "b-second", text=True)
-    mount(world, [second, first])
+    # Never ticked: keeps every selection below a real narrowing.
+    third, _ = library(world, "c-third")
+    mount(world, [third, second, first])
     marker = _as_alice(world)
     try:
         order = [ref.id for ref in world.repo.get_notebook(world.notebook).base_notebooks]
     finally:
         reset_request_user(marker)
-    assert order == [first, second]
+    assert order == [first, second, third]
     _assert_both_entries(world, [second, first], empty=True, where="text past the bound")
     _assert_both_entries(world, [second], empty=False, where="text alone, inside")
 
