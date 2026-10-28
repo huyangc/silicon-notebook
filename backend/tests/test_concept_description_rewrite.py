@@ -319,3 +319,9 @@ def test_a_page_is_atomic_against_another_process_on_sqlite(repo, monkeypatch, t
     else:
         assert outside == ["refused"]
         assert texts["MOSFET"] == "model-new::MOSFET"
+
+
+def test_cli_calls_of_a_failed_notebook_are_charged_to_the_limit(repo, monkeypatch, capsys):
+    """codex #1030 P2. Mutation anchor: drop the charge in the CLI's error
+    path and the second notebook gets the whole budget again (red)."""
+    cases.assert_calls_of_a_failed_notebook_are_charged_to_the_limit(repo, monkeypatch, capsys)

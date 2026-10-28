@@ -1015,7 +1015,8 @@ scripts/cli.sh kg rewrite-descriptions --all --dry-run
 scripts/cli.sh kg rewrite-descriptions <notebook_id>
 scripts/cli.sh kg rewrite-descriptions --all
 
-# In batches: at most 2000 model calls this run (summed over notebooks with --all); the rest
+# In batches: at most 2000 model calls this run (summed over notebooks with --all, the calls
+# of a notebook that later fails included); the rest
 # continues on the next run
 scripts/cli.sh kg rewrite-descriptions --all --limit 2000
 ```
