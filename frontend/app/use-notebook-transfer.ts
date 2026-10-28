@@ -260,6 +260,10 @@ export function useNotebookExport(notebookId: string) {
     setMemoryExporting(true);
     setMemoryResult("idle");
     setMemoryText("");
+    const failed = () => {
+      setMemoryResult("failed");
+      setMemoryText("记忆没有导出，请重试。");
+    };
     try {
       const outcome = await exportDeletedNotebookMemories(notebookId);
       if (generation !== generationRef.current) return;
@@ -274,6 +278,9 @@ export function useNotebookExport(notebookId: string) {
               : "记忆没有导出，请重试。",
         );
       }
+    } catch {
+      // 读文件内容时断了、或下载没能开始:结果同样落在那几个字旁边,不悄悄回到原样。
+      if (generation === generationRef.current) failed();
     } finally {
       busyRef.current.memory = false;
       if (generation === generationRef.current) setMemoryExporting(false);
