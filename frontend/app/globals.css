@@ -13399,7 +13399,8 @@ button.tag:hover {
 .pending-row:hover {
   background: var(--soft, #f2f4f7);
 }
-/* 只呈现状态、点击不做任何事的行(导出/导入作业):不像可点的样子,只有「×」可点。 */
+/* 行本身点击不做任何事的行(导出/导入作业):不像可点的样子;可点的是行内的「下载」
+   「打开笔记本」与「×」。 */
 .pending-row.pending-row-static {
   cursor: default;
 }
@@ -13408,6 +13409,14 @@ button.tag:hover {
 }
 .pending-row-static .pending-row-x {
   cursor: pointer;
+}
+/* 导出/导入那一行的行内动作与它的结果(结果就落在动作旁边)。 */
+.pending-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
 }
 /* 文本内容纵向堆叠(notebook 名 + 标签),min-width:0 让长标签能省略号截断而不撑宽 */
 .pending-row-main {

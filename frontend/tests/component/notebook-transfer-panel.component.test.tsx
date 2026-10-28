@@ -6,7 +6,7 @@ import type { NotebookTransferJob } from "../../app/notebook-transfer-api.ts";
 import type { NotebookImportView } from "../../app/use-notebook-transfer.ts";
 import { CHECKUP_FIX } from "../../app/vocabulary.ts";
 
-// 导出一节、导入弹窗:按钮在途禁用、结果落在按钮旁、关闭入口永不禁用、
+// 导出一节、导入弹窗、铃铛行动作:按钮在途禁用、结果落在按钮旁、关闭入口永不禁用、
 // 记忆说明是可点的动作、补全检索数据期间的那句提示。
 
 const api = vi.hoisted(() => ({
@@ -41,6 +41,7 @@ const {
   NotebookExportSection,
   NotebookImportModal,
   ImportToolbarButton,
+  TransferBellActions,
 } = await import("../../app/notebook-transfer-panel.tsx");
 
 function job(over: Partial<NotebookTransferJob> = {}): NotebookTransferJob {
@@ -288,6 +289,59 @@ test("导入记录:在途的行按钮禁用;收尾中说「正在停止」;结�
   expect(within(rows[2]).getByText(/已保留在你的笔记本列表里/)).toBeInTheDocument();
   await user.click(within(rows[2]).getByRole("button", { name: "打开笔记本" }));
   expect(handlers.onOpenNotebook).toHaveBeenCalledWith("nb-c");
+});
+
+test("铃铛:完成的导出给「下载」,在途禁用,结果写在它身上;失败原因就在旁边", async () => {
+  const user = userEvent.setup();
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  let release: () => void = () => undefined;
+  api.downloadNotebookExport.mockImplementationOnce(() => new Promise<void>((ok) => { release = ok; }))
+    .mockRejectedValueOnce(new Error("x"));
+  render(<TransferBellActions kind="export" state="succeeded" phase="done" jobId="xfer-7" notebookId="nb1" onOpenNotebook={vi.fn()} />);
+  await user.click(screen.getByRole("button", { name: "下载" }));
+  expect(api.downloadNotebookExport).toHaveBeenCalledWith("xfer-7");
+  expect(screen.getByRole("button", { name: "准备下载…" })).toBeDisabled();
+  release();
+  await user.click(await screen.findByRole("button", { name: "已开始下载" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("下载没有开始，请重试。");
+});
+
+test("铃铛:「下载」同一渲染周期里的双击只取一张票据", async () => {
+  let release: () => void = () => undefined;
+  api.downloadNotebookExport.mockImplementationOnce(() => new Promise<void>((ok) => { release = ok; }));
+  render(<TransferBellActions kind="export" state="succeeded" phase="done" jobId="xfer-8" notebookId="nb1" onOpenNotebook={vi.fn()} />);
+  const button = screen.getByRole("button", { name: "下载" });
+  // 两次点击之间没有重渲:disabled 还没生效,只能靠同步闸。
+  button.click();
+  button.click();
+  expect(api.downloadNotebookExport).toHaveBeenCalledTimes(1);
+  release();
+  expect(await screen.findByRole("button", { name: "已开始下载" })).toBeInTheDocument();
+});
+
+test("铃铛:发布之后才失败的导入(失败码 import_followup_*)也给「打开笔记本」,哪怕停在 publish 阶段", async () => {
+  const open = vi.fn();
+  render(<TransferBellActions kind="import" state="failed" phase="publish" failureCode="import_followup_interrupted" jobId="i2" notebookId="nb-new" onOpenNotebook={open} />);
+  await userEvent.setup().click(screen.getByRole("button", { name: "打开笔记本" }));
+  expect(open).toHaveBeenCalledOnce();
+});
+
+test("铃铛:已经发布的导入给「打开笔记本」;发布前、失败、进行中的导出没有动作", async () => {
+  const user = userEvent.setup();
+  const open = vi.fn();
+  const { rerender } = render(<TransferBellActions kind="import" state="running" phase="reembed" jobId="i1" notebookId="nb-new" onOpenNotebook={open} />);
+  await user.click(screen.getByRole("button", { name: "打开笔记本" }));
+  expect(open).toHaveBeenCalledOnce();
+  for (const props of [
+    { kind: "import", state: "running", phase: "rows", notebookId: "nb-new" },
+    { kind: "import", state: "running", phase: "reembed", notebookId: "" },
+    { kind: "export", state: "running", phase: "writing", notebookId: "nb1" },
+    { kind: "export", state: "failed", phase: "writing", notebookId: "nb1" },
+    { kind: "import", state: "failed", phase: "rows", notebookId: "nb-new", failureCode: "invalid_archive" },
+  ]) {
+    rerender(<TransferBellActions {...props} jobId="i1" onOpenNotebook={open} />);
+    expect(screen.queryByRole("button")).toBeNull();
+  }
 });
 
 test("工具栏「导入」:上传中说「导入中…」,弹窗关着时失败了说「导入失败」,点一下都打开导入弹窗", async () => {

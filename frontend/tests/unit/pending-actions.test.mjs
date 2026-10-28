@@ -181,6 +181,30 @@ test("notebook_transfer: in-progress items show but are not unread, like the bac
   assert.equal(transferInProgress(running), true);
   assert.equal(transferInProgress(ready), false);
   assert.deepEqual([running, queued, ready, failed].map(transferLabel), [
-    "导出进行中", "导出排队中", "导出完成", "导入失败",
+    "导出进行中", "导出排队中", "导出完成，可以下载", "导入失败",
   ]);
+});
+
+test("notebook_transfer: an import whose notebook is published says so (the row offers 打开笔记本)", () => {
+  // 发布之后的阶段(project / reembed / index / done)新笔记本已经能打开:标签要说「已导入」,
+  // 与那一行的「打开笔记本」一起读。发布之前(占位行已有 notebook_id)仍是「导入进行中」。
+  const base = { type: "notebook_transfer", kind: "import", job_id: "x9", notebook_id: "nb-new" };
+  assert.equal(transferLabel({ ...base, state: "running", phase: "reembed" }), "已导入，正在补全检索数据");
+  assert.equal(transferLabel({ ...base, state: "running", phase: "index" }), "已导入，正在补全检索数据");
+  assert.equal(transferLabel({ ...base, state: "running", phase: "rows" }), "导入进行中");
+  assert.equal(transferLabel({ ...base, state: "running", phase: "reembed", notebook_id: "" }), "导入进行中");
+  assert.equal(transferLabel({ ...base, state: "failed", phase: "reembed" }), "已导入，后台处理没有完成");
+  assert.equal(transferLabel({ ...base, state: "failed", phase: "rows" }), "导入失败");
+  // 发布在 publish 阶段之后才失败(服务重启):阶段停在 publish,靠失败码认出笔记本已在——
+  // 与导入面板同一个判据。
+  assert.equal(transferLabel({ ...base, state: "failed", phase: "publish", failure_code: "import_followup_interrupted" }), "已导入，后台处理没有完成");
+  assert.equal(transferLabel({ ...base, state: "failed", phase: "publish", failure_code: "invalid_archive" }), "导入失败");
+  // 签名带上「已发布」:关掉过的「导入进行中」在发布后以新签名回来。
+  assert.notEqual(
+    itemSig({ ...base, state: "running", phase: "rows" }),
+    itemSig({ ...base, state: "running", phase: "reembed" }),
+  );
+  assert.equal(itemSig({ ...base, state: "running", phase: "rows" }), "transfer:x9:running");
+  // 进行中的已发布导入仍不计未读(与后端 count 同口径)。
+  assert.equal(transferInProgress({ ...base, state: "running", phase: "reembed" }), true);
 });

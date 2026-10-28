@@ -4,6 +4,7 @@
 // 状态变化 → 新签名 → 关掉过的项会重新出现(诚实反映 backlog 变化)。
 
 import type { PendingItem, DoneToast } from "./pending-center";
+import { importPublished } from "./notebook-transfer-phases.ts";
 
 
 export function doneMessage(
@@ -45,8 +46,11 @@ export function itemSig(it: PendingItem): string {
   // running 一个在途态,终态即整条消失,所以身份不需要再编码状态。
   if (it.type === "ask") return `ask:${it.job_id ?? ""}`;
   // 导出/导入作业按 job 认身份(导入发布前 notebook_id 为空,按库认会互相撞);
-  // 带状态:进行中的条目关掉之后,完成或失败时重新出现。
-  if (it.type === "notebook_transfer") return `transfer:${it.job_id ?? ""}:${it.state ?? ""}`;
+  // 带状态:进行中的条目关掉之后,完成或失败时重新出现。也带「新笔记本是否已发布」:
+  // 导入发布前后都是 running,关掉过的「导入进行中」要以「已导入 · 打开笔记本」回来。
+  if (it.type === "notebook_transfer") {
+    return `transfer:${it.job_id ?? ""}:${it.state ?? ""}${importPublished(it) ? ":published" : ""}`;
+  }
   return `index:${it.notebook_id}:${it.state ?? ""}`;
 }
 
@@ -55,14 +59,18 @@ export function transferInProgress(it: PendingItem): boolean {
   return it.type === "notebook_transfer" && (it.state === "queued" || it.state === "running");
 }
 
-/** 导出/导入条目的一句状态(完整面板上线前铃铛里唯一的呈现,不带任何操作)。
- *  后端只为导出下发「已完成」(导入完成即离开铃铛),所以完成态只有「导出完成」。 */
+/** 导出/导入条目的一句状态,与那一行的动作(`TransferBellActions`)一起读:有「下载」
+ *  「打开笔记本」可点的状态,就把能做什么说出来。后端只为导出下发「已完成」(导入完成
+ *  即离开铃铛),所以完成态只有「可以下载」。 */
 export function transferLabel(it: PendingItem): string {
   const what = it.kind === "import" ? "导入" : "导出";
+  // 导入的新笔记本已经发布(能打开):作业还在补全检索数据,或补全那一步失败了。判据与
+  // 导入面板同一个(阶段或失败码),所以发布在 `publish` 阶段之后才失败的那种也认得。
+  const published = importPublished(it);
   if (it.state === "queued") return `${what}排队中`;
-  if (it.state === "running") return `${what}进行中`;
-  if (it.state === "failed") return `${what}失败`;
-  return "导出完成";
+  if (it.state === "running") return published ? "已导入，正在补全检索数据" : `${what}进行中`;
+  if (it.state === "failed") return published ? "已导入，后台处理没有完成" : `${what}失败`;
+  return "导出完成，可以下载";
 }
 
 /** 条目行首那枚出处标签:库名;全局问答不属于任何一本库,标成「全局问答」。

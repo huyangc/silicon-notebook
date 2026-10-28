@@ -86,6 +86,7 @@ const LONG_TASK_BUTTONS = [
   { match: "onStart", module: "notebook-transfer-panel.tsx", why: "开始导入:先核对名额、再上传整个导出文件,在途期间重复提交会占掉第二个作业名额", requires: "uploading" },
   { match: "onCancel", module: "notebook-transfer-panel.tsx", why: "取消导入:服务端最多等 30 秒确定笔记本留不留,收尾(pending)期间也不能再点", requires: ["row.busy", "row.stopping"] },
   { match: "onRemove", module: "notebook-transfer-panel.tsx", why: "移除导入记录:DELETE 在飞期间不能重复提交", requires: ["row.busy", "row.stopping"] },
+  { match: "void download()", module: "notebook-transfer-panel.tsx", why: "铃铛里的下载:同上,每点一次换一张票据", requires: "downloading" },
 ];
 
 // 长任务入口的另一种形态：**file input**。外层 label 无法 :disabled,所以禁用位落在
