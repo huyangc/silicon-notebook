@@ -71,6 +71,7 @@ from app.repositories.postgres.source_store import (
     NOT_PROMOTION_SOURCE_PREDICATE,
     PAPER_META_ELIGIBLE_SQL,
     PAPER_META_NO_META_SQL,
+    PAPER_META_OWN_ROW_JOIN_SQL,
     VISIBLE_SOURCE_TYPES_PREDICATE,
 )
 from app.domain.extraction_profiles import OBJECT_TYPE_LABELS
@@ -1595,6 +1596,7 @@ class QueryStore:
                     "s.source_type, s.parse_status, s.status, s.error_message, "
                     "s.doc_type, m.is_paper, m.paper_title "
                     "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id = s.id "
+                    "AND m.notebook_id IS NOT DISTINCT FROM s.notebook_id "
                     f"WHERE s.notebook_id IN ({owned_placeholders}) "
                     f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}{source_range_clause} "
                     f"ORDER BY {_absolute_instant('s.created_at')} DESC, "
@@ -1973,32 +1975,33 @@ class QueryStore:
                 ).fetchall()
             }
             # paper-meta 三态计数(看板;paper-metadata Task 4)。paper_meta 写入
-            # (create_source/upsert_paper_meta)不 bump kg_mutation_seq,故这两条
-            # GROUP BY 必须未缓存直读——不能像 knowledge_counts 那样走
+            # (create_source/upsert_paper_meta)不 bump kg_mutation_seq,故这条
+            # 计数必须未缓存直读——不能像 knowledge_counts 那样走
             # knowledge_counts_cache 的 seq 门(会读到陈旧值,见该模块 docstring
-            # 对 sources COUNT 的同款排除说明)。is_paper 计数走
-            # idx_source_paper_meta_nb(notebook_id)。
-            by_is_paper = {
-                int(row["is_paper"]): int(row["c"])
-                for row in db.execute(
-                    "SELECT is_paper, COUNT(*) AS c FROM source_paper_meta "
-                    "WHERE notebook_id = %s GROUP BY is_paper",
-                    (notebook_id,),
-                ).fetchall()
-            }
-            # missing 计数是 SourceStore.sources_missing_paper_meta 的 COUNT 镜像
-            # (WHERE 谓词共用 source_store 的 PAPER_META_*_SQL 常量,构造性同口径),
-            # 走 idx_sources_nb_parse_status_type(notebook_id, parse_status, source_type)。
-            missing = int(db.execute(
-                "SELECT COUNT(*) AS c FROM sources s "
-                "WHERE s.notebook_id = %s"
-                f"{PAPER_META_ELIGIBLE_SQL}{PAPER_META_NO_META_SQL}",
+            # 对 sources COUNT 的同款排除说明)。
+            #
+            # 一趟数完三态:本库每条 source 按 PAPER_META_OWN_ROW_JOIN_SQL 连到它自己
+            # 的论文元数据行。has_meta / marker 只数连得上的行(子表 notebook_id 与
+            # source 不一致的畸形遗留行不算这个库的,也不算子表写错的那个库的);
+            # missing 是连不上的合规 source——连接条件与 sources_missing_paper_meta /
+            # paper_meta_missing 探针的 PAPER_META_NO_META_SQL 是同一个
+            # PAPER_META_OWN_ROW_SQL,子表按 source_id 主键至多一行,所以 LEFT JOIN 的
+            # ``IS NULL`` 与 NOT EXISTS 逐行同判。合成一条之前是两条(按子表
+            # notebook_id 分组的 is_paper 计数 + missing COUNT);收窄后的单趟在 4.9 万
+            # 源的库上比那两条加起来快约三成(覆盖索引 idx_source_paper_meta_source_nb
+            # 让每条 source 的探针不回表)。
+            counts = db.execute(
+                "SELECT COUNT(*) FILTER (WHERE m.is_paper = 1) AS has_meta, "
+                "COUNT(*) FILTER (WHERE m.is_paper = 0) AS marker, "
+                f"COUNT(*) FILTER (WHERE m.source_id IS NULL{PAPER_META_ELIGIBLE_SQL}) "
+                f"AS missing FROM sources s{PAPER_META_OWN_ROW_JOIN_SQL} "
+                "WHERE s.notebook_id = %s",
                 (notebook_id,),
-            ).fetchone()["c"])
+            ).fetchone()
             paper_meta_counts = {
-                "has_meta": by_is_paper.get(1, 0),
-                "marker": by_is_paper.get(0, 0),
-                "missing": missing,
+                "has_meta": int(counts["has_meta"]),
+                "marker": int(counts["marker"]),
+                "missing": int(counts["missing"]),
             }
         useful += global_useful
         not_useful += global_not_useful

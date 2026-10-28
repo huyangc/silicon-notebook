@@ -71,6 +71,7 @@ from app.repositories.sqlite.source_store import (
     NOT_PROMOTION_SOURCE_PREDICATE,
     PAPER_META_ELIGIBLE_SQL,
     PAPER_META_NO_META_SQL,
+    PAPER_META_OWN_ROW_JOIN_SQL,
     VISIBLE_SOURCE_TYPES_PREDICATE,
 )
 from app.domain.extraction_profiles import OBJECT_TYPE_LABELS
@@ -1709,15 +1710,28 @@ class QueryStore:
                 source_params: list[Any] = list(owned_notebook_ids)
                 source_range_clause, source_range_params = _range_and_cursor_clause("s.")
                 source_params.extend(source_range_params)
+                # 先在 sources 上排序取页、再给这一页连论文元数据:SQLite 不会像
+                # PostgreSQL 那样把 LEFT JOIN 推到 LIMIT 之后(那边是 Limit → Nested
+                # Loop Left Join → 已排序的 sources),写成一条平铺的 JOIN 时它会给
+                # 库里每一条可见 source 都探一次子表再排序。连接条件按 source 自己
+                # 的库收窄(``+m.notebook_id``,同 source_store.PAPER_META_OWN_ROW_SQL
+                # 的口径)。外层 ORDER BY 重复内层的键,保证页内顺序不依赖连接的输出
+                # 顺序;它只排这一页的行。
                 source_rows = db.execute(
                     "SELECT s.id, s.notebook_id, s.created_at, s.title, s.file_name, "
                     "s.source_type, s.parse_status, s.status, s.error_message, "
-                    "s.doc_type, m.is_paper, m.paper_title, "
+                    "s.doc_type, m.is_paper, m.paper_title, s.sort_instant "
+                    "FROM (SELECT s.id, s.notebook_id, s.created_at, s.title, "
+                    "s.file_name, s.source_type, s.parse_status, s.status, "
+                    "s.error_message, s.doc_type, "
                     f"{_absolute_instant('s.created_at')} AS sort_instant "
-                    "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id = s.id "
-                    f"WHERE s.notebook_id IN ({owned_placeholders}) "
+                    f"FROM sources s WHERE s.notebook_id IN ({owned_placeholders}) "
                     f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}{source_range_clause} "
-                    f"ORDER BY {_absolute_instant('s.created_at')} DESC, s.id DESC LIMIT ?",
+                    f"ORDER BY {_absolute_instant('s.created_at')} DESC, s.id DESC "
+                    "LIMIT ?) s "
+                    "LEFT JOIN source_paper_meta m ON m.source_id = s.id "
+                    "AND +m.notebook_id = s.notebook_id "
+                    "ORDER BY s.sort_instant DESC, s.id DESC",
                     [*source_params, fetch_limit],
                 ).fetchall()
 
@@ -2082,32 +2096,33 @@ class QueryStore:
                 ).fetchall()
             }
             # paper-meta 三态计数(看板;paper-metadata Task 4)。paper_meta 写入
-            # (create_source/upsert_paper_meta)不 bump kg_mutation_seq,故这两条
-            # GROUP BY 必须未缓存直读——不能像 knowledge_counts 那样走
+            # (create_source/upsert_paper_meta)不 bump kg_mutation_seq,故这条
+            # 计数必须未缓存直读——不能像 knowledge_counts 那样走
             # knowledge_counts_cache 的 seq 门(会读到陈旧值,见该模块 docstring
-            # 对 sources COUNT 的同款排除说明)。is_paper 计数走
-            # idx_source_paper_meta_nb(notebook_id)。
-            by_is_paper = {
-                int(row["is_paper"]): int(row["c"])
-                for row in db.execute(
-                    "SELECT is_paper, COUNT(*) AS c FROM source_paper_meta "
-                    "WHERE notebook_id = ? GROUP BY is_paper",
-                    (notebook_id,),
-                ).fetchall()
-            }
-            # missing 计数是 SourceStore.sources_missing_paper_meta 的 COUNT 镜像
-            # (WHERE 谓词共用 source_store 的 PAPER_META_*_SQL 常量,构造性同口径),
-            # 走 idx_sources_nb_parse_status_type(notebook_id, parse_status, source_type)。
-            missing = int(db.execute(
-                "SELECT COUNT(*) AS c FROM sources s "
-                "WHERE s.notebook_id = ?"
-                f"{PAPER_META_ELIGIBLE_SQL}{PAPER_META_NO_META_SQL}",
+            # 对 sources COUNT 的同款排除说明)。
+            #
+            # 一趟数完三态:本库每条 source 按 PAPER_META_OWN_ROW_JOIN_SQL 连到它自己
+            # 的论文元数据行。has_meta / marker 只数连得上的行(子表 notebook_id 与
+            # source 不一致的畸形遗留行不算这个库的,也不算子表写错的那个库的);
+            # missing 是连不上的合规 source——连接条件与 sources_missing_paper_meta /
+            # paper_meta_missing 探针的 PAPER_META_NO_META_SQL 是同一个
+            # PAPER_META_OWN_ROW_SQL,子表按 source_id 主键至多一行,所以 LEFT JOIN 的
+            # ``IS NULL`` 与 NOT EXISTS 逐行同判。合成一条之前是两条(按子表
+            # notebook_id 分组的 is_paper 计数 + missing COUNT);收窄后的单趟在 4.9 万
+            # 源的库上比那两条加起来快约三成(覆盖索引 idx_source_paper_meta_source_nb
+            # 让每条 source 的探针不回表)。
+            counts = db.execute(
+                "SELECT COUNT(*) FILTER (WHERE m.is_paper = 1) AS has_meta, "
+                "COUNT(*) FILTER (WHERE m.is_paper = 0) AS marker, "
+                f"COUNT(*) FILTER (WHERE m.source_id IS NULL{PAPER_META_ELIGIBLE_SQL}) "
+                f"AS missing FROM sources s{PAPER_META_OWN_ROW_JOIN_SQL} "
+                "WHERE s.notebook_id = ?",
                 (notebook_id,),
-            ).fetchone()["c"])
+            ).fetchone()
             paper_meta_counts = {
-                "has_meta": by_is_paper.get(1, 0),
-                "marker": by_is_paper.get(0, 0),
-                "missing": missing,
+                "has_meta": int(counts["has_meta"]),
+                "marker": int(counts["marker"]),
+                "missing": int(counts["missing"]),
             }
         useful += global_useful
         not_useful += global_not_useful

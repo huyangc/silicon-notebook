@@ -662,6 +662,7 @@ class NotebookStore:
             "pm.is_paper,pm.paper_title "
             "FROM sources s JOIN notebooks n ON n.id=s.notebook_id "
             "LEFT JOIN source_paper_meta pm ON pm.source_id=s.id "
+            "AND +pm.notebook_id=s.notebook_id "
             f"WHERE s.notebook_id=? AND {VISIBLE_SOURCE_TYPES_PREDICATE}",
             (notebook_id,),
         ).fetchall()
