@@ -114,11 +114,19 @@ class PaperCardEvidence:
     citations: Mapping[str, Any]
     coverage: str = ""
     table: str = ""
+    # The extracted fields the table shows (the first ``TABLE_EXTRA_FIELDS``);
+    # ``rows`` keep every field's values for the digest and registration.
     extra_fields: tuple = ()
     # Extracted fields past ``TABLE_EXTRA_FIELDS``: named in the coverage line.
     overflow_fields: tuple = ()
     unexpanded: tuple = ()
     table_rows: int = 0
+    # The rows the table may list: those with at least one registered anchor.
+    # A row none of whose anchors registered (its source was deleted or
+    # reparsed since the card was read) has nothing it can cite: it is left
+    # out of the table and counted in ``unverified``.
+    listed: tuple = ()
+    unverified: int = 0
     # The run called ``find_sources``: the coverage line states the topic's
     # coverage from it (``roster_omitted_for``).
     searched: bool = False
@@ -176,10 +184,12 @@ def _all_fields(extractions: Sequence[Any]) -> tuple:
 
 
 def paper_rows(tools: Any) -> tuple[tuple, tuple]:
-    """``(rows, extra_fields)``: cards in first-request order, then the papers
-    that only have extracted values, in extraction order."""
+    """``(rows, fields)``: cards in first-request order, then the papers that
+    only have extracted values, in extraction order.  Every extracted field is
+    kept (the digest and the registration read them all); the table's width
+    limit is applied only when the table renders."""
     found = _find_index(tools.finds)
-    fields = _all_fields(tools.extractions)[:TABLE_EXTRA_FIELDS]
+    fields = _all_fields(tools.extractions)
     values: dict = {}
     titles: dict = {}
     for outcome in tools.extractions:
@@ -319,17 +329,22 @@ def build_paper_card_evidence(
             "notebook_id": citation.notebook_id,
             "relevance": 1.0,
         }
+    listed = tuple(
+        row for row in rows
+        if any(element_id in keys for element_id in _visible_anchor_ids(row, table=table))
+    )
     evidence = PaperCardEvidence(
         layout=layout if table else ANSWER_LAYOUT_PROSE,
         rows=rows, id_map=id_map, keys=keys, citations=citations,
-        extra_fields=fields,
-        overflow_fields=_all_fields(tools.extractions)[TABLE_EXTRA_FIELDS:],
+        extra_fields=fields[:TABLE_EXTRA_FIELDS],
+        overflow_fields=fields[TABLE_EXTRA_FIELDS:],
         table_rows=max(0, int(table_rows)),
         searched=bool(tools.finds),
+        listed=listed, unverified=len(rows) - len(listed),
     )
     if not table:
         return evidence
-    unexpanded = _unexpanded_titles(tools, rows, evidence.table_rows)
+    unexpanded = _unexpanded_titles(tools, listed, evidence.table_rows, rows)
     evidence = dataclasses.replace(evidence, unexpanded=unexpanded)
     return dataclasses.replace(
         evidence,
@@ -552,17 +567,30 @@ def _title_cell(row: PaperRow, keys: Mapping[str, str]) -> str:
     return f"{title} {marker}" if marker else title
 
 
+def _table_values(row: PaperRow, paper: PaperCardEvidence) -> list:
+    """The row's extracted values the table shows: a field within the table's
+    width whose element registered."""
+    return [
+        (name, value) for name, value in row.values
+        if name in paper.extra_fields and value.element_id in paper.keys
+    ]
+
+
 def _row_line(row: PaperRow, paper: PaperCardEvidence, *, extra_column: bool) -> str:
+    """One row.  Only entries whose anchor registered are shown: a cached
+    metric or contribution whose element no longer reads back under this
+    source has no marker to stand on, so it is not stated."""
     keys = paper.keys
     metrics = [
-        (_metric_text(entry, compared=True), _markers(_anchors(entry, "anchor"), keys))
+        (_metric_text(entry, compared=True), markers)
         for entry in (row.card.get("metrics") or [])[:TABLE_METRICS]
         if isinstance(entry, Mapping)
+        and (markers := _markers(_anchors(entry, "anchor"), keys))
     ]
     contributions = [
-        (str(entry.get("text") or ""), _markers(_anchors(entry), keys))
+        (str(entry.get("text") or ""), markers)
         for entry in (row.card.get("contributions") or [])[:TABLE_CONTRIBUTIONS]
-        if isinstance(entry, Mapping)
+        if isinstance(entry, Mapping) and (markers := _markers(_anchors(entry), keys))
     ]
     cells = [
         _title_cell(row, keys),
@@ -572,21 +600,21 @@ def _row_line(row: PaperRow, paper: PaperCardEvidence, *, extra_column: bool) ->
     if extra_column:
         cells.append(_cell([
             (f"{_clean(name)}: {_clean(value.value)}", _markers([value.element_id], keys))
-            for name, value in row.values
+            for name, value in _table_values(row, paper)
         ]))
     return "| " + " | ".join(cells) + " |"
 
 
 def render_paper_table(paper: PaperCardEvidence) -> str:
     """The table (first ``table_rows`` rows) and the not-expanded list."""
-    inline = paper.rows[:paper.table_rows]
+    inline = paper.listed[:paper.table_rows]
     if not inline:
         return ""
     # Extracted values share ONE column, ``field: value [kN]`` per entry: a
     # column per field is mostly empty (a field is usually extracted for the
-    # one or two papers whose card lacks it).  No inline row with a value, no
-    # column.
-    extra_column = any(row.values for row in inline)
+    # one or two papers whose card lacks it).  No inline row with a value the
+    # table shows, no column.
+    extra_column = any(_table_values(row, paper) for row in inline)
     headers = ["论文", "年份 / 会议", "主要技术指标", "关键创新点",
                *((EXTRA_FIELDS_HEADER,) if extra_column else ())]
     lines = [
@@ -602,12 +630,15 @@ def render_paper_table(paper: PaperCardEvidence) -> str:
     return table
 
 
-def _unexpanded_titles(tools: Any, rows: Sequence[PaperRow], table_rows: int) -> tuple:
-    """``(titles, total)`` of the related papers not shown as a row: rows past
-    the inline limit, then every found paper with no row; ``()`` when none."""
+def _unexpanded_titles(tools: Any, rows: Sequence[PaperRow], table_rows: int,
+                       all_rows: Sequence[PaperRow] = ()) -> tuple:
+    """``(titles, total)`` of the related papers not shown as a row: listed
+    rows past the inline limit, then every found paper with no row; ``()``
+    when none.  A row left out because none of its evidence registered
+    (``all_rows`` minus ``rows``) is counted by the coverage line instead."""
     inline = {(row.notebook_id, row.source_id) for row in rows[:table_rows]}
     titles: list[str] = []
-    seen = set(inline)
+    seen = set(inline) | {(row.notebook_id, row.source_id) for row in all_rows}
     for row in rows[table_rows:]:
         seen.add((row.notebook_id, row.source_id))
         titles.append(_clean(row.title))
@@ -653,12 +684,15 @@ def coverage_line(tools: Any, paper: PaperCardEvidence) -> str:
     "展开" counts the inline rows find_sources listed; rows read straight from
     a source are named apart.  Extracted fields past the table width are named
     rather than dropped silently."""
-    inline = paper.rows[:paper.table_rows]
+    inline = paper.listed[:paper.table_rows]
     finds = list(tools.finds)
     overflow = ""
     if paper.overflow_fields:
         overflow = (f"另有 {len(paper.overflow_fields)} 个临时字段未列入表："
                     + "、".join(_clean(name) for name in paper.overflow_fields) + "。")
+    if paper.unverified:
+        overflow = (f"另有 {paper.unverified} 篇的要点对不上原文（原文可能已删除或重新解析），"
+                    "未列入表。") + overflow
     if not finds:
         return (f"> 本表展开了 {len(inline)} 篇文档的要点（本轮没有做文档级检索，"
                 "不代表已列全）。" + overflow)
