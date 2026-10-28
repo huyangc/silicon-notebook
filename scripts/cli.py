@@ -66,6 +66,7 @@ COMMANDS = {
     ("kg", "recluster"): Command("app.scripts.recluster_kg", "重建知识对象规范簇", True, NOTEBOOK_USAGE, True),
     ("kg", "reembed"): Command("app.scripts.reembed_kg", "清空并重建知识与关系向量", True, NOTEBOOK_USAGE, True),
     ("kg", "backfill-relations"): Command("app.scripts.backfill_relation_embeddings", "补全关系向量", True, NOTEBOOK_USAGE, True),
+    ("kg", "rewrite-descriptions"): Command("app.scripts.rewrite_concept_descriptions", "换描述模型或提示词后按库重写概念描述（可在线、可续跑）", True, None, True),
     ("extensions", "check"): Command("check_cli_extensions.py", "检查插件导入与配置"),
     ("extensions", "parity"): Command("check_deployment_extension_parity.py", "检查部署插件能力配对"),
     ("extensions", "services"): Command("extension_services.py", "插件配套服务启停、状态与日志", False),

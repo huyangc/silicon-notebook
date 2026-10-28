@@ -101,6 +101,10 @@ from app.domain.kg_analysis_contracts import (
     check_artifact_payloads,
     check_mark_kind,
 )
+from app.domain.concept_description_rewrite import (
+    CONCEPT_DESC_REWRITE_STAGE,
+    REBUILD_DESC_CHECKPOINT_STAGE,
+)
 from app.domain.kg_merge_seed import check_concept_seed_version
 from app.domain.knowledge_contracts import (
     CLUSTER_OBJECT_TYPES,
@@ -496,6 +500,133 @@ class UnifiedKgStore:
             f"WHERE s.notebook_id=%s AND s.run_id=%s AND s.seed IN ({ph})",
             (notebook_id, run_id, *values),
         ).fetchall()
+
+    # ------------------------------ concept-description rewrite (kg rewrite-descriptions)
+    @staticmethod
+    def concept_description_member_page(
+        db: Any,
+        notebook_id: str,
+        generation: int,
+        *,
+        after: "Tuple[str, str] | None",
+        limit: int,
+    ) -> List[Any]:
+        """One keyset page of a cluster generation's concept rows, ordered by
+        ``(canonical_id, member_object_id)`` -- the description rewrite's plan
+        reads the whole published slice through it, a canonical at a time
+        (a canonical may straddle two pages; the caller carries it over).
+
+        Every row of the generation comes back (its stored name, description
+        and signature are what the rewrite compares and overwrites); ``live``
+        is 1 only for a member the rebuild's description stage would read -- a
+        non-deprecated concept object not derived from this notebook's Memory
+        (``stream_seed_rows``' filter) -- and the caller reads ``evidence``
+        of those rows only. The row-value keyset is an index condition on the
+        ``(notebook_id, canonical_id, member_object_id, ...)`` index and the
+        order is that index's, so each page is one bounded range scan whatever
+        the page number."""
+        lo_cid, lo_member = after if after is not None else ("", "")
+        live = (
+            "(k.id IS NOT NULL AND k.status!='deprecated' AND k.object_type='concept' "
+            f"AND {_not_memory('k')})"
+        )
+        return db.execute(
+            "SELECT cc.canonical_id, cc.member_object_id, cc.canonical_name, "
+            "cc.canonical_description, cc.canonical_desc_sig, "
+            f"CASE WHEN {live} THEN 1 ELSE 0 END AS live, "
+            "k.evidence::text AS evidence "
+            "FROM concept_clusters cc "
+            "LEFT JOIN knowledge_objects k ON k.id=cc.member_object_id "
+            "AND k.notebook_id=cc.notebook_id "
+            "WHERE cc.notebook_id=%s AND cc.object_type='concept' AND cc.generation=%s "
+            "AND (cc.canonical_id, cc.member_object_id) > (%s, %s) "
+            "ORDER BY cc.canonical_id, cc.member_object_id LIMIT %s",
+            (notebook_id, int(generation), lo_cid, lo_member, int(limit)),
+        ).fetchall()
+
+    @staticmethod
+    def lock_published_concept_clusters(db: Any, notebook_id: str) -> "Tuple[int, int]":
+        """Take the concept slice's advisory lock, then read the published
+        cluster generation and ``kg_reset_epoch`` under it (the lock-order red
+        line of ``insert_clusters``: the pointer is read after the lock, so a
+        concurrent flip or append is either wholly before or wholly after this
+        transaction). No state row reads as ``(0, 0)``."""
+        lock_cluster_artifact_type(db, notebook_id, "concept")
+        row = db.execute(
+            "SELECT cluster_generation, COALESCE(kg_reset_epoch, 0) AS epoch "
+            "FROM unified_kg_state WHERE notebook_id=%s",
+            (notebook_id,),
+        ).fetchone()
+        if row is None:
+            return 0, 0
+        return int(row["cluster_generation"]), int(row["epoch"])
+
+    @staticmethod
+    def concept_description_publish_rows(
+        db: Any, notebook_id: str, generation: int, canonical_ids: Sequence[str],
+    ) -> List[Any]:
+        """The rows of ``canonical_ids`` in ``generation`` that this transaction
+        can lock, each with ``live`` / ``evidence`` as in
+        ``concept_description_member_page`` (``evidence`` read for live rows
+        only). ``FOR UPDATE OF cc SKIP LOCKED``:
+        a row another transaction holds (a source delete, a Knowhow
+        reprojection pruning members and blanking the description) is left out
+        instead of waited on, so the caller recomputes the input from what it
+        holds and skips any canonical whose input no longer matches -- it never
+        waits on a row lock, and a row it skipped is never written."""
+        ids = list(canonical_ids)
+        if not ids:
+            return []
+        live = (
+            "(k.id IS NOT NULL AND k.status!='deprecated' AND k.object_type='concept' "
+            f"AND {_not_memory('k')})"
+        )
+        bound = bind_ids(ids)
+        return execute_ids(
+            db,
+            "SELECT cc.id, cc.canonical_id, cc.canonical_name, "
+            f"CASE WHEN {live} THEN 1 ELSE 0 END AS live, "
+            "k.evidence::text AS evidence "
+            "FROM concept_clusters cc "
+            "LEFT JOIN knowledge_objects k ON k.id=cc.member_object_id "
+            "AND k.notebook_id=cc.notebook_id "
+            "WHERE cc.notebook_id=%s AND cc.object_type='concept' AND cc.generation=%s "
+            f"AND {member_of('cc.canonical_id', bound)} "
+            "ORDER BY cc.canonical_id, cc.member_object_id "
+            "FOR UPDATE OF cc SKIP LOCKED",
+            (notebook_id, int(generation), bound.param),
+        ).fetchall()
+
+    @staticmethod
+    def rewrite_concept_description(
+        db: Any, notebook_id: str, row_ids: Sequence[str], description: str, sig: str,
+    ) -> int:
+        """Write one canonical's description and input signature onto the
+        given rows (rows the caller locked in this transaction); rows already
+        holding both are left alone. Returns how many rows changed."""
+        ids = list(row_ids)
+        if not ids:
+            return 0
+        bound = bind_ids(ids)
+        cursor = execute_ids(
+            db,
+            "UPDATE concept_clusters SET canonical_description=%s, canonical_desc_sig=%s "
+            f"WHERE notebook_id=%s AND {member_of('id', bound)} "
+            "AND (canonical_description<>%s OR canonical_desc_sig<>%s)",
+            (description, sig, notebook_id, bound.param, description, sig),
+        )
+        return int(cursor.rowcount or 0)
+
+    @staticmethod
+    def drop_description_checkpoints(db: Any, notebook_id: str) -> None:
+        """Drop the rebuild description stage's checkpoint (every version), in
+        the caller's transaction. The rebuild reuses it before the published
+        descriptions, so a rewrite that publishes must take it away with the
+        old texts (``REBUILD_DESC_CHECKPOINT_STAGE``)."""
+        db.execute(
+            "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=%s AND stage=%s",
+            (notebook_id, REBUILD_DESC_CHECKPOINT_STAGE),
+        )
 
     @staticmethod
     def canonical_relation_seed_rows(db: Any, notebook_id: str):
@@ -1303,16 +1434,42 @@ class UnifiedKgStore:
     # 走 database.write() 即同一把全局写锁。
     def checkpoint_gc(self, notebook_id: str, input_version: str) -> None:
         """删掉本 notebook 里 input_version 不等于当前值的所有 checkpoint 行(表有界)。
-        rebuild 开头调一次:数据/算法版本一变,旧决策自动失效。"""
+        rebuild 开头调一次:数据/算法版本一变,旧决策自动失效。
+        `kg rewrite-descriptions` 的暂存阶段(CONCEPT_DESC_REWRITE_STAGE)不归 rebuild
+        管:rebuild 从不读它,它的版本是生成来源而不是 rebuild 输入版本,由
+        checkpoint_prune_stage 自己收敛。"""
         with self.database.write() as db:
             db.execute(
-                "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=%s AND input_version!=%s",
-                (notebook_id, input_version))
+                "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=%s AND input_version!=%s "
+                "AND stage<>%s",
+                (notebook_id, input_version, CONCEPT_DESC_REWRITE_STAGE))
 
     def checkpoint_clear(self, notebook_id: str) -> None:
-        """删掉本 notebook 的全部 checkpoint(所有版本/阶段)。--fresh 用,强制两个 LLM 阶段重跑。"""
+        """删掉本 notebook 的全部 rebuild checkpoint(所有版本/阶段)。--fresh 用,强制两个
+        LLM 阶段重跑。描述重写的暂存阶段同 checkpoint_gc 一样留着(rebuild 不读它)。"""
         with self.database.write() as db:
-            db.execute("DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=%s", (notebook_id,))
+            db.execute(
+                "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=%s AND stage<>%s",
+                (notebook_id, CONCEPT_DESC_REWRITE_STAGE))
+
+    def checkpoint_prune_stage(
+        self, notebook_id: str, stage: str, keep_version: str, drop_keys: Sequence[str],
+    ) -> None:
+        """收敛一个阶段:删掉它在其它版本下的全部行,以及 ``keep_version`` 下
+        ``drop_keys`` 这些 item(一个写事务)。描述重写整库完成后调用。"""
+        keys = list(drop_keys)
+        with self.database.write() as db:
+            db.execute(
+                "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=%s AND stage=%s "
+                "AND input_version<>%s",
+                (notebook_id, stage, keep_version))
+            if keys:
+                bound = bind_ids(keys)
+                execute_ids(
+                    db,
+                    "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=%s AND stage=%s "
+                    f"AND input_version=%s AND {member_of('item_key', bound)}",
+                    (notebook_id, stage, keep_version, bound.param))
 
     def checkpoint_load(
         self, notebook_id: str, input_version: str, stage: str
