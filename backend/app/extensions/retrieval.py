@@ -78,6 +78,30 @@ def _candidate_from_domain(
         return None
 
 
+#: The outcomes after which a contribution did not get to answer this call, so
+#: the caller's result may be worse than a repeat under the same conditions
+#: (``run``'s ``on_degraded``).  Not here, because a repeat gets the same
+#: answer: ``available``/``partial`` (it answered), ``rejected`` (admission
+#: judged the answer, or the contributor declined this request) and
+#: ``disabled`` (switched off) -- and the availability probe's own verdict,
+#: which is emitted ``stable`` (``_emit_availability``).
+DEGRADED_CONTRIBUTION_OUTCOMES = frozenset({
+    "timeout", "failed", "invalid", "invalid_context", "invalid_result",
+    "blocked", "unavailable", "cancelled",
+})
+
+
+@dataclass(frozen=True)
+class _ReportingSink:
+    """``run``'s event sink paired with its ``on_degraded`` hook.  Travels in
+    the ``event_sink`` slot so every emit site reaches the hook without a
+    second parameter; ``_emit`` unwraps it, and a ``None`` sink inside still
+    falls back to the host's own."""
+
+    sink: Callable[[dict[str, object]], None] | None
+    on_degraded: Callable[[str], None]
+
+
 class _CallEvidenceReader:
     def __init__(self, source: object) -> None:
         self._source = source
@@ -272,7 +296,13 @@ class RetrievalContributorHost:
         cancellation: CancellationToken | None = None,
         event_sink: Callable[[dict[str, object]], None] | None = None,
         disabled_capabilities: frozenset[str] = frozenset(),
+        on_degraded: Callable[[str], None] | None = None,
     ) -> Sequence[T]:
+        """``on_degraded(reason)`` is told when a contribution did not get to
+        answer this call (``DEGRADED_CONTRIBUTION_OUTCOMES``, or its admission
+        read failed): the result may be worse than a repeat would give."""
+        if on_degraded is not None:
+            event_sink = _ReportingSink(event_sink, on_degraded)
         try:
             return self._run(
                 baseline,
@@ -346,14 +376,7 @@ class RetrievalContributorHost:
             if cancellation is not None:
                 self._raise_if_token_cancelled(cancellation)
             if availability.status is not AvailabilityStatus.AVAILABLE:
-                self._emit(
-                    contribution_id,
-                    outcome=availability.status.value,
-                    failure_code=self._stable_code(
-                        availability.reason_code, "contribution_unavailable"
-                    ),
-                    event_sink=event_sink,
-                )
+                self._emit_availability(contribution_id, availability, event_sink)
                 continue
             available.append(registration)
         if not available:
@@ -595,6 +618,7 @@ class RetrievalContributorHost:
                 )
             except Exception:
                 self._raise_if_core_cancelled(context)
+                self._note_degraded(event_sink, "admission_read_failed")
                 hydrated = ()
             self._raise_if_core_cancelled(context)
             if self._deadline_expired(context):
@@ -889,12 +913,45 @@ class RetrievalContributorHost:
             else fallback
         )
 
+    @staticmethod
+    def _note_degraded(event_sink, reason: str) -> None:
+        """Tell ``run``'s ``on_degraded`` (carried by a ``_ReportingSink``)
+        that this call's result is degraded; a hook that raises changes
+        nothing here.  A failed admission read reports here directly: every
+        candidate of that contribution is dropped, and a repeat whose read
+        succeeds would admit them."""
+        if not isinstance(event_sink, _ReportingSink):
+            return
+        try:
+            event_sink.on_degraded(reason)
+        except Exception:
+            return
+
+    def _emit_availability(self, contribution_id: str, availability, event_sink) -> None:
+        """The availability probe's verdict for this call.  ``stable``: it
+        holds for the whole call, a repeat gets the same answer, so it is not
+        a degradation of the caller's result."""
+        self._emit(
+            contribution_id,
+            outcome=availability.status.value,
+            failure_code=self._stable_code(
+                availability.reason_code, "contribution_unavailable"
+            ),
+            event_sink=event_sink,
+            stable=True,
+        )
+
     def _emit(
         self, contribution_id: str, *, outcome: str,
         accepted_count: int = 0, dropped_count: int = 0,
         failure_code: str = "", started: float | None = None,
         event_sink: Callable[[dict[str, object]], None] | None = None,
+        stable: bool = False,
     ) -> None:
+        if not stable and outcome in DEGRADED_CONTRIBUTION_OUTCOMES:
+            self._note_degraded(event_sink, outcome)
+        if isinstance(event_sink, _ReportingSink):
+            event_sink = event_sink.sink
         if (
             type(contribution_id) is not str
             or not _STABLE_METADATA_ID.fullmatch(contribution_id)

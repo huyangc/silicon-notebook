@@ -3415,13 +3415,14 @@ class CandidateRetrievalService(_RetrievalState):
 
         Only the chunks are returned -- the element arm reads nothing else of
         a recall -- so a hit is the light projection rebuilt as text-less
-        chunks.  On a miss the drift verdict the memo key had to resolve is
-        handed down through the arm's own ``_CHUNK_ARM_DRIFTED`` (the
-        once-per-arm-entry channel), so the recall does not probe again; the
-        recall itself keeps what it read for the next reader."""
+        chunks.  On a miss the slot taken here (key, ceiling digest, drift
+        verdict) is handed to that very ``_retrieve_chunks`` call
+        (``chunk_recall_memo.handing``), which therefore neither re-takes it
+        nor probes again; the recall itself keeps what it read for the next
+        reader."""
+        producer_explicit = bool(chunk_kwargs.get("producer_explicit", False))
         slot = self._chunk_recall_slot(
-            notebook_id, query, recall, allowed_source_ids,
-            bool(chunk_kwargs.get("producer_explicit", False)), None,
+            notebook_id, query, recall, allowed_source_ids, producer_explicit, None,
         )
         if slot is not None:
             served = chunk_recall_memo.serve(
@@ -3430,19 +3431,14 @@ class CandidateRetrievalService(_RetrievalState):
             )
             if served is not None:
                 return served
-        handed_down = (
-            slot is not None and slot.drifted is not None
-            and _CHUNK_ARM_DRIFTED.get() is None
-        )
-        token = _CHUNK_ARM_DRIFTED.set(slot.drifted) if handed_down else None
-        try:
+        with chunk_recall_memo.handing(
+            slot, (self, notebook_id, query, recall, allowed_source_ids,
+                   producer_explicit),
+        ):
             chunks, _ids, _matrix = self._retrieve_chunks(
                 notebook_id, query, recall=recall,
                 allowed_source_ids=allowed_source_ids, **chunk_kwargs,
             )
-        finally:
-            if token is not None:
-                _CHUNK_ARM_DRIFTED.reset(token)
         return chunks
 
     def _navigation_element_ids(
@@ -3649,10 +3645,14 @@ class CandidateRetrievalService(_RetrievalState):
         from app.services.source_scope import unbound_ceiling, verify_unbound_read
 
         unbound = None if allowed_source_ids is not None else unbound_ceiling(notebook_id)
-        slot = self._chunk_recall_slot(
-            notebook_id, query, recall, allowed_source_ids, producer_explicit,
-            drifted,
-        )
+        handed, slot = chunk_recall_memo.handed(
+            (self, notebook_id, query, recall, allowed_source_ids, producer_explicit),
+        ) if drifted is None else (False, None)
+        if not handed:
+            slot = self._chunk_recall_slot(
+                notebook_id, query, recall, allowed_source_ids, producer_explicit,
+                drifted,
+            )
 
         def still_unbound() -> bool:
             return self._chunk_source_ceiling(notebook_id, allowed_source_ids) is None
@@ -3673,26 +3673,40 @@ class CandidateRetrievalService(_RetrievalState):
                 notebook_id, query, recall,
                 producer_explicit=producer_explicit, drifted=drifted,
             )
-        if (slot is not None and not failures
-                and self._recall_readable_by_element_arm(notebook_id, allowed_source_ids)):
+        if slot is not None and failures:
+            slot.run.note_chunk_recall_degraded_skip()
+        elif slot is not None and self._recall_readable_by_element_arm(
+                slot, notebook_id, allowed_source_ids):
             chunk_recall_memo.keep(slot, result[0], still_unbound)
         return result
 
-    def _recall_readable_by_element_arm(self, notebook_id, allowed_source_ids) -> bool:
+    def _recall_readable_by_element_arm(self, slot, notebook_id,
+                                        allowed_source_ids) -> bool:
         """Whether an element search could ever read this recall back, so that
         keeping it can pay off.  A recall made with a list matches the element
         arm's own list (a peer leg, a producer's list).  One made without a list
         only matches an element search that has none either, and that search
-        takes the chunk route only for a library that is not copyable or whose
-        ceiling hands it a list (``_retrieve_elements``); otherwise it scans the
-        library's elements whole and the recall would only be held."""
+        takes the chunk route only when the library's ceiling hands it a list
+        or the library is not copyable (``_retrieve_elements``); otherwise it
+        scans the library's elements whole and the recall would only be held.
+
+        The copyable answer is read once per run and library (the recall
+        just made has already paid for the same read).  Any failure here
+        answers "not readable": the recall itself succeeded and is returned
+        unchanged, it is only not kept."""
         if allowed_source_ids is not None:
             return True
-        if not self.notebook_copy_stats(notebook_id)["copyable"]:
-            return True
-        from app.services.source_scope import scoped_allowed_source_ids
+        try:
+            from app.services.source_scope import scoped_allowed_source_ids
 
-        return scoped_allowed_source_ids(notebook_id, None) is not None
+            if scoped_allowed_source_ids(notebook_id, None) is not None:
+                return True
+            return not slot.run.memoized_value(
+                ("chunk_recall_copyable", notebook_id),
+                lambda: bool(self.notebook_copy_stats(notebook_id)["copyable"]),
+            )
+        except Exception:  # noqa: BLE001 - deciding to keep never fails a recall
+            return False
 
     def _chunk_recall_slot(self, notebook_id, query, recall, allowed_source_ids,
                            producer_explicit, drifted):
@@ -3913,9 +3927,8 @@ class CandidateRetrievalService(_RetrievalState):
                 cancellation=call_context.cancellation,
                 # A contributor that timed out, failed or was blocked leaves
                 # only an event; the recall is degraded all the same.
-                event_sink=chunk_recall_memo.noting_contribution_events(
-                    getattr(self.event_log, "emit", None),
-                ),
+                event_sink=getattr(self.event_log, "emit", None),
+                on_degraded=chunk_recall_memo.noting_contribution,
                 disabled_capabilities=(
                     frozenset()
                     if generated_enabled

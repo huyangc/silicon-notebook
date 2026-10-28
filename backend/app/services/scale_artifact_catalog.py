@@ -30,6 +30,7 @@ from collections import OrderedDict
 from typing import Callable
 
 from app.repositories.filesystem.scale_artifact_store import MANIFEST_ABSENT
+from app.services.chunk_lane import note_recall_failure
 
 _logger = logging.getLogger(__name__)
 
@@ -176,6 +177,10 @@ class ScaleArtifactCatalog:
                 # = 无工件,与 read_manifest 的缺失分支同款早退。两者在**这里**
                 # 仍然同款是刻意的:调用方 ``load`` 对二者的结论都是「回落 live
                 # 检索路径」,分开只会在探针失灵时多解析一份 2MB manifest。
+                # 只有 stat 失败是一次可能复原的读失败:正在算的 chunk 召回
+                # 因此不留给元素臂复用(``chunk_lane.note_recall_failure``)。
+                if signature is None:
+                    note_recall_failure("scale_manifest_stat")
                 return None
             with self._manifest_identity_lock:
                 cached = self._manifest_identity_memo.get(notebook_id)
@@ -185,6 +190,7 @@ class ScaleArtifactCatalog:
         try:
             manifest = self.artifacts.read_manifest(directory)
         except (OSError, ValueError):
+            note_recall_failure("scale_manifest_read")
             return None
         if manifest is None or manifest.get("version") is None:
             return None
@@ -340,6 +346,10 @@ class ScaleArtifactCatalog:
                 return cached
             idx = self.artifacts.load_scale(notebook_id)
             if idx is None:
+                # The manifest was just admitted, so a None here is a load that
+                # failed (a torn fold rename, EMFILE/EIO, MemoryError, or a
+                # corrupt artifact), never "no index".
+                note_recall_failure("scale_index_load")
                 return None
             return self._adopt(notebook_id, idx, signature)
 

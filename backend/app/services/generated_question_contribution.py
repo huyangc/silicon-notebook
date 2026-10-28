@@ -187,10 +187,7 @@ class GeneratedQuestionContributionCall:
                 # erase that evidence; downstream MMR treats ids absent from
                 # the original matrix as zero pair-similarity.
                 final_ids, final_matrix = _ids, _matrix
-                try:
-                    self._matrix_failure_event()
-                except Exception:
-                    pass
+                self._emit_matrix_failure()
             try:
                 # The bounded matrix read is allowed to finish safely, but a
                 # cancellation raised while it was in flight must take effect
@@ -285,6 +282,12 @@ class GeneratedQuestionContributionCall:
             chunk.relevance,
             chunk.notebook_id,
         )
+
+    def _emit_matrix_failure(self) -> None:
+        try:
+            self._matrix_failure_event()
+        except Exception:
+            return
 
     def _emit_failure(self) -> None:
         if self._failure_emitted:
