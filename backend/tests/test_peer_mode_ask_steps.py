@@ -324,6 +324,7 @@ def test_ppr_retrieve_returns_empty_in_peer_mode():
             probes.append(notebook_id) or []
         ),
         _federated_graph_is_large=lambda notebook_id: True,
+        _graph_refusal_reason=lambda notebook_id: "large_notebook",
         event_log=SimpleNamespace(emit=events.append),
     )
 

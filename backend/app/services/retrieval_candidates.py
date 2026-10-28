@@ -667,8 +667,10 @@ class _RetrievalState:
         Making the guard honour the library checkboxes therefore requires
         making the two graphs build by them first -- which is a cache-key change
         with its own trade-off (`scoped_subgraph_nodes` explains why the scope
-        is deliberately not in those keys). Registered in `fangan_todo.md` as
-        one joint change; do not relax this half on its own.
+        is deliberately not in those keys). Product decision (2026-10-28): the
+        refusal stays exactly this conservative; only the event's reason is
+        made truthful (`_graph_refusal_reason`). Do not relax this half on its
+        own.
         """
         from app.services.retrieval_participants import (
             current_participant_override,
@@ -688,6 +690,39 @@ class _RetrievalState:
                 active_notebook_id,
             )
         )
+
+    def _graph_refusal_reason(self, active_notebook_id: str) -> str:
+        """The event reason for a refusal ``_federated_graph_is_large`` just made.
+
+        Call only after that guard answered True; it never decides whether to
+        refuse. Without an override the guard counts every effective mounted
+        library, checked or not, so the large library behind a refusal may be
+        one this run does not search. When EVERY large participant is outside
+        the library scope the honest reason is
+        ``unselected_large_library_mounted``; ``large_notebook`` would
+        misdescribe the run's own corpus. The active notebook is always in
+        scope (`covers_notebook`), so a large active notebook is
+        ``large_notebook``. With an override the guard reads the seat, already
+        filtered by the library checkboxes, so it is always ``large_notebook``.
+        Same snapshot and memoised copy-stats as the guard.
+        """
+        from app.services.retrieval_participants import (
+            current_participant_override,
+        )
+        from app.services.source_scope import notebook_in_scope
+
+        if current_participant_override() is not None:
+            return "large_notebook"
+        participants, _fingerprint = self._viewer_graph_participants(
+            active_notebook_id,
+        )
+        large = [
+            notebook_id for notebook_id, _tier in participants
+            if not self.notebook_copy_stats(notebook_id)["copyable"]
+        ]
+        if not large or any(notebook_in_scope(notebook_id) for notebook_id in large):
+            return "large_notebook"
+        return "unselected_large_library_mounted"
 
     def cluster_map(self, notebook_id: str) -> dict[str, str]:
         version = tuple(self._scale_index_version(notebook_id))
@@ -6219,7 +6254,7 @@ class CandidateRetrievalService(_RetrievalState):
             self.event_log.emit({
                 "kind": "graph_walk_refused",
                 "notebook_id": notebook_id,
-                "reason": "large_notebook",
+                "reason": self._graph_refusal_reason(notebook_id),
                 "site": "chunk_kg_overlay",
             })
             return "", {}, [], {}

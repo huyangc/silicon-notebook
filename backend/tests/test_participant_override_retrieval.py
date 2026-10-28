@@ -470,6 +470,139 @@ def test_graph_size_guard_stays_scope_blind_without_an_override(repo, monkeypatc
         )
 
 
+def _refusal_probe(repo, monkeypatch, *, large_ids):
+    """装一个事件探针,并让 ``large_ids`` 里的库判为不可 copy(大库)。
+
+    返回 ``(events, builds)``:``events`` 是发射的事件,``builds`` 记两张被守卫的图
+    各被建了几次(守卫拒绝时必须是 0)。
+    """
+    candidates, graph = repo.retrieval.candidates, repo.retrieval.graph
+    monkeypatch.setattr(
+        candidates, "notebook_copy_stats",
+        lambda notebook_id: {"copyable": notebook_id not in large_ids,
+                             "size": {}},
+    )
+    monkeypatch.setattr(graph, "scale_ppr", lambda *_a, **_kw: [])
+    events: list = []
+    monkeypatch.setattr(repo.event_log, "emit", lambda event, **_kw: events.append(event))
+    builds = {"ppr": 0, "rx": 0}
+
+    def ppr_graph(_notebook_id):
+        builds["ppr"] += 1
+        return SimpleNamespace(num_nodes=lambda: 0), {}, {}
+
+    def rx_graph(*_args, **_kwargs):
+        builds["rx"] += 1
+        raise AssertionError("rx graph must not be built in this probe")
+
+    monkeypatch.setattr(graph, "_ppr_graph", ppr_graph)
+    monkeypatch.setattr(candidates, "_federated_rx_graph", rx_graph)
+    return events, builds
+
+
+def _refusals(events) -> dict:
+    return {event["kind"]: event["reason"] for event in events
+            if event.get("kind") in ("graph_walk_refused", "ppr_fallback_refused")}
+
+
+def _run_both_guarded_lanes(repo, active_id):
+    """走一遍两个发射点:chunk KG overlay 与 PPR 回退。"""
+    repo.retrieval.candidates._chunk_kg_overlay(active_id, "q", "", id_offset=1)
+    repo.retrieval.graph._ppr_retrieve(active_id, "q")
+
+
+@pytest.fixture
+def mounted_reference(repo):
+    base = repo.create_notebook(NotebookCreate(name="huge reference"))
+    repo.mark_notebook_base(base.id)
+    active = repo.create_notebook(NotebookCreate(name="small notebook"))
+    repo.replace_notebook_bases(active.id, [base.id], _ACTOR)
+    return active, base
+
+
+def test_refusal_names_an_unchecked_large_library_truthfully(
+    repo, mounted_reference, monkeypatch,
+):
+    """取消勾选的大参考库撑大了守卫(仍保守拒绝),事件不再谎称语料是大库。
+
+    拒绝行为一字不变:两张图零构建;变的只有事件原因码。
+
+    **变异锚点**:把 ``_graph_refusal_reason`` 的 any(...) 判定写反 -> 这条与
+    下面「已勾选」两条里至少一条报红。
+    """
+    active, base = mounted_reference
+    events, builds = _refusal_probe(repo, monkeypatch, large_ids={base.id})
+
+    with source_scope_context(
+        active.id, None, BaseNotebookScope(mode="include", notebook_ids=[]),
+    ):
+        _run_both_guarded_lanes(repo, active.id)
+
+    assert _refusals(events) == {
+        "graph_walk_refused": "unselected_large_library_mounted",
+        "ppr_fallback_refused": "unselected_large_library_mounted",
+    }
+    assert builds == {"ppr": 0, "rx": 0}
+
+
+def test_refusal_keeps_large_notebook_for_a_checked_or_unscoped_large_library(
+    repo, mounted_reference, monkeypatch,
+):
+    active, base = mounted_reference
+    for scope in (
+        BaseNotebookScope(mode="include", notebook_ids=[base.id]),
+        BaseNotebookScope(mode="exclude", notebook_ids=[]),
+        None,
+    ):
+        events, builds = _refusal_probe(repo, monkeypatch, large_ids={base.id})
+        with source_scope_context(active.id, None, scope):
+            _run_both_guarded_lanes(repo, active.id)
+        assert _refusals(events) == {
+            "graph_walk_refused": "large_notebook",
+            "ppr_fallback_refused": "large_notebook",
+        }, scope
+        assert builds == {"ppr": 0, "rx": 0}
+
+
+def test_refusal_counts_the_active_notebook_as_searched(
+    repo, mounted_reference, monkeypatch,
+):
+    """活动库自己是大库时,即使某个大参考库没勾,原因也是 large_notebook。"""
+    active, base = mounted_reference
+    events, builds = _refusal_probe(
+        repo, monkeypatch, large_ids={active.id, base.id},
+    )
+    with source_scope_context(
+        active.id, None, BaseNotebookScope(mode="include", notebook_ids=[]),
+    ):
+        _run_both_guarded_lanes(repo, active.id)
+    assert set(_refusals(events).values()) == {"large_notebook"}
+    assert builds == {"ppr": 0, "rx": 0}
+
+
+def test_refusal_reason_under_an_override_is_large_notebook(repo, islands, monkeypatch):
+    """覆盖在场时守卫读座位(已按勾选过滤),拒绝只可能来自本次搜的库。"""
+    ids, _sources = islands
+    events, _builds = _refusal_probe(repo, monkeypatch, large_ids={ids[1]})
+    with retrieval_run(run_kind="ask_chunk", actor_id=_ACTOR):
+        with participant_override(_override(ids)):
+            _run_both_guarded_lanes(repo, ids[0])
+    # 覆盖意味着对等模式,``_ppr_retrieve`` 在那里整条关掉:只剩 overlay 一个发射点。
+    assert _refusals(events) == {"graph_walk_refused": "large_notebook"}
+
+
+def test_all_small_libraries_are_not_refused(repo, mounted_reference, monkeypatch):
+    active, base = mounted_reference
+    events, builds = _refusal_probe(repo, monkeypatch, large_ids=set())
+    with source_scope_context(
+        active.id, None, BaseNotebookScope(mode="include", notebook_ids=[]),
+    ):
+        assert repo.retrieval.candidates._federated_graph_is_large(active.id) is False
+        repo.retrieval.graph._ppr_retrieve(active.id, "q")
+    assert _refusals(events) == {}
+    assert builds["ppr"] == 1
+
+
 # ---------------------------------------------------------------------------
 # 5. follow_chain 起点鉴权按覆盖集解析(C4)
 # ---------------------------------------------------------------------------
