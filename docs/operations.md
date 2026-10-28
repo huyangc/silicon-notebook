@@ -2567,13 +2567,14 @@ the live service (no `--confirm-service-stopped`), so a notebook too large for t
 is a CLI job.
 
 **State lives in the one API process.** The job registry, the one-time download tickets and the
-per-user slots (2 active jobs) are in memory; each job also has a JSON sidecar. No table, no
+per-user slots are in memory; each job also has a JSON sidecar. No table, no
 migration. A second API process would see neither the other's jobs nor its tickets: run one.
 The work runs in the heavy maintenance pool (`BACKGROUND_MAINTENANCE_CONCURRENCY`) under the
 diagnostics names `notebook-export-<job>` and `notebook-import-<job>`; an import's re-embedding
 is the `notebook-reembed` job below, waited for by a thread named
-`notebook-transfer-watch-<job>` (at most 24 hours; past that the job records the re-embedding
-as still running and builds no index). Logs (`silicon_notebook.notebook_transfer`) carry job
+`notebook-transfer-watch-<job>` for at most the wait the product reference states
+("Reading a succeeded import"); past that the job records the re-embedding as still running
+and requests no index. Logs (`silicon_notebook.notebook_transfer`) carry job
 and notebook ids and exception class names only; the download's and the upload's query strings
 are never logged.
 
@@ -2588,12 +2589,14 @@ transfers/imports/<job>.snbk              an admitted upload, deleted when its i
 ```
 
 An upload is never kept after its import ends, whatever the outcome. Size the disk for, per
-user, two web-limit-sized files in flight plus the finished exports kept until expiry (one per
+user, one web-limit-sized file per active job they may hold (the per-user cap is in the
+product reference) plus the finished exports kept until expiry (one per
 notebook per user: a newer export of the same notebook replaces the older one).
 
 **Expiry sweep.** A finished job -- its record, sidecar and export file -- is kept
-`NOTEBOOK_TRANSFER_TTL_SECONDS` (default 86400). Reads drop expired jobs from memory; the sweep
--- at server start, whenever a job is created and on one expiry timer armed for the next job
+`NOTEBOOK_TRANSFER_TTL_SECONDS`. Every read (a job, the list, the bell, a ticket) drops each
+expired job whole -- its record, sidecar, tickets and its own files -- without scanning a
+directory; the sweep -- at server start, whenever a job is created and on one expiry timer armed for the next job
 to expire -- also removes every file under `transfers/` that no job owns and that has not been
 written to for that long (the part file of a killed export, the upload of a request that
 died). At server start every file no job owns is removed at once, since nothing can still be
@@ -2614,22 +2617,39 @@ server start once its heartbeat is older than `NOTEBOOK_IMPORT_STALE_SECONDS` (`
 N abandoned notebook import(s) to the delete job`), as for the CLI. A restart sooner than that
 leaves it hidden until a later start; users never see it.
 
-**Finishing an import whose follow-up was interrupted** (`import_followup_interrupted`, or
-`import_followup_failed`). The notebook was published; the re-embedding run is **not**
-resubmitted at startup, the scale index was not requested and a Knowhow projection may have been
-cut short. Do not import the file again (that makes a second notebook). Either:
+**Finishing an import whose follow-up did not complete.** Four situations leave a published
+notebook with work missing, and none of them is undone by importing the file again (that only
+makes a second notebook):
 
-- the owner deletes the notebook and imports the file again (what the job's message suggests); or
-- fill what is missing in place: the notebook's dashboard 「来源状态」 → 「补齐向量」
-  (`POST /api/notebooks/{id}/backfill-vectors`) fills chunk and element vectors while the
-  service runs; knowledge-object and relation vectors are filled by
-  `scripts/cli.sh batch embed --notebook-id <id>` and `scripts/cli.sh kg backfill-relations <id>`
-  (the commands an interrupted CLI import lists; both fill only what has no vector, and on
-  PostgreSQL both are offline maintenance tools that need the service stopped and
-  `--confirm-service-stopped`); a Knowhow table whose projection
-  failed is rebuilt from the table; then build the scale index (the notebook's retrieval-index
-  rebuild, or `scripts/build_scale_index.py build --notebook <id> --full`). Checkup H4/H5 shows
-  what is still missing.
+- **`import_followup_interrupted`** (a restart after publish) or **`import_followup_failed`**
+  (the job's run stopped on an unexpected error after publish): the job is failed; the
+  re-embedding was not (re)submitted, no scale index was requested, and a Knowhow projection
+  may have been cut short.
+- **A `succeeded` import whose `reembed.state` is `failed`** (the run failed or could not be
+  submitted) or **`running`** (still running when the job's wait ended): `index` is `skipped`.
+  A `running` run may still finish on its own; check H4/H5 before repairing.
+- **A `succeeded` import with `index.state` `failed`**: the vectors are in, the scale-index
+  request failed.
+- **A `succeeded` import with a non-empty `report.projection_failures`**: those Knowhow tables
+  were not projected again (the panel says how many).
+
+How to read these fields: product reference, "Reading a succeeded import". Either the owner
+deletes the notebook and imports the file again (what the failed job's message suggests), or
+fill only what is missing, in this order:
+
+1. **Knowhow tables** listed in `projection_failures` (or all of them after a failed/interrupted
+   follow-up): open each in 「Knowhow 表」 and press 「重新同步」
+   (`POST /api/notebooks/{id}/knowhow/{table_id}/reproject`). Do this first: the projection
+   rewrites the table's edges and drops their vectors.
+2. **Vectors.** The dashboard 「来源状态」 → 「补齐向量」 (`POST /api/notebooks/{id}/backfill-vectors`)
+   fills chunk and element vectors while the service runs; knowledge-object and relation
+   vectors are filled by `scripts/cli.sh batch embed --notebook-id <id>` and
+   `scripts/cli.sh kg backfill-relations <id>` (the commands an interrupted CLI import lists;
+   both fill only what has no vector, and on PostgreSQL both are offline maintenance tools that
+   need the service stopped and `--confirm-service-stopped`). Checkup H4/H5 shows what is still
+   missing.
+3. **Scale index**, once the vectors are complete: the notebook's retrieval-index rebuild, or
+   `scripts/build_scale_index.py build --notebook <id> --full`.
 
 ## Filling a notebook's missing vectors (`notebook-reembed`)
 

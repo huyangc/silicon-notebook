@@ -1275,9 +1275,12 @@ token 时 `share_token` 为空串，并且**不计算** copy-stats：那是一�
 回答、报告、反馈、成员、授权边、分享链接或挂载的参考库（挂载边只计数）。闭包以外的派生层（主题板块、scale
 索引、图谱视图索引）由导入端重建。导入时：
 
-- **向量**按 embedding workload 比较 `(model, dim)`：与本部署的绑定一致就逐字节保留；不一致就丢弃，在笔记本
-  发布后重新嵌入。网页导入在后台嵌入：笔记本立刻能打开，作业完成前问答可能找不全（缺向量的行只剩关键词召回）。
-  生成问题的向量保留不了时，在发布前重新嵌入。
+- **向量**按 embedding workload 比较 `(model, dim)`：与本部署的绑定一致就逐字节保留；不一致就丢弃。笔记本
+  发布后有一次重新嵌入，覆盖导入写入过行的每一条腿（切块、元素、知识对象、关系；Knowhow 表算切块、对象与关系
+  三条），与比较结果无关——导出文件可能缺源端本来就没算出的向量；每条腿只补缺的，所以模型一致时通常不调用模型。
+  网页导入在后台跑它：笔记本立刻能打开，跑完之前问答可能找不全（还没有向量的行只能靠关键词召回）。生成问题的向量
+  保留不了时，在发布前用 `chunk_embedding` 重新嵌入；这个 workload 没有绑定或调用失败时，这些问题被丢弃，它们所在
+  的切块重新标记为待建问题索引。
 - **知识图谱**原样带过来；Knowhow 表重新投影。
 - 导出时**还在解析的来源**到达时是失败状态，需要重新解析；作业报告给出条数（`sources_reset`）。
 - 更新版本的构建写出的文件（格式版本更新，或带有本部署没有的列）在本部署升级之前一律拒绝。
@@ -1291,10 +1294,10 @@ token 时 `share_token` 为空串，并且**不计算** copy-stats：那是一�
 | --- | --- | --- |
 | `POST /api/notebooks/{id}/export` | `notebook:export`（owner；镜像放行） | **202** + 作业。调用者对这本的导出仍在排队或运行时，拿回的就是那一个作业。笔记本的原文件（不算 Memory）已经超过网页上限时 **413**；调用者没有空闲的作业名额时 **409**；没有这个能力 404。 |
 | `POST /api/notebook-imports?name=` | 任何登录用户 | 请求体是原始导出文件，`Content-Type: application/zip`，流式落盘。`name`（最多 200 字符）给新笔记本改名，空串沿用导出时的名字。**202** + 作业。可选请求头 `X-Upload-Id`（8–64 个 `A-Z a-z 0-9 _ -`）。 |
-| `GET /api/notebook-imports/uploads/{upload_id}` | 调用者 | 调用者带这个 `X-Upload-Id` 的上传后来怎样了：`{"status": "job", "job": …}`、`{"status": "receiving"}`（还在接收或检查，之后仍可能建出作业）或 `{"status": "none"}`（别人的标识也是它）。格式不对 400。 |
+| `GET /api/notebook-imports/uploads/{upload_id}` | 调用者 | 调用者带这个 `X-Upload-Id` 的上传后来怎样了：`{"status": "job", "job": …}`、`{"status": "receiving", "job": null}`（还在接收或检查，之后仍可能建出作业）或 `{"status": "none", "job": null}`（别人的标识也是它）。格式不对 400。 |
 | `GET /api/notebook-transfers` | 调用者 | `{"jobs": [...]}`：调用者的导出与导入作业，新的在前。 |
 | `GET /api/notebook-transfers/{job}` | 调用者 | 一个作业；别人的作业与不存在的一样是 404。 |
-| `POST /api/notebook-transfers/{job}/download-ticket` | 调用者 | 已完成的导出给 `{url, expires_at}`；还没完成 409。 |
+| `POST /api/notebook-transfers/{job}/download-ticket` | 调用者 | `succeeded` 的导出给 `{url, expires_at}`；调用者的其他作业一律 **409**（还在跑、失败或取消的导出，以及所有导入）。 |
 | `GET /api/notebook-transfers/download?ticket=` | 票据 | 凭票据流式返回文件一次（见下文票据），不要求鉴权头。 |
 | `DELETE /api/notebook-transfers/{job}` | 调用者 | 取消进行中的作业，或删除已结束的作业连同文件：`{id, outcome, kept_notebook_id}`。 |
 
@@ -1325,10 +1328,25 @@ token 时 `share_token` 为空串，并且**不计算** copy-stats：那是一�
 | `invalid_archive` | 导入器拒绝了这个文件（原因说清哪里不对，从不引用文件内容）。 |
 | `archive_too_new` | 文件来自更新版本的构建；先升级本部署。 |
 | `import_reaped` | 导入的占位行中途被收割（心跳停了）；重新导入可能成功。 |
-| `import_followup_failed` | 笔记本已经发布，但之后的工作（Knowhow 投影、重新嵌入、索引请求）没有完成；笔记本保留。 |
+| `import_followup_failed` | 笔记本已经发布，之后作业自己的运行遇到意外错误、没能走完；笔记本保留。后续工作里的一般问题**不是**这个码，见下文「读懂一次成功的导入」。 |
 | `not_started` | 作业没能排进队列。 |
 | `export_interrupted` / `import_interrupted` | 服务重启使作业没有完成；导入什么都不留。 |
 | `import_followup_interrupted` | 重启发生在笔记本发布之后；笔记本保留，不要再导入一份。 |
+
+**读懂一次成功的导入。** 笔记本一旦发布，之后工作里的问题不会让作业失败：作业以 `succeeded` 结束，用三个字段
+说明哪里不完整。
+
+- `report.projection_failures`：投影失败的 Knowhow 表的 id（笔记本与表的行都已导入；表里的「重新同步」可以重建）。
+  导入面板会说出张数。
+- `reembed`：导入没有点名任何腿时是 `null`；否则是 `{run_id, state, legs, progress, error}`。`state` 是
+  `succeeded`、`failed`（运行失败，或者连提交都没成功——那时只有 `legs`，`error` 是异常类名），或作业等满
+  **24 小时**（`REEMBED_WAIT_SECONDS`）仍未结束时的 `running`；`progress` 每条腿一项。导入面板会说检索数据还没补全，
+  只缺切块与元素两条腿时点名看板的「补齐向量」。
+- `index`：重新嵌入成功（或不需要任何腿）且已发出 scale 索引请求时是 `{"state": "requested"}`——要不要真的建由
+  `maybe_auto_index` 决定；请求失败时是 `{"state": "failed", "error": <异常类名>}`；重新嵌入没有成功时是
+  `{"state": "skipped", "reason": "reembed_not_done" | "reembed_still_running"}`，因为在缺向量的库上建出的索引不完整。
+
+把这样的笔记本补完整的运维步骤见[运维文档](./operations_zh.md#网页导出与导入作业)。
 
 **上限。**
 
@@ -1348,7 +1366,9 @@ token 时 `share_token` 为空串，并且**不计算** copy-stats：那是一�
 兑换一次就作废，不论结果。下载不要求鉴权头（浏览器在隐藏的 iframe 里导航过去，当前页永远不会被替换），任何
 拒绝都回同一个 404：未知、重放或过期的票据，已过期或被删的作业，被停用的用户。响应带 `Cache-Control: no-store`、
 `Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff`，`Content-Disposition` 为
-`filename*=UTF-8''<笔记本名>.snbk`（ASCII 回退 `<笔记本 id>.snbk`）。整段流发送完毕才算 `downloaded`；过期前
+`filename*=UTF-8''<笔记本名>.snbk`（名字里的路径分隔符、保留字符与控制字符换成 `_`，最多 120 字符，什么都不剩
+时用笔记本 id），另带给旧客户端的普通 `filename=`：只取名字里的 ASCII 字符，引号、斜杠与控制字符换成 `_`，
+主干里一个拉丁字母都不剩时（全中文的名字）改用 `<笔记本 id>.snbk`。整段流发送完毕才算 `downloaded`；过期前
 可以再次下载。下载与导入上传的 query 都不进日志。
 
 **删除结果。** `deleted`（已结束的作业及其文件已删）、`cancelled`（进行中的作业已停；什么都不留）、`kept`（导入
@@ -1357,8 +1377,8 @@ token 时 `share_token` 为空串，并且**不计算** copy-stats：那是一�
 行或下一块文件处停下；导入在尚未发布时的下一个进度点停下。
 
 **服务重启之后**，排队或运行中的作业判为失败（`*_interrupted`）；笔记本已经发布的导入会说明这一点并保留笔记本
-id，它的重新嵌入不会重新提交——笔记本自己的修复（看板的「补齐向量」）补段与内容块的向量，其余见运维手册
-（[运维文档](./operations_zh.md#网页导出与导入作业)）。已结束的作业保留到过期。
+id，它的重新嵌入不会重新提交——笔记本自己的修复（看板的「补齐向量」）补段与内容块的向量，其余见运维手册——
+`import_followup_failed` 与报告了未完成工作的成功导入也按同样的步骤补（[运维文档](./operations_zh.md#网页导出与导入作业)）。已结束的作业保留到过期。
 
 **待确认中心（铃铛）。** 铃铛在「导出与导入」组里列出每个进行中的作业、尚未下载的已完成导出、失败的作业（直到
 过期），已完成的导出给「下载」，笔记本已发布的导入给「打开笔记本」。导入成功即离开铃铛。
