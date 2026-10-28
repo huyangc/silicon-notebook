@@ -26,7 +26,7 @@ const memories = vi.hoisted(() => ({ exportDeletedNotebookMemories: vi.fn() }));
 vi.mock("../../app/notebook-deletion-api.ts", () => memories);
 
 const {
-  useNotebookExport, useNotebookImport, importFileProblem, TRANSFER_POLL_MS,
+  useNotebookExport, useNotebookImport, importFileProblem, TRANSFER_POLL_MS, TRACK_POLL_MS,
 } = await import("../../app/use-notebook-transfer.ts");
 const { forgetTransferLimit } = await import("../../app/notebook-transfer-api.ts");
 const { importUpload, RECONCILE_INTERVAL_MS } = await import("../../app/notebook-import-upload.ts");
@@ -572,6 +572,31 @@ test("说不准之后重传同一个文件:带同一个上传标识,服务端回
   expect(result.current.view.uploadError).toBe("");
 });
 
+
+test("弹窗在发布前关掉:后台低频跟着这一次的导入,发布时刷新一次列表,之后不再读", async () => {
+  const { result, rerender, onNotebookReady } = renderImport();
+  await waitFor(() => expect(result.current.view.limitBytes).toBe(LIMIT));
+  api.uploadNotebookImport.mockResolvedValueOnce(imp("bg-1"));
+  act(() => result.current.chooseFile(new File([new Uint8Array(10)], "a.snbk")));
+  act(() => result.current.start());
+  await waitFor(() => expect(result.current.view.jobs[0]?.id).toBe("bg-1"));
+  rerender({ isOpen: false });
+  api.getNotebookTransfer.mockClear();
+  api.getNotebookTransfer.mockResolvedValueOnce(imp("bg-1", { phase: "files" }))
+    .mockResolvedValue(imp("bg-1", { phase: "reembed", notebook_id: "nb-bg" }));
+  // 关着时不按弹窗那样 1.5 秒一读。
+  await tick();
+  expect(api.getNotebookTransfer).not.toHaveBeenCalled();
+  await tick(TRACK_POLL_MS);
+  expect(api.getNotebookTransfer).toHaveBeenCalledTimes(1);
+  expect(onNotebookReady).not.toHaveBeenCalled();
+  await tick(TRACK_POLL_MS);
+  expect(onNotebookReady).toHaveBeenCalledExactlyOnceWith("nb-bg");
+  const calls = api.getNotebookTransfer.mock.calls.length;
+  await tick(TRACK_POLL_MS * 3);
+  expect(api.getNotebookTransfer.mock.calls.length).toBe(calls);
+  expect(onNotebookReady).toHaveBeenCalledTimes(1);
+});
 
 test("弹窗关着时说不准的上传,作业晚些登记出来:被认领成一行,工具栏的「导入待确认」撤掉", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
