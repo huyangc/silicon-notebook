@@ -74,6 +74,11 @@ class SystemConfiguration(BaseModel):
     # 旧后端缺这个字段不该把入口隐藏成一个「看起来关闭了」的状态；真正的写路径
     # 仍由 PATCH /me/search-profile 的 409 兜底。
     user_search_profile_enabled: bool
+    # 网页导出/导入笔记本(.snbk)的单文件字节上限,直接反映
+    # Settings.notebook_transfer_web_max_bytes(NOTEBOOK_TRANSFER_WEB_MAX_MB):导入
+    # 弹窗在选择文件时提前拒绝超限文件,并提示请管理员用命令行处理;服务端的流式
+    # 413 仍是权威校验。
+    notebook_transfer_max_bytes: int = Field(gt=0)
 
 
 class SystemExtensionContribution(BaseModel):

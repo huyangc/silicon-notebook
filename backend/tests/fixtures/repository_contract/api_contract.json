@@ -14240,6 +14240,11 @@
               "title": "Agent Profile Enabled",
               "type": "boolean"
             },
+            "notebook_transfer_max_bytes": {
+              "exclusiveMinimum": 0.0,
+              "title": "Notebook Transfer Max Bytes",
+              "type": "integer"
+            },
             "parser_engines": {
               "items": {
                 "$ref": "#/components/schemas/ParserEngineCapability"
@@ -14307,7 +14312,8 @@
             "source_image_max_per_source",
             "source_images_enabled",
             "agent_profile_enabled",
-            "user_search_profile_enabled"
+            "user_search_profile_enabled",
+            "notebook_transfer_max_bytes"
           ],
           "title": "SystemConfiguration",
           "type": "object"

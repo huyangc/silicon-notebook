@@ -213,6 +213,7 @@ def system_configuration(
         source_images_enabled=settings.mineru_return_images,
         agent_profile_enabled=settings.agent_profile_enabled,
         user_search_profile_enabled=settings.user_search_profile_enabled,
+        notebook_transfer_max_bytes=settings.notebook_transfer_web_max_bytes,
     )
 
 

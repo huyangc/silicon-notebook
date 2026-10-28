@@ -1,4 +1,4 @@
-import { sourceUploadProxyBodyMaxBytes } from "./next-upload-limit.mjs";
+import { proxyBodyMaxBytes } from "./next-upload-limit.mjs";
 
 // 同源反代：Next 把 /api/* 和公开的 /mcp 转发到本机后端。
 // 好处：免 CORS、后端无需对外暴露(可留 127.0.0.1)、前端包不写死后端地址。
@@ -26,13 +26,16 @@ const nextConfig = {
     // Idle timeout in milliseconds; API/MCP stream heartbeats keep active calls alive.
     proxyTimeout: 300_000,
     // Next 15 otherwise clones only the first 10 MiB before an external rewrite.
-    // This is a whole-multipart transport envelope derived from the backend's
-    // per-file setting and fixed batch rail; backend streaming validation stays
-    // authoritative. prod.sh exports the root .env before build, while pack.sh
-    // deliberately builds against the protocol maximum for runtime-configurable
-    // offline bundles.
-    middlewareClientMaxBodySize: sourceUploadProxyBodyMaxBytes(
+    // One ceiling covers every proxied request, so it is the larger of two
+    // transport envelopes: the whole-multipart source upload (the backend's
+    // per-file setting times the fixed batch rail) and one raw notebook-import
+    // body (NOTEBOOK_TRANSFER_WEB_MAX_MB plus 1 MiB). Backend streaming
+    // validation stays authoritative for both. prod.sh exports the root .env
+    // before build, while pack.sh deliberately builds against the protocol
+    // maximum for runtime-configurable offline bundles.
+    middlewareClientMaxBodySize: proxyBodyMaxBytes(
       process.env.SOURCE_UPLOAD_MAX_MB,
+      process.env.NOTEBOOK_TRANSFER_WEB_MAX_MB,
     ),
   },
   async rewrites() {
