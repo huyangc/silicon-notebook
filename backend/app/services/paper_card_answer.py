@@ -374,17 +374,42 @@ def value_with_unit(value: str, unit: str) -> str:
     return f"{value}{unit}"
 
 
+def _name_ends_with_unit(name: str, unit: str) -> bool:
+    """Name ``GPU days`` with unit ``GPU days``: the name already says the unit
+    (case-insensitive, on a word boundary -- ``mAP`` does not end with the
+    unit ``AP``)."""
+    if not unit or not name.casefold().endswith(unit.casefold()):
+        return False
+    before = name[:len(name) - len(unit)]
+    return not before or not (before[-1].isalnum() and unit[0].isalnum())
+
+
+def _compared_text(against: str, unit: str, shown_unit: str) -> str:
+    """The ``compared_to`` text with each ``<number><unit>`` written the way
+    the paper's own value is (``SchNet 1.8M`` beside ``2.1 M`` reads
+    ``SchNet 1.8 M``; the unit is dropped there too when the name carries
+    it)."""
+    if not unit or not against:
+        return against
+    pattern = re.compile(
+        r"(?<![\w.])(\d+(?:[.,]\d+)*)\s*" + re.escape(unit) + r"(?!\w)")
+    return pattern.sub(lambda m: value_with_unit(m.group(1), shown_unit), against)
+
+
 def _metric_text(metric: Mapping[str, Any], *, compared: bool = False) -> str:
     """``name value unit（setting）`` and, with ``compared``, `` vs compared_to``
     (the card prompt keeps ``metrics`` to the paper's own method and puts the
-    baseline it is measured against in ``compared_to``)."""
+    baseline it is measured against in ``compared_to``).  A name that already
+    ends with the unit does not repeat it (``GPU days 79``)."""
     name = _clean(metric.get("name"))
     value = _clean(metric.get("value"))
     unit = _clean(metric.get("unit"))
+    shown_unit = "" if _name_ends_with_unit(name, unit) else unit
     setting = _clean(metric.get("setting"))
-    text = f"{name} {value_with_unit(value, unit)}".strip()
+    text = f"{name} {value_with_unit(value, shown_unit)}".strip()
     text = f"{text}（{setting}）" if setting else text
     against = _clean(metric.get("compared_to")) if compared else ""
+    against = _compared_text(against, unit, shown_unit)
     return f"{text} vs {against}" if against else text
 
 
@@ -688,6 +713,16 @@ def compose_paper_answer(answer: str, paper: Optional[PaperCardEvidence]) -> str
     return f"{paper.coverage}\n\n{answer}\n\n{paper.table}"
 
 
+def coverage_line_rendered(answer: str, paper: Optional[PaperCardEvidence]) -> bool:
+    """The answer carries the paper table and its coverage line.  That line is
+    then the answer's single completeness statement -- it says "可能还有更多"
+    / "不代表已列全" itself when coverage has gaps -- so the generic
+    completeness warning is not appended after the table as well."""
+    return bool(
+        answer and paper is not None and paper.paper_table and paper.coverage
+        and paper.coverage in answer and paper.table in answer)
+
+
 def sectioned_paper_prefix(paper: Optional[PaperCardEvidence]) -> str:
     """What a sectioned answer starts with: the coverage line and the table,
     once, before the first section (``""`` when there is no table)."""
@@ -706,6 +741,7 @@ __all__ = [
     "build_paper_card_evidence",
     "compose_paper_answer",
     "coverage_line",
+    "coverage_line_rendered",
     "document_read_band_overflow",
     "paper_digest_block",
     "paper_digest_reserve",

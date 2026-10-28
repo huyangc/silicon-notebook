@@ -100,8 +100,8 @@ from app.services.reasoning_paper_tools import (
     PaperCardOutcome, PaperExtractionItem, PaperExtractionOutcome, PaperHandles,
     answer_layout_value, cap_find_terms, card_anchor_ids, card_has_content, clip,
     extraction_value_count, missing_paper_tool_argument, paper_tool_text_fields,
-    paper_tools_note, parse_paper_tool_arguments, resolve_answer_layout,
-    resolve_source_tokens, year_value,
+    note_top_level_arguments, paper_tools_note, parse_paper_tool_arguments,
+    resolve_answer_layout, resolve_source_tokens, year_value,
 )
 from app.services.source_finder import (
     FIND_SOURCES_MAX_TERMS, FIND_SOURCES_PAGE_SIZE, FindSourcesCursorError,
@@ -3643,6 +3643,9 @@ class ReflectDecision:
     paper_card_sources: Tuple[str, ...] = ()
     extract_sources: Tuple[str, ...] = ()
     extract_fields: Tuple[str, ...] = ()
+    # 选中的论文工具嵌套对象缺失/为空、参数改从顶层同名键读到时 = 该动作名
+    # (`reasoning_paper_tools.paper_tool_request`);执行体据此在账目里说明一句。
+    paper_arguments_top_level: str = ""
     # 本轮写下的 `answer_layout`("prose" | "paper_table"),空串 = 本轮没写。任何
     # 一轮都可以写,run 取最后一次写下的值(`_note_reflect_decision`)。
     answer_layout: str = ""
@@ -5696,7 +5699,7 @@ class ReasoningRetriever:
             parse_paper_tool_arguments(
                 d, data, find_sources=find_sources, paper_cards=paper_cards,
                 extract=extract, enumerate_scope=enumerate_scope,
-                answer_layout=answer_layout)
+                answer_layout=answer_layout, next_action=action)
             if outline:
                 # 与 enumerate 分支同形:只在这一把闸打开时才看这个字段,关闭态
                 # 连读都不读(模型硬吐一份大纲也不会有任何影响)。夹取与丢弃的规则
@@ -7709,6 +7712,7 @@ class ReasoningRetriever:
                 "find_sources_unavailable",
                 "find_sources 本次不可用(本 run 的次数已用完或未提供),请用已有句柄继续或直接作答")
             return
+        note_top_level_arguments(state.paper_log, decision)
         terms, dropped = cap_find_terms(decision.find_sources_terms, FIND_SOURCES_MAX_TERMS)
         if dropped:
             # 超出上限的词截掉而不是整次拒绝(可接受偏差做兼容);MCP 直调仍由服务拒绝。
@@ -7774,6 +7778,7 @@ class ReasoningRetriever:
                 state, "跳过论文卡片(本次检索不提供或额度已用完)", "paper_cards_unavailable",
                 "get_paper_cards 本次不可用(本 run 的篇数已用完或未提供)")
             return
+        note_top_level_arguments(state.paper_log, decision)
         checked = self._resolved_paper_sources(
             state, GET_PAPER_CARDS_ACTION, decision.paper_card_sources)
         if checked is None:
@@ -7862,6 +7867,7 @@ class ReasoningRetriever:
                 state, "跳过逐篇提取(本次检索不提供或额度已用完)", "extract_unavailable",
                 "extract_from_sources 本次不可用(本 run 的篇数已用完或未提供)")
             return
+        note_top_level_arguments(state.paper_log, decision)
         try:
             fields = normalize_fields(decision.extract_fields)
         except ExtractionRequestError as exc:

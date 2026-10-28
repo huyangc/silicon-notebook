@@ -16,7 +16,7 @@ import pytest
 
 from app.application.ask_reasoning import PaperToolsSnapshot
 from app.core.config import Settings
-from app.models.ask import Citation
+from app.models.ask import AskIntentConfirmation, Citation, QueryIntentContract
 from app.models.schemas import AskRequest, NotebookCreate
 from app.services import ask_evidence
 from app.services import reasoning_retrieval as rr_module
@@ -31,6 +31,7 @@ from app.services.paper_card_answer import (
     UNEXPANDED_TITLES,
     build_paper_card_evidence,
     compose_paper_answer,
+    coverage_line_rendered,
     document_read_band_overflow,
     paper_digest_block,
     roster_omitted_for,
@@ -409,15 +410,26 @@ class _AnswerLLM:
         return json.dumps({"answer": f"这些论文都在做门控{cite}。", "grounded": True})
 
 
-def _ask(repo, notebook_id, result, monkeypatch, *, effort="standard", answer=None):
+def _ask(repo, notebook_id, result, monkeypatch, *, effort="standard", answer=None,
+         completeness_required=False):
     monkeypatch.setattr(ReasoningRetriever, "run", lambda self, *a, **k: result)
     llm = _AnswerLLM(answer)
     for service in ("reasoning_agent", "evidence_refine", "ask_answer"):
         bind_chat_client(repo, service, llm)
+    question = "列出与门控相关的论文并给出指标"
+    intent = None
+    if completeness_required:
+        # A "list them all" question: no Knowhow table proves it, so the run
+        # is completeness-unavailable (the generic warning's precondition).
+        intent = AskIntentConfirmation(
+            contract=QueryIntentContract(
+                objective=question, resolved_question=question,
+                completeness_required=True, result_scope="complete"),
+            resolved_question=question)
     response = repo._runtime.ask_service().ask_reasoning(
         notebook_id,
-        AskRequest(question="列出与门控相关的论文并给出指标", mode="reasoning",
-                   retrieval_effort=effort),
+        AskRequest(question=question, mode="reasoning", retrieval_effort=effort,
+                   intent=intent),
         user_id=repo.current_user().id,
     )
     return response, llm
@@ -913,3 +925,102 @@ def test_the_roster_preview_is_left_out_only_for_a_find_sources_paper_table(repo
         service._render_structured_side(stage, client, None, {}, paper)
     assert omitted == [frozenset({"sources"}), frozenset(), frozenset(), frozenset()]
     assert roster_omitted_for(searched) == frozenset({"sources"})
+
+
+# ------------------------------------------------------------------ T7 rerun fixes
+
+GENERIC_WARNING = "本次回答未验证完整性，不能视为全部结果。"
+
+
+def _paper_table_result(notebook_id, *, capped=False):
+    found = [_found(notebook_id, f"s{i}", f"论文{i}") for i in range(2)]
+    return ReasoningResult(
+        answer_layout=ANSWER_LAYOUT_PAPER_TABLE,
+        paper_finds=[_find(found, capped=capped)],
+        paper_cards=[_card_outcome(notebook_id, f"s{i}", f"论文{i}", _card(f"s{i}"))
+                     for i in range(2)],
+    )
+
+
+def test_a_paper_table_without_gaps_carries_no_generic_completeness_warning(
+        repo, monkeypatch):
+    """T7 复跑 B:论文表回答的覆盖说明是唯一的完整性声明,表后不再追加通用免责。"""
+    notebook = repo.create_notebook(NotebookCreate(name="论文库"))
+    for i in range(2):
+        _seed(repo, notebook.id, f"s{i}", f"论文{i}")
+    response, _llm = _ask(repo, notebook.id, _paper_table_result(notebook.id), monkeypatch,
+                          completeness_required=True)
+    assert response.answer.startswith("> 共找到 2 篇相关论文")
+    assert "| 论文 |" in response.answer
+    assert "可能还有更多" not in response.answer
+    assert GENERIC_WARNING not in response.answer
+    assert GENERIC_WARNING not in response.conclusion
+    assert not response.completeness_notice
+
+
+def test_a_paper_table_with_gaps_says_so_in_its_coverage_line_only(repo, monkeypatch):
+    notebook = repo.create_notebook(NotebookCreate(name="论文库"))
+    for i in range(2):
+        _seed(repo, notebook.id, f"s{i}", f"论文{i}")
+    response, _llm = _ask(
+        repo, notebook.id, _paper_table_result(notebook.id, capped=True), monkeypatch,
+        completeness_required=True)
+    first_line = response.answer.splitlines()[0]
+    assert first_line.startswith("> 共找到 2 篇相关论文")
+    assert "可能还有更多：" in first_line and "语义召回已触顶" in first_line
+    assert GENERIC_WARNING not in response.answer
+    assert not response.completeness_notice
+
+
+def test_a_prose_answer_keeps_the_generic_completeness_warning(repo, monkeypatch):
+    notebook = repo.create_notebook(NotebookCreate(name="论文库"))
+    _seed(repo, notebook.id, "s0", "论文0")
+    result = ReasoningResult(
+        answer_layout=ANSWER_LAYOUT_PROSE,
+        paper_finds=[_find([_found(notebook.id, "s0", "论文0")])],
+        paper_cards=[_card_outcome(notebook.id, "s0", "论文0", _card("s0"))],
+    )
+    response, _llm = _ask(repo, notebook.id, result, monkeypatch, completeness_required=True)
+    assert "| 论文 |" not in response.answer
+    assert response.completeness_notice == GENERIC_WARNING
+    assert response.answer.endswith(f"> {GENERIC_WARNING}")
+    assert response.conclusion.endswith(GENERIC_WARNING)
+
+
+def test_the_coverage_line_must_actually_be_in_the_answer_to_stand_in():
+    paper = _evidence(_tools(finds=[_find([_found("nb", "s1", "A")])],
+                             cards=[_card_outcome("nb", "s1", "A", _card("s1"))]))
+    assert coverage_line_rendered(compose_paper_answer("综述", paper), paper)
+    assert not coverage_line_rendered("综述", paper)
+    assert not coverage_line_rendered("", paper)
+    assert not coverage_line_rendered("综述", None)
+    prose = _evidence(_tools(layout=ANSWER_LAYOUT_PROSE,
+                             cards=[_card_outcome("nb", "s1", "A", _card("s1"))]))
+    assert not coverage_line_rendered("综述", prose)
+
+
+@pytest.mark.parametrize("metric, text", [
+    # T7 复跑 C:指标名已带单位时不再重复(「GPU days 79 GPU days」)。
+    ({"name": "GPU days", "value": "79", "unit": "GPU days"}, "GPU days 79"),
+    ({"name": "Training GPU Days", "value": "79", "unit": "gpu days",
+      "compared_to": "DDPM 150 gpu days"}, "Training GPU Days 79 vs DDPM 150"),
+    # 本文值与基线同一写法(「2.1 M … vs SchNet 1.8M」)。
+    ({"name": "Params", "value": "2.1", "unit": "M", "compared_to": "SchNet 1.8M"},
+     "Params 2.1 M vs SchNet 1.8 M"),
+    ({"name": "Acc", "value": "85.2", "unit": "%", "compared_to": "ResNet 80.1 %"},
+     "Acc 85.2% vs ResNet 80.1%"),
+    # 名字只是以单位字母结尾、不在词边界上:单位照写。
+    ({"name": "mAP", "value": "42.1", "unit": "AP"}, "mAP 42.1 AP"),
+    ({"name": "LVIS AP rare", "value": "21.4", "unit": "AP"}, "LVIS AP rare 21.4 AP"),
+    # 基线里没有该单位的数、别的数字照原样。
+    ({"name": "FID", "value": "3.52", "unit": "",
+      "compared_to": "BigGAN-deep 6.95"}, "FID 3.52 vs BigGAN-deep 6.95"),
+    ({"name": "Params", "value": "2.1", "unit": "M",
+      "compared_to": "SchNet 1.8M; DimeNet 12MB"}, "Params 2.1 M vs SchNet 1.8 M; DimeNet 12MB"),
+])
+def test_metric_cell_does_not_repeat_the_unit_and_spaces_the_baseline_alike(metric, text):
+    e = _eid("s1", 3)
+    card = _metric_card("s1", [dict(metric, anchor=e)])
+    paper = _evidence(_tools(cards=[_card_outcome("nb", "s1", "Cascaded", card)]))
+    row = _table_lines(paper.table)[2]
+    assert f"{text} [{paper.keys[e]}]" in row

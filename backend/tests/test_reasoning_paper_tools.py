@@ -401,6 +401,87 @@ def test_terms_past_the_limit_are_dropped_and_named_not_the_whole_call(corpus):
     assert "「visuomotor manipulation」、「sim-to-real grasping」" in ledger
 
 
+#: T7 rerun, molgraph, first reflect turn, verbatim: the find_sources
+#: arguments flat on the top level, no nested ``find_sources`` object.
+FLAT_FIND_PAYLOAD = {
+    "sufficient": False, "next_action": "find_sources",
+    "query": "graph neural networks for molecular property prediction",
+    "terms": ["graph neural network", "molecular property prediction",
+              "message passing", "molecule", "GNN"],
+    "scope": "current_notebook", "kind": "papers", "answer_layout": "paper_table",
+}
+
+
+def test_flat_find_sources_arguments_run_instead_of_an_invalid_call(corpus):
+    """T7 复跑 molgraph 首轮的原样 payload:参数平铺在顶层,执行器曾读嵌套键得到
+    空请求(`find_sources_invalid`),多花一轮 reflect。现在按顶层同名键执行,
+    并在账目里说明一句。"""
+    repo, nb, _seeded = corpus
+    llm = _RecordingLLM([dict(FLAT_FIND_PAYLOAD), ANSWER])
+    result = _run(_retriever(repo, llm), nb)
+    assert "find_sources_invalid" not in _skips(result)
+    (found,) = result.paper_finds
+    assert found.request.query == FLAT_FIND_PAYLOAD["query"]
+    assert found.request.terms == tuple(FLAT_FIND_PAYLOAD["terms"])
+    assert (found.request.scope, found.request.kind) == ("current_notebook", "papers")
+    assert _steps(result, "find_documents")
+    assert "find_sources 的参数写在了顶层,这次按顶层的同名键执行" in llm.prompts[1]
+
+
+def test_a_non_empty_nested_object_wins_over_top_level_keys(corpus):
+    repo, _nb, _seeded = corpus
+    decision = _reflect(repo, dict(_find(terms=["detector"]), query="flat query"))
+    assert decision.find_sources_terms == ("detector",)
+    assert decision.find_sources_query == ""
+    assert decision.paper_arguments_top_level == ""
+    # An empty nested object falls back to the top level.
+    decision = _reflect(repo, dict(FLAT_FIND_PAYLOAD, find_sources={}))
+    assert decision.find_sources_query == FLAT_FIND_PAYLOAD["query"]
+    assert decision.paper_arguments_top_level == "find_sources"
+
+
+def test_top_level_fallback_only_for_the_chosen_action_and_its_own_keys(corpus):
+    repo, _nb, _seeded = corpus
+    # Another action's flat ``query`` is never read as find_sources arguments.
+    decision = _reflect(repo, {
+        "next_action": "add_subquery", "reason": "再查", "query": "flat",
+        "terms": ["x"], "new_sub_query": {"query": "detector"}})
+    assert decision.find_sources_query == "" and decision.find_sources_terms == ()
+    assert decision.paper_arguments_top_level == ""
+    # Cards / extraction read only their own argument names off the top level.
+    decision = _reflect(repo, {"next_action": "get_paper_cards", "reason": "读",
+                               "sources": ["p1", "p2"], "fields": ["AP"]})
+    assert decision.paper_card_sources == ("p1", "p2")
+    assert decision.extract_fields == ()
+    assert decision.paper_arguments_top_level == "get_paper_cards"
+    decision = _reflect(repo, {"next_action": "extract_from_sources", "reason": "抽",
+                               "sources": ["p1"], "fields": ["COCO AP"]})
+    assert (decision.extract_sources, decision.extract_fields) == (("p1",), ("COCO AP",))
+    assert decision.paper_arguments_top_level == "extract_from_sources"
+
+
+def test_flat_arguments_pass_fail_closed_and_stay_under_the_length_gate(corpus):
+    repo, _nb, _seeded = corpus
+    decision = _reflect(repo, dict(FLAT_FIND_PAYLOAD), fail_closed=True)
+    assert decision.find_sources_terms == tuple(FLAT_FIND_PAYLOAD["terms"])
+    with pytest.raises(ValueError, match="too long"):
+        _reflect(repo, dict(FLAT_FIND_PAYLOAD, query="x" * 2001), fail_closed=True)
+    with pytest.raises(ValueError, match="is missing sources"):
+        _reflect(repo, {"next_action": "get_paper_cards", "sources": []},
+                 fail_closed=True)
+
+
+def test_flat_card_arguments_are_named_in_the_ledger(corpus):
+    repo, nb, seeded = corpus
+    llm = _RecordingLLM([
+        {"next_action": "get_paper_cards", "reason": "读",
+         "sources": [seeded["det-01"]]},
+        ANSWER,
+    ])
+    _run(_stub_retriever(repo, llm, cards=_StubCards()), nb)
+    assert "get_paper_cards 的参数写在了顶层" in llm.prompts[1]
+
+
 @pytest.mark.parametrize("error, reason", [
     (FindSourcesCursorError("the cursor belongs to other parameters"),
      "find_sources_cursor_invalid"),
