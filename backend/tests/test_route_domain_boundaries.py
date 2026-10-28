@@ -15,6 +15,8 @@ from app.api.knowhow_routes import router as knowhow_router
 from app.api.knowledge_routes import router as knowledge_router
 from app.api.memory_routes import memory_router
 from app.api.notebook_routes import router as notebook_router
+from app.api.notebook_transfer_routes import download_router as notebook_transfer_download_router
+from app.api.notebook_transfer_routes import router as notebook_transfer_router
 from app.api.report_routes import router as report_router
 from app.api.source_routes import router as source_router
 from app.api.system_routes import router as system_router
@@ -39,6 +41,7 @@ DOMAIN_ROUTERS = (
     agent_profile_router,
     wish_router,
     global_ask_router,
+    notebook_transfer_router,
 )
 EXPECTED_COMPOSITION_NAMES = (
     "memory_router",
@@ -66,6 +69,9 @@ EXPECTED_COMPOSITION_NAMES = (
     # 许愿墙是全局反馈域，不归属于任何单个笔记本。
     "wish_router",
     "global_ask_router",
+    # 网页导出/导入单本笔记本(.snbk);票据下载另有一个不带 session 的
+    # download_router,由 app.main 单独挂载(见下面那条用例)。
+    "notebook_transfer_router",
 )
 
 
@@ -176,6 +182,31 @@ def test_wish_wall_endpoints_have_a_domain_owner():
     }
     for endpoint, module in expected.items():
         assert modules[endpoint] == module, endpoint
+
+
+def test_notebook_transfer_endpoints_have_a_domain_owner():
+    """导出端点挂在 `/notebooks/{id}/export` 下,但与导入、作业、票据同属传输域;
+    票据下载是唯一不带 session 的一条,只在 download_router 上。"""
+    modules = _endpoint_modules()
+    expected = {
+        "export_notebook_route",
+        "import_notebook_route",
+        "list_notebook_transfers",
+        "get_notebook_transfer",
+        "create_notebook_transfer_ticket",
+        "delete_notebook_transfer",
+    }
+    declared = {
+        route.name for route in notebook_transfer_router.routes if isinstance(route, APIRoute)
+    }
+    assert declared == expected
+    for endpoint in expected:
+        assert modules[endpoint] == "app.api.notebook_transfer_routes", endpoint
+    assert [
+        (route.path, route.name)
+        for route in notebook_transfer_download_router.routes
+        if isinstance(route, APIRoute)
+    ] == [("/notebook-transfers/download", "download_notebook_transfer")]
 
 
 def test_group_and_grant_endpoints_have_a_domain_owner():

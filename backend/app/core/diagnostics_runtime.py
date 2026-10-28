@@ -72,6 +72,8 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("sources", None, "command-catalog", "apply"),
     ("sources", None, "command-catalog", "dismiss"),
     ("backfill-vectors",),
+    # 网页导出单本笔记本(.snbk):一段字面量,作业 id 在响应体里。
+    ("export",),
     ("assets",),
     ("assets", None),
     ("knowledge-types",),

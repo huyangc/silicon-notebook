@@ -10068,6 +10068,250 @@
           "title": "NotebookSummary",
           "type": "object"
         },
+        "NotebookTransferDeleted": {
+          "additionalProperties": false,
+          "description": "``DELETE /notebook-transfers/{id}``. ``outcome``: ``deleted`` (a finished\njob is gone), ``cancelled`` (an active job was stopped; nothing of it\nstays), ``kept`` (an import had already created its notebook: it stays and\nis the caller's, ``kept_notebook_id`` names it) or ``pending`` (a running\nimport still settling after 30 s: the job stays readable and ends\n``cancelled`` -- or, had it published meanwhile, carries on with its\nnotebook; read it again for the outcome).",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kept_notebook_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kept Notebook Id"
+            },
+            "outcome": {
+              "enum": [
+                "deleted",
+                "cancelled",
+                "kept",
+                "pending"
+              ],
+              "title": "Outcome",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "outcome"
+          ],
+          "title": "NotebookTransferDeleted",
+          "type": "object"
+        },
+        "NotebookTransferDownloadTicket": {
+          "additionalProperties": false,
+          "description": "``url`` downloads the export once, without an authorization header, until\n``expires_at``.",
+          "properties": {
+            "expires_at": {
+              "title": "Expires At",
+              "type": "string"
+            },
+            "url": {
+              "title": "Url",
+              "type": "string"
+            }
+          },
+          "required": [
+            "url",
+            "expires_at"
+          ],
+          "title": "NotebookTransferDownloadTicket",
+          "type": "object"
+        },
+        "NotebookTransferError": {
+          "additionalProperties": false,
+          "description": "Why a job failed: ``code`` for the client to branch on, ``message`` a\ncomplete Chinese sentence that may be shown as it is. Neither ever carries a\npath, an exception message or file content.",
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "NotebookTransferError",
+          "type": "object"
+        },
+        "NotebookTransferJob": {
+          "additionalProperties": false,
+          "description": "One export or import job of the current user.\n\n``state``: ``queued`` -> ``running`` -> ``succeeded`` / ``failed`` /\n``cancelled``. ``phase`` names the step a running job is in (export:\n``queued``, ``writing``, ``done``; import: ``queued``, ``preflight``,\n``files``, ``rows``, ``validate``, ``publish``, ``project``, ``reembed``,\n``index``, ``done``). ``notebook_id`` is the exported notebook, or the new\nnotebook of an import once it is published (``\"\"`` before). A finished job\nis kept until ``expires_at``; a ``succeeded`` export is ``downloadable``\nthrough a one-time ticket until then.",
+          "properties": {
+            "archive_bytes": {
+              "title": "Archive Bytes",
+              "type": "integer"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "downloadable": {
+              "title": "Downloadable",
+              "type": "boolean"
+            },
+            "downloaded": {
+              "title": "Downloaded",
+              "type": "boolean"
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/NotebookTransferError"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expires At"
+            },
+            "finished_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Finished At"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "index": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Index"
+            },
+            "kind": {
+              "enum": [
+                "export",
+                "import"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "notebook_name": {
+              "title": "Notebook Name",
+              "type": "string"
+            },
+            "phase": {
+              "title": "Phase",
+              "type": "string"
+            },
+            "progress": {
+              "additionalProperties": true,
+              "title": "Progress",
+              "type": "object"
+            },
+            "reembed": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Reembed"
+            },
+            "report": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Report"
+            },
+            "state": {
+              "enum": [
+                "queued",
+                "running",
+                "succeeded",
+                "failed",
+                "cancelled"
+              ],
+              "title": "State",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "state",
+            "phase",
+            "notebook_id",
+            "notebook_name",
+            "created_at",
+            "updated_at",
+            "progress",
+            "archive_bytes",
+            "downloadable",
+            "downloaded"
+          ],
+          "title": "NotebookTransferJob",
+          "type": "object"
+        },
+        "NotebookTransferList": {
+          "additionalProperties": false,
+          "properties": {
+            "jobs": {
+              "items": {
+                "$ref": "#/components/schemas/NotebookTransferJob"
+              },
+              "title": "Jobs",
+              "type": "array"
+            }
+          },
+          "required": [
+            "jobs"
+          ],
+          "title": "NotebookTransferList",
+          "type": "object"
+        },
         "NotebookUpdate": {
           "additionalProperties": false,
           "properties": {
@@ -21041,6 +21285,234 @@
           "summary": "Get System Model Services Status"
         }
       },
+      "/api/notebook-imports": {
+        "post": {
+          "description": "Import one ``.snbk`` file as a new notebook owned by the caller (202 + the\njob). The body is the raw file (``Content-Type: application/zip``); ``name``\nrenames the new notebook (empty: the exported name).",
+          "operationId": "import_notebook_route_api_notebook_imports_post",
+          "parameters": [
+            {
+              "in": "query",
+              "name": "name",
+              "required": false,
+              "schema": {
+                "default": "",
+                "maxLength": 200,
+                "title": "Name",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "202": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/NotebookTransferJob"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Import Notebook Route"
+        }
+      },
+      "/api/notebook-transfers": {
+        "get": {
+          "description": "The caller's export and import jobs, newest first.",
+          "operationId": "list_notebook_transfers_api_notebook_transfers_get",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/NotebookTransferList"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "List Notebook Transfers"
+        }
+      },
+      "/api/notebook-transfers/download": {
+        "get": {
+          "description": "Stream a finished export once, by its ticket (no authorization header).\nAny refusal -- an unknown, replayed or expired ticket, a job that expired or\nwas deleted, a user who was disabled -- is the same 404.",
+          "operationId": "download_notebook_transfer_api_notebook_transfers_download_get",
+          "parameters": [
+            {
+              "in": "query",
+              "name": "ticket",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Ticket",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Download Notebook Transfer"
+        }
+      },
+      "/api/notebook-transfers/{job_id}": {
+        "delete": {
+          "description": "Cancel the caller's queued or running job, or delete a finished one; its\nfiles go. A running import is waited for (up to 30 s) until it is known\nwhether its notebook stays: ``outcome`` is ``deleted``, ``cancelled``,\n``kept`` (``kept_notebook_id`` names the notebook, which stays the caller's)\nor ``pending`` (still settling: the job stays readable and ends\n``cancelled``, or goes on with its notebook if it had published).",
+          "operationId": "delete_notebook_transfer_api_notebook_transfers__job_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "job_id",
+              "required": true,
+              "schema": {
+                "title": "Job Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/NotebookTransferDeleted"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Notebook Transfer"
+        },
+        "get": {
+          "operationId": "get_notebook_transfer_api_notebook_transfers__job_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "job_id",
+              "required": true,
+              "schema": {
+                "title": "Job Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/NotebookTransferJob"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Notebook Transfer"
+        }
+      },
+      "/api/notebook-transfers/{job_id}/download-ticket": {
+        "post": {
+          "description": "A one-time ticket for the caller's finished export: ``url`` downloads it\nonce within 60 seconds.",
+          "operationId": "create_notebook_transfer_ticket_api_notebook_transfers__job_id__download_ticket_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "job_id",
+              "required": true,
+              "schema": {
+                "title": "Job Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/NotebookTransferDownloadTicket"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Create Notebook Transfer Ticket"
+        }
+      },
       "/api/notebooks": {
         "get": {
           "operationId": "list_notebooks_api_notebooks_get",
@@ -22688,6 +23160,46 @@
             }
           },
           "summary": "Edge Review Queue"
+        }
+      },
+      "/api/notebooks/{notebook_id}/export": {
+        "post": {
+          "description": "Start exporting the notebook to one ``.snbk`` file (202 + the job; the\ncaller's export of it that is still active, if there is one). The job runs in\nthe background; once it has ``succeeded``, a download ticket fetches the file\nuntil the job expires.",
+          "operationId": "export_notebook_route_api_notebooks__notebook_id__export_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "202": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/NotebookTransferJob"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Export Notebook Route"
         }
       },
       "/api/notebooks/{notebook_id}/grants": {

@@ -1154,8 +1154,8 @@ class RepositoryRuntime:
         # wire_knowledge_lifecycle finishes deletion after building its
         # kg_maintenance and kg_conflict_jobs collaborators.
         self.notebook_delete = None
-        # wire_sharing builds the .snbk importer (NotebookImportService).
-        self.notebook_import = None
+        # wire_sharing builds the .snbk importer and the web transfer job registry.
+        self.notebook_import = self.notebook_transfers = None
         retrieval = _build_retrieval_domain(foundation)
         self.retrieval_snapshots = retrieval.retrieval_snapshots
         self.memory_service = retrieval.memory_service
@@ -1517,6 +1517,8 @@ class RepositoryRuntime:
         self._closed = True
         if self._global_ask is not None:
             self._global_ask.close()
+        if self.notebook_transfers is not None:
+            self.notebook_transfers.close()
         self.models.close()
         self.database.close()
 
@@ -2120,6 +2122,7 @@ class RepositoryRuntime:
             # below once it's built, same seam as catalog.source_ingestion.
             source_ingestion=self.source_ingestion,
             now=self.seams.now,
+            transfers=self.notebook_transfers,
         )
 
     def wire_knowledge_lifecycle(
@@ -2455,6 +2458,7 @@ class RepositoryRuntime:
         read at call time."""
         from app.services.notebook_transfer.export import embedding_identities
         from app.services.notebook_transfer.import_ import NotebookImportService
+        from app.services.notebook_transfer.jobs import NotebookTransferJobs
 
         def question_embedder():
             if not self.models.configured("chunk_embedding"):
@@ -2477,6 +2481,16 @@ class RepositoryRuntime:
             ],
             project_table=project_table,
             delete_runner=lambda: self.notebook_delete,
+        )
+        self.notebook_transfers = NotebookTransferJobs(
+            settings=self.settings,
+            storage_dir=storage_dir,
+            export_rows=self.sharing_store,
+            embeddings=lambda: embedding_identities(
+                self.settings, self.models.registry.service_for
+            ),
+            object_schemas=lambda: self.schema_registry.list_object_schemas(),
+            importer=lambda: self.notebook_import,
         )
 
     def _after_report_completed(self, committed) -> None:

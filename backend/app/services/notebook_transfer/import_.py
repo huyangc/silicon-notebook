@@ -118,11 +118,15 @@ from app.services.notebook_transfer.archive_reader import (
     NOTEBOOK_FILES_PREFIX,
     ArchiveError,
     ArchiveRowSource,
+    ArchiveTooLarge,
+    archive_errors,
     check_columns,
     check_file_paths,
+    check_inflated_size,
     copy_file_entry,
     inspect_open_archive,
     open_archive,
+    read_manifest,
 )
 
 _log = logging.getLogger("silicon_notebook.notebook_import")
@@ -148,12 +152,17 @@ class ImportProgress:
     """One progress event: ``stage`` is ``preflight``, ``files``, ``rows``,
     ``validate``, ``publish``, ``project`` or ``done``; ``table`` and ``rows``
     (rows written to it so far) accompany ``rows`` events, ``rows_total`` is
-    the archive's row count over every table."""
+    the archive's row count over every table. ``notebook_id`` is the new
+    notebook's id, on every event once its hidden sentinel row is committed
+    (``files`` onwards): a caller that records it can later ask the database
+    whether that notebook was published, even if the process dies in between.
+    ``project`` and ``done`` come after publish."""
 
     stage: str
     table: str = ""
     rows: int = 0
     rows_total: int = 0
+    notebook_id: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -468,6 +477,7 @@ class _ImportStore:
         self.written[table] = self.written.get(table, 0) + len(rows)
         self._progress(ImportProgress(
             stage="rows", table=table, rows=self.written[table], rows_total=self._rows_total,
+            notebook_id=self._notebook_id,
         ))
         self.beat()
 
@@ -636,10 +646,14 @@ class NotebookImportService:
         name: "str | None" = None,
         progress: "Callable[[ImportProgress], None] | None" = None,
         dry_run: bool = False,
+        max_inflated_bytes: "int | None" = None,
     ) -> ImportReport:
         """Import ``path`` for ``owner_id`` (module docstring). ``name`` replaces
         the exported name; ``dry_run`` runs the preflight and the whole row
-        mapping (every strict check, every verdict) and writes nothing.
+        mapping (every strict check, every verdict) and writes nothing;
+        ``max_inflated_bytes`` refuses (``NotebookImportTooLarge``), before any
+        entry is decompressed, an archive whose zip directory adds up to more
+        (the web import's bound; the CLI's protocol limits otherwise).
 
         Raises ``NotebookImportError`` for an archive this deployment refuses
         (invalid, incomplete, written by a newer build) or an import that was
@@ -652,6 +666,11 @@ class NotebookImportService:
         except ArchiveError as exc:
             raise NotebookImportError(str(exc)) from None
         with archive:
+            if max_inflated_bytes is not None:
+                try:
+                    check_inflated_size(archive, max_inflated_bytes)
+                except ArchiveTooLarge as exc:
+                    raise NotebookImportTooLarge(str(exc)) from None
             report(ImportProgress(stage="preflight"))
             try:
                 checked = self._preflight(Path(path), archive)
@@ -841,7 +860,7 @@ class NotebookImportService:
             # The sentinel first, committed on its own: every file below then
             # belongs to a row the stale-import sweep can find.
             writer.write_sentinel(new_name=name)
-            report(ImportProgress(stage="files"))
+            report(ImportProgress(stage="files", notebook_id=new_id))
             self._extract_notebook_files(archive, checked, trees, store)
             writer.write_rows(actor_label=None)
             schema_rows = self._object_type_rows(checked, run)
@@ -849,13 +868,13 @@ class NotebookImportService:
                 store.insert_copy_rows(
                     "notebook_object_schemas", schema_rows, chunk_size=run.chunk_size
                 )
-            report(ImportProgress(stage="validate"))
+            report(ImportProgress(stage="validate", notebook_id=new_id))
             store.beat()
             self._store.validate_import(new_id, store.written)
             store.beat()
             if run.question_dropped_chunks:
                 self._chunks.clear_question_index_marks(new_id, sorted(run.question_dropped_chunks))
-            report(ImportProgress(stage="publish"))
+            report(ImportProgress(stage="publish", notebook_id=new_id))
             if not self._store.publish_import(new_id, _published_status(checked)):
                 raise NotebookImportError("导入中途被收割（心跳超时），本次导入已作废")
         except BaseException as exc:
@@ -865,13 +884,13 @@ class NotebookImportService:
             raise
         # Past publish nothing may compensate (the copy's rule): a projection
         # failure is logged and reported, the notebook stays.
-        report(ImportProgress(stage="project"))
+        report(ImportProgress(stage="project", notebook_id=new_id))
         failures, interrupted = self._project_knowhow(run, checked)
         result = self._report(
             checked, run, store.written, notebook_id=new_id, name=name, dry_run=False,
             files=trees.files_written, projection_failures=failures, interrupted=interrupted,
         )
-        report(ImportProgress(stage="done"))
+        report(ImportProgress(stage="done", notebook_id=new_id))
         return result
 
     # ------------------------------------------------------------- files
@@ -1081,6 +1100,86 @@ class NotebookImportService:
             projection_failures=projection_failures,
             interrupted=interrupted,
         )
+
+
+class NotebookImportTooLarge(NotebookImportError):
+    """The archive would inflate beyond the bound the caller set
+    (``max_inflated_bytes``); nothing of it was decompressed."""
+
+
+def _bounded_manifest(archive: zipfile.ZipFile, max_inflated_bytes: int) -> ArchiveManifest:
+    """The manifest of an open archive whose zip directory, and then whose
+    manifest-declared sizes, stay within ``max_inflated_bytes`` -- read before
+    any other entry is decompressed."""
+    check_inflated_size(archive, max_inflated_bytes)
+    with archive_errors():
+        manifest = read_manifest(archive)
+    check_inflated_size(archive, max_inflated_bytes, manifest)
+    return manifest
+
+
+def check_web_archive(path: Path, *, max_inflated_bytes: int) -> None:
+    """The web import's admission of an archive whose sources are not counted
+    (an administrator's): the zip directory, the inflation bound and a valid
+    manifest -- nothing else is decompressed. Raises ``NotebookImportTooLarge``
+    past the bound and ``NotebookImportError`` for an archive that is not valid."""
+    try:
+        with open_archive(Path(path)) as archive:
+            _bounded_manifest(archive, max_inflated_bytes)
+    except ArchiveTooLarge as exc:
+        raise NotebookImportTooLarge(str(exc)) from None
+    except ArchiveError as exc:
+        raise NotebookImportError(str(exc)) from None
+
+
+def archive_document_count(
+    path: Path, *, max_inflated_bytes: int, stop_above: "int | None" = None
+) -> int:
+    """How many sources the archive at ``path`` would add to its new notebook,
+    before anything is imported -- the count a per-notebook document limit is held
+    against. Nothing in the file is trusted to lower it: every ``sources`` row
+    counts (a ``promotion`` label included), except a Memory source (the import
+    refuses those) and a ``knowhow`` source a ``knowhow_tables`` row of the same
+    archive names as its ``hidden_source_id`` (the table's own projection, which
+    the import rebuilds). A ``knowhow``-labelled row no table names counts.
+
+    The work is bounded before any entry is decompressed (``check_web_archive``'s
+    checks); then the Knowhow tables and the sources are read once each, verified
+    against the manifest's sha256 and row count. A table can hide only a source
+    the archive holds, so more ``knowhow_tables`` rows than the manifest declares
+    ``sources`` refuses the archive (the set of hidden ids stays bounded). With
+    ``stop_above`` the count stops as soon as it exceeds that number (and returns
+    ``stop_above + 1``). Raises ``NotebookImportTooLarge`` past the bound and
+    ``NotebookImportError`` for an archive that is not valid."""
+    try:
+        with open_archive(Path(path)) as archive:
+            manifest = _bounded_manifest(archive, max_inflated_bytes)
+            sources_declared = manifest.tables["sources"].rows
+            source = ArchiveRowSource(
+                archive, manifest, adapt=lambda table, row: row, page_rows=1000
+            )
+            hidden: set[str] = set()
+            tables = 0
+            for page in source.batches("knowhow_tables"):
+                for row in page:
+                    tables += 1
+                    if tables > sources_declared:
+                        raise ArchiveError("导出文件里的 Knowhow 表多于来源")
+                    hidden.add(str(row.get("hidden_source_id") or ""))
+            counted = 0
+            for page in source.batches("sources"):
+                for row in page:
+                    kind = str(row.get("source_type") or "")
+                    if kind == "memory" or (kind == "knowhow" and str(row.get("id")) in hidden):
+                        continue
+                    counted += 1
+                    if stop_above is not None and counted > stop_above:
+                        return counted
+            return counted
+    except ArchiveTooLarge as exc:
+        raise NotebookImportTooLarge(str(exc)) from None
+    except ArchiveError as exc:
+        raise NotebookImportError(str(exc)) from None
 
 
 def reembed_legs(written: Mapping[str, int]) -> tuple[str, ...]:

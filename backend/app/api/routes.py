@@ -12,6 +12,7 @@ from app.api.knowhow_routes import router as knowhow_router
 from app.api.knowledge_routes import router as knowledge_router
 from app.api.memory_routes import memory_router
 from app.api.notebook_routes import router as notebook_router
+from app.api.notebook_transfer_routes import router as notebook_transfer_router
 from app.api.report_routes import router as report_router
 from app.api.source_routes import router as source_router
 from app.api.system_routes import router as system_router
@@ -45,5 +46,7 @@ for domain_router in (
     agent_profile_router,
     wish_router,
     global_ask_router,
+    # 网页导出/导入单本笔记本(.snbk)。同上:注册顺序不影响 api_contract 夹具。
+    notebook_transfer_router,
 ):
     router.include_router(domain_router)

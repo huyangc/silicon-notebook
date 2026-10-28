@@ -1007,6 +1007,24 @@ class SharingStore:
         ]
         return (owner["username"] if owner and owner["username"] else "", titles)
 
+    def notebook_lifecycle_status(self, notebook_id: str) -> "str | None":
+        """`sqlite/sharing_store.py::notebook_lifecycle_status` 的镜像。"""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM notebooks WHERE id = %s", (notebook_id,)
+            ).fetchone()
+        return None if row is None else str(row["status"] or "")
+
+    def exportable_file_bytes(self, notebook_id: str) -> int:
+        """`sqlite/sharing_store.py::exportable_file_bytes` 的镜像。"""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(SUM(file_size), 0) AS n FROM sources "
+                f"WHERE notebook_id = %s AND NOT ({memory_sql.memory_source_type_predicate()})",
+                (notebook_id,),
+            ).fetchone()
+        return int(row["n"])
+
     def notebook_sync_origin(self, notebook_id: str) -> str:
         """`sqlite/sharing_store.py::notebook_sync_origin` 的镜像——为什么不带
         生命周期过滤、为什么行缺失返回 '' 而不是抛,完整理由写在那一份里。"""

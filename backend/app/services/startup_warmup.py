@@ -418,6 +418,26 @@ def _sweep_stale_notebook_imports(repo: object) -> None:
         )
 
 
+def _recover_notebook_transfers(repo: object) -> None:
+    """Settle the web export/import jobs the previous process left
+    (``NotebookTransferJobs.recover_on_start``): the ones still queued or
+    running are failed, expired jobs and every file no job owns are removed.
+    Startup only, for the delete-job sweep's reason: an offline tool cannot
+    claim no live job owns a sidecar. A narrow test double without the seat is
+    not an error."""
+    jobs = getattr(getattr(repo, "_runtime", None), "notebook_transfers", None)
+    recover = getattr(jobs, "recover_on_start", None)
+    if not callable(recover):
+        return
+    try:
+        failed = int(recover() or 0)
+    except Exception as exc:  # noqa: BLE001 - recovery must never block startup
+        logger.error("startup: notebook transfer recovery failed: %s", type(exc).__name__)
+        return
+    if failed:
+        logger.warning("startup: marked %d interrupted notebook transfer job(s) failed", failed)
+
+
 def _start_notebook_delete_sweeper(lease: object, repo: object) -> None:
     """Begin the periodic notebook-delete-job sweep in this process (batch
     3·W1 PR-3 §T-4's two drivers, run every ``NOTEBOOK_DELETE_SWEEP_
@@ -717,6 +737,7 @@ def run_startup(lease: object | None) -> object | None:
         # jobs here, and that sweep is what keeps every job moving afterwards.
         _sweep_stale_notebook_imports(repo)
         _sweep_notebook_delete_jobs_on_start(repo)
+        _recover_notebook_transfers(repo)
         if not _bind_repository_and_begin_warmup(lease, repo):
             # Defensive only: a valid lease cannot be detached during startup.
             # If that invariant is ever broken, do not leak the just-created
