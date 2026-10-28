@@ -497,17 +497,37 @@ class QueryStore:
 
     @staticmethod
     def notebook_has_usable_base_kg(
-        db: Any, notebook_id: str, *, viewer_id: str | None
+        db: Any,
+        notebook_id: str,
+        *,
+        viewer_id: str | None,
+        among: list[str] | None = None,
     ) -> bool:
         """本库挂载的参考库中是否有任一含**可用状态** KG。与 sqlite 同义(PR#334)。
-        
+
         ``viewer_id`` 是必填关键字(M3:挂载只对挂载人或自己能读被挂库的人生效);
-        ``None``/空串 = 无查看者,只剩公共库与 ``everyone``。"""
-        row = db.execute(
+        ``None``/空串 = 无查看者,只剩公共库与 ``everyone``。
+
+        ``among`` 给出时只问这几本挂载库(单库请求勾选的参考库);挂载有效性照旧由
+        同一段 join 判,名单绑成一个参数(``id_binding``,custom plan)。省略时语句、
+        参数与执行方式逐字不变。"""
+        if among is None:
+            row = db.execute(
+                "SELECT EXISTS(SELECT 1 " + MOUNT_VIEWER_JOIN
+                + MOUNT_EFFECTIVE_FOR_VIEWER
+                + " AND EXISTS(SELECT 1 FROM knowledge_objects ko "
+                "WHERE ko.notebook_id = b.id AND ko.status=ANY(%s))) AS exists",
+                (viewer_id, notebook_id, list(USABLE_STATUSES)),
+            ).fetchone()
+            return bool(row["exists"])
+        bound = bind_ids(list(among))
+        row = execute_ids(
+            db,
             "SELECT EXISTS(SELECT 1 " + MOUNT_VIEWER_JOIN + MOUNT_EFFECTIVE_FOR_VIEWER
+            + f" AND {member_of('b.id', bound)}"
             + " AND EXISTS(SELECT 1 FROM knowledge_objects ko "
             "WHERE ko.notebook_id = b.id AND ko.status=ANY(%s))) AS exists",
-            (viewer_id, notebook_id, list(USABLE_STATUSES)),
+            (viewer_id, notebook_id, bound.param, list(USABLE_STATUSES)),
         ).fetchone()
         return bool(row["exists"])
 

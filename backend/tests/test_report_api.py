@@ -923,11 +923,34 @@ def test_generate_does_not_retry_failed_report_without_outline(client, monkeypat
 # ---------------------------------------------------------------------------
 
 
-def _scoped_client(client, monkeypatch, *, with_base=False):
+def _give_library_text(notebook_id: str, name: str = "lib-text") -> None:
+    """给参考库一篇可见来源 + 一条 chunk:联邦原文通道够得着的证据。空范围判据的
+    参考库那一维按证据判(用户 2026-10-28 裁决),一个空壳参考库撑不起检索范围。"""
+    from app.api.deps import repository
+
+    now = "2026-10-28T00:00:00"
+    with repository()._write() as db:
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (f"s-{name}-{notebook_id}", notebook_id, name, "document", "ready",
+             now, now),
+        )
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,created_at) "
+            "VALUES (?,?,?,?,?)",
+            (f"c-{name}-{notebook_id}", notebook_id, f"s-{name}-{notebook_id}",
+             "some retrievable text", now),
+        )
+
+
+def _scoped_client(client, monkeypatch, *, with_base=False, base_text=True):
     """建一个 notebook(可选挂一个参考库),并 stub 掉 LLM 就绪与 plan job。
 
     返回 (notebook_id, base_notebook_id|None, launched) —— launched 记录每次
     _launch_plan_job 的 (args, kwargs),用于断言范围真的传给了后台任务。
+    参考库默认带一篇有原文的来源(``base_text``),否则它撑不起检索范围。
     """
     import app.api.report_routes as R
     from app.api.deps import repository
@@ -943,6 +966,8 @@ def _scoped_client(client, monkeypatch, *, with_base=False):
     if with_base:
         base = client.post("/api/notebooks", json={"name": "base"}).json()
         repository().mark_notebook_base(base["id"])
+        if base_text:
+            _give_library_text(base["id"])
         put = client.put(
             f"/api/notebooks/{nb['id']}/bases",
             json={"base_notebook_ids": [base["id"]]},

@@ -300,17 +300,34 @@ def _require_non_empty_scope(
     notebook: NotebookSummary,
     resolved_source_scope: SourceScope | None,
     resolved_base_scope: BaseNotebookScope | None,
+    repo,
 ) -> None:
     """Reject (409) a retrieval scope whose evidence universe is empty across
     BOTH dimensions at once -- the refusal ``_scope_is_empty`` decides."""
-    if _scope_is_empty(notebook, resolved_source_scope, resolved_base_scope):
+    if _scope_is_empty(notebook, resolved_source_scope, resolved_base_scope, repo):
         raise user_error(409, "当前检索范围为空，请至少选择一个来源或挂载参考库")
+
+
+def _checked_base_ids(
+    notebook: NotebookSummary, resolved_base_scope: BaseNotebookScope | None
+) -> list[str] | None:
+    """The reference libraries a request checked, read through the scope's
+    ``mode`` (``None`` = the dimension was not submitted, i.e. every mount).
+    Route callers hand over the frozen include ceiling; an exclude-shaped
+    scope is complemented against the mount roster rather than read inverted."""
+    if resolved_base_scope is None:
+        return None
+    if resolved_base_scope.mode == "include":
+        return list(resolved_base_scope.notebook_ids)
+    excluded = set(resolved_base_scope.notebook_ids)
+    return [ref.id for ref in notebook.base_notebooks if ref.id not in excluded]
 
 
 def _scope_is_empty(
     notebook: NotebookSummary,
     resolved_source_scope: SourceScope | None,
     resolved_base_scope: BaseNotebookScope | None,
+    repo,
 ) -> bool:
     """Whether a retrieval scope's evidence universe is empty across BOTH
     dimensions at once -- the one definition ``_require_non_empty_scope`` turns
@@ -325,9 +342,12 @@ def _scope_is_empty(
     refuse, and widening that is a separate behaviour change.
 
     判据是「这次勾了哪些库」而不是「挂了哪些库」。Each dimension answers with
-    its FROZEN selection when the request actually NARROWED it, and with the
-    notebook's real evidence universe when it did not. Neither fallback costs a
-    round trip: both ride on the ``NotebookSummary`` the caller already loaded.
+    the EVIDENCE its frozen selection reaches when the request actually NARROWED
+    it, and with the notebook's real evidence universe when it did not. The
+    local half rides on the ``NotebookSummary`` the caller already loaded; the
+    reference-library half asks the catalog (``repo._runtime.catalog``) the
+    same question ``ask_available`` asks, narrowed to the checked libraries,
+    and only when the local half came out empty.
 
     A dimension the request did not narrow must NOT be read as a non-empty one:
     that shortcut is what would let a library-only notebook (zero local
@@ -368,16 +388,20 @@ def _scope_is_empty(
         has_local = (
             not resolved_source_scope.narrowed and has_local_universe
         )
-    # 库维度**不需要**同样的 narrowed 分支:`_validate_base_scope` 的
-    # narrowed = len(selected) < len(mounted),空选择只有在零挂载时才 narrowed=False,
-    # 而那时的回落值 bool(notebook.base_notebooks) 同样为假 —— 两条规则逐值相同。
-    # 参考库也没有「没有可见行的隐藏证据」这回事:挂载集就是它完整的宇宙。
-    has_base = (
-        bool(resolved_base_scope.notebook_ids)
-        if resolved_base_scope is not None
-        else bool(notebook.base_notebooks)
-    )
-    return not has_local and not has_base
+    if has_local:
+        return False
+    # 参考库维度同样按**证据**判,不按「勾了几个」判(用户 2026-10-28 裁决,问答与报告
+    # 两个入口都改):勾了一个既无可用图谱、又无联邦原文通道够得着的可见原文的库,检索
+    # 宇宙照样是空的。判据就是 ask_available 参考库那一半本身
+    # (``NotebookSummaryQuery._base_evidence_available``),收窄到这次勾选的库;联邦
+    # 上界套在**勾选之后**、按挂载序排的名单上,与检索座位同源。没提交库维度、或勾选
+    # 覆盖全部挂载时,问的就是 get_notebook 已经问过的那一半,直接复用、零查询;只有
+    # 本地为空且参考库真被收窄时才多付至多两条 EXISTS。本地非空(绝大多数请求)在上面
+    # 已经返回,一条查询都不多;一个库都没勾(或一个都没挂)也不必问。
+    checked = _checked_base_ids(notebook, resolved_base_scope)
+    if not (notebook.base_notebooks if checked is None else checked):
+        return True
+    return not repo._runtime.catalog.base_evidence_available(notebook, checked)
 
 
 def _scope_receipt(
@@ -492,7 +516,9 @@ def _require_ask_available(
     if repo is not None:
         resolved_source_scope = _validate_source_scope(repo, notebook, source_scope)
     resolved_base_scope = _validate_base_scope(notebook, base_scope)
-    _require_non_empty_scope(notebook, resolved_source_scope, resolved_base_scope)
+    _require_non_empty_scope(
+        notebook, resolved_source_scope, resolved_base_scope, repo
+    )
     return resolved_source_scope, resolved_base_scope
 
 
