@@ -488,26 +488,15 @@ test("弹窗关着时上传失败:工具栏上的「导入失败」一直挂着,
   rerender({ isOpen: false });
   await act(async () => { fail(new Error("x")); await Promise.resolve(); });
   await waitFor(() => expect(result.current.view.uploadError).not.toBe(""));
-  expect(result.current.view.uploadFailedUnseen).toBe(true);
+  expect(result.current.view.uploadAttention).toBe("failed");
   rerender({ isOpen: true });
-  await waitFor(() => expect(result.current.view.uploadFailedUnseen).toBe(false));
+  await waitFor(() => expect(result.current.view.uploadAttention).toBe(""));
   expect(result.current.view.uploadError).not.toBe("");
   // 弹窗开着时失败的,原因已经在眼前:不挂工具栏上的那一句。
   api.uploadNotebookImport.mockRejectedValueOnce(new Error("y"));
   act(() => result.current.start());
   await waitFor(() => expect(importUpload.busy()).toBe(false));
-  expect(result.current.view.uploadFailedUnseen).toBe(false);
-});
-
-
-test("导出记忆的请求本身抛错:结果落在那几个字旁边,不悄悄回到原样", async () => {
-  const { result } = renderHook(() => useNotebookExport("nb1"));
-  await waitFor(() => expect(result.current.view.loading).toBe(false));
-  memories.exportDeletedNotebookMemories.mockRejectedValueOnce(new TypeError("body stream broke"));
-  await act(async () => { await result.current.exportMemories(); });
-  expect(result.current.view.memoryExporting).toBe(false);
-  expect(result.current.view.memoryResult).toBe("failed");
-  expect(result.current.view.memoryText).toBe("记忆没有导出，请重试。");
+  expect(result.current.view.uploadAttention).toBe("");
 });
 
 
@@ -523,4 +512,30 @@ test("上传的响应回来时导入已经做完(小文件):照样报告一次�
   api.listNotebookTransfers.mockResolvedValue([imp("tiny", { state: "succeeded", phase: "done", notebook_id: "nb-tiny" })]);
   await tick();
   expect(onNotebookReady).toHaveBeenCalledTimes(1);
+});
+
+test("连接断了、说不准有没有被接收:原因落在按钮旁,弹窗关着时工具栏说「待确认」", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { result, rerender } = renderImport();
+  await waitFor(() => expect(result.current.view.limitBytes).toBe(LIMIT));
+  act(() => result.current.chooseFile(new File([new Uint8Array(10)], "a.snbk")));
+  let cut: (error: unknown) => void = () => undefined;
+  api.uploadNotebookImport.mockImplementationOnce(() => new Promise((_, reject) => { cut = reject; }));
+  api.listNotebookTransfers.mockResolvedValueOnce([]).mockRejectedValueOnce(new TypeError("offline"));
+  act(() => result.current.start());
+  await waitFor(() => expect(importUpload.getSnapshot()?.stage).toBe("uploading"));
+  rerender({ isOpen: false });
+  await act(async () => { cut(new TypeError("Failed to fetch")); await Promise.resolve(); });
+  await waitFor(() => expect(result.current.view.uploadError).toContain("可能已被接收"));
+  expect(result.current.view.uploadAttention).toBe("unsure");
+});
+
+test("导出记忆的请求本身抛错:结果落在那几个字旁边,不悄悄回到原样", async () => {
+  const { result } = renderHook(() => useNotebookExport("nb1"));
+  await waitFor(() => expect(result.current.view.loading).toBe(false));
+  memories.exportDeletedNotebookMemories.mockRejectedValueOnce(new TypeError("body stream broke"));
+  await act(async () => { await result.current.exportMemories(); });
+  expect(result.current.view.memoryExporting).toBe(false);
+  expect(result.current.view.memoryResult).toBe("failed");
+  expect(result.current.view.memoryText).toBe("记忆没有导出，请重试。");
 });
