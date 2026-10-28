@@ -60,9 +60,12 @@ DIGEST_METRICS = 3
 TABLE_CELL_CHARS = 240
 TABLE_METRICS = 3
 TABLE_CONTRIBUTIONS = 2
-# Extracted fields become extra columns; one extraction call takes at most four
-# fields (``EXTRACT_MAX_FIELDS``) and the table keeps that width across calls.
+# Extracted fields the table shows (in its one ``EXTRA_FIELDS_HEADER`` column);
+# one extraction call takes at most four fields (``EXTRACT_MAX_FIELDS``) and
+# the table keeps that many across calls -- the rest are named in the coverage
+# line.
 TABLE_EXTRA_FIELDS = 4
+EXTRA_FIELDS_HEADER = "补充字段"
 UNEXPANDED_TITLES = 100
 # ``REASONING_MAX_DOCUMENT_READS x DOCUMENT_OVERVIEW_MAX_ELEMENTS`` above this
 # pushes ``read_document``'s band (k7001+) into this one, which closes the
@@ -116,10 +119,31 @@ class PaperCardEvidence:
     overflow_fields: tuple = ()
     unexpanded: tuple = ()
     table_rows: int = 0
+    # The run called ``find_sources``: the coverage line states the topic's
+    # coverage from it (``roster_omitted_for``).
+    searched: bool = False
 
     @property
     def paper_table(self) -> bool:
         return self.layout == ANSWER_LAYOUT_PAPER_TABLE and bool(self.table)
+
+
+#: The enumeration collection a paper-table answer leaves out of synthesis.
+ROSTER_COLLECTION = "sources"
+
+
+def roster_omitted_for(paper: Optional[PaperCardEvidence]) -> frozenset:
+    """Collections the enumeration preview leaves out for this answer.
+
+    A paper-table answer whose papers came from ``find_sources`` leads with a
+    coverage line computed from it; a document-roster preview cut by the
+    shared budget (``previewed 32`` of 40) would have the model write its own,
+    contradicting coverage claim, and the roster is not the topic's candidate
+    set anyway.  Without ``find_sources`` the roster may be the only list the
+    run holds, so it stays."""
+    if paper is not None and paper.paper_table and paper.searched:
+        return frozenset({ROSTER_COLLECTION})
+    return frozenset()
 
 
 def document_read_band_overflow(max_reads: int, max_elements: int) -> bool:
@@ -301,6 +325,7 @@ def build_paper_card_evidence(
         extra_fields=fields,
         overflow_fields=_all_fields(tools.extractions)[TABLE_EXTRA_FIELDS:],
         table_rows=max(0, int(table_rows)),
+        searched=bool(tools.finds),
     )
     if not table:
         return evidence
@@ -332,13 +357,35 @@ def _clean(text: Any) -> str:
     return neutralize_markers(_NEWLINES.sub(" ", str(text or ""))).strip()
 
 
-def _metric_text(metric: Mapping[str, Any]) -> str:
+# Units written flush against the number: symbols, never words.  ``x`` / ``X``
+# is the multiplication sign spelled in ASCII (``3.5x``).
+_FLUSH_UNITS = frozenset({"x", "X"})
+
+
+def value_with_unit(value: str, unit: str) -> str:
+    """``21.4 AP`` / ``79 GPU days`` / ``26 FPS``, but ``85.2%`` / ``4×`` /
+    ``90°``: a space only before a unit that starts with a letter or digit."""
+    if not unit:
+        return value
+    if not value:
+        return unit
+    if unit[0].isalnum() and unit not in _FLUSH_UNITS:
+        return f"{value} {unit}"
+    return f"{value}{unit}"
+
+
+def _metric_text(metric: Mapping[str, Any], *, compared: bool = False) -> str:
+    """``name value unit（setting）`` and, with ``compared``, `` vs compared_to``
+    (the card prompt keeps ``metrics`` to the paper's own method and puts the
+    baseline it is measured against in ``compared_to``)."""
     name = _clean(metric.get("name"))
     value = _clean(metric.get("value"))
     unit = _clean(metric.get("unit"))
     setting = _clean(metric.get("setting"))
-    text = f"{name} {value}{unit}".strip()
-    return f"{text}（{setting}）" if setting else text
+    text = f"{name} {value_with_unit(value, unit)}".strip()
+    text = f"{text}（{setting}）" if setting else text
+    against = _clean(metric.get("compared_to")) if compared else ""
+    return f"{text} vs {against}" if against else text
 
 
 def _year_venue(row: PaperRow) -> str:
@@ -480,10 +527,10 @@ def _title_cell(row: PaperRow, keys: Mapping[str, str]) -> str:
     return f"{title} {marker}" if marker else title
 
 
-def _row_line(row: PaperRow, paper: PaperCardEvidence) -> str:
+def _row_line(row: PaperRow, paper: PaperCardEvidence, *, extra_column: bool) -> str:
     keys = paper.keys
     metrics = [
-        (_metric_text(entry), _markers(_anchors(entry, "anchor"), keys))
+        (_metric_text(entry, compared=True), _markers(_anchors(entry, "anchor"), keys))
         for entry in (row.card.get("metrics") or [])[:TABLE_METRICS]
         if isinstance(entry, Mapping)
     ]
@@ -492,17 +539,16 @@ def _row_line(row: PaperRow, paper: PaperCardEvidence) -> str:
         for entry in (row.card.get("contributions") or [])[:TABLE_CONTRIBUTIONS]
         if isinstance(entry, Mapping)
     ]
-    values = dict(row.values)
-    extra = [
-        _cell([(values[name].value, _markers([values[name].element_id], keys))])
-        if name in values else _EMPTY_CELL
-        for name in paper.extra_fields
-    ]
     cells = [
         _title_cell(row, keys),
         _cell_escape(_year_venue(row))[:TABLE_CELL_CHARS] or _EMPTY_CELL,
-        _cell(metrics), _cell(contributions), *extra,
+        _cell(metrics), _cell(contributions),
     ]
+    if extra_column:
+        cells.append(_cell([
+            (f"{_clean(name)}: {_clean(value.value)}", _markers([value.element_id], keys))
+            for name, value in row.values
+        ]))
     return "| " + " | ".join(cells) + " |"
 
 
@@ -511,12 +557,17 @@ def render_paper_table(paper: PaperCardEvidence) -> str:
     inline = paper.rows[:paper.table_rows]
     if not inline:
         return ""
+    # Extracted values share ONE column, ``field: value [kN]`` per entry: a
+    # column per field is mostly empty (a field is usually extracted for the
+    # one or two papers whose card lacks it).  No inline row with a value, no
+    # column.
+    extra_column = any(row.values for row in inline)
     headers = ["论文", "年份 / 会议", "主要技术指标", "关键创新点",
-               *(_cell_escape(name) for name in paper.extra_fields)]
+               *((EXTRA_FIELDS_HEADER,) if extra_column else ())]
     lines = [
         "| " + " | ".join(headers) + " |",
         "|" + "---|" * len(headers),
-        *(_row_line(row, paper) for row in inline),
+        *(_row_line(row, paper, extra_column=extra_column) for row in inline),
     ]
     table = "\n".join(lines)
     if paper.unexpanded:
@@ -661,6 +712,8 @@ __all__ = [
     "paper_rows",
     "registered_keys",
     "render_paper_table",
+    "roster_omitted_for",
     "sectioned_paper_prefix",
+    "value_with_unit",
     "with_registration",
 ]

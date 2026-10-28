@@ -363,9 +363,12 @@ PAPER_TABLE_ANSWER_RULE = (
     "that table or re-list the papers one by one. Write only an overview of "
     "what these papers address and a comparison across them (approaches, "
     "trade-offs, which results are comparable and under which settings), "
-    "citing the same [k] markers the paper digests carry. When a coverage "
-    "note in the evidence says the list may be incomplete, never claim it "
-    "is complete.\n"
+    "citing the same [k] markers the paper digests carry. The coverage line "
+    "is authoritative about how many papers were found and expanded: do NOT "
+    "write your own statement of how many sources or documents exist or were "
+    "read, previewed or listed, and do not add your own caveat about the "
+    "list's completeness. When a coverage note in the evidence says the list "
+    "may be incomplete, never claim it is complete.\n"
 )
 #: Rule 16 for the first section of a sectioned synthesis (the only section
 #: that sees the paper digests): the table sits before the first section.
@@ -376,8 +379,11 @@ PAPER_TABLE_SECTION_RULE = (
     "re-list the papers one by one. Write this section's own content as "
     "instructed below; you may add a short comparison across the papers "
     "(approaches, trade-offs, comparable results), citing the same [k] "
-    "markers the paper digests carry. Never claim the paper list is complete "
-    "when a coverage note in the evidence says it may not be.\n"
+    "markers the paper digests carry. The coverage line before the table is "
+    "authoritative about how many papers were found and expanded: do NOT "
+    "write your own statement of how many sources or documents exist or were "
+    "read, previewed or listed. Never claim the paper list is complete when a "
+    "coverage note in the evidence says it may not be.\n"
 )
 
 
@@ -1074,9 +1080,17 @@ def keyword_language_rule(corpus_langs: Optional[Sequence[str]]) -> str:
         "corpus needs only single-language keywords.")
 
 
+#: ``find_sources.terms`` bounds as the reflect prompt states them; mirrored
+#: (not imported: the finder pulls the whole retrieval stack) from
+#: ``source_finder.FIND_SOURCES_MAX_TERMS`` / ``FIND_SOURCES_TERM_MAX_CHARS``,
+#: pinned equal by ``test_reasoning_paper_tools``.
+FIND_SOURCES_PROMPT_MAX_TERMS = 6
+FIND_SOURCES_PROMPT_TERM_MAX_CHARS = 64
+
+
 def _paper_tool_lines(
     find_sources_cap: int, paper_cards_cap: int, extract_cap: int,
-    enumerate_scope: bool, answer_layout: bool = False,
+    enumerate_scope: bool, answer_layout: bool = False, roster: bool = False,
 ) -> str:
     """The paper tools' action lines and usage paragraph for ``reflect_prompt``
     (spec 2026-10-28 §7.1). Only the tools whose cap is non-zero are named --
@@ -1094,7 +1108,10 @@ def _paper_tool_lines(
             "their tier (strong / related), year, venue and card status. Set "
             "find_sources.terms to the topic's LITERAL words, abbreviations and "
             "aliases as the documents write them (matched against titles, paper "
-            "titles, keywords, authors, venues and summaries) and "
+            "titles, keywords, authors, venues and summaries) -- at most "
+            f"{FIND_SOURCES_PROMPT_MAX_TERMS} terms, each at most "
+            f"{FIND_SOURCES_PROMPT_TERM_MAX_CHARS} characters, the most literal "
+            "first (terms past the limit are dropped) -- and "
             "find_sources.query to a natural-language description of the topic "
             "(semantic search); leave either empty when it does not apply. "
             "Optional filters: year_from / year_to (a year written as a string, "
@@ -1156,7 +1173,16 @@ def _paper_tool_lines(
             "recall capped, its lexical coverage incomplete (papers whose "
             "metadata is not extracted yet, libraries it could not read) or "
             "found documents remain unexpanded, the answer must say that more "
-            "may exist — NEVER claim the list is complete.\n"
+            "may exist — NEVER claim the list is complete."
+            # The roster sentence names the enumerate action's ``sources``
+            # collection, so it rides the enumeration tools (``roster``).
+            + (" When find_sources reports no coverage gap (semantic recall not "
+               "capped, lexical coverage complete) and the question is about a "
+               "topic, its result already is the candidate set: do NOT also "
+               "list the whole document roster (enumerate.collection "
+               "\"sources\") to double-check it — list the roster only when "
+               "the question is about the whole collection." if roster else "")
+            + "\n"
         )
     return lines
 
@@ -1642,7 +1668,7 @@ def reflect_prompt(
     )
     paper_tool_actions = _paper_tool_lines(
         find_sources_cap, paper_cards_cap, extract_cap, enumerate_scope,
-        answer_layout)
+        answer_layout, roster=enumeration_tools)
     # The outline scratchpad (design doc §3.1).  Three things have to be said
     # here or the action is worse than useless:
     #   * WHEN — it earns its turns on answers that have structure to build

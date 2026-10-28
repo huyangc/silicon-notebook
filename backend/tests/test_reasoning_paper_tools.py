@@ -380,6 +380,27 @@ def test_coverage_gaps_reach_the_ledger_and_forbid_a_complete_claim(corpus):
     assert "已找到但还没取卡片的强相关文档:p1" in ledger
 
 
+def test_terms_past_the_limit_are_dropped_and_named_not_the_whole_call(corpus):
+    """T7 robotrl 的原样 payload(8 个 terms):真 finder 曾整次拒绝
+    (`find_sources_invalid`),多花一轮 reflect。执行器按前 6 个执行并在账本里点名
+    丢掉的两个;finder 自己的校验(MCP 也走它)不变。"""
+    repo, nb, _seeded = corpus
+    terms = ["reinforcement learning", "robot manipulation", "dexterous manipulation",
+             "offline reinforcement learning", "hierarchical reinforcement learning",
+             "reward learning", "visuomotor manipulation", "sim-to-real grasping"]
+    llm = _RecordingLLM([_find(
+        query="reinforcement learning for robot manipulation", terms=terms,
+        kind="papers", scope="current_notebook")])
+    result = _run(_retriever(repo, llm), nb)
+    assert "find_sources_invalid" not in _skips(result)
+    (found,) = result.paper_finds
+    assert found.request.terms == tuple(terms[:6])
+    assert found.result.items
+    ledger = llm.prompts[1]
+    assert "find_sources.terms 最多 6 个,这次按前 6 个执行" in ledger
+    assert "「visuomotor manipulation」、「sim-to-real grasping」" in ledger
+
+
 @pytest.mark.parametrize("error, reason", [
     (FindSourcesCursorError("the cursor belongs to other parameters"),
      "find_sources_cursor_invalid"),

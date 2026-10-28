@@ -335,6 +335,18 @@ def answer_layout_value(data: Mapping[str, Any]) -> str:
     return layout if layout in ANSWER_LAYOUTS else ""
 
 
+def cap_find_terms(terms: Sequence[str], limit: int) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    """``(kept, dropped)``: the first ``limit`` distinct terms and the rest.
+
+    The finder refuses more than its term cap outright (it is also the MCP
+    tool's validation); the Agent's call is an acceptable deviation, so the
+    executor keeps the first ``limit`` terms -- the model lists the most
+    literal ones first -- and names the rest in the ledger instead of
+    discarding the whole call."""
+    distinct = tuple(dict.fromkeys(terms))
+    return distinct[:limit], distinct[limit:]
+
+
 def find_sources_has_criteria(decision: Any) -> bool:
     return bool(
         decision.find_sources_query or decision.find_sources_terms
@@ -632,8 +644,10 @@ __all__ = [
     "RejectedSource",
     "ResolvedSource",
     "answer_layout_value",
+    "cap_find_terms",
     "card_anchor_ids",
     "card_has_content",
+    "clip",
     "extraction_value_count",
     "find_coverage_gaps",
     "missing_paper_tool_argument",

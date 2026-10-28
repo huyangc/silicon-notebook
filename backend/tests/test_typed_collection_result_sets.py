@@ -575,6 +575,34 @@ def test_empty_outcomes_returns_empty_preview():
     assert preview.shown_rows == []
 
 
+def test_omitted_collection_gets_no_header_rows_or_quota():
+    """A paper-table answer leaves the document roster out (``omit_collections``):
+    no roster header (no ``previewed N`` for the model to restate), no rows, no
+    granularity note, and the other collections keep the whole row allowance."""
+    roster = _outcome(
+        collection="sources", kind="",
+        items=[_source_item(source_id=f"s{i}", source_title=f"论文{i}") for i in range(4)],
+        coverage=_coverage(returned=4, returned_total=4, scanned=4, total=4, complete=True))
+    formulas = _outcome(
+        items=[_element_item(element_id=f"el-{i}") for i in range(4)],
+        coverage=_coverage(returned=4, returned_total=4, scanned=4, total=4, complete=True))
+    both = enumeration_prompt_block([roster, formulas], inline_rows=4, budget_chars=10_000)
+    assert both.shown_rows == [2, 2] and "documents, listed 4/4" in both.text
+
+    preview = enumeration_prompt_block(
+        [roster, formulas], inline_rows=4, budget_chars=10_000,
+        omit_collections=frozenset({"sources"}))
+    assert preview.shown_rows == [0, 4]
+    assert "documents" not in preview.text and "论文1" not in preview.text
+    assert "Document roster guidance" not in preview.text
+    assert "previewed 4]" in preview.text
+
+    alone = enumeration_prompt_block(
+        [roster], inline_rows=4, budget_chars=10_000,
+        omit_collections=frozenset({"sources"}))
+    assert alone.text == "" and alone.shown_rows == [0] and alone.evidence_by_id == {}
+
+
 def test_complete_header_reports_previewed_count():
     items = [_element_item(element_id=f"el-{i}") for i in range(3)]
     outcome = _outcome(

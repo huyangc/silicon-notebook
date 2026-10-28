@@ -20,7 +20,8 @@ from app.core.model_values import as_text
 
 # prompt / schema / 校验规则 / 采样口径任何一项变化都要加一:旧卡片在读取时
 # 因版本不等自动失效(规格 §4.4「有效性在读取时判定」),不写清理代码。
-PAPER_CARD_VERSION = 1
+# 2:指标只收本文方法的成绩,基线数值进 compared_to,setting 写测量条件(T7 验收)。
+PAPER_CARD_VERSION = 2
 
 # 示例里不写 null、空列表只给字符串列表字段(本 hint 一个都没有,所以每个列表都
 # 给一个示例项):否则严格 schema 投影整体回落 JSON 模式(json-hint-strict-alignment)。
@@ -106,12 +107,18 @@ def paper_card_prompt(input_block: str) -> str:
         f"problem / method: <= {PROBLEM_MAX_CHARS} characters each.\n"
         f"- contributions: at most {MAX_CONTRIBUTIONS} key innovations, each "
         f"<= {CONTRIBUTION_MAX_CHARS} characters.\n"
-        f"- metrics: at most {MAX_METRICS} main quantitative results. \"value\" "
-        "is the number EXACTLY as printed in the cited excerpt (e.g. \"85.2\"); "
-        "put the unit (%, x, ms, ...) in \"unit\", the benchmark / dataset / "
-        "split in \"setting\", and the baseline it is compared against (if "
-        "stated) in \"compared_to\". \"anchor\" is the ONE excerpt (often a "
-        "table) where that number appears.\n"
+        f"- metrics: at most {MAX_METRICS} main quantitative results of THIS "
+        "paper's own proposed method ONLY. \"value\" is the number EXACTLY as "
+        "printed in the cited excerpt (e.g. \"85.2\"); put the unit (%, x, ms, "
+        "...) in \"unit\". \"setting\" is the dataset / benchmark / split / "
+        "evaluation condition that number was measured on (e.g. \"ImageNet "
+        "256, 250 steps\") -- never the header of another column. A number "
+        "of a baseline, a prior method or an ablation row is NOT a metric: put "
+        "it in \"compared_to\" of the metric it is compared with, naming the "
+        "row (e.g. \"BigGAN-deep 6.95\"); leave compared_to empty when the "
+        "excerpt states no comparison. In a results table, take values from "
+        "the row of the paper's own method. \"anchor\" is the ONE excerpt "
+        "(often a table) where that number appears.\n"
         f"- datasets: at most {MAX_DATASETS} datasets or benchmarks used.\n"
         "- Write the text in the language of the paper.\n"
         "- Return JSON only.\n\n"
