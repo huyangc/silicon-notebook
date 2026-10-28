@@ -50,6 +50,9 @@ class NotebookTransferJob(BaseModel):
     reembed: Optional[dict[str, Any]] = None
     index: Optional[dict[str, Any]] = None
     error: Optional[NotebookTransferError] = None
+    #: An import's client upload id (``X-Upload-Id`` of the upload that created
+    #: it; ``""`` when none was sent, and always for an export).
+    client_upload_id: str = ""
 
 
 class NotebookTransferList(BaseModel):

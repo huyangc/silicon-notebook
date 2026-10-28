@@ -189,3 +189,7 @@ def test_a_notebook_with_an_empty_knowhow_table_round_trips_pg(world):
 
 def test_refusals_say_whether_to_upgrade_or_retry_pg(world):
     cases.check_refusals_say_whether_to_upgrade_or_retry(world)
+
+
+def test_a_retry_with_the_same_upload_id_returns_its_job_pg(world):
+    cases.check_a_retry_with_the_same_upload_id_returns_its_job(world)

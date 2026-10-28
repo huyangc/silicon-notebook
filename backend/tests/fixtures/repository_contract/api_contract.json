@@ -10153,6 +10153,11 @@
               "title": "Archive Bytes",
               "type": "integer"
             },
+            "client_upload_id": {
+              "default": "",
+              "title": "Client Upload Id",
+              "type": "string"
+            },
             "created_at": {
               "title": "Created At",
               "type": "string"
@@ -21287,7 +21292,7 @@
       },
       "/api/notebook-imports": {
         "post": {
-          "description": "Import one ``.snbk`` file as a new notebook owned by the caller (202 + the\njob). The body is the raw file (``Content-Type: application/zip``); ``name``\nrenames the new notebook (empty: the exported name). A file that is not an\narchive or is damaged is 400; one written by a newer build is 400 with the\ndetail ``{\"code\": \"archive_too_new\", \"message\"}`` (upgrade this deployment).",
+          "description": "Import one ``.snbk`` file as a new notebook owned by the caller (202 + the\njob). The body is the raw file (``Content-Type: application/zip``); ``name``\nrenames the new notebook (empty: the exported name). A file that is not an\narchive or is damaged is 400; one written by a newer build is 400 with the\ndetail ``{\"code\": \"archive_too_new\", \"message\"}`` (upgrade this deployment).\n\n``X-Upload-Id`` (optional; 8-64 of ``A-Z a-z 0-9 _ -``, else 400) names this\nupload attempt chain. When the caller already has a job carrying the id, that\njob is answered (202, the same body) and the request body is not read: a\nretry never makes a second import. While an upload with the id is still being\nreceived or checked, 409 ``{\"code\": \"upload_in_progress\", \"message\"}``.",
           "operationId": "import_notebook_route_api_notebook_imports_post",
           "parameters": [
             {
