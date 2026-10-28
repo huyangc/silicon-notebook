@@ -701,3 +701,28 @@ def test_one_model_failure_classification_for_cards_and_extraction(error, expect
     from app.services.model_work import model_failure_reason
 
     assert model_failure_reason(error) == expected
+
+
+
+def test_an_extraction_failure_logs_only_the_class_and_code(repo, nb, service, model, monkeypatch):
+    secret = "sk-LEAK-0000 https://user:pw@provider.example/v1"
+    calls = []
+
+    class Recorder:
+        def __getattr__(self, method):
+            return lambda msg, *args, **kwargs: calls.append((method, msg % args if args else msg, kwargs))
+
+    card_kit.seed_source(repo, nb, "s1", doc_type="meeting_notes", filler=2)
+    monkeypatch.setattr(service._event_log, "logger", Recorder())
+
+    def boom(key, fields, cancel_event):
+        try:
+            raise ValueError(secret)
+        except ValueError as original:
+            raise RuntimeError(f"wrapped {secret}") from original
+
+    monkeypatch.setattr(service, "_extract_one", boom)
+    [result] = _extract(service, nb, ["s1"], ["accuracy"])
+    assert (result.status, result.reason) == ("failed", "error:RuntimeError")
+    assert calls and all(method != "exception" and not kwargs.get("exc_info") for method, _t, kwargs in calls)
+    assert not any("LEAK" in text or "user:pw" in text for _m, text, _k in calls)

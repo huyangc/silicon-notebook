@@ -973,3 +973,68 @@ def test_pool_is_bounded_by_the_service_parallelism(repo, nb, service, model, mo
     results = _get(service, nb, ["s1", "s2", "s3", "s4", "s5"])
     assert {r.status for r in results} == {"generated"}
     assert peak[0] <= 2
+
+
+_SECRET = "sk-LEAK-0000 https://user:pw@provider.example/v1"
+
+
+class _Recorder:
+    """Stand-in logger: records every call, including exc_info, so a test can
+    prove no traceback (and with it the provider's original exception) is logged."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, tuple, dict]] = []
+
+    def __getattr__(self, method):
+        def record(msg, *args, **kwargs):
+            self.calls.append((method, msg, args, kwargs))
+        return record
+
+    def text(self) -> str:
+        return " ".join(f"{m} {msg % args if args else msg} {kw}" for m, msg, args, kw in self.calls)
+
+
+def _assert_no_leak(recorder: _Recorder) -> None:
+    assert recorder.calls, "expected the failure to be logged"
+    assert all(method != "exception" and not kwargs.get("exc_info")
+               for method, _msg, _args, kwargs in recorder.calls)
+    assert "LEAK" not in recorder.text() and "user:pw" not in recorder.text()
+
+
+class _LeakyStatus(Exception):
+    """A provider error whose own text carries content that must never reach logs."""
+
+    def __init__(self) -> None:
+        super().__init__(f"HTTP 400 body={_SECRET}")
+        self.status_code = 400
+
+
+def test_a_card_failure_logs_only_the_class_and_code(repo, nb, service, model, monkeypatch):
+    _paper(repo, nb, "s1")
+    recorder = _Recorder()
+    monkeypatch.setattr(service._event_log, "logger", recorder)
+
+    def boom(plan, cancel_event):
+        try:
+            raise ValueError(_SECRET)
+        except ValueError as original:
+            raise RuntimeError(f"wrapped {_SECRET}") from original
+
+    monkeypatch.setattr(service, "_generate", boom)
+    [result] = _get(service, nb, ["s1"])
+    assert (result.status, result.reason) == ("failed", "error:RuntimeError")
+    _assert_no_leak(recorder)
+
+
+def test_a_metadata_failure_logs_only_the_class_and_code(repo, nb, service, model, monkeypatch):
+    _paper(repo, nb, "s1", meta=None)
+    recorder = _Recorder()
+    monkeypatch.setattr(service._ingestion.event_log, "logger", recorder)
+
+    def leaky(prompt):
+        raise _LeakyStatus()
+
+    model.on_meta = leaky
+    assert _get(service, nb, ["s1"])[0].reason == "metadata_failed"
+    _assert_no_leak(recorder)
+    assert any("provider_error" in str(args) for _m, _msg, args, _kw in recorder.calls)
