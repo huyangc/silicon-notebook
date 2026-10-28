@@ -151,7 +151,8 @@ def paper_card_prompt(input_block: str) -> str:
 
 # 千分位:逗号两侧都是数字,且右侧恰好三位后不再接数字。
 _THOUSANDS_RE = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
-_NUMBER_RE = re.compile(r"(?<![\d.])(-?)(\d+(?:\.\d+)*)(?!\d)")
+# 省略整数位的小数(``.95``、``±.9``)也是数:规范成 ``0.95``,与写全的 ``0.95`` 同形。
+_NUMBER_RE = re.compile(r"(?<![\d.])(-?)(\d+(?:\.\d+)*|\.\d+)(?!\d)")
 
 
 def _canonical_number(token: str) -> str:
