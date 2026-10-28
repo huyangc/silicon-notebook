@@ -425,3 +425,19 @@ def test_cap_number_safe_never_splits_a_numeric_expression(value, limit, expecte
     from app.services.paper_cards import cap_number_safe
 
     assert cap_number_safe(value, limit) == expected
+
+
+
+@pytest.mark.parametrize(("value", "text", "verdict"), [
+    (".95", "Accuracy is .72", "value_not_in_anchor"),          # codex round 9 repro
+    ("85.2\u00b1.9", "85.2\u00b10.1", "value_not_in_anchor"),  # codex round 9 repro
+    ("85.2\u00b1.9", "85.2 \u00b1 0.9", ""),
+    (".95", "top-1 0.95 on val", ""),
+    ("0.95", "top-1 .95 on val", ""),
+    ("-.5", "delta of 0.5", "value_not_in_anchor"),
+])
+def test_leading_dot_decimals_are_numbers(value, text, verdict):
+    from app.services.paper_cards import ground_prose_numbers, ground_value
+
+    assert ground_value(value, text) == verdict
+    assert ground_prose_numbers(value, text) == verdict
