@@ -5160,17 +5160,16 @@ class AskService:
         # **清洗本身是必需的**(codex PR#407 R3 P1):按节解析只决定谁能拿到锚点,
         # 而前端是拿正文里的标记去查**合并后**的引用表 —— 不清洗,第二节那个 `[k1]`
         # 会绑到第一节的无关证据上,按节解析防住的误绑从渲染这道后门回来。
-        id_map = with_paper_registration(id_map, paper)
         if sectioned:
             answer = _keep_only_section_markers(answer, set(id_map))
-        else:
-            answer = compose_paper_answer(answer, paper)
         # 锚点按**本节自己的** id_map 解析(节模式下 id_map 只含本节证据)。合并
         # 之后再统一解析拼好的全文是错的:一节写出别节号段的 `[k]`(它根本没见过
         # 那个号)只可能是幻觉,合并解析会把它一本正经地绑到别节的证据上,而按节
         # 解析直接丢弃 —— 这正是号段偏移要买到的东西。合法标记两种口径结果相同
         # (号段互不相交),差别只在幻觉这一种情况上。
         anchors = self._parse_answer_anchors(answer, id_map)
+        if not sectioned:  # 论文表:模型正文按 prompt 号段、表格按登记表各解析一次
+            answer, anchors = self._with_paper_table(answer, anchors, paper, set(id_map))
         return answer, llm_grounded, anchors, context.counts
 
     def _answer_reasoning_sections(
@@ -5391,27 +5390,49 @@ class AskService:
             baseline_assemblies=baseline_assemblies,
         )
 
+    def _paper_table_anchors(self, text: str, paper) -> list:
+        """The anchors of the system-written table text, bound against the
+        registration ONLY: the table cites registered keys and nothing else."""
+        return self._parse_answer_anchors(text, with_paper_registration({}, paper))
+
+    def _with_paper_table(self, answer: str, anchors: list, paper, prompt_keys: set) -> tuple:
+        """A single synthesis's answer laid out as the paper table: the model's
+        text keeps only markers of keys its prompt carried (a ``k9xxx`` it made
+        up would otherwise render bound to the table's anchor of that key), then
+        coverage line + text + table; the table's anchors follow the text's.
+        No table, or an empty model answer (the retry reads it): unchanged."""
+        if paper is None or not paper.paper_table or not answer:
+            return answer, anchors
+        answer = compose_paper_answer(_keep_only_section_markers(answer, prompt_keys), paper)
+        keys = {anchor.key for anchor in anchors}
+        return answer, anchors + [
+            a for a in self._paper_table_anchors(sectioned_paper_prefix(paper), paper)
+            if a.key not in keys]
+
     def _with_sectioned_paper_table(self, answer: str, anchors: list, paper) -> tuple:
         """The sectioned answer led by the paper table (once, before the first
         section) and its anchors -- the table's markers bound against the
         registration, first, then the sections' (a key both carry kept once).
-        Without a table: ``(answer, anchors)`` unchanged."""
+        Also the synthesis-failure fallback (``answer`` = the honest-degradation
+        text): the table is deterministic and its citations registered, so it
+        still follows.  Without a table: ``(answer, anchors)`` unchanged."""
         prefix = sectioned_paper_prefix(paper)
-        if not prefix or not answer:
+        if not prefix:
             return answer, anchors
-        table_anchors = self._parse_answer_anchors(prefix, dict(paper.id_map))
+        table_anchors = self._paper_table_anchors(prefix, paper)
         keys = {anchor.key for anchor in table_anchors}
-        return (f"{prefix}\n\n{answer}",
+        return (f"{prefix}\n\n{answer}" if answer else prefix,
                 table_anchors + [a for a in anchors if a.key not in keys])
 
-    def _paper_card_evidence(self, stage) -> "PaperCardEvidence | None":
+    def _paper_card_evidence(self, stage, *, for_answer: bool = True) -> "PaperCardEvidence | None":
         """The run's paper-tool evidence for synthesis (``paper_card_answer``):
         every card / extracted-value element registered under k9001+ through
         ``collection_item_citations`` (one bounded hydration, participant and
         ceiling checks, read attestation) and, for ``paper_table``, the table.
         ``None`` without paper tools -- and when building it fails: then no key,
         no digest and no table exist, never a table whose markers bind to
-        nothing (logged by class name, the answer proceeds as prose)."""
+        nothing (logged by class name, the answer proceeds as prose).
+        ``for_answer=False`` (retrieval-only output): digest keys only, no table."""
         tools = getattr(stage, "paper_tools", None)
         if tools is None:
             return None
@@ -5425,6 +5446,7 @@ class AskService:
                     items, active_notebook_id=notebook_id),
                 tier_of=self.evidence_context.tier_map,
                 table_rows=stage.prepared.limits.paper_table_rows,
+                for_answer=for_answer,
             )
         except (AskCancelled, RetrievalControlError):
             raise
@@ -8588,8 +8610,9 @@ class AskService:
          enumeration_block_dropped, collection_item_citations,
          document_read_block_dropped) = self._assemble_structured_evidence(
             stage, answer_client, collection_map_prompt_block, paper)
-        if paper is not None:  # 登记的引用卡按锚点的 object_id(元素 id)发
-            collection_item_citations.update(paper.citations)
+        if paper is not None:  # 登记的引用卡按锚点的 object_id(元素 id)发;
+            for element_id, citation in paper.citations.items():  # 清单行的卡不被顶掉
+                collection_item_citations.setdefault(element_id, citation)
         run.paper_evidence = paper
         run.answer, run.llm_grounded, run.anchors = answer, llm_grounded, anchors
         run.synth_failed, run.synthesis_ran = synth_failed, synthesis_ran
@@ -8763,6 +8786,8 @@ class AskService:
                 service="ask_answer",
             )
             synth_failed = not _ok
+            if synth_failed:  # 论文表是确定性的、引用已登记:合成失败也照样给出
+                answer, anchors = self._with_sectioned_paper_table(answer, anchors, paper)
             synthesis_ran = True
             if outline_fallback and _ok:
                 # 只摘分节那一段(mark..fallback_mark)。单次合成自己那几条
@@ -8847,8 +8872,12 @@ class AskService:
             object_id=relation_id, relevance=relevance,
         ) for relation_id, relevance in relation_relevances.items()]
         citations.extend(self._memory_citations(anchors, memory_hits))
+        # 卡片段(k9001+)的锚点不走元素腿:那条腿逐锚点建卡,同一元素被 k4001 与
+        # k9xxx 各引一次会得到两张卡;卡片段自己的卡在下面的清单循环里按元素补发。
+        paper = run.ready("paper_evidence")
+        paper_keys = paper_registered_keys(paper)
         citations.extend(self.evidence_context.element_citations(
-            elements, anchors, notebook_id=notebook_id))
+            elements, [a for a in anchors if a.key not in paper_keys], notebook_id=notebook_id))
         # 原文段腿:候选集口径与读取复用见 `_reasoning_chunk_cards`;清空闸照常适用,
         # 这些卡不参与附图(见下面 attach_citation_images 处按身份排除的理由)。
         chunk_cards = self._reasoning_chunk_cards(chunks, reasoning_baseline, notebook_id)
@@ -8863,12 +8892,16 @@ class AskService:
         # .citation`),所以下面那次 `attach_citation_images` 必须按身份把它们
         # 排除——理由写在那处。
         collection_citation_ids: set[int] = {id(c) for c in (*chunk_cards, *report_cards.citations)}
+        # 论文卡片段(k9001+)的卡只在同一元素还没有卡时才发:同一个元素被 k4001 与
+        # k9xxx 各引一次时只留一张。只作用于卡片段——清单行(k5001+)的既有行为不动。
+        paper_card_ids = {id(c) for c in paper.citations.values()} if paper is not None else set()
         for anchor in anchors:
             citation = collection_item_citations.get(anchor.object_id)
             if citation is None:
                 continue
             identity = (citation.source_id, citation.element_id)
-            if identity in seen_collection_citations:
+            if identity in seen_collection_citations or (id(citation) in paper_card_ids and any(
+                    c.element_id == citation.element_id for c in citations)):
                 continue
             seen_collection_citations.add(identity)
             citations.append(citation)
@@ -9045,7 +9078,7 @@ class AskService:
         grounded = run.ready("grounded")
         synth_failed = run.ready("synth_failed")
         typed_collection_result_sets = run.ready("typed_collection_result_sets")
-        if answer:
+        if answer and not synth_failed:
             conclusion = _MARKER_GROUP_RE.sub("", answer).strip()
             llm_mode = "grounded" if grounded else "ungrounded"
         elif synth_failed:
@@ -9057,6 +9090,9 @@ class AskService:
                 "请重试该问题;下方为已检索到的证据。"
                 if top_hits else
                 "本次答案合成未产出内容,请重试该问题。")
+            if answer:  # 只有论文表(确定性、引用已登记)会在合成失败时留下正文
+                answer = f"{conclusion}\n\n{answer}"
+                conclusion = _MARKER_GROUP_RE.sub("", answer).strip()
         else:
             llm_mode = "deterministic"
             conclusion = _NO_RETRIEVAL_EVIDENCE_MESSAGE
@@ -9214,7 +9250,7 @@ class AskService:
         trace = list(stage.trace)
         raise_if_cancelled(cancel_event)
         map_block = collection_map_block(stage.collection_map_text)
-        paper = self._paper_card_evidence(stage)  # 摘要块同答案路径;表格不是证据
+        paper = self._paper_card_evidence(stage, for_answer=False)  # 只登记摘要能出现的键
         (structured_block, structured_map, _result_sets, _enumeration_dropped,
          _collection_citations, _read_dropped) = self._assemble_structured_evidence(
             stage, _EvidenceAssemblyClient(), map_block, paper)

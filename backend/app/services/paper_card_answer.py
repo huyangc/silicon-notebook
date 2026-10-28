@@ -36,10 +36,11 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
+from app.services.citation_markers import neutralize_markers
 from app.services.context_spans import Glue, concat, entry_lines, joined
 from app.services.reasoning_paper_tools import (
     ANSWER_LAYOUT_PAPER_TABLE,
-    card_anchor_ids,
+    ANSWER_LAYOUT_PROSE,
     card_has_content,
     find_coverage_gaps,
 )
@@ -77,7 +78,6 @@ PAPER_DIGEST_GUIDANCE = (
 )
 
 _EMPTY_CELL = "—"
-_MARKER_LIKE = re.compile(r"\[(\s*k\d)")
 _NEWLINES = re.compile(r"[\r\n]+")
 
 
@@ -112,6 +112,8 @@ class PaperCardEvidence:
     coverage: str = ""
     table: str = ""
     extra_fields: tuple = ()
+    # Extracted fields past ``TABLE_EXTRA_FIELDS``: named in the coverage line.
+    overflow_fields: tuple = ()
     unexpanded: tuple = ()
     table_rows: int = 0
 
@@ -140,20 +142,20 @@ def _find_index(finds: Sequence[Any]) -> dict:
     return index
 
 
-def _extra_fields(extractions: Sequence[Any]) -> tuple:
+def _all_fields(extractions: Sequence[Any]) -> tuple:
     fields: list[str] = []
     for outcome in extractions:
         for name in outcome.fields:
             if name not in fields:
                 fields.append(name)
-    return tuple(fields[:TABLE_EXTRA_FIELDS])
+    return tuple(fields)
 
 
 def paper_rows(tools: Any) -> tuple[tuple, tuple]:
     """``(rows, extra_fields)``: cards in first-request order, then the papers
     that only have extracted values, in extraction order."""
     found = _find_index(tools.finds)
-    fields = _extra_fields(tools.extractions)
+    fields = _all_fields(tools.extractions)[:TABLE_EXTRA_FIELDS]
     values: dict = {}
     titles: dict = {}
     for outcome in tools.extractions:
@@ -203,27 +205,31 @@ def _anchors(entry: Any, name: str = "anchors") -> list[str]:
     return [str(a) for a in (raw if isinstance(raw, list) else [raw]) if a]
 
 
-def _visible_anchor_ids(row: PaperRow) -> list[str]:
-    """The anchors the table and the digest can show, in display order."""
+def _visible_anchor_ids(row: PaperRow, *, table: bool) -> list[str]:
+    """The anchors this row can show, in display order: the digest's (the
+    first anchor of the tl;dr and of each of the first two contributions, the
+    first three metrics, the extracted values) and, with ``table``, the
+    table's (a contribution cell shows up to two anchors).  Nothing else is
+    registered: a key no answer text can carry would only be a card that
+    nothing cites."""
     card = row.card
+    per_contribution = TABLE_CONTRIBUTIONS if table else 1
     ids = _anchors(card.get("tldr"))[:1]
-    for entry in (card.get("contributions") or [])[:TABLE_CONTRIBUTIONS]:
-        ids.extend(_anchors(entry)[:TABLE_CONTRIBUTIONS])
-    for entry in (card.get("metrics") or [])[:TABLE_METRICS]:
+    for entry in (card.get("contributions") or [])[:DIGEST_CONTRIBUTIONS]:
+        ids.extend(_anchors(entry)[:per_contribution])
+    for entry in (card.get("metrics") or [])[:max(TABLE_METRICS, DIGEST_METRICS)]:
         ids.extend(_anchors(entry, "anchor"))
     ids.extend(value.element_id for _name, value in row.values if value.element_id)
     return ids
 
 
-def _requested_anchors(rows: Sequence[PaperRow]) -> list[tuple[str, PaperRow]]:
-    """Every element to register, the visible ones of every row first, so a
-    full band still gives each inline cell its marker."""
+def _requested_anchors(rows: Sequence[PaperRow], *, table: bool) -> list[tuple[str, PaperRow]]:
+    """The elements to register: what the table (``table``) and the digest of
+    EVERY row can show -- the digest covers rows past the table's inline
+    limit -- capped at the band."""
     wanted: dict[str, PaperRow] = {}
     for row in rows:
-        for element_id in _visible_anchor_ids(row):
-            wanted.setdefault(element_id, row)
-    for row in rows:
-        for element_id in card_anchor_ids(row.card) if row.card else ():
+        for element_id in _visible_anchor_ids(row, table=table):
             wanted.setdefault(element_id, row)
     return list(wanted.items())[:PAPER_CARD_MAX_KEYS]
 
@@ -236,6 +242,7 @@ def build_paper_card_evidence(
     read_citations: Callable[[list], Mapping[str, Any]],
     tier_of: Callable[[list], Mapping[str, str]],
     table_rows: int,
+    for_answer: bool = True,
 ) -> Optional[PaperCardEvidence]:
     """Register the run's paper evidence; ``None`` when there is nothing to show.
 
@@ -244,13 +251,18 @@ def build_paper_card_evidence(
     ``notebook_id`` + ``tier``); an element is kept only when its citation names
     the very source the card or the value belongs to.  ``tier_of(notebook_ids)``
     is the library tier map.
+
+    ``for_answer=False`` (the retrieval-only output: there is no answer and so
+    no table) registers only what the digest can show, and renders no table.
     """
     if tools is None:
         return None
     rows, fields = paper_rows(tools)
     if not rows:
         return None
-    requested = _requested_anchors(rows)
+    layout = str(getattr(tools, "answer_layout", "") or "")
+    table = for_answer and layout == ANSWER_LAYOUT_PAPER_TABLE
+    requested = _requested_anchors(rows, table=table)
     tiers = dict(tier_of(sorted({row.notebook_id for _eid, row in requested})) or {}) \
         if requested else {}
     items = [
@@ -284,11 +296,13 @@ def build_paper_card_evidence(
             "relevance": 1.0,
         }
     evidence = PaperCardEvidence(
-        layout=str(getattr(tools, "answer_layout", "") or ""),
+        layout=layout if table else ANSWER_LAYOUT_PROSE,
         rows=rows, id_map=id_map, keys=keys, citations=citations,
-        extra_fields=fields, table_rows=max(0, int(table_rows)),
+        extra_fields=fields,
+        overflow_fields=_all_fields(tools.extractions)[TABLE_EXTRA_FIELDS:],
+        table_rows=max(0, int(table_rows)),
     )
-    if evidence.layout != ANSWER_LAYOUT_PAPER_TABLE:
+    if not table:
         return evidence
     unexpanded = _unexpanded_titles(tools, rows, evidence.table_rows)
     evidence = dataclasses.replace(evidence, unexpanded=unexpanded)
@@ -315,7 +329,7 @@ def with_registration(id_map: dict, paper: Optional[PaperCardEvidence]) -> dict:
 
 def _clean(text: Any) -> str:
     """One line of model-facing or table text: no newline, no fake marker."""
-    return _MARKER_LIKE.sub(r"［\1", _NEWLINES.sub(" ", str(text or ""))).strip()
+    return neutralize_markers(_NEWLINES.sub(" ", str(text or ""))).strip()
 
 
 def _metric_text(metric: Mapping[str, Any]) -> str:
@@ -426,7 +440,10 @@ def paper_digest_reserve(paper: Optional[PaperCardEvidence], chunk_context_chars
 # ----------------------------------------------------------- table
 
 def _cell_escape(text: Any) -> str:
-    return _clean(text).replace("|", "\\|")
+    """Cell text: one line, no marker, and ``|`` mapped to the full-width
+    ``｜`` -- a backslash escape would be undone by a backslash in the text
+    itself (``\\|W\\|_F``) and split the cell."""
+    return _clean(text).replace("|", "｜")
 
 
 def _markers(anchors: Iterable[str], keys: Mapping[str, str], limit: int = 2) -> str:
@@ -482,7 +499,8 @@ def _row_line(row: PaperRow, paper: PaperCardEvidence) -> str:
         for name in paper.extra_fields
     ]
     cells = [
-        _title_cell(row, keys), _cell_escape(_year_venue(row)) or _EMPTY_CELL,
+        _title_cell(row, keys),
+        _cell_escape(_year_venue(row))[:TABLE_CELL_CHARS] or _EMPTY_CELL,
         _cell(metrics), _cell(contributions), *extra,
     ]
     return "| " + " | ".join(cells) + " |"
@@ -542,45 +560,70 @@ def _find_groups(finds: Sequence[Any]) -> list:
     return list(groups.values())
 
 
+def _tier_rank(tier: str) -> int:
+    return 0 if tier == "strong" else 1
+
+
 def coverage_line(tools: Any, paper: PaperCardEvidence) -> str:
-    """The line that leads a paper-table answer (spec §7.3)."""
-    expanded = min(len(paper.rows), paper.table_rows)
+    """The line that leads a paper-table answer (spec §7.3).
+
+    Counts: each distinct request's last page (pages share their counts); a
+    paper listed by two requests is counted once, under its best tier.
+    "展开" counts the inline rows find_sources listed; rows read straight from
+    a source are named apart.  Extracted fields past the table width are named
+    rather than dropped silently."""
+    inline = paper.rows[:paper.table_rows]
     finds = list(tools.finds)
+    overflow = ""
+    if paper.overflow_fields:
+        overflow = (f"另有 {len(paper.overflow_fields)} 个临时字段未列入表："
+                    + "、".join(_clean(name) for name in paper.overflow_fields) + "。")
     if not finds:
-        return (f"> 本表展开了 {expanded} 篇文档的要点（本轮没有做文档级检索，"
-                "不代表已列全）。")
-    strong = related = 0
-    seen: dict = {}
-    for group in _find_groups(finds):
-        last = group[-1].result
-        strong += int(last.strong or 0)
-        related += int(last.related or 0)
+        return (f"> 本表展开了 {len(inline)} 篇文档的要点（本轮没有做文档级检索，"
+                "不代表已列全）。" + overflow)
+    groups = _find_groups(finds)
+    strong = sum(int(group[-1].result.strong or 0) for group in groups)
+    related = sum(int(group[-1].result.related or 0) for group in groups)
+    sightings: dict = {}
+    for group in groups:
+        tiers: dict = {}
         for outcome in group:
             for item in outcome.result.items:
-                key = (item.notebook_id, item.source_id)
-                if key in seen:
-                    # The same paper counted by two different requests.
-                    if item.tier == "strong":
-                        strong -= 1
-                    else:
-                        related -= 1
-                    continue
-                seen[key] = item.tier
+                tiers.setdefault((item.notebook_id, item.source_id), item.tier)
+        for key, tier in tiers.items():
+            sightings.setdefault(key, []).append(tier)
+    for tiers in sightings.values():
+        if len(tiers) < 2:
+            continue
+        # Take every sighting out of its own tier, then count the paper once
+        # under the best one.
+        for tier in tiers:
+            if tier == "strong":
+                strong -= 1
+            else:
+                related -= 1
+        if min(_tier_rank(t) for t in tiers) == 0:
+            strong += 1
+        else:
+            related += 1
     strong, related = max(0, strong), max(0, related)
-    total = max(strong + related, len(seen))
+    total = max(strong + related, len(sightings))
+    expanded = sum(1 for row in inline if (row.notebook_id, row.source_id) in sightings)
+    direct = len(inline) - expanded
     noun = "文档" if any(getattr(o.request, "kind", "") == "all" for o in finds) else "论文"
     gaps: list[str] = []
     for outcome in finds:
         for gap in find_coverage_gaps(outcome.result):
             if gap not in gaps:
                 gaps.append(gap)
-    if any(group[-1].result.next_cursor for group in _find_groups(finds)):
+    if any(group[-1].result.next_cursor for group in groups):
         gaps.append("检索结果还有后续页没有取回")
     line = (f"> 共找到 {total} 篇相关{noun}（强相关 {strong} 篇、相关 {related} 篇），"
-            f"其中 {expanded} 篇展开了要点。")
+            f"其中 {expanded} 篇展开了要点"
+            + (f"（另有 {direct} 篇直接按来源读取）" if direct else "") + "。")
     if gaps:
         line += "可能还有更多：" + "；".join(gaps) + "。"
-    return line
+    return line + overflow
 
 
 # ----------------------------------------------------------- composition
