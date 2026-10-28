@@ -127,6 +127,7 @@ class RetrievalRunState:
         self.chunk_recall_hits = 0
         self.chunk_recall_stores = 0
         self.chunk_recall_evictions = 0
+        self.chunk_recall_degraded_skips = 0
         self.embedding_requests = 0
         self.embedding_hits = 0
         self.embedding_errors = 0
@@ -313,6 +314,11 @@ class RetrievalRunState:
         with self._lock:
             self.chunk_recall_hits += 1
 
+    def note_chunk_recall_degraded_skip(self) -> None:
+        """A recall was not kept because a lane failed open during it."""
+        with self._lock:
+            self.chunk_recall_degraded_skips += 1
+
     def keep_chunk_recall(self, key: Hashable, entry: ChunkRecallEntry, *,
                           max_rows: int) -> None:
         """Keep ``entry`` under ``key``, then drop least recently used entries
@@ -434,7 +440,10 @@ class RetrievalRunState:
         ``chunk_recall_stores`` counts every write into that memo, a write
         that replaces the entry kept under the same key included (so it is
         not the number of entries held); ``chunk_recall_evictions`` counts the
-        entries the row/entry bound pushed out (``chunk_recall_memo``)."""
+        entries the row/entry bound pushed out; ``chunk_recall_degraded_skips``
+        counts the recalls not kept because a lane failed open during them
+        (``chunk_recall_memo``) -- a run whose recalls are never reused shows
+        why here."""
         with self._lock:
             event = {
                 "kind": "retrieval_run_stats",
@@ -455,6 +464,7 @@ class RetrievalRunState:
                 "chunk_recall_hits": self.chunk_recall_hits,
                 "chunk_recall_stores": self.chunk_recall_stores,
                 "chunk_recall_evictions": self.chunk_recall_evictions,
+                "chunk_recall_degraded_skips": self.chunk_recall_degraded_skips,
             }
             if self.fanout_limit is not None:
                 event["fanout_limit"] = self.fanout_limit

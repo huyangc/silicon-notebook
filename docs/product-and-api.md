@@ -496,14 +496,19 @@ recalled passage's identity, element ids and scores -- no text, no vectors -- at
 `CHUNK_FEDERATION_MAX_PARTICIPANTS` x `CHUNK_RECALL` passages and 64 recalls, least recently used out first, and
 only recalls an element search could read back (a copyable notebook searched without a source list scans its
 elements whole, so its recalls are not kept). A recall during which any lane failed open is not kept: a model
-error, a full-text timeout or failure (the ANN-plus-full-text lane's included, whatever its banner role), an ANN
-handle that did not open, a failed language or drift probe, a failed sidecar coverage probe, and a contributor or
-question-index supplement that failed, timed out, was blocked or whose admission read failed. A ceiling-drift flip
+error, a full-text timeout or failure (the ANN-plus-full-text lane's included, whatever its banner role), a scale
+index whose manifest is there but that could not be read or loaded (a torn fold rename, a file-handle or I/O error,
+memory -- not a notebook that has no index), an ANN handle that did not open, a failed language or drift probe, a
+failed sidecar coverage probe, and a contributor or question-index supplement that failed, timed out, was blocked,
+was unavailable at run time or whose admission read failed. A contributor's availability verdict for the call
+(steadily unavailable or disabled), a contributor declining the request or reporting itself disabled, and admission
+rejecting its answer are not degradations: a repeat gets the same answer. A ceiling-drift flip
 (a source outside the run's frozen ceiling seen on read) drops that library's recalls that were read without the
 source list. `chunk` runs and Deep Report planning keep nothing. The run's closing `retrieval_run_stats` counts the
 reuses as `chunk_recall_hits`, every write into the memo as `chunk_recall_stores` (a write replacing the recall
-already kept under the same key included, so it is not the number held) and the recalls the bound pushed out as
-`chunk_recall_evictions`. Each call of the arm emits one content-free `ask_stage` event,
+already kept under the same key included, so it is not the number held), the recalls the bound pushed out as
+`chunk_recall_evictions`, and the recalls not kept because a lane failed open during them as
+`chunk_recall_degraded_skips` (a run that never reuses anything shows why here). Each call of the arm emits one content-free `ask_stage` event,
 `stage: "global_element_arm"`, with participant, notebooks-with-hits, merged and failed-notebook counts and latency.
 `GLOBAL_ASK_ELEMENT_ARM_ENABLED` (default `true`) is the rollback switch: `false` returns global runs to the
 pre-federation behaviour — `search_elements` is not in the action catalog (a model that names it anyway gets the

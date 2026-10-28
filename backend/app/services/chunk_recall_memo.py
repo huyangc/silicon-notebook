@@ -59,6 +59,7 @@ kept or served outside a retrieval run.
 """
 from __future__ import annotations
 
+import contextvars
 import hashlib
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -130,7 +131,14 @@ def recall_slot(candidates, notebook_id: str, query: str, recall: int,
     if bounded != gate(ceiling, notebook_id, explicit=producer_explicit,
                        drifted=True):
         if resolved is None:
-            resolved = _lexical_gate_drift_probe(candidates, notebook_id)
+            # Probed here, before the recall's own ``computing`` block opens,
+            # so its failure note is captured here: a key resolved from a
+            # failed probe (answered "no drift") is not one to keep or serve
+            # under, and the recall then resolves the verdict itself.
+            with computing() as probe_failures:
+                resolved = _lexical_gate_drift_probe(candidates, notebook_id)
+            if probe_failures:
+                return None
         bounded = gate(ceiling, notebook_id, explicit=producer_explicit,
                        drifted=resolved)
     settings = candidates.settings
@@ -266,36 +274,63 @@ def noting(stage: str, callback: Callable[[], Any]) -> Callable[[], Any]:
     return hook
 
 
-#: The contribution host's outcomes that mean the contributor did not get to
-#: answer (``extensions/retrieval.py``): a recall during which one occurred is
-#: not what a healthy repeat gives.  ``available``/``partial`` (answered),
-#: ``rejected`` (admission judged the answer) and ``disabled`` (switched off
-#: for the run) are answers, not failures.
-_DEGRADED_CONTRIBUTION_OUTCOMES = frozenset({
-    "timeout", "failed", "invalid", "invalid_context", "invalid_result",
-    "blocked", "unavailable", "cancelled",
-})
+# The slot ``CandidateRetrievalService._element_chunk_recall`` already took for
+# the ``_retrieve_chunks`` call it is about to make (``handing``): ``(call,
+# slot)``, where ``call`` names that call by identity.  A context variable
+# because ``_retrieve_chunks`` has whole-method test doubles a new keyword
+# would break; a double never reads it.
+_HANDED_SLOT: contextvars.ContextVar[Optional[tuple]] = contextvars.ContextVar(
+    "_chunk_recall_handed_slot", default=None
+)
 
 
-def noting_contribution_events(sink: Optional[Callable[[dict], Any]]):
-    """The contribution host's event sink, noting a failure of the recall
-    being computed for every degraded outcome before forwarding the event."""
-    def forward(event: dict) -> Any:
-        if (event.get("kind") == "retrieval_contribution"
-                and str(event.get("outcome") or "") in _DEGRADED_CONTRIBUTION_OUTCOMES):
-            note_recall_failure("retrieval_contribution")
-        return sink(event) if sink is not None else None
-    return forward
+@contextmanager
+def handing(slot: Optional[RecallSlot], call: tuple) -> Iterator[None]:
+    """Hand ``slot`` (``None`` included: "no memo for this call") to the
+    ``_retrieve_chunks`` call named by ``call`` inside the block."""
+    token = _HANDED_SLOT.set((call, slot))
+    try:
+        yield
+    finally:
+        _HANDED_SLOT.reset(token)
+
+
+def handed(call: tuple) -> tuple[bool, Optional[RecallSlot]]:
+    """``(True, slot)`` when the enclosing ``handing`` was for exactly this
+    call -- the same service, library, text, window, the same list OBJECT and
+    attestation -- consumed so no nested call can take it; else ``(False,
+    None)`` and the caller takes its own slot."""
+    handed_call = _HANDED_SLOT.get()
+    if handed_call is None:
+        return False, None
+    expected, slot = handed_call
+    if (len(expected) != len(call)
+            or any(left is not right and left != right
+                   for left, right in zip(expected, call))
+            or expected[4] is not call[4]):
+        return False, None
+    _HANDED_SLOT.set(None)
+    return True, slot
+
+
+def noting_contribution(reason: str) -> None:
+    """The contribution host's ``on_degraded``: a contributor did not get to
+    answer this call (the host decides which outcomes those are,
+    ``extensions.retrieval.DEGRADED_CONTRIBUTION_OUTCOMES``), so the recall
+    being computed is degraded."""
+    note_recall_failure(f"retrieval_contribution:{reason}")
 
 
 __all__ = [
     "RecallSlot",
     "computing",
+    "handed",
+    "handing",
     "forget_unbound",
     "keep",
     "note_recall_failure",
     "noting",
-    "noting_contribution_events",
+    "noting_contribution",
     "recall_slot",
     "serve",
 ]
