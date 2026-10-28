@@ -17,7 +17,7 @@
 台账的性能 / 结构 / 工程卫生项逐条按代码复核后补登；移除过时的「BM25 / FTS5 / tsvector 全文索引：暂缓」
 （SQLite FTS5 trigram 索引 + `bm25()` 排序与 PostgreSQL `pg_trgm` 词法候选早已在用，见 `fangan_done.md` §9；
 PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交付的统一认证与跨库全局问答，
-`_federated_graph_is_large` 一条按现行代码重写机制，状态速览改正 closeout 计划已完成；10-15 之后合入的 #913 / #914 / #915 / #916 记入 `fangan_done.md` §60；第二节「reasoning 原文段引用卡重复三次批量读」已完成，移入 `fangan_done.md` §61。此前 2026-10-15：技术债整改程序
+`_federated_graph_is_large` 一条按现行代码重写机制（随后 2026-10-28 用户裁决只改事件原因码、拒绝逻辑不变，已完成并移入 `fangan_done.md` §61，该条自本文件删除），状态速览改正 closeout 计划已完成；10-15 之后合入的 #913 / #914 / #915 / #916 记入 `fangan_done.md` §60；第二节「reasoning 原文段引用卡重复三次批量读」已完成，移入 `fangan_done.md` §61。此前 2026-10-15：技术债整改程序
 移交，新增「四、技术债整改程序：收官后剩余」，`read_document` 延后项 (b) 与「历史全局回答 payload 归一」
 已移入 `fangan_done.md` §59；再此前 2026-10-07）
 对照：`silicon_notebook_fangan.md`（产品方案）。已完成项见 `fangan_done.md`；本文件只列**尚未做完**的部分。
@@ -224,25 +224,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       两种形态解决的问题不同（前者补逐库召回，后者补跨库排序与标识符定位）；后者只在逐库形态
       被证明不够时再评估。
 - [ ] 结构化硬过滤：软加权已够用，硬过滤有清空结果风险，暂缓。
-- [ ] **`_federated_graph_is_large` 把取消勾选的参考库也算进「图是否过大」**：这个
-      判据（`backend/app/services/retrieval_candidates.py`）在**无参与集覆盖**时读
-      `_viewer_graph_participants` 的快照——当前查看者有效的挂载（经 `participant_rows`，
-      PR #828 起只算查看者能读的被挂库），每个检索 run 按查看者 memo 一次——只要其中任一库
-      `notebook_copy_stats(...)["copyable"]` 为假就判「大图」；这份快照从不过
-      `notebook_in_scope`。于是一个刚被用户取消勾选的大参考库仍然把它撑成「大图」，
-      本次 run 范围内每个库都很小时，`_chunk_kg_overlay` 与 PPR 回退照样以
-      `reason=large_notebook` 拒绝，事件也因此误描述了这次 run 的语料。
-      **不要单独收窄这个守卫**：它守的两张图在无覆盖时按同一份快照里的全部挂载库建
-      （`graph_retrieval._federated_rx_graph` 与 `_ppr_graph` 都读 `_viewer_graph_participants`，
-      库维度是在走查**结果**上由 `scoped_subgraph_nodes` 过滤的），守卫与建图同源，
-      只放松守卫会放行它本来要拒绝的那次构建——小笔记本挂一本 9M 对象的参考库、
-      用户取消勾选它，就会逐库跑 `graph_object_rows`/`graph_relation_rows`/
-      `cluster_member_rows`（`retrieval_service.ppr_retrieve` 的 docstring 记着这条路
-      数十分钟、数 GB，曾在 1.13M 节点库上冻结 reasoning）。所以这是**一次联合改
-      动**：必须先让那两张图按库勾选建，而那是缓存键的独立取舍（论证见
-      `source_scope.scoped_subgraph_nodes` 的 docstring：把 scope 放进键会按勾选组合
-      重建整图）。参与集覆盖在场时守卫已经读座位——因为那时两张图也读座位，守卫与
-      建图口径同源；要修的是无覆盖那一半。
 - [ ] **对等模式关键词腿的重复超时（待大库实测）**：对等模式的关键词腿自身超时
       **不**打开按库 FTS 熔断（`retrieval_candidates._chunk_fts_hits` 的
       `trip_circuit=False`，既有设计：补召回腿超时不该关掉该库语义腿的全文检索）。

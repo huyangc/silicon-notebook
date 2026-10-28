@@ -413,6 +413,9 @@ class GraphRetrievalService(_RetrievalState):
     def _federated_graph_is_large(self, *args, **kwargs):
         return self._peer._federated_graph_is_large(*args, **kwargs)
 
+    def _graph_refusal_reason(self, *args, **kwargs):
+        return self._peer._graph_refusal_reason(*args, **kwargs)
+
     def _gather_kg_graph(self, *args, **kwargs):
         return self._peer._gather_kg_graph(*args, **kwargs)
 
@@ -1424,7 +1427,7 @@ class GraphRetrievalService(_RetrievalState):
                 self.event_log.emit({
                     "kind": "ppr_fallback_refused",
                     "notebook_id": notebook_id,
-                    "reason": "large_notebook",
+                    "reason": self._graph_refusal_reason(notebook_id),
                 })
                 return []
             G, key_to_idx, chunk_idx_to_id = self._ppr_graph(notebook_id)
