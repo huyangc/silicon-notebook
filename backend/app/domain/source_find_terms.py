@@ -5,21 +5,23 @@ The metadata leg runs one SQL prefilter per library (``lower(col) LIKE`` with th
 returned here, in Python, with the very same case fold SQL applies
 (``ascii_lower``: A-Z only, on both backends).  The re-check is the arbiter: it
 names WHICH field matched and whether the match sits on a word boundary, and it
-drops a prefilter hit that is not a real match (a term spanning two keywords of
-the JSON list text, for instance).  So SQL may only ever over-match, never
-under-match, and both backends answer identically.
+drops a prefilter hit that is not a real match.  So SQL may only ever
+over-match, never under-match, and both backends answer identically.
+``keywords`` is matched one list element at a time on both backends
+(``jsonb_array_elements`` / ``json_each``), never on the JSON text, so a term
+containing a quote or a backslash matches the keyword as written.
 
 Word boundary (design §5.2): a short ASCII term such as ``GAN`` matching inside
 ``organ`` is a substring match, not a word match.  For an ASCII alphanumeric
 term of at most ``WORD_BOUNDARY_TERM_MAX_CHARS`` characters the match counts as
 word-boundary only when the characters on both sides are not ASCII letters or
-digits; any other term (non-ASCII, contains punctuation/space, or longer)
+digits (a trailing plural ``s`` / ``es`` is allowed: ``GAN`` matches ``GANs``
+as a word, ``organ`` stays a substring); any other term (non-ASCII, contains punctuation/space, or longer)
 counts every substring match as a boundary match -- CJK has no case and no
 spaces, and a long term rarely hides inside an unrelated word.
 """
 from __future__ import annotations
 
-import json
 from typing import Iterable, Mapping, Sequence
 
 from app.domain.sql_text_fold import ascii_lower
@@ -75,26 +77,26 @@ def term_match(folded_term: str, value: object) -> bool | None:
     width = len(folded_term)
     while start >= 0:
         before = text[start - 1] if start > 0 else ""
-        after = text[start + width] if start + width < len(text) else ""
-        if before not in _ASCII_ALNUM and after not in _ASCII_ALNUM:
+        if before not in _ASCII_ALNUM and _ends_a_word(text, start + width):
             return True
         start = text.find(folded_term, start + 1)
     return False
 
 
-def keyword_values(raw: object) -> list[str]:
-    """``source_paper_meta.keywords`` as a list of strings (jsonb list on
-    PostgreSQL, JSON text on SQLite); anything malformed is no keywords."""
-    if isinstance(raw, (list, tuple)):
-        values = raw
-    else:
-        try:
-            values = json.loads(str(raw or "[]"))
-        except (TypeError, ValueError):
-            return []
-    if not isinstance(values, (list, tuple)):
-        return []
-    return [str(value) for value in values if isinstance(value, (str, int, float))]
+def _ends_a_word(text: str, end: int) -> bool:
+    """Does the match ending at ``end`` end a word, allowing an English plural?
+
+    ``GAN`` in ``GANs`` / ``GANes`` is still the term (a short acronym is most
+    often written in the plural), so a trailing ``s`` or ``es`` followed by a
+    non-alphanumeric is a boundary too; ``organ``-style hits stay substring
+    matches because the character BEFORE them is a letter."""
+    for suffix in ("", "s", "es"):
+        if suffix and not text.startswith(suffix, end):
+            continue
+        after = end + len(suffix)
+        if after >= len(text) or text[after] not in _ASCII_ALNUM:
+            return True
+    return False
 
 
 def field_match(folded_terms: Sequence[str], values: Iterable[object]) -> bool | None:

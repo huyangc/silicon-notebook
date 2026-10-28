@@ -76,9 +76,12 @@ class FakeRetrieval:
         self.lane = lane
         self.relevance = dict(relevance or {})
         self.calls: list = []
+        self.flags: list = []
 
-    def retrieve_chunks_in_sources(self, notebook_id, query, recall, allowed):
+    def retrieve_chunks_in_sources(self, notebook_id, query, recall, allowed, *,
+                                   peer=False, narrowed=False):
         self.calls.append((notebook_id, query, recall, tuple(allowed)))
+        self.flags.append({"peer": peer, "narrowed": narrowed})
         out = [
             RetrievedChunk(
                 chunk_id=f"{source_id}-c{index}", source_id=source_id,
@@ -94,15 +97,17 @@ class FakeRetrieval:
         return out[:recall], self.lane
 
 
-def _finder(instance, retrieval=None) -> SourceFinder:
+def _finder(instance, retrieval=None, *, enumeration=None, sources=None,
+            event_log=None) -> SourceFinder:
     runtime = instance._runtime
     return SourceFinder(
         database=runtime.database,
-        sources=runtime.source_store,
+        sources=sources or runtime.source_store,
         retrieval=retrieval or instance.retrieval,
-        enumeration=runtime.collection_enumeration,
+        enumeration=enumeration or runtime.collection_enumeration,
         settings=instance.settings,
         paper_card_version=CARD_VERSION,
+        event_log=event_log,
     )
 
 
@@ -322,7 +327,7 @@ def test_the_cursor_pages_and_dies_with_any_parameter_change(repo):
 def test_counts_and_coverage_flags(repo, monkeypatch):
     instance, nb, *_ = repo
     for sid in ("s-a", "s-b", "s-c", "s-d"):
-        _source(instance, nb, sid)
+        _source(instance, nb, sid, doc_type="manual")
     monkeypatch.setattr(instance.settings, "find_sources_chunk_recall", 3)
     full = FakeRetrieval("baseline", {"s-a": [ABOVE], "s-b": [BETWEEN, BETWEEN]})
     result = _finder(instance, full).find(nb, FindSourcesRequest(query="q", kind="all"))
@@ -395,13 +400,14 @@ def test_card_status_is_read_in_one_batch_per_library(repo):
 
 
 def test_paper_card_status_is_judged_against_the_current_basis():
-    row = {"is_paper": True, "source_type": "document", "doc_type": "academic_paper",
-           "parse_status": "extracted"}
     card = {"card_version": 2, "basis": "b1", "status": "ready"}
-    assert paper_card_status(row, card, "b1", card_version=2) == "ready"
-    assert paper_card_status(row, card, "b2", card_version=2) == "missing"
-    assert paper_card_status(row, card, "b1", card_version=3) == "missing"
-    assert paper_card_status(row, None, "b1", card_version=2) == "missing"
+    assert paper_card_status(True, False, card, "b1", card_version=2) == "ready"
+    assert paper_card_status(True, False, card, "b2", card_version=2) == "missing"
+    assert paper_card_status(True, False, card, "b1", card_version=3) == "missing"
+    assert paper_card_status(True, False, None, "b1", card_version=2) == "missing"
+    assert paper_card_status(False, False, card, "b1", card_version=2) == "not_paper"
+    assert paper_card_status(None, True, None, "", card_version=2) == "meta_pending"
+    assert paper_card_status(None, False, None, "", card_version=2) == "not_paper"
 
 
 @pytest.mark.parametrize("request_kwargs", [
@@ -415,6 +421,8 @@ def test_paper_card_status_is_judged_against_the_current_basis():
     {"terms": ("x",), "kind": "everything"},
     {"terms": ("x",), "scope": "mounted"},
     {"terms": ("x",), "limit": 21},
+    {"terms": ("x",), "limit": "twenty"},
+    {"terms": ("x",), "limit": object()},
 ])
 def test_malformed_requests_are_refused_not_trimmed(repo, request_kwargs):
     instance, nb, *_ = repo
@@ -527,3 +535,259 @@ def test_ids_are_unique_per_item(repo):
     result = _finder(instance).find(nb, FindSourcesRequest(terms=("unique",), kind="all"))
     assert [item.source_id for item in result.items] == [sid]
     assert result.items[0].notebook_id == nb
+
+
+# ------------------------------------------------- coverage (design §5.4)
+def test_lexical_complete_reports_the_unjudgeable_papers(repo):
+    instance, nb, *_ = repo
+    _source(instance, nb, "s-meta", title="lidar odometry")
+    _meta(instance, nb, "s-meta", year=2022, venue="ICRA")
+    _source(instance, nb, "s-pending", title="lidar mapping")    # no meta yet
+    _source(instance, nb, "s-manual", title="lidar manual", doc_type="manual")
+    finder = _finder(instance, FakeRetrieval())
+    filtered = finder.find(nb, FindSourcesRequest(year_from=2020))
+    assert [item.source_id for item in filtered.items] == ["s-meta"]
+    assert (filtered.meta_pending_excluded, filtered.meta_pending_unchecked) == (1, 0)
+    assert filtered.lexical_complete is False
+    termed = finder.find(nb, FindSourcesRequest(terms=("lidar",)))
+    assert {item.source_id for item in termed.items} == {"s-meta", "s-pending"}
+    assert (termed.meta_pending_excluded, termed.meta_pending_unchecked) == (0, 1)
+    assert termed.lexical_complete is False
+    _meta(instance, nb, "s-pending", year=2019)
+    done = finder.find(nb, FindSourcesRequest(terms=("lidar",)))
+    assert (done.meta_pending_excluded, done.meta_pending_unchecked) == (0, 0)
+    assert done.lexical_complete is True
+    assert done.skipped_libraries == {}
+
+
+# ------------------------------------------------ participant libraries
+class TwoLibraries:
+    """``source_scope`` over the active notebook plus one mounted library."""
+
+    def __init__(self, instance, nb, ref):
+        self.instance, self.nb, self.ref = instance, nb, ref
+
+    def source_scope(self, db, active, *, ceiling_binds, local_only=False):
+        from types import SimpleNamespace
+
+        ids = (self.nb,) if local_only else (self.nb, self.ref)
+        store = self.instance._runtime.source_store
+        entries = [
+            SimpleNamespace(notebook_id=notebook_id, source_id=source_id)
+            for notebook_id in ids
+            for source_id in store.all_visible_source_ids(notebook_id)
+        ]
+        return SimpleNamespace(
+            notebook_ids=ids, tiers={}, plan=SimpleNamespace(sources=entries),
+            ceiling_digest="digest",
+        )
+
+
+class Events:
+    def __init__(self):
+        self.events: list = []
+
+    def emit(self, event):
+        self.events.append(dict(event))
+
+
+class FailingStore:
+    """The real store, except ``find_sources_metadata_rows`` misbehaves for
+    one library (``fail``: raise; ``stall``: sleep, then read)."""
+
+    def __init__(self, store, notebook_id, *, fail=None, stall=0.0):
+        self._store, self._nb = store, notebook_id
+        self._fail, self._stall = fail, stall
+        self.calls = 0
+
+    def find_sources_metadata_rows(self, db, notebook_id, **kwargs):
+        self.calls += 1
+        if notebook_id == self._nb and self._fail is not None:
+            raise self._fail
+        if notebook_id == self._nb and self._stall:
+            import time
+
+            time.sleep(self._stall)
+        return self._store.find_sources_metadata_rows(db, notebook_id, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
+
+
+def _reference_library(instance, name="reference"):
+    return instance.create_notebook(NotebookCreate(name=name)).id
+
+
+def test_a_peer_library_never_cold_loads_its_scale_index(repo, monkeypatch):
+    instance, nb, *_ = repo
+    ref = _reference_library(instance)
+    body = "phase locked loop jitter analysis for clock recovery "
+    for notebook_id, sid in ((nb, "s-local"), (ref, "s-ref")):
+        _source(instance, notebook_id, sid, title=f"{sid} doc",
+                texts=[f"{body} {sid} part {i} " * 6 for i in range(3)])
+    candidates = instance.retrieval.candidates
+    monkeypatch.setattr(instance.settings, "chunk_ann_enabled", True)
+    monkeypatch.setattr(
+        candidates, "notebook_copy_stats",
+        lambda notebook_id: {"copyable": notebook_id != ref, "size": {}},
+    )
+    loaded: list = []
+    original = candidates._scale_index
+
+    def spy(notebook_id, *args, **kwargs):
+        loaded.append(notebook_id)
+        return original(notebook_id, *args, **kwargs)
+
+    monkeypatch.setattr(candidates, "_scale_index", spy)
+    result = _finder(instance, enumeration=TwoLibraries(instance, nb, ref)).find(
+        nb, FindSourcesRequest(query="phase locked loop jitter", kind="all"))
+    assert ref not in loaded                        # never a cold scale-index load
+    assert result.lanes[ref] == "fts_degraded"      # reported as what ran
+    assert {"s-local", "s-ref"} <= {item.source_id for item in result.items}
+
+
+def test_a_peer_library_that_fails_is_skipped_and_reported(repo):
+    instance, nb, *_ = repo
+    ref = _reference_library(instance)
+    _source(instance, nb, "s-local", title="kalman filter")
+    _source(instance, ref, "s-ref", title="kalman smoother")
+    events = Events()
+    store = FailingStore(instance._runtime.source_store, ref, fail=RuntimeError("x"))
+    result = _finder(
+        instance, enumeration=TwoLibraries(instance, nb, ref), sources=store,
+        event_log=events,
+    ).find(nb, FindSourcesRequest(terms=("kalman",), kind="all"))
+    assert [item.source_id for item in result.items] == ["s-local"]
+    assert result.skipped_libraries == {ref: "unavailable"}
+    assert result.lexical_complete is False
+    assert [e for e in events.events if e["kind"] == "find_sources_library_skipped"] == [{
+        "kind": "find_sources_library_skipped", "notebook_id": ref,
+        "error_type": "RuntimeError", "latency_ms": events.events[0]["latency_ms"],
+        "reason": "unavailable",
+    }]
+    # The subject library is not isolated: its failure is the call's.
+    broken = FailingStore(instance._runtime.source_store, nb, fail=RuntimeError("y"))
+    with pytest.raises(RuntimeError):
+        _finder(instance, enumeration=TwoLibraries(instance, nb, ref),
+                sources=broken).find(nb, FindSourcesRequest(terms=("kalman",)))
+
+
+def test_a_peer_library_read_runs_under_a_per_library_deadline(repo, monkeypatch):
+    instance, nb, *_ = repo
+    ref = _reference_library(instance)
+    _source(instance, nb, "s-local", title="kalman filter")
+    _source(instance, ref, "s-ref", title="kalman smoother")
+    monkeypatch.setattr(instance.settings, "global_ask_notebook_timeout_seconds", 0.05)
+    store = FailingStore(instance._runtime.source_store, ref, stall=0.2)
+    result = _finder(
+        instance, enumeration=TwoLibraries(instance, nb, ref), sources=store,
+    ).find(nb, FindSourcesRequest(terms=("kalman",), kind="all"))
+    assert [item.source_id for item in result.items] == ["s-local"]
+    assert result.skipped_libraries == {ref: "timeout"}
+
+
+# ----------------------------------------------------------- efficiency
+def test_a_page_turn_inside_a_run_only_slices_the_ranking(repo):
+    from app.services.retrieval_run import retrieval_run
+
+    instance, nb, *_ = repo
+    for index in range(5):
+        _source(instance, nb, f"s-{index}", title=f"graph paper {index}")
+    fake = FakeRetrieval("baseline", {f"s-{i}": [ABOVE] for i in range(5)})
+    store = FailingStore(instance._runtime.source_store, "none")
+    finder = _finder(instance, fake, sources=store)
+    request = FindSourcesRequest(query="graphs", terms=("graph",), kind="all", limit=2)
+    with retrieval_run(run_kind="ask_reasoning"):
+        first = finder.find(nb, request)
+        second = finder.find(nb, FindSourcesRequest(
+            **{**request.__dict__, "cursor": first.next_cursor}))
+    assert [i.source_id for i in first.items + second.items] == [
+        "s-0", "s-1", "s-2", "s-3"]
+    assert (len(fake.calls), store.calls) == (1, 1)
+    # Without a run (MCP) every call recomputes.
+    finder.find(nb, request)
+    finder.find(nb, FindSourcesRequest(**{**request.__dict__, "cursor": first.next_cursor}))
+    assert (len(fake.calls), store.calls) == (3, 3)
+
+
+def test_only_a_filter_narrowed_list_is_attested_explicit(repo):
+    instance, nb, *_ = repo
+    _source(instance, nb, "s-new")
+    _meta(instance, nb, "s-new", year=2023)
+    _source(instance, nb, "s-old")
+    _meta(instance, nb, "s-old", year=2012)
+    _source(instance, nb, "s-manual", doc_type="manual")
+    fake = FakeRetrieval()
+    finder = _finder(instance, fake)
+    store = instance._runtime.source_store
+    whole = [*store.all_visible_source_ids(nb)]
+    cases = [
+        (FindSourcesRequest(query="q", kind="all"), None, False),
+        (FindSourcesRequest(query="q", kind="all"), whole, False),
+        (FindSourcesRequest(query="q", kind="all"), ["s-new", "s-old"], False),
+        (FindSourcesRequest(query="q", kind="all", year_from=2020), whole, True),
+        (FindSourcesRequest(query="q"), None, True),          # kind drops s-manual
+    ]
+    for request, allowed, narrowed in cases:
+        finder.find(nb, request, allowed_source_ids=allowed)
+        assert fake.flags[-1] == {"peer": False, "narrowed": narrowed}, request
+
+
+def test_a_filter_narrowed_fts_degraded_search_keeps_its_lexical_candidates(
+        repo, monkeypatch):
+    """On the FTS-degraded lane the corpus-language gate would drop a CJK
+    query against a notebook sampled as English; a list the filters narrowed
+    is a bounded scan, so the gate must not apply (``producer_explicit``)."""
+    instance, nb, *_ = repo
+    _source(instance, nb, "s-zh", title="zh", texts=[f"锁相环抖动分析与时钟恢复电路设计 第{i}部分 " * 40 for i in range(3)])
+    _meta(instance, nb, "s-zh", year=2023)
+    for index in range(3):
+        _source(instance, nb, f"s-en-{index}", title=f"en {index}",
+                texts=[f"gardening notes about tomatoes and soil {index} " * 6])
+        _meta(instance, nb, f"s-en-{index}", year=2012)
+    candidates = instance.retrieval.candidates
+    monkeypatch.setattr(candidates, "notebook_copy_stats",
+                        lambda _nb: {"copyable": False, "size": {}})
+    monkeypatch.setattr(instance.settings, "lexical_language_gate_enabled", True)
+    monkeypatch.setattr(candidates, "_notebook_langs", lambda _nb: ["en"])
+    finder = _finder(instance)
+    narrowed = finder.find(nb, FindSourcesRequest(
+        query="哪些论文研究了锁相环抖动问题", kind="all", year_from=2020))
+    assert narrowed.lanes == {nb: "fts_degraded"}
+    assert [item.source_id for item in narrowed.items] == ["s-zh"]
+    assert narrowed.items[0].best_passage is not None
+    # Control: the same search over the whole library (nothing narrowed) is
+    # gated, so the case above really depends on the attestation.
+    whole = finder.find(nb, FindSourcesRequest(query="哪些论文研究了锁相环抖动问题", kind="all"))
+    assert whole.items == ()
+
+
+# ------------------------------------------------- explicit (MCP) sets
+def test_a_changed_explicit_list_invalidates_the_cursor(repo):
+    instance, nb, *_ = repo
+    for index in range(4):
+        _source(instance, nb, f"s-{index}", title=f"radar {index}")
+    finder = _finder(instance)
+    request = FindSourcesRequest(terms=("radar",), kind="all", limit=1)
+    listed = ["s-0", "s-1", "s-2"]
+    first = finder.find(nb, request, allowed_source_ids=listed)
+    resumed = FindSourcesRequest(**{**request.__dict__, "cursor": first.next_cursor})
+    # Same set in another order: the same cursor.
+    assert finder.find(nb, resumed, allowed_source_ids=listed[::-1]).items
+    with pytest.raises(FindSourcesCursorError):
+        finder.find(nb, resumed, allowed_source_ids=["s-0", "s-1", "s-3"])
+
+
+def test_an_explicit_subset_never_shows_a_hit_outside_it(repo):
+    instance, nb, *_ = repo
+    _source(instance, nb, "s-in", title="sparse attention in")
+    _source(instance, nb, "s-out", title="sparse attention out")
+    _source(instance, nb, "s-other", title="unrelated")
+    fake = FakeRetrieval("baseline", {"s-in": [ABOVE], "s-out": [ABOVE]})
+    result = _finder(instance, fake).find(
+        nb, FindSourcesRequest(query="sparse", terms=("sparse",), kind="all"),
+        allowed_source_ids=["s-in", "s-other"],
+    )
+    assert [item.source_id for item in result.items] == ["s-in"]
+    assert result.filtered_scope_total == 2
+    assert set(fake.calls[0][3]) == {"s-in", "s-other"}

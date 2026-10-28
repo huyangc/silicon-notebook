@@ -408,7 +408,8 @@ class RetrievalService:
         )
 
     def retrieve_chunks_in_sources(
-        self, notebook_id, query, recall, allowed_source_ids,
+        self, notebook_id, query, recall, allowed_source_ids, *,
+        peer=False, narrowed=False,
     ):
         """``find_sources``' semantic leg: ``(chunks, lane)`` for ONE library.
 
@@ -421,7 +422,16 @@ class RetrievalService:
         else narrows it, so the caller's list is the whole authority: it must
         be ``all_visible ∪ hidden(owner)`` or narrower, never a library-wide
         read.  ``filter_retrieval_items`` stays at the result boundary like
-        every chunk producer.  An empty list reads nothing."""
+        every chunk producer.  An empty list reads nothing.
+
+        ``peer``: the library is not the run's privileged subject
+        (``chunk_federation.is_peer_library``), so it reads under the
+        federation's peer lane flags (``peer_library_lane``: warm ANN only,
+        else bounded FTS -- never a cold scale-index load).  ``narrowed``: the
+        caller attests the list is narrower than the library's visible set
+        because of its own filters (``producer_explicit``: the lexical gate
+        then treats the scan as bounded); never for a whole-library list."""
+        from app.services.chunk_federation import peer_library_lane
         from app.services.chunk_lane import observed_chunk_lane
 
         allowed = tuple(dict.fromkeys(
@@ -429,10 +439,12 @@ class RetrievalService:
         ))
         if not allowed:
             return [], "baseline"
-        with observed_chunk_lane() as lanes:
+        with observed_chunk_lane() as lanes, peer_library_lane(
+            self.candidates, notebook_id, bool(peer),
+        ):
             scored, _ids, _matrix = self.candidates._retrieve_chunks(
                 notebook_id, query, max(1, int(recall)),
-                allowed_source_ids=allowed,
+                allowed_source_ids=allowed, producer_explicit=bool(narrowed),
             )
         return (
             filter_retrieval_items(notebook_id, "chunk", scored),

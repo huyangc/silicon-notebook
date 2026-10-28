@@ -1,24 +1,28 @@
 """Backend-neutral assembly of ``find_sources_metadata_rows`` (both adapters).
 
-Each adapter issues its own two statements -- the filtered-scope read and the
-per-field term legs -- and hands the raw rows here, so "which field matched,
-and on a word boundary?" and the row shape are written once
-(``app.domain.source_find_terms`` holds the matching rule).  Adapters never
-import each other; this module imports neither.
+Each adapter issues its own statements -- the counts, the filtered-scope read
+and the per-field term legs -- and hands the raw rows here, so "which field
+matched, and on a word boundary?", the row shape and the "bind the term legs to
+the scope?" rule are written once (``app.domain.source_find_terms`` holds the
+matching rule).  Adapters never import each other; this module imports neither.
 """
 from __future__ import annotations
 
 from typing import Any, Iterable, Mapping, Sequence
 
 from app.domain.promotion_source import presented_source_title
-from app.domain.source_find_terms import (
-    field_match,
-    keyword_values,
-    merge_match,
-)
+from app.domain.source_find_terms import field_match, merge_match
 
 #: The kinds ``find_sources_metadata_rows`` accepts.
 FIND_SOURCES_KINDS = ("papers", "all")
+#: The term legs are bound to the filtered scope's ids only when the filters
+#: (or the allow list) really narrowed the library AND the scope is at most this
+#: share of the library's visible sources.  Measured on the 49k-source bench
+#: (``docs/superpowers/plans/2026-10-28-find-sources-measurement.md``): a 49-id
+#: scope cuts the UNION ALL from 21 ms to 1-2 ms, while a 12.8k-id scope (26%)
+#: makes it slower (21 -> 52 ms: one list parameter and an ``= ANY`` filter per
+#: leg cost more than the hits they drop).
+TERM_LEG_BIND_MAX_SHARE = 0.1
 
 
 def check_kind(kind: str) -> str:
@@ -37,50 +41,67 @@ def _year(value: Any) -> int | None:
         return None
 
 
-def assemble_rows(
-    scope_rows: Iterable[Mapping[str, Any]],
-    hit_rows: Iterable[Mapping[str, Any]],
-    folded_terms: Sequence[str],
-) -> list[dict]:
-    """One dict per in-scope source, ``matches`` filled from the term legs.
+def bind_term_legs(scope_size: int, visible_total: int) -> bool:
+    """Should the term legs carry ``member_of(scope ids)``?  Only for a scope
+    the filters / allow list actually narrowed, and narrowed enough."""
+    return 0 < scope_size < visible_total and (
+        scope_size <= visible_total * TERM_LEG_BIND_MAX_SHARE
+    )
 
-    ``scope_rows``: ``id, notebook_id, title, source_type, doc_type,
-    parse_status, meta_id, is_paper, paper_title, venue, pub_year``.
-    ``hit_rows``: ``source_id, field, v1, v2`` (``v2`` is the file name on the
-    title leg, ``''`` elsewhere).  A hit for a source outside the scope (hidden
-    projection, filtered out, outside the allowed set) is dropped here."""
+
+def scope_rows_dicts(
+    scope_rows: Iterable[Mapping[str, Any]], notebook_id: str, *, with_titles: bool,
+) -> dict[str, dict]:
+    """``{source_id: row}`` of the light scope rows (``id, pub_year,
+    pending`` -- plus ``title, source_type, paper_title`` with titles)."""
     rows: dict[str, dict] = {}
     for row in scope_rows:
         source_id = str(row["id"])
-        has_meta = row["meta_id"] is not None
-        rows[source_id] = {
+        entry = {
             "source_id": source_id,
-            "notebook_id": str(row["notebook_id"]),
-            "title": presented_source_title(
-                row["title"], source_type=row["source_type"], source_id=source_id,
-            ),
-            "source_type": str(row["source_type"] or ""),
-            "doc_type": str(row["doc_type"] or ""),
-            "parse_status": str(row["parse_status"] or ""),
-            "has_meta": has_meta,
-            "is_paper": bool(row["is_paper"]) if has_meta else None,
-            "paper_title": str(row["paper_title"] or "") if has_meta else "",
-            "venue": str(row["venue"] or "") if has_meta else "",
-            "pub_year": _year(row["pub_year"]) if has_meta else None,
+            "notebook_id": notebook_id,
+            "pub_year": _year(row["pub_year"]),
+            "pending": bool(row["pending"]),
             "matches": {},
         }
-    if not folded_terms:
-        return [rows[key] for key in sorted(rows)]
-    for hit in hit_rows:
+        if with_titles:
+            entry["sort_title"] = str(row["paper_title"] or "") or presented_source_title(
+                row["title"], source_type=row["source_type"], source_id=source_id,
+            )
+        rows[source_id] = entry
+    return rows
+
+
+def assemble_scope(
+    rows: dict[str, dict],
+    hit_rows: Iterable[Mapping[str, Any]],
+    folded_terms: Sequence[str],
+    *,
+    scope_total: int,
+    visible_total: int,
+    meta_pending_excluded: int,
+) -> dict:
+    """The method's result: ``rows`` (one light dict per in-scope source, in
+    id order, ``matches`` filled from the term legs) and the counts.
+
+    ``hit_rows``: ``source_id, field, v1, v2`` (``v2`` is the file name on the
+    title leg, ``''`` elsewhere; on the keywords leg ``v1`` is ONE keyword).  A
+    hit for a source outside the scope (hidden projection, filtered out,
+    outside the allowed set) is dropped here."""
+    for hit in hit_rows if folded_terms else ():
         target = rows.get(str(hit["source_id"]))
         if target is None:
             continue
         field = str(hit["field"])
-        if field == "keywords":
-            values: list[object] = keyword_values(hit["v1"])
-        elif field == "title":
-            values = [hit["v1"], hit["v2"], target["title"]]
-        else:
-            values = [hit["v1"]]
+        values = [hit["v1"], hit["v2"]] if field == "title" else [hit["v1"]]
         merge_match(target["matches"], field, field_match(folded_terms, values))
-    return [rows[key] for key in sorted(rows)]
+    ordered = [rows[key] for key in sorted(rows)]
+    return {
+        "rows": ordered,
+        # The unfiltered scope (visible ∧ allowed) and the library's visible
+        # sources: a caller tells "the filters narrowed this library" from
+        # ``len(rows) < scope_total``.
+        "scope_total": int(scope_total),
+        "visible_total": int(visible_total),
+        "meta_pending_excluded": int(meta_pending_excluded),
+    }

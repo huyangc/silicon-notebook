@@ -1459,6 +1459,39 @@ def _peer_leg(active_id: str, notebook_id: str) -> bool:
     return federated_ask_active() or notebook_id != active_id
 
 
+def is_peer_library(active_notebook_id: str, notebook_id: str) -> bool:
+    """``_peer_leg`` for a caller outside the fan-out (``find_sources``' per-
+    library reads): the same one predicate, so "which library is a peer" has
+    one answer whether the read is federated or not."""
+    return _peer_leg(active_notebook_id, notebook_id)
+
+
+@contextmanager
+def peer_library_lane(candidates, notebook_id: str, peer: bool):
+    """The lane flags a federated PEER task runs under, around ONE direct
+    single-library chunk read of that peer (``find_sources``' semantic leg).
+
+    ``_CHUNK_PEEK_ONLY`` takes ``_peek_only``'s run-frozen answer -- a LARGE
+    library may only borrow an already-warm ANN index and otherwise degrades to
+    the bounded FTS lane (reported as ``fts_degraded``); it never cold-loads a
+    scale index nor runs the brute-force lane -- and ``_CHUNK_PEER_LEG`` turns
+    the generated-question supplement off, exactly as ``_federated_tasks`` sets
+    them for a peer task.  ``peer=False`` (the active library outside peer
+    mode) sets nothing: its lanes are the ordinary single-library ones."""
+    if not peer:
+        yield
+        return
+    from app.services.chunk_lane import _CHUNK_PEEK_ONLY, _CHUNK_PEER_LEG
+
+    peek_token = _CHUNK_PEEK_ONLY.set(_peek_only(candidates, notebook_id))
+    peer_token = _CHUNK_PEER_LEG.set(True)
+    try:
+        yield
+    finally:
+        _CHUNK_PEER_LEG.reset(peer_token)
+        _CHUNK_PEEK_ONLY.reset(peek_token)
+
+
 def _peer_visible_sources(candidates, notebook_id: str) -> tuple:
     """This peer library's live visible ceiling, frozen for the run.
 

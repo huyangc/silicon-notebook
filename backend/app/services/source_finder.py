@@ -26,24 +26,44 @@ fields, the word-boundary rule and two configured relevance lines that apply on
 the lanes with a semantic signal only; on the FTS-degraded lane a passage-only
 source needs two hits to be ``related``.  The order is total and deterministic,
 so a page is recomputed on every call and the cursor is just an offset plus a
-fingerprint of the parameters (any change invalidates it).
+fingerprint of the parameters (any change invalidates it).  Within one
+retrieval run the ranked list is memoized by that fingerprint
+(``memoized_retrieval_value``), so turning a page only slices it; without a run
+(MCP) every call recomputes.  Only the page is hydrated (titles, authors, card
+status); the ranking reads ids, years, the pending flag and the matched fields.
+
+Participant libraries other than the run's subject are read like a federated
+PEER (``chunk_federation.is_peer_library``): their semantic leg runs under the
+federation's peek-only lane (``peer_library_lane``: warm ANN or bounded FTS,
+never a cold scale-index load), and each such library's reads run under its own
+read budget (the federation's per-library timeout, capped by the phase when a
+run plan is installed) with failure isolation: a library that fails or times
+out is skipped, reported in ``skipped_libraries`` and a
+``find_sources_library_skipped`` event, and makes ``lexical_complete`` false.
 """
 from __future__ import annotations
 
 import base64
 import hashlib
 import json
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from app.domain.promotion_source import presented_source_title
 from app.domain.retrieval import RetrievedChunk
+from app.domain.retrieval_control import RetrievalControlError
 from app.domain.source_find_terms import (
     STRONG_FIELDS,
     fold_term,
     ordered_fields,
 )
-from app.models.sources import paper_meta_status
-from app.services.cancellation import CancelEvent, raise_if_cancelled
+from app.repositories.read_budget import classify_read_failure, read_budget
+from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
+from app.services.chunk_federation import is_peer_library
+from app.services.federated_run import current_federated_run_plan
+from app.services.retrieval_participants import federated_ask_active
+from app.services.retrieval_run import memoized_retrieval_value
 from app.services.source_scope import (
     scoped_allowed_source_ids,
     subjectless_run_active,
@@ -128,6 +148,15 @@ class FindSourcesResult:
     next_cursor: str
     #: ``{notebook_id: lane}`` of the libraries the semantic leg read.
     lanes: Mapping[str, str]
+    #: Eligible papers without extracted metadata that a year / venue / author
+    #: filter excluded (they cannot be judged), design §5.4.
+    meta_pending_excluded: int = 0
+    #: Eligible papers without extracted metadata in the filtered scope when
+    #: ``terms`` were given (only title / file name / summary could be checked).
+    meta_pending_unchecked: int = 0
+    #: ``{notebook_id: reason}`` of the participant libraries skipped in this
+    #: call (``timeout`` / ``saturated`` / ``queue_deadline`` / ``unavailable``).
+    skipped_libraries: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -152,8 +181,31 @@ class _Candidate:
     tier: str = ""
 
 
+@dataclass(frozen=True)
+class _LibraryRead:
+    rows: Tuple[Dict[str, Any], ...]
+    meta_pending_excluded: int
+    lane: str = ""
+    capped: bool = False
+    chunks: Tuple[RetrievedChunk, ...] = ()
+
+
+@dataclass(frozen=True)
+class _Ranking:
+    """Everything one parameter fingerprint ranks to (memoized per run)."""
+
+    ranked: Tuple[_Candidate, ...]
+    filtered_scope_total: int
+    capped: bool
+    lanes: Mapping[str, str]
+    skipped: Mapping[str, str]
+    meta_pending_excluded: int
+    meta_pending_unchecked: int
+
+
 def paper_card_status(
-    meta_row: Mapping[str, Any],
+    is_paper: Optional[bool],
+    pending: bool,
     card: Optional[Mapping[str, Any]],
     basis: str,
     *,
@@ -161,20 +213,18 @@ def paper_card_status(
 ) -> str:
     """``card_status`` of one found source (design §5.4 + ``meta_pending``).
 
-    No paper-meta row: ``meta_pending`` for a source eligible for one (the
-    metadata is extracted lazily), else ``not_paper``.  A meta row saying "not
-    a paper": ``not_paper``.  A paper: ``ready`` / ``failed`` when its card row
-    is for the current element ``basis`` and ``card_version``, else
-    ``missing`` (absent, stale, or of an older version -- regenerated lazily).
-    ``card_version`` is passed in by the caller (the paper card module's
-    ``PAPER_CARD_VERSION``) so this judgement has one definition."""
-    status = paper_meta_status(
-        meta_row.get("is_paper"), meta_row.get("source_type", ""),
-        meta_row.get("doc_type", ""), meta_row.get("parse_status", ""),
-    )
-    if status == "missing":
-        return "meta_pending"
-    if status != "has_meta":
+    No paper-meta row (``is_paper`` is ``None``): ``meta_pending`` for a
+    source eligible for one (``pending``: the store's
+    ``PAPER_META_ELIGIBLE_SQL``, metadata is extracted lazily), else
+    ``not_paper``.  A meta row saying "not a paper": ``not_paper``.  A paper:
+    ``ready`` / ``failed`` when its card row is for the current element
+    ``basis`` and ``card_version``, else ``missing`` (absent, stale, or of an
+    older version -- regenerated lazily).  ``card_version`` is passed in by the
+    caller (the paper card module's ``PAPER_CARD_VERSION``) so this judgement
+    has one definition."""
+    if is_paper is None:
+        return "meta_pending" if pending else "not_paper"
+    if not is_paper:
         return "not_paper"
     if (
         card is None
@@ -226,14 +276,9 @@ def _relevance_order(candidate: _Candidate) -> tuple:
 def _filter_order(candidate: _Candidate) -> tuple:
     return (
         *_year_key(candidate.row["pub_year"]),
-        _display_title(candidate.row),
+        candidate.row["sort_title"],
         candidate.row["source_id"],
     )
-
-
-def _display_title(row: Mapping[str, Any]) -> str:
-    """The paper title when metadata has one, else the (presented) title."""
-    return str(row["paper_title"] or row["title"])
 
 
 def _clean_text(value: Any, field: str, limit: int) -> str:
@@ -268,7 +313,10 @@ def _normalized(request: FindSourcesRequest) -> FindSourcesRequest:
             raise FindSourcesError("year must be an integer") from exc
     if None not in years and years[0] > years[1]:
         raise FindSourcesError("year_from is after year_to")
-    limit = int(request.limit or FIND_SOURCES_PAGE_SIZE)
+    try:
+        limit = int(request.limit or FIND_SOURCES_PAGE_SIZE)
+    except (TypeError, ValueError) as exc:
+        raise FindSourcesError("limit must be an integer") from exc
     if not 1 <= limit <= FIND_SOURCES_PAGE_SIZE:
         raise FindSourcesError(f"limit must be 1..{FIND_SOURCES_PAGE_SIZE}")
     normalized = FindSourcesRequest(
@@ -333,6 +381,12 @@ def decode_cursor(cursor: str, fingerprint: str) -> int:
     return offset
 
 
+def _explicit_identity(source_ids: Sequence[str]) -> str:
+    """A digest of an explicit source set (order-free), for the cursor."""
+    payload = "\x1e".join(sorted(source_ids))
+    return hashlib.blake2b(payload.encode("utf-8"), digest_size=12).hexdigest()
+
+
 class SourceFinder:
     """``find_sources`` over the run's source set (or an explicit one)."""
 
@@ -345,6 +399,7 @@ class SourceFinder:
         enumeration: Any,
         settings: Any,
         paper_card_version: int,
+        event_log: Any = None,
     ) -> None:
         self._database = database
         self._sources = sources
@@ -352,6 +407,7 @@ class SourceFinder:
         self._enumeration = enumeration
         self._settings = settings
         self._card_version = int(paper_card_version)
+        self._event_log = event_log
 
     # ----------------------------------------------------------------- entry
     def find(
@@ -377,31 +433,20 @@ class SourceFinder:
                 db, active_notebook_id, request,
                 ceiling_binds=ceiling_binds, allowed_source_ids=allowed_source_ids,
             )
-            fingerprint = _fingerprint(request, scope_identity)
-            offset = decode_cursor(request.cursor, fingerprint)
-            scope_rows: Dict[str, List[Dict[str, Any]]] = {}
-            for library in libraries:
-                raise_if_cancelled(cancel_event)
-                scope_rows[library.notebook_id] = self._metadata_rows(
-                    db, library, request,
-                )
-        candidates = {
-            row["source_id"]: _Candidate(row=row)
-            for rows in scope_rows.values() for row in rows
-        }
-        lanes: Dict[str, str] = {}
-        capped = False
-        if request.query:
-            for notebook_id, rows in scope_rows.items():
-                raise_if_cancelled(cancel_event)
-                if rows:
-                    lane, library_capped = self._semantic_leg(
-                        notebook_id, request.query,
-                        [row["source_id"] for row in rows], candidates,
-                    )
-                    lanes[notebook_id] = lane
-                    capped = capped or library_capped
-        ranked = self._ranked(candidates, request)
+        fingerprint = _fingerprint(request, scope_identity)
+        offset = decode_cursor(request.cursor, fingerprint)
+        # One ranking per fingerprint per run: a page turn only slices it.
+        # Without a run (MCP) the memo is a pass-through.
+        ranking = memoized_retrieval_value(
+            (
+                "find_sources_ranking", fingerprint,
+                int(self._settings.find_sources_chunk_recall),
+                float(self._settings.find_sources_strong_relevance),
+                float(self._settings.find_sources_related_relevance),
+            ),
+            lambda: self._rank(active_notebook_id, libraries, request, cancel_event),
+        )
+        ranked = ranking.ranked
         page = ranked[offset:offset + request.limit]
         items = self._hydrate(page, offset)
         more = offset + request.limit < len(ranked)
@@ -409,11 +454,17 @@ class SourceFinder:
             items=items,
             strong=sum(1 for c in ranked if c.tier == "strong"),
             related=sum(1 for c in ranked if c.tier == "related"),
-            filtered_scope_total=len(candidates),
-            lexical_complete=bool(request.terms) or not request.query,
-            semantic_recall_capped=capped,
+            filtered_scope_total=ranking.filtered_scope_total,
+            lexical_complete=(bool(request.terms) or not request.query)
+            and not ranking.meta_pending_excluded
+            and not ranking.meta_pending_unchecked
+            and not ranking.skipped,
+            semantic_recall_capped=ranking.capped,
             next_cursor=encode_cursor(offset + request.limit, fingerprint) if more else "",
-            lanes=lanes,
+            lanes=dict(ranking.lanes),
+            meta_pending_excluded=ranking.meta_pending_excluded,
+            meta_pending_unchecked=ranking.meta_pending_unchecked,
+            skipped_libraries=dict(ranking.skipped),
         )
 
     # ------------------------------------------------------------ source set
@@ -427,14 +478,15 @@ class SourceFinder:
         allowed_source_ids: Optional[Sequence[str]],
     ) -> Tuple[List[_Library], Tuple[Any, ...]]:
         """The libraries to read, plus the scope's identity for the cursor
-        fingerprint."""
+        fingerprint (an explicit set is identified by a digest of its ids, so
+        a changed list invalidates the cursor)."""
         if allowed_source_ids is not None:
             explicit = tuple(dict.fromkeys(
                 str(value) for value in allowed_source_ids if str(value or "")
             ))
             return (
                 [_Library(active_notebook_id, explicit, None, None)],
-                ("explicit", active_notebook_id),
+                ("explicit", active_notebook_id, _explicit_identity(explicit)),
             )
         resolved = self._enumeration.source_scope(
             db, active_notebook_id, ceiling_binds=ceiling_binds,
@@ -463,10 +515,133 @@ class SourceFinder:
             "run", list(resolved.notebook_ids), resolved.ceiling_digest,
         )
 
+    # --------------------------------------------------------------- ranking
+    def _rank(
+        self,
+        active_notebook_id: str,
+        libraries: Sequence[_Library],
+        request: FindSourcesRequest,
+        cancel_event: CancelEvent,
+    ) -> _Ranking:
+        """Both legs over every library, tiered and totally ordered.
+
+        A PEER library (``is_peer_library``) is read under its own budget --
+        ``min(phase deadline, now + per-library timeout)`` with a run plan
+        (the federation's ``_budgeted_retrieve_for`` bound), else ``now +
+        GLOBAL_ASK_NOTEBOOK_TIMEOUT_SECONDS`` (the same per-library knob the
+        plan is built from) -- and in isolation: its failure skips it alone.
+        The subject library outside peer mode fails the call, as the
+        single-library chunk path does."""
+        plan = current_federated_run_plan() if federated_ask_active() else None
+        timeout = float(
+            plan.notebook_timeout_seconds if plan is not None
+            else self._settings.global_ask_notebook_timeout_seconds
+        )
+        phase_deadline = (
+            time.monotonic() + float(plan.phase_timeout_seconds)
+            if plan is not None else None
+        )
+        cancel = plan.cancel if plan is not None else cancel_event
+        reads: Dict[str, _LibraryRead] = {}
+        skipped: Dict[str, str] = {}
+        for library in libraries:
+            raise_if_cancelled(cancel_event)
+            notebook_id = library.notebook_id
+            peer = is_peer_library(active_notebook_id, notebook_id)
+            if not peer:
+                reads[notebook_id] = self._read_library(library, request, peer=False)
+                continue
+            started = time.perf_counter()
+            if phase_deadline is not None and phase_deadline - time.monotonic() <= 0:
+                skipped[notebook_id] = "queue_deadline"
+                self._emit_skipped(notebook_id, "queue_deadline", "", 0)
+                continue
+            deadline = time.monotonic() + timeout
+            if phase_deadline is not None:
+                deadline = min(deadline, phase_deadline)
+            # A run already cancelled must not open a connection, and the
+            # answer is ``AskCancelled`` -- entering a budget whose token is
+            # set would raise ``ReadBudgetExceeded`` and read as a timeout.
+            raise_if_cancelled(cancel)
+            try:
+                with read_budget(deadline, cancel):
+                    reads[notebook_id] = self._read_library(library, request, peer=True)
+            except (AskCancelled, RetrievalControlError):
+                raise
+            except Exception as exc:  # noqa: BLE001 - one library must not fail the call
+                reason = classify_read_failure(exc) or (
+                    "timeout" if time.monotonic() >= deadline else "unavailable"
+                )
+                skipped[notebook_id] = reason
+                self._emit_skipped(
+                    notebook_id, reason, type(exc).__name__,
+                    round((time.perf_counter() - started) * 1000),
+                )
+        candidates: Dict[str, _Candidate] = {}
+        lanes: Dict[str, str] = {}
+        capped = False
+        for notebook_id, read in reads.items():
+            for row in read.rows:
+                candidates[row["source_id"]] = _Candidate(row=row)
+            if read.lane:
+                lanes[notebook_id] = read.lane
+                capped = capped or read.capped
+            for chunk in read.chunks:
+                candidate = candidates.get(str(chunk.source_id))
+                if candidate is None or candidate.row["notebook_id"] != notebook_id:
+                    continue
+                candidate.lane = read.lane
+                candidate.hits += 1
+                relevance = float(chunk.relevance)
+                if (
+                    candidate.best is None or relevance > candidate.best
+                    or (relevance == candidate.best
+                        and chunk.chunk_id < candidate.passage.chunk_id)
+                ):
+                    candidate.best = relevance
+                    candidate.passage = chunk
+        return _Ranking(
+            ranked=tuple(self._ranked(candidates, request)),
+            filtered_scope_total=len(candidates),
+            capped=capped,
+            lanes=lanes,
+            skipped=skipped,
+            meta_pending_excluded=sum(r.meta_pending_excluded for r in reads.values()),
+            meta_pending_unchecked=sum(
+                1 for c in candidates.values() if c.row["pending"]
+            ) if request.terms else 0,
+        )
+
+    def _read_library(
+        self, library: _Library, request: FindSourcesRequest, *, peer: bool,
+    ) -> _LibraryRead:
+        """One library's metadata leg and, with a ``query``, its semantic leg
+        over the filtered scope (the filters decide the allow list first)."""
+        with self._database.connect() as db:
+            rows, excluded, narrowed = self._metadata_rows(db, library, request)
+        if not request.query or not rows:
+            return _LibraryRead(tuple(rows), excluded)
+        recall = int(self._settings.find_sources_chunk_recall)
+        chunks, lane = self._retrieval.retrieve_chunks_in_sources(
+            library.notebook_id, request.query, recall,
+            [row["source_id"] for row in rows],
+            peer=peer, narrowed=narrowed,
+        )
+        capped = len(chunks) >= recall and (
+            lane == LEXICAL_ONLY_LANE
+            or min(float(chunk.relevance) for chunk in chunks)
+            >= float(self._settings.find_sources_related_relevance)
+        )
+        return _LibraryRead(tuple(rows), excluded, lane, capped, tuple(chunks))
+
     def _metadata_rows(
         self, db: Any, library: _Library, request: FindSourcesRequest,
-    ) -> List[Dict[str, Any]]:
-        rows = self._sources.find_sources_metadata_rows(
+    ) -> Tuple[List[Dict[str, Any]], int, bool]:
+        """``(rows, meta_pending_excluded, narrowed)``: ``narrowed`` -- the
+        filters (kind / year / venue / author) really dropped a source of the
+        unfiltered scope, so the semantic leg's list is a genuinely narrower
+        universe than the library's visible set (``producer_explicit``)."""
+        scope = self._sources.find_sources_metadata_rows(
             db, library.notebook_id,
             terms=list(request.terms),
             year_from=request.year_from, year_to=request.year_to,
@@ -474,7 +649,10 @@ class SourceFinder:
             allowed_source_ids=(
                 None if library.allowed is None else list(library.allowed)
             ),
+            with_titles=not request.query and not request.terms,
         )
+        rows = scope["rows"]
+        narrowed = len(rows) < int(scope["scope_total"])
         # A read without the run's list is verified against the ceiling taken
         # before it (a source outside flips the verdict for later reads); every
         # read is then cut to the plan ``enumerate_sources`` lists, so the two
@@ -483,42 +661,32 @@ class SourceFinder:
             library.notebook_id, library.unbound,
             (row["source_id"] for row in rows),
         )
+        excluded = int(scope["meta_pending_excluded"])
         if library.plan_ids is None:
-            return rows
-        return [row for row in rows if row["source_id"] in library.plan_ids]
+            return rows, excluded, narrowed
+        return (
+            [row for row in rows if row["source_id"] in library.plan_ids],
+            excluded, narrowed,
+        )
 
-    # --------------------------------------------------------- semantic leg
-    def _semantic_leg(
-        self,
-        notebook_id: str,
-        query: str,
-        source_ids: Sequence[str],
-        candidates: Dict[str, _Candidate],
-    ) -> Tuple[str, bool]:
-        recall = int(self._settings.find_sources_chunk_recall)
-        chunks, lane = self._retrieval.retrieve_chunks_in_sources(
-            notebook_id, query, recall, list(source_ids),
-        )
-        for chunk in chunks:
-            candidate = candidates.get(str(chunk.source_id))
-            if candidate is None or candidate.row["notebook_id"] != notebook_id:
-                continue
-            candidate.lane = lane
-            candidate.hits += 1
-            relevance = float(chunk.relevance)
-            if (
-                candidate.best is None or relevance > candidate.best
-                or (relevance == candidate.best
-                    and chunk.chunk_id < candidate.passage.chunk_id)
-            ):
-                candidate.best = relevance
-                candidate.passage = chunk
-        capped = len(chunks) >= recall and (
-            lane == LEXICAL_ONLY_LANE
-            or min(float(chunk.relevance) for chunk in chunks)
-            >= float(self._settings.find_sources_related_relevance)
-        )
-        return lane, capped
+    def _emit_skipped(
+        self, notebook_id: str, reason: str, error_type: str, latency_ms: int,
+    ) -> None:
+        """Content-free skip receipt (``chunk_federation_skipped``'s fields),
+        fail-open: never break the search to report."""
+        emit = getattr(self._event_log, "emit", None)
+        if not callable(emit):
+            return
+        try:
+            emit({
+                "kind": "find_sources_library_skipped",
+                "notebook_id": notebook_id,
+                "error_type": error_type,
+                "latency_ms": latency_ms,
+                "reason": reason,
+            })
+        except Exception:  # noqa: BLE001 - observability is fail-open
+            pass
 
     # ---------------------------------------------------------------- order
     def _ranked(
@@ -544,18 +712,24 @@ class SourceFinder:
     def _hydrate(
         self, page: Sequence[_Candidate], offset: int,
     ) -> Tuple[FoundSource, ...]:
-        """Authors and card status for one page, batched per owning library
-        (four bounded reads per library on one connection)."""
+        """Titles, paper metadata, authors and card status for ONE page,
+        batched per owning library (bounded primary-key reads on one
+        connection) -- the ranking never reads a display row."""
         by_notebook: Dict[str, List[str]] = {}
         for candidate in page:
             by_notebook.setdefault(candidate.row["notebook_id"], []).append(
                 candidate.row["source_id"]
             )
+        listings: Dict[str, Mapping[str, Any]] = {}
         metas: Dict[str, dict] = {}
         cards: Dict[str, dict] = {}
         bases: Dict[str, str] = {}
         with self._database.connect() as db:
             for notebook_id, ids in by_notebook.items():
+                listings.update(
+                    (str(row["id"]), dict(row))
+                    for row in self._sources.source_listing_rows(db, ids)
+                )
                 metas.update(self._sources.paper_meta_for_sources(
                     db, ids, notebook_id=notebook_id))
                 papers = [
@@ -570,20 +744,26 @@ class SourceFinder:
         for position, candidate in enumerate(page):
             row = candidate.row
             source_id = row["source_id"]
+            listing = listings.get(source_id) or {}
+            meta = metas.get(source_id)
             passage = candidate.passage
             reasons = ordered_fields(row["matches"]) + (
                 (f"passages:{candidate.hits}",) if candidate.hits else ()
+            )
+            title = str((meta or {}).get("paper_title") or "") or presented_source_title(
+                listing.get("title"), source_type=listing.get("source_type"),
+                source_id=source_id,
             )
             items.append(FoundSource(
                 rank=offset + position + 1,
                 source_id=source_id,
                 notebook_id=row["notebook_id"],
-                title=_display_title(row),
+                title=title,
                 pub_year=row["pub_year"],
-                venue=row["venue"],
+                venue=str((meta or {}).get("venue") or ""),
                 authors=tuple(
                     str(author["name"])
-                    for author in metas.get(source_id, {}).get("authors", [])
+                    for author in (meta or {}).get("authors", [])
                     if str(author.get("name") or "")
                 )[:AUTHORS_SHOWN],
                 tier=candidate.tier,
@@ -594,7 +774,8 @@ class SourceFinder:
                     element_ids=tuple(str(e) for e in passage.element_ids or ()),
                 ),
                 card_status=paper_card_status(
-                    row, cards.get(source_id), bases.get(source_id, ""),
+                    None if meta is None else bool(meta.get("is_paper")),
+                    row["pending"], cards.get(source_id), bases.get(source_id, ""),
                     card_version=self._card_version,
                 ),
             ))

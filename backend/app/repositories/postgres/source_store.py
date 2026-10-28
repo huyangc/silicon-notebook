@@ -46,11 +46,17 @@ from app.repositories.postgres._store_utils import (
     placeholders,
 )
 from app.domain.source_find_terms import fold_term, like_pattern
-from app.repositories.find_sources_rows import assemble_rows, check_kind
+from app.repositories.find_sources_rows import (
+    assemble_scope,
+    bind_term_legs,
+    check_kind,
+    scope_rows_dicts,
+)
 from app.repositories.paper_card_rows import paper_card_row, utc_iso
 from app.repositories.postgres import memory_sql
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.id_binding import (
+    BoundIds,
     bind_ids,
     execute_bound,
     execute_ids,
@@ -171,14 +177,20 @@ PAPER_META_OWN_ROW_JOIN_SQL = (
 
 
 def _find_sources_term_legs(
-    notebook_id: str, folded_terms: Sequence[str],
+    notebook_id: str, folded_terms: Sequence[str], scope: BoundIds | None = None,
 ) -> tuple[str, list[object]]:
     """``find_sources_metadata_rows``' term legs (0048's per-table UNION shape,
     see that method).  Every leg ORs one ``lower(col) LIKE %s`` per term and
     reports ``(source_id, field, v1, v2)``; ``v2`` is the file name on the
     title leg.  The promotion leg (a legacy-titled promotion source matched by
     its MAPPED title) appears only for a term naming today's wording, exactly as
-    in ``list_sources_page``."""
+    in ``list_sources_page``.  ``keywords`` is matched one array element at a
+    time (``jsonb_array_elements``: a string or number element, its text under
+    ``COLLATE "C"``), never on the jsonb text, so a quote or a backslash in a
+    term means itself.  ``scope`` (the filtered scope's ids, only for a scope
+    the filters narrowed -- ``find_sources_rows.bind_term_legs``) is a
+    ``member_of`` filter on every leg; the leg stays driven by its own
+    ``notebook_id=`` and trigram predicate."""
     patterns = [like_pattern(term) for term in folded_terms]
 
     def any_like(expression: str) -> tuple[str, list[object]]:
@@ -190,49 +202,63 @@ def _find_sources_term_legs(
     legs: list[str] = []
     params: list[object] = []
 
-    def leg(head: str, expressions: Sequence[str], scope: str) -> None:
+    def leg(head: str, expressions: Sequence[str], where: str, id_column: str) -> None:
         clauses: list[str] = []
         for expression in expressions:
             clause, values = any_like(expression)
             clauses.append(clause)
             params.extend(values)
-        legs.append(f"{head} WHERE {scope}AND (" + " OR ".join(clauses) + ")")
+        member = ""
+        if scope is not None:
+            member = f" AND {member_of(id_column, scope)}"
+            params.append(scope.param)
+        legs.append(
+            f"{head} WHERE {where}AND (" + " OR ".join(clauses) + f"){member}"
+        )
 
     visible = f"notebook_id=%s AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
     params.append(notebook_id)
     leg(
         "SELECT id AS source_id,'title' AS field,title AS v1,file_name AS v2 "
         "FROM sources",
-        ("lower(title)", "lower(file_name)"), visible,
+        ("lower(title)", "lower(file_name)"), visible, "id",
     )
     if any(needle_names_current_wording(term) for term in folded_terms):
         params.append(notebook_id)
         leg(
             f"SELECT id,'title',{mapped_title_sql('title')},'' FROM sources",
             (f"lower({mapped_title_sql('title')})",),
-            f"notebook_id=%s AND {promotion_gate_sql('source_type', 'id')} ",
+            f"notebook_id=%s AND {promotion_gate_sql('source_type', 'id')} ", "id",
         )
     params.append(notebook_id)
-    leg("SELECT id,'summary',summary,'' FROM sources", ("lower(summary)",), visible)
+    leg(
+        "SELECT id,'summary',summary,'' FROM sources", ("lower(summary)",),
+        visible, "id",
+    )
     params.append(notebook_id)
     leg(
         "SELECT a.source_id,'author',a.name,'' FROM source_authors a",
-        ("lower(a.name)",), "a.notebook_id=%s ",
+        ("lower(a.name)",), "a.notebook_id=%s ", "a.source_id",
     )
     params.append(notebook_id)
     leg(
         "SELECT m.source_id,'paper_title',m.paper_title,'' FROM source_paper_meta m",
-        ("lower(m.paper_title)",), "m.notebook_id=%s ",
+        ("lower(m.paper_title)",), "m.notebook_id=%s ", "m.source_id",
     )
     params.append(notebook_id)
     leg(
         "SELECT m.source_id,'venue',m.venue,'' FROM source_paper_meta m",
-        ("lower(m.venue)",), "m.notebook_id=%s ",
+        ("lower(m.venue)",), "m.notebook_id=%s ", "m.source_id",
     )
     params.append(notebook_id)
     leg(
-        "SELECT m.source_id,'keywords',m.keywords::text,'' FROM source_paper_meta m",
-        ('lower(m.keywords::text COLLATE "C")',), "m.notebook_id=%s ",
+        "SELECT m.source_id,'keywords',k.value #>> '{}','' FROM source_paper_meta m "
+        "CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN "
+        "jsonb_typeof(m.keywords)='array' THEN m.keywords ELSE '[]'::jsonb END) "
+        "AS k(value)",
+        ("lower((k.value #>> '{}') COLLATE \"C\")",),
+        "m.notebook_id=%s AND jsonb_typeof(k.value) IN ('string','number') ",
+        "m.source_id",
     )
     return " UNION ALL ".join(legs), params
 
@@ -617,23 +643,36 @@ class SourceStore:
         author: str = "",
         kind: str = "papers",
         allowed_source_ids: Sequence[str] | None = None,
-    ) -> list[dict]:
+        with_titles: bool = False,
+    ) -> dict:
         """``find_sources``' metadata leg over ONE library (the canonical
-        definition; SQLite mirrors it).  Two statements on the caller's
+        definition; SQLite mirrors it).  Up to three statements on the caller's
         connection:
 
-        1. **the filtered scope** -- every user-visible source of the library
-           (``VISIBLE_SOURCE_TYPES_PREDICATE``, the source tab's predicate, so
-           Memory/Knowhow projections never appear) that passes ``kind`` /
-           year / venue / author and, when given, ``allowed_source_ids``
-           (``id_binding.member_of``, a custom plan: the run's frozen ceiling
-           can hold the whole library).  ``kind="papers"`` is ``is_paper=1``
-           plus the sources WITHOUT a paper-meta row that are eligible for one
-           (``PAPER_META_ELIGIBLE_SQL``): metadata is extracted lazily and
-           never backfilled, so an unextracted paper must still be findable.
-           Paper meta is joined on its OWN ``notebook_id`` as well
-           (``list_sources_page`` comment, point 2).
-        2. **the term legs** (only with ``terms``) -- 0048's shape: one leg per
+        1. **the counts** (skipped when nothing can narrow: ``kind="all"``, no
+           filter, no allow list) -- over the library's user-visible sources:
+           how many there are, how many of them the allow list keeps
+           (``scope_total``: the scope BEFORE the filters) and how many of
+           those are eligible papers without a paper-meta row.  A year / venue
+           / author filter excludes every such source -- it cannot be judged
+           -- so they are reported as ``meta_pending_excluded`` (design §5.4).
+        2. **the filtered scope**, ids only (``id, pub_year, pending`` --
+           ``pending``: eligible for paper meta but none extracted yet; plus
+           ``title, source_type, paper_title`` with ``with_titles``, the one
+           ordering that needs a title for every row) -- every user-visible
+           source of the library (``VISIBLE_SOURCE_TYPES_PREDICATE``, the
+           source tab's predicate, so Memory/Knowhow projections never appear)
+           that passes ``kind`` / year / venue / author and, when given,
+           ``allowed_source_ids`` (``id_binding.member_of``, a custom plan: the
+           run's frozen ceiling can hold the whole library).
+           ``kind="papers"`` is ``is_paper=1`` plus the sources WITHOUT a
+           paper-meta row that are eligible for one (``PAPER_META_ELIGIBLE_SQL``):
+           metadata is extracted lazily and never backfilled, so an
+           unextracted paper must still be findable.  Paper meta is joined on
+           its OWN ``notebook_id`` as well (``list_sources_page`` comment,
+           point 2).  Display rows are hydrated by the caller for one page only
+           (``source_listing_rows`` / ``paper_meta_for_sources``).
+        3. **the term legs** (only with ``terms``) -- 0048's shape: one leg per
            table and column group, each rooted at its own table's
            ``notebook_id=``, the visible predicate repeated as an inline
            literal on the ``sources`` legs so ``idx_sources_nb_title_file_trgm``'s
@@ -641,21 +680,48 @@ class SourceStore:
            ``%``/``_``/backslash escaped (``source_find_terms.like_pattern``;
            PostgreSQL's LIKE escapes with backslash by default).  ``UNION ALL``:
            each leg reports the matched VALUE, and Python re-checks it
-           (``find_sources_rows.assemble_rows``) for the field and the word
-           boundary.  ``keywords`` is matched on the jsonb text under
-           ``COLLATE "C"`` so ``lower()`` folds exactly what Python folds.
+           (``find_sources_rows.assemble_scope``) for the field and the word
+           boundary.  Bound to the scope's ids (``member_of`` on every leg)
+           only when the filters really narrowed the library
+           (``find_sources_rows.bind_term_legs``).
 
-        Returns one dict per in-scope source, ``matches`` = ``{field:
-        word_boundary}`` (empty without a term hit); see ``assemble_rows``."""
+        Returns ``{"rows": [...], "scope_total", "visible_total",
+        "meta_pending_excluded"}``; each row is ``source_id, notebook_id,
+        pub_year, pending, matches`` (``{field: word_boundary}``, empty without
+        a term hit) and ``sort_title`` with titles."""
         kind = check_kind(kind)
         folded = [term for term in dict.fromkeys(
             fold_term(value) for value in terms) if term]
-        where = [f"s.notebook_id=%s AND s.{VISIBLE_SOURCE_TYPES_PREDICATE}"]
-        params: list[object] = [notebook_id]
         bound = None
+        allowed = "TRUE"
         if allowed_source_ids is not None:
             bound = bind_ids(list(allowed_source_ids))
-            where.append(member_of("s.id", bound))
+            allowed = member_of("s.id", bound)
+        meta_filtered = (
+            year_from is not None or year_to is not None
+            or bool(fold_term(venue)) or bool(fold_term(author))
+        )
+        joined = (
+            "FROM sources s LEFT JOIN source_paper_meta m "
+            "ON m.source_id=s.id AND m.notebook_id=s.notebook_id "
+            f"WHERE s.notebook_id=%s AND s.{VISIBLE_SOURCE_TYPES_PREDICATE}"
+        )
+        pending = f"(m.source_id IS NULL{PAPER_META_ELIGIBLE_SQL})"
+        counts = None
+        if bound is not None or kind != "all" or meta_filtered:
+            counts = execute_bound(
+                connection,
+                "SELECT count(*) AS visible_total,"
+                f"count(*) FILTER (WHERE {allowed}) AS scope_total,"
+                f"count(*) FILTER (WHERE {allowed} AND {pending}) AS pending_total "
+                f"{joined}",
+                [*([bound.param] * 2 if bound is not None else []), notebook_id],
+                bound,
+            ).fetchone()
+        where: list[str] = []
+        params: list[object] = [notebook_id]
+        if bound is not None:
+            where.append(allowed)
             params.append(bound.param)
         if kind == "papers":
             where.append(
@@ -677,20 +743,35 @@ class SourceStore:
                 "WHERE a.notebook_id=%s AND lower(a.name) LIKE %s)"
             )
             params.extend((notebook_id, like_pattern(fold_term(author))))
-        scope_rows = execute_bound(
-            connection,
-            "SELECT s.id,s.notebook_id,s.title,s.source_type,s.doc_type,"
-            "s.parse_status,m.source_id AS meta_id,m.is_paper,m.paper_title,"
-            "m.venue,m.pub_year FROM sources s LEFT JOIN source_paper_meta m "
-            "ON m.source_id=s.id AND m.notebook_id=s.notebook_id "
-            f"WHERE {' AND '.join(where)}",
-            params, bound,
-        ).fetchall()
+        titles = ",s.title,s.source_type,m.paper_title" if with_titles else ""
+        rows = scope_rows_dicts(
+            execute_bound(
+                connection,
+                f"SELECT s.id,m.pub_year,{pending} AS pending{titles} {joined}"
+                + "".join(f" AND {clause}" for clause in where),
+                params, bound,
+            ).fetchall(),
+            notebook_id, with_titles=with_titles,
+        )
+        visible_total = len(rows) if counts is None else int(counts["visible_total"])
+        scope_total = len(rows) if counts is None else int(counts["scope_total"])
+        excluded = 0
+        if meta_filtered and counts is not None:
+            excluded = int(counts["pending_total"]) - sum(
+                1 for row in rows.values() if row["pending"]
+            )
         hit_rows: list = []
-        if folded and scope_rows:
-            statement, leg_params = _find_sources_term_legs(notebook_id, folded)
-            hit_rows = connection.execute(statement, leg_params).fetchall()
-        return assemble_rows(scope_rows, hit_rows, folded)
+        if folded and rows:
+            scope = (
+                bind_ids(sorted(rows))
+                if bind_term_legs(len(rows), visible_total) else None
+            )
+            statement, leg_params = _find_sources_term_legs(notebook_id, folded, scope)
+            hit_rows = execute_bound(connection, statement, leg_params, scope).fetchall()
+        return assemble_scope(
+            rows, hit_rows, folded, scope_total=scope_total,
+            visible_total=visible_total, meta_pending_excluded=excluded,
+        )
 
     def visible_document_count(self, notebook_id: str) -> int:
         with self.database.connect() as connection:
