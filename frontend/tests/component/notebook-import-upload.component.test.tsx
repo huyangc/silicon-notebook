@@ -13,6 +13,7 @@ const api = vi.hoisted(() => ({
   uploadStillInProgress: vi.fn(() => false),
   // 白名单判定在 api 层(那里有自己的用例);这里按用例需要直接给结论,默认「不是确定拒绝」。
   uploadRefusedForSure: vi.fn(() => false),
+  getImportUploadStatus: vi.fn(async (): Promise<unknown> => ({ status: "receiving" })),
 }));
 vi.mock("../../app/notebook-transfer-api.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../app/notebook-transfer-api.ts")>()),
@@ -28,7 +29,7 @@ vi.mock("../../app/page-reload.ts", () => ({
 const {
   importUpload, useImportUpload, useImportUploadBusy, IMPORT_UPLOAD_UNSURE_TEXT, IMPORT_STOP_UNSURE_TEXT,
   IMPORT_PRECHECK_STOP_UNSURE_TEXT, IMPORT_RESPONSE_UNSURE_TEXT, IMPORT_NOT_CREATED_TEXT,
-  RECONCILE_INTERVAL_MS, RECONCILE_WINDOW_MS, RECONCILE_GIVE_UP_AFTER_FAILURES, IMPORT_RECONCILE_UNREADABLE_TEXT,
+  RECONCILE_INTERVAL_MS, NONE_CONFIRM_MS, RECONCILE_GIVE_UP_AFTER_FAILURES, IMPORT_RECONCILE_UNREADABLE_TEXT,
 } = await import("../../app/notebook-import-upload.ts");
 const { IMPORT_UPLOAD_CUT_TEXT, IMPORT_UPLOAD_FAILED_TEXT, TRANSFER_BUSY_TEXT } = await import(
   "../../app/notebook-transfer-api.ts"
@@ -659,42 +660,72 @@ test("第一次尝试就被确定拒绝:换标识之前也先按标识对账(有
 });
 
 
-test("说不准之后,后台按上传标识接着对账:作业晚些登记出来就认领它", async () => {
+/** 后台对账问服务端的回答,一次一个。 */
+function answers(...list: Array<"receiving" | "none" | Error | NotebookTransferJob>) {
+  for (const item of list) {
+    if (item instanceof Error) api.getImportUploadStatus.mockRejectedValueOnce(item);
+    else if (typeof item === "string") api.getImportUploadStatus.mockResolvedValueOnce({ status: item });
+    else api.getImportUploadStatus.mockResolvedValueOnce({ status: "job", job: item });
+  }
+}
+
+test("服务端一直说「还在接收」超过 3 分钟,之后说「有作业」:认领它(还在接收时没有时限)", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.useFakeTimers({ shouldAdvanceTime: true });
   try {
     const { outcomes, stop } = collect();
-    const chosen = file();
-    const uploadId = await leaveUnsure(chosen);
-    expect(outcomes).toEqual([{ kind: "unsure", text: IMPORT_UPLOAD_UNSURE_TEXT }]);
-    // 第一次对账还没有,第二次有了。
-    api.listNotebookTransfers.mockResolvedValueOnce([]).mockResolvedValueOnce([active("late", "import", uploadId)]);
-    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS + 10);
+    const uploadId = await leaveUnsure(file());
+    api.getImportUploadStatus.mockResolvedValue({ status: "receiving" });
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
     expect(outcomes).toHaveLength(1);
+    api.getImportUploadStatus.mockReset();
+    answers(active("slow", "import", uploadId));
     await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS + 10);
-    expect(outcomes.at(-1)).toEqual({ kind: "uploaded", job: active("late", "import", uploadId), fileName: "库.snbk" });
-    // 认领到就停:不再读。
-    const calls = api.listNotebookTransfers.mock.calls.length;
-    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 3);
-    expect(api.listNotebookTransfers.mock.calls.length).toBe(calls);
+    expect(outcomes.at(-1)).toEqual({ kind: "uploaded", job: active("slow", "import", uploadId), fileName: "库.snbk" });
+    expect(api.getImportUploadStatus).toHaveBeenLastCalledWith(uploadId);
     stop();
   } finally {
     vi.useRealTimers();
   }
 });
 
-test("说不准之后对账到时限也没看到作业:说没建出来,可以重传,重传仍用同一个标识", async () => {
+test("服务端先说「没有」(请求还在前面的代理里),之后说「有作业」:认领它", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const { outcomes, stop } = collect();
+    const uploadId = await leaveUnsure(file());
+    answers("none", active("late", "import", uploadId));
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 2 + 10);
+    expect(outcomes.at(-1)).toEqual({ kind: "uploaded", job: active("late", "import", uploadId), fileName: "库.snbk" });
+    // 认领到就停:不再问。
+    const calls = api.getImportUploadStatus.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 3);
+    expect(api.getImportUploadStatus.mock.calls.length).toBe(calls);
+    stop();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("服务端隔开两次都说「没有」才算没建出来:可以重传,重传仍用同一个标识;中间说了「还在接收」就重新数", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.useFakeTimers({ shouldAdvanceTime: true });
   try {
     const { outcomes, stop } = collect();
     const chosen = file();
     const uploadId = await leaveUnsure(chosen);
-    api.listNotebookTransfers.mockResolvedValue([active("other-tab", "import", "up-other-tab-1")]);
-    await vi.advanceTimersByTimeAsync(RECONCILE_WINDOW_MS + RECONCILE_INTERVAL_MS * 2);
+    // 「没有」之后「还在接收」:重新数;之后一直「没有」,直到隔够 NONE_CONFIRM_MS。
+    answers("none", "receiving");
+    api.getImportUploadStatus.mockResolvedValue({ status: "none" });
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 2 + 10);
+    expect(outcomes).toHaveLength(1);
+    // 从第一次「没有」算已经过了 NONE_CONFIRM_MS,但「还在接收」把数重置了:还不能下结论。
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 3);
+    expect(outcomes.some((outcome) => (outcome as { kind: string }).kind === "not_created")).toBe(false);
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 3);
     expect(outcomes.at(-1)).toEqual({ kind: "not_created", text: IMPORT_NOT_CREATED_TEXT });
     expect(outcomes.filter((outcome) => (outcome as { kind: string }).kind === "not_created")).toHaveLength(1);
-    api.listNotebookTransfers.mockResolvedValue([]);
     const retry = controllableUpload();
     const again = importUpload.start(chosen, "", 1024);
     await vi.waitFor(() => expect(retry.uploadId).not.toBe(""));
@@ -707,41 +738,24 @@ test("说不准之后对账到时限也没看到作业:说没建出来,可以重
   }
 });
 
-test("登出、或这一串开始新的一次尝试:后台对账停下", async () => {
-  vi.spyOn(console, "error").mockImplementation(() => undefined);
-  vi.useFakeTimers({ shouldAdvanceTime: true });
-  try {
-    const { outcomes, stop } = collect();
-    await leaveUnsure(file());
-    importUpload.reset();
-    const calls = api.listNotebookTransfers.mock.calls.length;
-    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 3);
-    expect(api.listNotebookTransfers.mock.calls.length).toBe(calls);
-    expect(outcomes).toHaveLength(1);
-    stop();
-  } finally {
-    vi.useRealTimers();
-  }
-});
-
-
-test("对账一直读不到:到时限也不说没建出来——仍是说不准、标识留着;接着核对时读得到了就认领", async () => {
+test("问不到服务端:不算「没有」——仍是说不准、标识留着、先停下;接着核对时问得到了就认领", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.useFakeTimers({ shouldAdvanceTime: true });
   try {
     const { outcomes, stop } = collect();
     const chosen = file();
     const uploadId = await leaveUnsure(chosen);
-    api.listNotebookTransfers.mockRejectedValue(new TypeError("offline"));
-    await vi.advanceTimersByTimeAsync(RECONCILE_WINDOW_MS + RECONCILE_INTERVAL_MS * (RECONCILE_GIVE_UP_AFTER_FAILURES + 2));
+    // 一次「没有」夹在问不到中间,也不会凑成「隔开两次没有」。
+    answers("none");
+    api.getImportUploadStatus.mockRejectedValue(new TypeError("offline"));
+    await vi.advanceTimersByTimeAsync(NONE_CONFIRM_MS + RECONCILE_INTERVAL_MS * (RECONCILE_GIVE_UP_AFTER_FAILURES + 2));
     expect(outcomes.some((outcome) => (outcome as { kind: string }).kind === "not_created")).toBe(false);
     expect(outcomes.at(-1)).toEqual({ kind: "unsure", text: IMPORT_RECONCILE_UNREADABLE_TEXT });
-    // 先停下了:不再读。
-    const calls = api.listNotebookTransfers.mock.calls.length;
+    const calls = api.getImportUploadStatus.mock.calls.length;
     await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 5);
-    expect(api.listNotebookTransfers.mock.calls.length).toBe(calls);
-    // 打开弹窗接着核对:读得到了,作业在。
-    api.listNotebookTransfers.mockResolvedValue([active("found-later", "import", uploadId)]);
+    expect(api.getImportUploadStatus.mock.calls.length).toBe(calls);
+    api.getImportUploadStatus.mockReset();
+    answers(active("found-later", "import", uploadId));
     importUpload.resumeReconcile();
     await vi.advanceTimersByTimeAsync(10);
     expect(outcomes.at(-1)).toEqual({ kind: "uploaded", job: active("found-later", "import", uploadId), fileName: "库.snbk" });
@@ -751,18 +765,16 @@ test("对账一直读不到:到时限也不说没建出来——仍是说不准�
   }
 });
 
-test("读不到时标识留着:下一次重传带的还是同一个(预检本身也按标识对账)", async () => {
+test("问不到时标识留着:下一次重传带的还是同一个", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.useFakeTimers({ shouldAdvanceTime: true });
   try {
     const { outcomes, stop } = collect();
     const chosen = file();
     const uploadId = await leaveUnsure(chosen);
-    api.listNotebookTransfers.mockRejectedValue(new TypeError("offline"));
-    await vi.advanceTimersByTimeAsync(RECONCILE_WINDOW_MS + RECONCILE_INTERVAL_MS * (RECONCILE_GIVE_UP_AFTER_FAILURES + 2));
+    api.getImportUploadStatus.mockRejectedValue(new TypeError("offline"));
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * (RECONCILE_GIVE_UP_AFTER_FAILURES + 1));
     expect(outcomes.at(-1)).toMatchObject({ kind: "unsure" });
-    api.listNotebookTransfers.mockReset();
-    api.listNotebookTransfers.mockResolvedValue([]);
     const retry = controllableUpload();
     const again = importUpload.start(chosen, "", 1024);
     await vi.waitFor(() => expect(retry.uploadId).not.toBe(""));
@@ -775,26 +787,37 @@ test("读不到时标识留着:下一次重传带的还是同一个(预检本身
   }
 });
 
-test("「没建出来」只有一条路:服务端检查窗口过后发出的一次读取成功、且没有这个标识的作业", async () => {
+test("登出:后台对账停下;换了文件开始新的上传:旧的一串照样在后台对账,认领到时结局带着旧文件", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.useFakeTimers({ shouldAdvanceTime: true });
   try {
-    const { outcomes, stop } = collect();
+    const seen: Array<[unknown, { file: File; uploadId: string }]> = [];
+    const stopSeen = importUpload.consumeOutcomes((outcome, origin) => seen.push([outcome, origin]));
+    const fileA = file();
+    const uploadIdA = await leaveUnsure(fileA);
+    api.getImportUploadStatus.mockResolvedValue({ status: "receiving" });
+    // 换成 B 上传(成功)。
+    const fileB = new File([new Uint8Array(50)], "乙.snbk");
+    const uploadB = controllableUpload();
+    const runningB = importUpload.start(fileB, "", 1024);
+    await vi.waitFor(() => expect(uploadB.uploadId).not.toBe(""));
+    expect(uploadB.uploadId).not.toBe(uploadIdA);
+    uploadB.resolve(active("b-job", "import", uploadB.uploadId));
+    await runningB;
+    // A 的对账还在跑:它的作业登记出来就认领,结局的出处是 A。
+    api.getImportUploadStatus.mockReset();
+    answers(active("a-job", "import", uploadIdA));
+    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS + 10);
+    const last = seen.at(-1)!;
+    expect(last[0]).toEqual({ kind: "uploaded", job: active("a-job", "import", uploadIdA), fileName: "库.snbk" });
+    expect(last[1]).toEqual({ file: fileA, uploadId: uploadIdA });
+    // 登出之后不再问。
     await leaveUnsure(file());
-    // 窗口之内一直读得到、一直没有:还不能下结论(只说明还没登记)。
-    api.listNotebookTransfers.mockResolvedValue([]);
-    await vi.advanceTimersByTimeAsync(RECONCILE_WINDOW_MS - RECONCILE_INTERVAL_MS);
-    expect(outcomes.some((outcome) => (outcome as { kind: string }).kind === "not_created")).toBe(false);
-    // 窗口过后:读失败两次(没到停下的次数),然后成功一次、没有——这才是「没建出来」。
-    api.listNotebookTransfers.mockReset();
-    api.listNotebookTransfers.mockRejectedValueOnce(new TypeError("offline"))
-      .mockRejectedValueOnce(new TypeError("offline"))
-      .mockResolvedValue([]);
-    await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 2);
-    expect(outcomes.some((outcome) => (outcome as { kind: string }).kind === "not_created")).toBe(false);
+    importUpload.reset();
+    const calls = api.getImportUploadStatus.mock.calls.length;
     await vi.advanceTimersByTimeAsync(RECONCILE_INTERVAL_MS * 3);
-    expect(outcomes.at(-1)).toEqual({ kind: "not_created", text: IMPORT_NOT_CREATED_TEXT });
-    stop();
+    expect(api.getImportUploadStatus.mock.calls.length).toBe(calls);
+    stopSeen();
   } finally {
     vi.useRealTimers();
   }

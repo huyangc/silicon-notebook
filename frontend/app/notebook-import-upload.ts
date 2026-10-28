@@ -11,7 +11,7 @@
 //
 // 上传之前先读一次自己的作业:进行中的导出与导入已经有两个(后端每人上限),就不上传——
 // 服务器会在读请求体之前回 409 并断开,浏览器那边只看得到一次说不清原因的网络中断。
-// 每一串上传尝试带一个上传标识(`X-Upload-Id`,见 `chain`):上传被打断后只按它认领这一次
+// 每一串上传尝试带一个上传标识(`X-Upload-Id`,见 `chains`):上传被打断后只按它认领这一次
 // 建出的作业(别的标签页的导入不算),重传同一个文件也用它,服务端据此不会建第二本。
 // 确定没被接收时才说失败或「没有导入任何内容」;说不准时照实说说不准。
 //
@@ -30,11 +30,13 @@ import {
   TRANSFER_BUSY_TEXT,
   activeTransferCount,
   forgetTransferLimit,
+  getImportUploadStatus,
   listNotebookTransfers,
   transferRequestErrorText,
   uploadNotebookImport,
   uploadRefusedForSure,
   uploadStillInProgress,
+  type ImportUploadStatus,
   type NotebookTransferJob,
 } from "./notebook-transfer-api.ts";
 
@@ -56,8 +58,11 @@ export type UploadOutcome =
   | { kind: "failed"; text: string }
   /** 连接断了,而服务器有没有接收这次上传说不准:不能当失败,也不能叫人马上重传。 */
   | { kind: "unsure"; text: string }
-  /** 说不准之后对账到时限,服务器始终没有建出这次的导入:可以重传(仍用同一个标识,无害)。 */
+  /** 说不准之后,服务端两次(隔开一段时间)都说没有这个标识的上传:可以重传(仍用同一个标识,无害)。 */
   | { kind: "not_created"; text: string };
+
+/** 一个结局出自哪一次选择:选中的文件与它那一串的上传标识。界面只在当前选择还是它时才动表单。 */
+export type UploadOrigin = Readonly<{ file: File; uploadId: string }>;
 
 type Listener = () => void;
 
@@ -65,8 +70,9 @@ let snapshot: UploadSnapshot = null;
 let controller: AbortController | null = null;
 let generation = 0;
 const listeners = new Set<Listener>();
-const pendingOutcomes: UploadOutcome[] = [];
-const outcomeConsumers = new Set<(outcome: UploadOutcome) => void>();
+type OutcomeConsumer = (outcome: UploadOutcome, origin: UploadOrigin) => void;
+const pendingOutcomes: Array<[UploadOutcome, UploadOrigin]> = [];
+const outcomeConsumers = new Set<OutcomeConsumer>();
 
 function publish(next: UploadSnapshot): void {
   const same = snapshot === next || (
@@ -80,12 +86,12 @@ function publish(next: UploadSnapshot): void {
   for (const listener of [...listeners]) listener();
 }
 
-function deliver(outcome: UploadOutcome): void {
+function deliver(outcome: UploadOutcome, origin: UploadOrigin): void {
   if (outcomeConsumers.size === 0) {
-    pendingOutcomes.push(outcome);
+    pendingOutcomes.push([outcome, origin]);
     return;
   }
-  for (const consumer of [...outcomeConsumers]) consumer(outcome);
+  for (const consumer of [...outcomeConsumers]) consumer(outcome, origin);
 }
 
 const onBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -117,19 +123,19 @@ export const IMPORT_UPLOAD_UNSURE_TEXT = "连接中断，导入可能已被接�
 /** 停止了、而请求体可能已经整个到了服务器:同一个意思。 */
 export const IMPORT_STOP_UNSURE_TEXT = "已停止上传，但文件可能已经传完、导入可能已被接收；请先看下方的导入记录，再决定是否重传。";
 
-/** 说不准之后对账到时限、还是没看到作业时那句话。 */
+/** 服务端确认没有这个标识的上传时那句话。 */
 export const IMPORT_NOT_CREATED_TEXT = "服务器没有建出这次的导入，可以重传。";
-/** 对账一直读不到作业列表、没法确认时那句话:不说没建出来,标识留着。 */
+/** 对账一直问不到服务端、没法确认时那句话:不说没建出来,标识留着。 */
 export const IMPORT_RECONCILE_UNREADABLE_TEXT = "暂时无法确认这次导入是否已被接收；稍后打开导入窗口会再次核对。";
-/** 过了时限之后,连续读不到这么多次就先停下(等打开弹窗或下一次尝试时再接着核对)。 */
+/** 连续问不到这么多次就先停下(等打开弹窗或下一次尝试时再接着核对)。 */
 export const RECONCILE_GIVE_UP_AFTER_FAILURES = 3;
-/** 说不准之后,每隔多久按上传标识对一次账。 */
+/** 说不准之后,每隔多久问一次服务端。 */
 export const RECONCILE_INTERVAL_MS = 4000;
 /**
- * 对账的时限:服务器收完请求体之后检查文件、数文档、建作业,最多也就这么久(网页导入上限
- * 之内的文件);过了它还没看到作业,就是没建出来。
+ * 服务端说「没有」之后,要隔这么久再说一次「没有」才算确定没建出来:请求可能还停在前面的
+ * 反向代理里(Next 会先把整个请求体缓存下来再转发),服务端那时还没见过这个标识。
  */
-export const RECONCILE_WINDOW_MS = 3 * 60_000;
+export const NONE_CONFIRM_MS = 15_000;
 
 /** 服务器回了话、却不是认得出的确定拒绝(网关超时、5xx……)时那句话。 */
 export const IMPORT_RESPONSE_UNSURE_TEXT = "服务器没有给出明确结果，导入可能已被接收；请先看下方的导入记录，再决定是否重传。";
@@ -142,94 +148,112 @@ export const IMPORT_PRECHECK_STOP_UNSURE_TEXT = "已停止。上一次上传可�
  * ——服务端认出它,回已经建出的那个作业,不读请求体,不会多出一本。
  *
  * 只有确定的结局才换标识(`endChain`):已接收(含按标识认领到)、确定没被接收、服务端明确
- * 拒绝且这个标识下确实没有作业,或者换了文件。预检里的拒绝(名额满了、作业读不到)与预检
- * 时的停止都**不是**确定的结局——那时请求还没发出,而上一次带这个标识的尝试(`unresolved`)
- * 可能已经建出作业、正占着名额;换了标识,下一次重传就会多出一本。
+ * 拒绝且这个标识下确实没有作业。预检里的拒绝(名额满了、作业读不到)与预检时的停止都**不是**
+ * 确定的结局。换了文件不结束旧的一串:它在后台接着对账,只是不再和表单绑在一起。
  */
 type Chain = {
   file: File;
   uploadId: string;
   unresolved: boolean;
-  /** 最近一次「说不准」之后,服务端检查窗口结束的时刻(之后读到「没有」才算确定没建出来)。 */
-  windowEnd: number;
+  /** 这一串的后台对账(没有在跑为 `null`)。 */
+  reconciler: { timer: ReturnType<typeof setTimeout> | null } | null;
 };
-let chain: Chain | null = null;
+const chains = new Map<File, Chain>();
+/** 此刻正在上传的那个文件(没有为 `null`)。 */
+let activeFile: File | null = null;
 
 function chainFor(file: File): Chain {
-  if (chain?.file !== file) chain = { file, uploadId: newClientRequestId(), unresolved: false, windowEnd: 0 };
-  return chain;
+  let found = chains.get(file);
+  if (!found) {
+    found = { file, uploadId: newClientRequestId(), unresolved: false, reconciler: null };
+    chains.set(file, found);
+  }
+  return found;
 }
+
+const originOf = (file: File): UploadOrigin => ({ file, uploadId: chains.get(file)?.uploadId ?? "" });
 
 /** 这一串尝试有了确定的结局:下一次上传用新的标识。 */
 function endChain(file: File): void {
-  if (chain?.file === file) chain = null;
+  const found = chains.get(file);
+  if (!found) return;
+  stopReconcile(found);
+  chains.delete(file);
 }
 
-/** 这一串尝试的结局说不准:标识留着,下一次(哪怕被打断)也不能当作确定没导入。服务端的
- *  检查窗口从这一刻重新算起。 */
+/** 这一串尝试的结局说不准:标识留着,下一次(哪怕被打断)也不能当作确定没导入。 */
 function leaveUnresolved(file: File): void {
-  if (chain?.file !== file) return;
-  chain.unresolved = true;
-  chain.windowEnd = Date.now() + RECONCILE_WINDOW_MS;
+  const found = chains.get(file);
+  if (found) found.unresolved = true;
 }
 
 /**
- * 说不准之后的后台对账:每隔 `RECONCILE_INTERVAL_MS` 按上传标识读一次作业。
+ * 说不准之后的后台对账:每隔 `RECONCILE_INTERVAL_MS` 问服务端「这个标识后来怎样了」
+ * (`GET /notebook-imports/uploads/{id}`,权威回答)。
  *
- * * 认领到:交出 `uploaded`。
- * * 「确定没建出来」(`not_created`,标识留着)只有一条路:一次**在服务端检查窗口结束之后
- *   才发出**的读取成功了,且里面没有这个标识的作业。窗口之内读到「没有」只说明还没登记。
- * * 读不到不等于没有:过了窗口仍连续 `RECONCILE_GIVE_UP_AFTER_FAILURES` 次读不到,就交出
- *   「暂时无法确认」(仍是 `unsure`,标识留着)并先停下;打开导入弹窗(`resumeReconcile`)
- *   或下一次尝试的预检(它本来就按标识对账)会接着核对。
- * * 这一串开始新的一次尝试、换了文件、或登出,就停。
+ * * `job`:认领它,交出 `uploaded`。
+ * * `receiving`:还在接收或检查,接着等——服务端这么说着就没有时限(它的检查没有时限)。
+ * * `none`:第一次只是记下;隔 `NONE_CONFIRM_MS` 以上再连着说 `none`,才交出「没建出来」
+ *   (`not_created`,标识留着)。中间说了 `receiving` 就重新数。
+ * * 问不到:不算任何回答。连续 `RECONCILE_GIVE_UP_AFTER_FAILURES` 次问不到就交出「暂时无法
+ *   确认」(仍是 `unsure`,标识留着)并先停下;打开导入弹窗(`resumeReconcile`)或下一次
+ *   尝试的预检会接着核对。
+ * * 这一串开始新的一次尝试、有了确定结局、或登出,就停。换了文件不停:旧的一串在后台接着对账。
  *
  * 弹窗开不开都在跑:它不住在 React 里。
  */
-let reconciler: { timer: ReturnType<typeof setTimeout> | null } | null = null;
+function stopReconcile(found: Chain): void {
+  if (found.reconciler?.timer) clearTimeout(found.reconciler.timer);
+  found.reconciler = null;
+}
 
-function stopReconcile(): void {
-  if (reconciler?.timer) clearTimeout(reconciler.timer);
-  reconciler = null;
+async function uploadStatusOf(uploadId: string): Promise<ImportUploadStatus | undefined> {
+  try {
+    return await getImportUploadStatus(uploadId);
+  } catch {
+    return undefined;
+  }
 }
 
 function startReconcile(file: File, firstDelay: number = RECONCILE_INTERVAL_MS): void {
-  stopReconcile();
-  const own = chain;
-  if (own === null || own.file !== file || !own.unresolved) return;
+  const own = chains.get(file);
+  if (!own || !own.unresolved) return;
+  stopReconcile(own);
   const handle: { timer: ReturnType<typeof setTimeout> | null } = { timer: null };
-  reconciler = handle;
-  const alive = () => reconciler === handle && chain === own;
-  let failuresAfterWindow = 0;
+  own.reconciler = handle;
+  const alive = () => own.reconciler === handle && chains.get(file) === own;
+  let failures = 0;
+  let firstNoneAt: number | null = null;
   const tick = async () => {
     handle.timer = null;
     if (!alive()) return;
-    const readStartedAt = Date.now();
-    const job = await jobOfUpload(own.uploadId);
+    const answer = await uploadStatusOf(own.uploadId);
     if (!alive()) return;
-    if (job) {
-      reconciler = null;
+    const origin = { file, uploadId: own.uploadId };
+    if (answer?.status === "job") {
       endChain(file);
-      deliver({ kind: "uploaded", job, fileName: file.name });
+      deliver({ kind: "uploaded", job: answer.job, fileName: file.name }, origin);
       return;
     }
-    const afterWindow = readStartedAt >= own.windowEnd;
-    if (job === null && afterWindow) {
-      // 窗口过后读到了、确实没有:没建出来。标识照旧留着——再传一次用的还是它,服务端那边
-      // 即便晚到也只会认成同一个。
-      reconciler = null;
-      deliver({ kind: "not_created", text: IMPORT_NOT_CREATED_TEXT });
-      return;
-    }
-    if (job === undefined && afterWindow) {
-      failuresAfterWindow += 1;
-      if (failuresAfterWindow >= RECONCILE_GIVE_UP_AFTER_FAILURES) {
-        reconciler = null;
-        deliver({ kind: "unsure", text: IMPORT_RECONCILE_UNREADABLE_TEXT });
+    if (answer === undefined) {
+      failures += 1;
+      if (failures >= RECONCILE_GIVE_UP_AFTER_FAILURES) {
+        own.reconciler = null;
+        deliver({ kind: "unsure", text: IMPORT_RECONCILE_UNREADABLE_TEXT }, origin);
         return;
       }
     } else {
-      failuresAfterWindow = 0;
+      failures = 0;
+      if (answer.status === "receiving") {
+        firstNoneAt = null;
+      } else if (firstNoneAt === null) {
+        firstNoneAt = Date.now();
+      } else if (Date.now() - firstNoneAt >= NONE_CONFIRM_MS) {
+        // 服务端隔开两次都说没有:没建出来。标识照旧留着——再传一次用的还是它。
+        own.reconciler = null;
+        deliver({ kind: "not_created", text: IMPORT_NOT_CREATED_TEXT }, origin);
+        return;
+      }
     }
     handle.timer = setTimeout(() => { void tick(); }, RECONCILE_INTERVAL_MS);
   };
@@ -239,7 +263,7 @@ function startReconcile(file: File, firstDelay: number = RECONCILE_INTERVAL_MS):
 /** 交出一个「说不准」:标识留着,并在后台接着按标识对账。 */
 function deliverUnsure(file: File, text: string): void {
   leaveUnresolved(file);
-  deliver({ kind: "unsure", text });
+  deliver({ kind: "unsure", text }, originOf(file));
   startReconcile(file);
 }
 
@@ -305,17 +329,20 @@ export const importUpload = {
     return snapshot !== null;
   },
   /**
-   * 接着核对一串结果未定、对账已经停下的上传(打开导入弹窗时调用):马上读一次。没有未定
-   * 的串、对账还在跑、或有上传在进行,就什么都不做。
+   * 接着核对结果未定、对账已经停下的那几串上传(打开导入弹窗时调用):马上问一次。对账还在
+   * 跑的、或那个文件此刻正在上传的,不动。
    */
   resumeReconcile(): void {
-    if (chain === null || !chain.unresolved || reconciler !== null || snapshot !== null) return;
-    startReconcile(chain.file, 0);
+    for (const found of chains.values()) {
+      if (found.unresolved && found.reconciler === null && found.file !== activeFile) {
+        startReconcile(found.file, 0);
+      }
+    }
   },
   /** 接收上传的结局;先把挂载前就落定、还没人拿走的那些交出来。 */
-  consumeOutcomes(consumer: (outcome: UploadOutcome) => void): () => void {
+  consumeOutcomes(consumer: OutcomeConsumer): () => void {
     outcomeConsumers.add(consumer);
-    for (const outcome of pendingOutcomes.splice(0)) consumer(outcome);
+    for (const [outcome, origin] of pendingOutcomes.splice(0)) consumer(outcome, origin);
     return () => outcomeConsumers.delete(consumer);
   },
   /**
@@ -324,8 +351,6 @@ export const importUpload = {
    */
   async start(file: File, name: string, limitBytes: number | null): Promise<void> {
     if (snapshot !== null) return;
-    // 新的一次尝试接手:后台对账让给它(同一串的话,这次尝试自己会按标识认领)。
-    stopReconcile();
     const mine = ++generation;
     const own = new AbortController();
     controller = own;
@@ -333,7 +358,11 @@ export const importUpload = {
     publish({ ...base, percent: 0, stage: "precheck" });
     const current = () => mine === generation;
     const attempt = chainFor(file);
+    // 新的一次尝试接手:这一串的后台对账让给它(这次尝试自己会按标识认领)。别的串不动。
+    stopReconcile(attempt);
+    activeFile = file;
     const { uploadId } = attempt;
+    const origin: UploadOrigin = { file, uploadId };
     // 上一次带这个标识的尝试结果未定:这一次没认领到作业时,也只能说说不准。
     const carried = attempt.unresolved;
     // 上传请求已经发出 / 请求体已经整个交给了网络(`xhr.upload` 的 load):此后服务器
@@ -353,12 +382,12 @@ export const importUpload = {
       const adopted = jobs?.find((job) => job.kind === "import" && job.client_upload_id === uploadId);
       if (adopted) {
         endChain(file);
-        deliver({ kind: "uploaded", job: adopted, fileName: file.name });
+        deliver({ kind: "uploaded", job: adopted, fileName: file.name }, origin);
         return;
       }
       if (jobs && activeTransferCount(jobs) >= MAX_ACTIVE_TRANSFER_JOBS) {
         // 预检拒绝不是确定的结局:标识留着。
-        deliver({ kind: "failed", text: TRANSFER_BUSY_TEXT });
+        deliver({ kind: "failed", text: TRANSFER_BUSY_TEXT }, origin);
         return;
       }
       publish({ ...base, percent: 0, stage: "uploading" });
@@ -381,14 +410,14 @@ export const importUpload = {
       });
       if (!current()) return;
       endChain(file);
-      deliver({ kind: "uploaded", job, fileName: file.name });
+      deliver({ kind: "uploaded", job, fileName: file.name }, origin);
     } catch (error) {
       if (!current()) return;
       const interrupted = isAbort(error) || error instanceof TypeError;
       if (interrupted && !requestStarted) {
         // 停在预检那一步:这一次的请求根本没发出。标识留着;上一次的结果未定就照实说。
         if (carried) deliverUnsure(file, IMPORT_PRECHECK_STOP_UNSURE_TEXT);
-        else deliver({ kind: "stopped" });
+        else deliver({ kind: "stopped" }, origin);
       } else if (interrupted) {
         let outcome = await settleInterrupted(uploadId, isAbort(error), bodySent, file, limitBytes);
         if (!current()) return;
@@ -400,7 +429,7 @@ export const importUpload = {
           deliverUnsure(file, outcome.text);
         } else {
           endChain(file);
-          deliver(outcome);
+          deliver(outcome, origin);
         }
       } else if (uploadRefusedForSure(error)) {
         // 白名单里的确定拒绝(后端在建作业之前说的)。有些拒绝(格式、按声明长度的 413)发生在
@@ -412,10 +441,10 @@ export const importUpload = {
         if (!current()) return;
         if (job) {
           endChain(file);
-          deliver({ kind: "uploaded", job, fileName: file.name });
+          deliver({ kind: "uploaded", job, fileName: file.name }, origin);
         } else {
           if (job === null) endChain(file);
-          deliver({ kind: "failed", text });
+          deliver({ kind: "failed", text }, origin);
         }
       } else {
         // 其余一切回答(5xx、502/503/504、408、429、不认得的状态码或正文、没有认得的码的
@@ -425,7 +454,7 @@ export const importUpload = {
         if (!current()) return;
         if (job) {
           endChain(file);
-          deliver({ kind: "uploaded", job, fileName: file.name });
+          deliver({ kind: "uploaded", job, fileName: file.name }, origin);
         } else {
           deliverUnsure(file, uploadStillInProgress(error)
             ? transferRequestErrorText(error, {}, IMPORT_UPLOAD_UNSURE_TEXT)
@@ -435,6 +464,7 @@ export const importUpload = {
     } finally {
       if (current()) {
         controller = null;
+        activeFile = null;
         publish(null);
       }
     }
@@ -450,8 +480,9 @@ export const importUpload = {
   /** 登出:中止上传,丢掉一切(包括还没人拿走的结局),下一个人从空白开始。 */
   reset(): void {
     generation += 1;
-    stopReconcile();
-    chain = null;
+    for (const found of chains.values()) stopReconcile(found);
+    chains.clear();
+    activeFile = null;
     controller?.abort();
     controller = null;
     pendingOutcomes.splice(0);

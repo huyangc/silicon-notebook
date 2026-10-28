@@ -186,6 +186,29 @@ export async function deleteNotebookTransfer(jobId: string): Promise<TransferDel
   };
 }
 
+/** 服务端对一个上传标识的权威回答(`GET /notebook-imports/uploads/{id}`)。 */
+export type ImportUploadStatus =
+  /** 有作业带着这个标识。 */
+  | { status: "job"; job: NotebookTransferJob }
+  /** 带这个标识的上传还占着预留(正在接收或检查),之后仍可能建出作业。 */
+  | { status: "receiving" }
+  /** 两样都没有。 */
+  | { status: "none" };
+
+/** 问服务端「这个上传标识后来怎样了」。读不到(网络、非 2xx、形状不对)就抛出。 */
+export async function getImportUploadStatus(uploadId: string, signal?: AbortSignal): Promise<ImportUploadStatus> {
+  const body = await requestJson<unknown>(
+    `/notebook-imports/uploads/${encodeURIComponent(uploadId)}`, { tag: TAG, signal },
+  );
+  if (isRecord(body) && body.status === "job") {
+    const job = parseTransferJob(body.job);
+    if (job) return { status: "job", job };
+  } else if (isRecord(body) && (body.status === "receiving" || body.status === "none")) {
+    return { status: body.status };
+  }
+  throw humanizedError("暂时无法确认这次导入是否已被接收。");
+}
+
 export type ImportUploadOptions = {
   /** 新笔记本的名字;空串沿用导出时的名字。 */
   name: string;
