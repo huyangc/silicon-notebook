@@ -186,7 +186,7 @@ CardResult.status ∈ ready | generated | not_paper | meta_pending | failed | de
      取消、队列超时/满原样上抛，不吞成 `failed`）先抽元数据；这一步**计入 `generate_limit`**，超出的篇返回 `deferred`。
      镜像笔记本（只读同步副本，写入会抛 `MirroredNotebookError`）**不写元数据**，直接返回 `meta_pending`。
      元数据抽取的每种返回值都显式映射：`stored`→继续判论文、`not_paper`→`not_paper`、
-     `skipped/disabled/no_llm/no_text`→`meta_pending`、`failed`→`failed`（不写卡片行）。
+     `skipped/disabled/no_llm/no_text`→`meta_pending`、内容失败→`failed`（写 `metadata_failed` 卡片行以便冷却）。
   2. 论文 → 进入生成队列，**元数据与卡片合计本次最多 `generate_limit` 次模型调用**，超出的返回 `deferred`（调用方可再调一次）。
   3. 卡片与元数据都是由原文确定性派生的缓存，不含提问者的任何信息，所以**读者也可以为他有读权的挂载库/引用库
      写入缓存**（§9 第 6 条，待确认）；只有镜像笔记本不写，卡片缺失时返回 `meta_pending`。
@@ -197,8 +197,9 @@ CardResult.status ∈ ready | generated | not_paper | meta_pending | failed | de
   `model_work_scope(priority=INTERACTIVE, actor_id=凭证主人, notebook_id=…)`。
   **瞬时错误**一律本篇返回 `deferred`、**不记失败**、不加 `attempts`：队列满、队列等待超时（INTERACTIVE 30 秒）、
   服务熔断、服务商限流（429）、服务商不可用（5xx）、请求超时。生产里这些错误经调度适配器包成带 `.code` 的
-  `ModelInvocationError`，按 `code` 分类，不按原始异常类型。只有**内容失败**（返回非对象 JSON、无法解析、校验后为空、
-  元数据抽取内容失败）才写 `failed` 行并进入冷却。
+  `ModelInvocationError`，按 `code` 分类，不按原始异常类型。**内容失败**（返回非对象 JSON、无法解析、校验后为空、
+  元数据抽取内容失败）与**对这篇文档确定性的失败**（上下文超长、服务商拒绝该内容等非鉴权 4xx）写 `failed` 行并进入冷却；
+  鉴权/配置这类全局故障返回 `failed` 但不写行（不是这篇文档的问题，修好配置后应立即可用）。
 - 单飞：进程内按 `source_id` 加锁，并发请求同一篇时后来者等待前者结果；等待期间轮询取消、不占
   `retrieval_fanout_slot` 也不占线程池工位（在提交前判定、等待放在池外）。跨进程重复生成可接受（条件 upsert 兜底）。
 - 事件：每篇写一条 `paper_card` 事件（`source_id`、`status`、丢弃计数、耗时），只记 id 与类名，不记正文。
