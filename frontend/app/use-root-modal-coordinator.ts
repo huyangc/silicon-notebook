@@ -9,6 +9,8 @@ export type RootModalSlot =
   | "search-profile"
   | "notebook-editor"
   | "notebook-delete"
+  | "notebook-export"
+  | "notebook-import"
   | "source-add"
   | "source-detail"
   | "info"
@@ -128,6 +130,11 @@ export const ROOT_MODAL_POLICIES: Readonly<Record<RootModalSlot, ModalPolicy>> =
   "search-profile": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false },
   "notebook-editor": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false, workspaceSensitive: true },
   "notebook-delete": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false, workspaceSensitive: true },
+  // 网页导出(镜像库卡片菜单的入口)与导入:同笔记本设置一档——集合页上 actor 拥有、
+  // 打开笔记本即撤下。两条退路(Escape、遮罩)都关着:导入弹窗里有选好、还没上传的
+  // 文件,误触遮罩不该把它丢掉;所以「×」任何时候都不禁用(作业在服务端接着跑)。
+  "notebook-export": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false, workspaceSensitive: true },
+  "notebook-import": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false, workspaceSensitive: true },
   "source-add": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 20, backdrop: true, escape: false },
   "source-detail": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false },
   info: { ownerKinds: ["actor", "workspace", "source"], conflictGroup: null, layer: 80, backdrop: false, escape: false },

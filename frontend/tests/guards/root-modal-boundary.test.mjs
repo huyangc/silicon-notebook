@@ -60,6 +60,8 @@ const edgeReviewModal = await parseModule("edge-review-modal.tsx");
 // 知识图谱主视图搬进了自己的模块（PR-5 分片 3）；page.tsx 仍持有它的开合门与
 // 「图谱分析」弹窗的 rootModals 编排（作为 children 原位渲染在 .kg-view 内）。
 const kgGraphView = await parseModule("kg-graph-view.tsx");
+// 网页导出 / 导入的两个根弹窗(notebook-export / notebook-import)。
+const transferPanel = await parseModule("notebook-transfer-panel.tsx");
 const pageText = page.getText(page);
 const hookText = hook.getText(hook);
 
@@ -265,6 +267,8 @@ test("every coordinated root surface leaves the interaction tree when it is cove
     ["ImagePreviewModal", "answer-image-preview"],
     ["PromotionQueueModal", "promotion-queue"],
     ["EdgeReviewModal", "edge-review"],
+    ["NotebookExportModal", "notebook-export"],
+    ["NotebookImportModal", "notebook-import"],
   ];
   for (const [component, slot] of componentBindings) {
     const view = `rootModals\\.view\\("${slot}"\\)`;
@@ -276,12 +280,16 @@ test("every coordinated root surface leaves the interaction tree when it is cove
   }
   for (const source of [
     passwordModal, searchProfileModal, releaseNotesModal, memoryPanel, catalogPanel, conversationShare,
-    promotionQueueModal, edgeReviewModal,
+    promotionQueueModal, edgeReviewModal, transferPanel,
   ]) {
     const text = source.getText(source);
     assert.match(text, /aria-hidden=\{!interactive\}/);
     assert.match(text, /inert=\{interactive \? undefined : true\}/);
   }
+  // 一个模块里住着两个根弹窗(导出 / 导入):上面的 match 只证明「至少有一处」,必须逐个都有。
+  const transferText = transferPanel.getText(transferPanel);
+  assert.equal((transferText.match(/aria-hidden=\{!interactive\}/g) ?? []).length, 2);
+  assert.equal((transferText.match(/inert=\{interactive \? undefined : true\}/g) ?? []).length, 2);
 });
 
 test("presentation close never releases an in-flight domain operation", () => {
@@ -519,5 +527,30 @@ test("global ask hands its citation images to the shared preview slot as a stack
   for (const handler of ["onCancel", "onKeyDown"]) {
     assert.ok(dialogs[0].bindings?.[handler], `${handler} 不见了`);
     assert.doesNotMatch(dialogs[0].bindings[handler], /preview/i, handler);
+  }
+});
+
+
+test("导出 / 导入弹窗没有 Escape 与遮罩退路,它们的「×」任何时候都不禁用", () => {
+  // 与上面 notebook-editor / notebook-delete 同一前提:两条退路都关着(导入弹窗里有选好、
+  // 还没上传的文件,误触遮罩不该把它丢掉),那么「×」被忙碌位禁用就把用户锁在弹窗里——
+  // 而上传、导出、取消时的 30 秒收尾都是会持续很久的在飞状态。作业在服务端接着跑,关掉
+  // 弹窗从来不该等它们。
+  for (const slot of ["notebook-export", "notebook-import"]) {
+    assert.match(
+      hookText,
+      new RegExp(`"${slot}": \\{[^}]*backdrop: false, escape: false`),
+      `${slot} 的策略不再是「无遮罩关闭 + 无 Escape」，请重新评估本守卫的前提`,
+    );
+    assert.ok(
+      pageText.includes(`onClose={() => rootModals.requestClose("${slot}", "button")}`),
+      `${slot}: page.tsx 没有把关闭接到 requestClose`,
+    );
+  }
+  const closers = jsxElements(transferPanel, "button")
+    .filter((element) => (element.bindings?.onClick ?? element.attributes?.onClick ?? "") === "onClose");
+  assert.equal(closers.length, 2, "导出与导入弹窗各有一个「×」");
+  for (const closer of closers) {
+    assert.equal(closer.bindings?.disabled ?? closer.attributes?.disabled, undefined, "「×」带上了 disabled");
   }
 });

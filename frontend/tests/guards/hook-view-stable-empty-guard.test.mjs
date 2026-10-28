@@ -107,6 +107,13 @@ const EXPECTED_NO_VIEW_FIELDS = new Set([
   // Returns `{ notice, clear }` (all shorthand): `notice` is `null` when there is
   // nothing to show — a stable primitive, never an empty [] / {} fallback.
   "use-release-notes.ts",
+  // Both hooks of this file (useNotebookExport, useNotebookImport) return
+  // `{ view, <commands> }` (all
+  // shorthand) and build `view` from shorthand useState values only: every list
+  // or map in it (jobs, rows, notes, fileNames) is that hook's own state, never a
+  // `cond ? x : []` hidden-view fallback; logging out resets it through
+  // `leaveActor` with fresh state, not a returned literal.
+  "use-notebook-transfer.ts",
 ]);
 
 // Parameters here are deliberately *not* named `node` (this repo's
@@ -354,9 +361,13 @@ function scanHookSource(sourceFile, functionName) {
   return { violations, returnObjectLiteralCount, ...stats };
 }
 
-// A top-level `FunctionDeclaration` named `use...` and exported — the shape
-// every hook file in `frontend/app/` uses (`export function useFoo(...) {`).
-function exportedHookFunctionName(sourceFile) {
+// Every top-level `FunctionDeclaration` named `use...` and exported — the
+// shape every hook file in `frontend/app/` uses (`export function useFoo(...) {`).
+// All of them, not the first: a file may export more than one hook
+// (`use-notebook-transfer.ts` has `useNotebookExport` and `useNotebookImport`),
+// and stopping at the first left the rest unscanned.
+function exportedHookFunctionNames(sourceFile) {
+  const names = [];
   for (const statement of sourceFile.statements) {
     if (
       ts.isFunctionDeclaration(statement)
@@ -366,10 +377,10 @@ function exportedHookFunctionName(sourceFile) {
         (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
       )
     ) {
-      return statement.name.text;
+      names.push(statement.name.text);
     }
   }
-  return undefined;
+  return names;
 }
 
 // Glob `frontend/app/use-*.ts(x)` — deliberately not a static roster, so a
@@ -397,8 +408,8 @@ async function discoverHookFunctions() {
   const hooks = [];
   for (const { path: file, module: sourceFile } of hookModules) {
     if (NOT_A_VIEW_OWNER.has(file)) continue; // explicitly registered non-view-owner, see the map above
-    const name = exportedHookFunctionName(sourceFile);
-    if (!name) {
+    const names = exportedHookFunctionNames(sourceFile);
+    if (names.length === 0) {
       // Response to an unclassifiable new hook file must be loud, not a
       // silent gap in coverage: either it exports a `use...` function (and
       // gets scanned automatically) or it must be explicitly registered in
@@ -408,7 +419,7 @@ async function discoverHookFunctions() {
         + "被本守卫识别出它导出的 hook 函数名，否则须显式登记进 NOT_A_VIEW_OWNER 并写明理由。",
       );
     }
-    hooks.push({ file, name });
+    for (const name of names) hooks.push({ file, name });
   }
   return hooks;
 }
@@ -515,4 +526,15 @@ test("a bare `state ?? STABLE_CONST` fallback stays green", () => {
   assert.deepEqual(scanned.violations, []);
   assert.equal(scanned.scannedFields, 2); // `rows` is shorthand — not a `field: value` pair
   assert.equal(scanned.localDeclarations, 1);
+});
+
+
+test("a file that exports several hooks has every one of them scanned", async () => {
+  // use-notebook-transfer.ts exports useNotebookExport and useNotebookImport; stopping at
+  // the first exported hook once left useNotebookImport out of every check above.
+  const discovered = (await discoverHookFunctions())
+    .filter(({ file }) => file === "use-notebook-transfer.ts")
+    .map(({ name }) => name)
+    .sort();
+  assert.deepEqual(discovered, ["useNotebookExport", "useNotebookImport"]);
 });

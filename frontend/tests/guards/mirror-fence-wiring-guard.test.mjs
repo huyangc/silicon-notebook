@@ -211,3 +211,27 @@ test("每一处 workspaceCapabilities 调用都把 sync_origin 交进去", () =>
     "漏传 sync_origin 的调用点会把镜像库当成本地库，整屏写入口照常画出来（点了必 409）",
   );
 });
+
+
+test("导出入口按 canExportNotebook 下发:设置弹窗一节,镜像(设置弹窗打不开)走卡片菜单", () => {
+  // `notebook:export` 恒 owner、围栏放行(镜像也能导出)。常规入口在笔记本设置弹窗的
+  // 「导出」一节;镜像库的库主打不开设置弹窗(canManageNotebook 被围栏挡),所以卡片菜单
+  // 只在「能导出 && 没有设置弹窗」时给一格——入口不重复,镜像也不漏。
+  const menus = jsxElements(page, "NotebookMenuActions");
+  assert.equal(menus.length, 1);
+  assert.equal(
+    compact(menus[0].bindings?.canExportFromMenu ?? ""),
+    "menuNotebookCapabilities.canExportNotebook&&!menuNotebookCapabilities.canManageNotebook",
+  );
+  const sections = collect(
+    page,
+    (node) => (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node))
+      && node.tagName.getText(page) === "NotebookExportSection",
+  );
+  assert.equal(sections.length, 1, "设置弹窗里应当恰好一处导出一节");
+  assert.match(
+    nearestRenderCondition(sections[0]) ?? "",
+    /^notebookCollection\.editor\?\.target&&workspaceCapabilities\(.*\)\.canExportNotebook$/,
+    "设置弹窗对组管理员也开着(notebook:manage),导出一节必须再按 canExportNotebook 收",
+  );
+});
