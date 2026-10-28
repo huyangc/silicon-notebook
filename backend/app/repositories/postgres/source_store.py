@@ -50,6 +50,7 @@ from app.repositories.find_sources_rows import (
     assemble_scope,
     bind_term_legs,
     check_kind,
+    paper_meta_state,
     scope_rows_dicts,
 )
 from app.repositories.paper_card_rows import paper_card_row, utc_iso
@@ -646,7 +647,7 @@ class SourceStore:
         with_titles: bool = False,
     ) -> dict:
         """``find_sources``' metadata leg over ONE library (the canonical
-        definition; SQLite mirrors it).  Up to three statements on the caller's
+        definition; SQLite mirrors it).  Up to four statements on the caller's
         connection:
 
         1. **the counts** (skipped when nothing can narrow: ``kind="all"``, no
@@ -685,8 +686,13 @@ class SourceStore:
            only when the filters really narrowed the library
            (``find_sources_rows.bind_term_legs``).
 
+        4. **the paper-meta state** -- ``count|max(updated_at)`` (UTC) of the
+           library's paper-meta rows, cut to ``allowed_source_ids`` when given
+           (``meta_state``): ``find_sources`` puts it in its cursor so a page
+           taken before a lazy extraction is refused, not misaligned.
+
         Returns ``{"rows": [...], "scope_total", "visible_total",
-        "meta_pending_excluded"}``; each row is ``source_id, notebook_id,
+        "meta_pending_excluded", "meta_state"}``; each row is ``source_id, notebook_id,
         pub_year, pending, matches`` (``{field: word_boundary}``, empty without
         a term hit) and ``sort_title`` with titles."""
         kind = check_kind(kind)
@@ -775,9 +781,20 @@ class SourceStore:
             # term on a 10k library where the custom plan takes ~20 ms (the
             # measurement doc).  Planning per call costs well under 1 ms here.
             hit_rows = execute_ids(connection, statement, leg_params).fetchall()
+        # 4. The scope's paper-meta state (``idx_source_paper_meta_nb``): the
+        # cursor of a ranking taken before a lazy extraction stops matching.
+        meta_state = paper_meta_state(execute_bound(
+            connection,
+            "SELECT count(*) AS meta_rows, max(m.updated_at) AS meta_latest "
+            "FROM source_paper_meta m WHERE m.notebook_id=%s"
+            + (f" AND {member_of('m.source_id', bound)}" if bound is not None else ""),
+            [notebook_id, *([bound.param] if bound is not None else [])],
+            bound,
+        ).fetchone())
         return assemble_scope(
             rows, hit_rows, folded, scope_total=scope_total,
             visible_total=visible_total, meta_pending_excluded=excluded,
+            meta_state=meta_state,
         )
 
     def visible_document_count(self, notebook_id: str) -> int:

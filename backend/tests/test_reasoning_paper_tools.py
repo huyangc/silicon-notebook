@@ -44,8 +44,10 @@ from app.services.reports.policy import (
 )
 from app.services.retrieval_run import holding_fanout_slot
 from app.services.source_finder import (
+    STALE_CURSOR_MESSAGE,
     BestPassage,
     FindSourcesCursorError,
+    FindSourcesCursorStaleError,
     FindSourcesError,
     FindSourcesResult,
     FoundSource,
@@ -496,6 +498,26 @@ def test_finder_errors_become_ledger_notes_and_the_run_goes_on(corpus, error, re
     assert result.paper_finds == []
     assert "论文工具记录" in llm.prompts[1] and "未执行:" in llm.prompts[1]
     assert _steps(result, "answer")
+
+
+def test_a_stale_cursor_says_restart_from_the_first_page_and_keeps_handles(corpus):
+    repo, nb, seeded = corpus
+    sid = seeded["det-01"]
+    page = _result([_found(nb, sid, "Detector")], cursor="fs1.next")
+    finder = _StubFinder(page, FindSourcesCursorStaleError(STALE_CURSOR_MESSAGE),
+                         _result([_found(nb, sid, "Detector")]))
+    llm = _RecordingLLM([
+        _find(terms=["detector"]),
+        _find(terms=["detector"], cursor="fs1.next"),
+        _find(terms=["detector"]),
+        ANSWER,
+    ])
+    result = _run(_stub_retriever(repo, llm, finder=finder), nb)
+    assert "find_sources_cursor_stale" in _skips(result)
+    assert "find_sources_cursor_invalid" not in _skips(result)
+    assert "从第一页重新检索" in llm.prompts[2]
+    assert "其余参数与上一次完全相同" not in llm.prompts[2]
+    assert [outcome.handles for outcome in result.paper_finds] == [("p1",), ("p1",)]
 
 
 def test_extraction_request_errors_and_per_run_counting(corpus):

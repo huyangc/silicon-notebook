@@ -12,6 +12,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from app.domain.promotion_source import presented_source_title
 from app.domain.source_find_terms import field_match, merge_match, really_narrowed
+from app.repositories.paper_card_rows import utc_iso
 
 #: The kinds ``find_sources_metadata_rows`` accepts.
 FIND_SOURCES_KINDS = ("papers", "all")
@@ -71,6 +72,7 @@ def assemble_scope(
     scope_total: int,
     visible_total: int,
     meta_pending_excluded: int,
+    meta_state: str = "",
 ) -> dict:
     """The method's result: ``rows`` (one light dict per in-scope source, in
     id order, ``matches`` filled from the term legs) and the counts.
@@ -95,4 +97,20 @@ def assemble_scope(
         "scope_total": int(scope_total),
         "visible_total": int(visible_total),
         "meta_pending_excluded": int(meta_pending_excluded),
+        "meta_state": meta_state,
     }
+
+
+def paper_meta_state(row: Mapping[str, Any] | None) -> str:
+    """``count|latest updated_at`` (UTC ISO) of a library's paper-meta rows in
+    the scope: a lazy extraction adds a row or moves ``updated_at``, so a
+    ``find_sources`` cursor taken before it no longer matches (its ranking may
+    have changed membership, tiers or order)."""
+    if row is None:
+        return "0|"
+    latest = row["meta_latest"]
+    try:
+        stamp = utc_iso(latest)
+    except ValueError:  # an unparsable legacy text stamp still identifies itself
+        stamp = str(latest)
+    return f"{int(row['meta_rows'] or 0)}|{stamp}"

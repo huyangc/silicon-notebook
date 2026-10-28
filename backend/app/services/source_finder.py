@@ -158,6 +158,12 @@ class FindSourcesCursorError(FindSourcesError):
     """The cursor does not belong to these parameters (or is not a cursor)."""
 
 
+class FindSourcesCursorStaleError(FindSourcesCursorError):
+    """The cursor's parameters match, but the paper metadata (or the set of
+    libraries read) changed since its page: the ranking it was cut from is
+    gone, so its offset would skip or repeat sources.  Restart from page 1."""
+
+
 @dataclass(frozen=True)
 class FindSourcesRequest:
     query: str = ""
@@ -252,6 +258,7 @@ class _MetadataRead:
     rows: Tuple[Dict[str, Any], ...]
     excluded: int
     narrowed: bool
+    meta_state: str = ""
 
 
 @dataclass(frozen=True)
@@ -261,6 +268,7 @@ class _LibraryRead:
     lane: str = ""
     capped: bool = False
     chunks: Tuple[RetrievedChunk, ...] = ()
+    meta_state: str = ""
 
 
 @dataclass(frozen=True)
@@ -294,6 +302,10 @@ class _Ranking:
     skipped: Mapping[str, str]
     meta_pending_excluded: int
     meta_pending_unchecked: int
+    #: Digest of what the ranking was cut from -- each library's paper-meta
+    #: state, the libraries skipped and the run's write generation -- carried
+    #: by its cursors (``FindSourcesCursorStaleError`` when it moved).
+    meta_digest: str = ""
 
 
 def paper_card_status(
@@ -463,16 +475,19 @@ def _fingerprint(request: FindSourcesRequest, scope_identity: Sequence[Any]) -> 
     return hashlib.blake2b(payload.encode("utf-8"), digest_size=12).hexdigest()
 
 
-def encode_cursor(offset: int, fingerprint: str) -> str:
-    raw = json.dumps({"o": int(offset), "f": fingerprint}, separators=(",", ":"))
+def encode_cursor(offset: int, fingerprint: str, meta_digest: str) -> str:
+    raw = json.dumps(
+        {"o": int(offset), "f": fingerprint, "m": meta_digest}, separators=(",", ":"))
     return _CURSOR_PREFIX + base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
 
 
-def decode_cursor(cursor: str, fingerprint: str) -> int:
-    """The offset ``cursor`` carries; ``FindSourcesCursorError`` when it is not
-    a cursor of these parameters over this source scope."""
+def decode_cursor(cursor: str, fingerprint: str) -> Tuple[int, str]:
+    """The offset and the metadata digest ``cursor`` carries (``(0, "")``
+    without one); ``FindSourcesCursorError`` when it is not a cursor of these
+    parameters over this source scope.  The digest is checked against the
+    current ranking's (``check_cursor_digest``) once that ranking exists."""
     if not cursor:
-        return 0
+        return 0, ""
     if not cursor.startswith(_CURSOR_PREFIX):
         raise FindSourcesCursorError("not a find_sources cursor")
     body = cursor[len(_CURSOR_PREFIX):]
@@ -480,13 +495,40 @@ def decode_cursor(cursor: str, fingerprint: str) -> int:
         data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
         offset = int(data["o"])
         cut_for = str(data["f"])
-    except (ValueError, TypeError, KeyError) as exc:
+        digest = str(data.get("m") or "")
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
         raise FindSourcesCursorError("not a find_sources cursor") from exc
     if cut_for != fingerprint or offset < 0:
         raise FindSourcesCursorError(
             "the cursor belongs to other parameters; start a new search"
         )
-    return offset
+    return offset, digest
+
+
+#: ``FindSourcesCursorStaleError``'s message.
+STALE_CURSOR_MESSAGE = (
+    "the paper metadata changed since this page was listed (a paper's metadata "
+    "was just extracted), so the ranking changed; restart from the first page "
+    "without a cursor"
+)
+
+
+def check_cursor_digest(cursor: str, cursor_digest: str, meta_digest: str) -> None:
+    """``FindSourcesCursorStaleError`` when ``cursor`` was cut from a ranking
+    with another metadata digest (a cursor without one is from before the
+    digest existed: stale too)."""
+    if cursor and cursor_digest != meta_digest:
+        raise FindSourcesCursorStaleError(STALE_CURSOR_MESSAGE)
+
+
+def _meta_digest(
+    states: Mapping[str, str], skipped: Mapping[str, str], generation: int,
+) -> str:
+    payload = json.dumps(
+        [sorted(states.items()), sorted(skipped.items()), int(generation)],
+        ensure_ascii=False, separators=(",", ":"),
+    )
+    return hashlib.blake2b(payload.encode("utf-8"), digest_size=12).hexdigest()
 
 
 def _explicit_identity(source_ids: Sequence[str]) -> str:
@@ -542,7 +584,8 @@ class SourceFinder:
                 ceiling_binds=ceiling_binds, allowed_source_ids=allowed_source_ids,
             )
         fingerprint = _fingerprint(request, scope_identity)
-        offset = decode_cursor(request.cursor, fingerprint)
+        offset, cursor_digest = decode_cursor(request.cursor, fingerprint)
+        generation = paper_meta_write_generation()
         # One ranking per fingerprint per run: a page turn only slices it.
         # Without a run (MCP) the memo is a pass-through.
         ranking = memoized_retrieval_value(
@@ -550,13 +593,17 @@ class SourceFinder:
                 "find_sources_ranking", fingerprint,
                 # Paper metadata written earlier in this run (a card's lazy
                 # extraction) changes years / venues / pending: re-rank.
-                paper_meta_write_generation(),
+                generation,
                 int(self._settings.find_sources_chunk_recall),
                 float(self._settings.find_sources_strong_relevance),
                 float(self._settings.find_sources_related_relevance),
             ),
-            lambda: self._rank(active_notebook_id, libraries, request, cancel_event),
+            lambda: self._rank(
+                active_notebook_id, libraries, request, cancel_event, generation),
         )
+        # A page of an older ranking (metadata written since, in this run or
+        # between MCP calls) would skip or repeat sources: refuse it.
+        check_cursor_digest(request.cursor, cursor_digest, ranking.meta_digest)
         ranked = ranking.ranked
         page = ranked[offset:offset + request.limit]
         # Hydration is outside the memo: a peer skipped here is re-read on the
@@ -578,7 +625,10 @@ class SourceFinder:
                 for reason in skipped.values()
             ),
             semantic_recall_capped=ranking.capped,
-            next_cursor=encode_cursor(offset + request.limit, fingerprint) if more else "",
+            next_cursor=(
+                encode_cursor(offset + request.limit, fingerprint, ranking.meta_digest)
+                if more else ""
+            ),
             lanes=dict(ranking.lanes),
             meta_pending_excluded=ranking.meta_pending_excluded,
             meta_pending_unchecked=ranking.meta_pending_unchecked,
@@ -640,6 +690,7 @@ class SourceFinder:
         libraries: Sequence[_Library],
         request: FindSourcesRequest,
         cancel_event: CancelEvent,
+        generation: int = 0,
     ) -> _Ranking:
         """Both legs over every library, tiered and totally ordered.
 
@@ -692,7 +743,8 @@ class SourceFinder:
                 self._skip(notebook_id, exc, deadline, started, skipped, "",
                            cancel, cancel_event)
                 continue
-            reads[notebook_id] = _LibraryRead(read.rows, read.excluded)
+            reads[notebook_id] = _LibraryRead(
+                read.rows, read.excluded, meta_state=read.meta_state)
             try:
                 with read_budget(deadline, cancel):
                     reads[notebook_id] = self._semantic_read(
@@ -745,6 +797,10 @@ class SourceFinder:
             meta_pending_unchecked=sum(
                 1 for c in candidates.values() if c.row["pending"]
             ) if request.terms else 0,
+            meta_digest=_meta_digest(
+                {notebook_id: read.meta_state for notebook_id, read in reads.items()},
+                skipped, generation,
+            ),
         )
 
     def _peer_budget(
@@ -805,7 +861,7 @@ class SourceFinder:
         filters decide the allow list first)."""
         rows = tuple(read.rows)
         if not request.query or not rows:
-            return _LibraryRead(rows, read.excluded)
+            return _LibraryRead(rows, read.excluded, meta_state=read.meta_state)
         recall = int(self._settings.find_sources_chunk_recall)
         chunks, lane = self._retrieval.retrieve_chunks_in_sources(
             library.notebook_id, request.query, recall,
@@ -822,7 +878,8 @@ class SourceFinder:
             or min(float(chunk.relevance) for chunk in chunks)
             >= float(self._settings.find_sources_related_relevance)
         )
-        return _LibraryRead(rows, read.excluded, lane, capped, tuple(chunks))
+        return _LibraryRead(
+            rows, read.excluded, lane, capped, tuple(chunks), read.meta_state)
 
     def _metadata_rows(
         self, db: Any, library: _Library, request: FindSourcesRequest,
@@ -870,7 +927,8 @@ class SourceFinder:
         excluded = max(0, int(scope["meta_pending_excluded"]))
         if library.plan_ids is not None:
             rows = [row for row in rows if row["source_id"] in library.plan_ids]
-        return _MetadataRead(tuple(rows), excluded, narrowed)
+        return _MetadataRead(
+            tuple(rows), excluded, narrowed, str(scope.get("meta_state") or ""))
 
     def _emit_skipped(
         self, notebook_id: str, reason: str, error_type: str, latency_ms: int,

@@ -301,6 +301,12 @@ coverage: lexical_complete(bool), semantic_recall_capped(bool), skipped_librarie
 - `semantic_recall_capped=true`：第 400 个召回片段仍高于 `related` 阈值，可能还有漏网的论文。
   这时 Agent 必须在回答里说「可能还有更多」，不得声称已列全（与 `prompts.py:1533` 的完整性规则同一口径）。
 - 每页 20 篇（Agent 与 MCP 相同）；每次调用重算排序，翻页靠游标里的偏移量 + 参数指纹，参数变了游标作废。
+  游标还带一个元数据摘要：每个参与库作用域内论文元数据行的 `count|max(updated_at)`（UTC）、被跳过的库与本次运行的
+  元数据写入代次。两页之间有论文元数据被抽取（本 run 的 `get_paper_cards` 或 MCP 两次调用之间），排序可能改变
+  成员、档位与次序，旧偏移会漏篇或重复——此时旧游标被拒（`FindSourcesCursorStaleError`，说明「元数据已变化、
+  从第一页重新检索」），Agent 账目给同样的提示（`find_sources_cursor_stale`），已发的句柄不变。
+- 卡片懒生成的单飞:占到单飞位之后、预留生成预算之前按库批量重读缓存行与见证再判一次;分类与占位之间别的请求
+  刚写下的有效卡片、冷却行或「不是论文」直接从缓存给结论,不占预算、不再调模型。
   翻页会重跑 400 个片段的语义腿，所以 Agent 侧**每翻一页都计入本次运行的 `find_sources` 次数**。
 - MCP 的 `best_passage` 需要 `ref`：现有 ref 只有元素类型，没有片段类型，按 `evidence_page.py:55-60` 的做法
   把片段映射到它的首个元素再出 ref。

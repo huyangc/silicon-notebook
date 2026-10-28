@@ -101,3 +101,9 @@ test_a_stop_during_a_peer_page_hydration_is_a_cancellation = (
     cases.test_a_stop_during_a_peer_page_hydration_is_a_cancellation)
 test_the_subject_librarys_page_hydration_failure_fails_the_call = (
     cases.test_the_subject_librarys_page_hydration_failure_fails_the_call)
+test_a_cursor_dies_when_paper_metadata_changes_between_pages = (
+    cases.test_a_cursor_dies_when_paper_metadata_changes_between_pages)
+test_a_cursor_dies_when_the_run_writes_paper_metadata = (
+    cases.test_a_cursor_dies_when_the_run_writes_paper_metadata)
+test_a_cursor_from_before_the_digest_is_stale_not_misread = (
+    cases.test_a_cursor_from_before_the_digest_is_stale_not_misread)

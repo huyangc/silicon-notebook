@@ -105,7 +105,7 @@ from app.services.reasoning_paper_tools import (
 )
 from app.services.source_finder import (
     FIND_SOURCES_MAX_TERMS, FIND_SOURCES_PAGE_SIZE, FindSourcesCursorError,
-    FindSourcesError, FindSourcesRequest,
+    FindSourcesCursorStaleError, FindSourcesError, FindSourcesRequest,
 )
 from app.services.reasoning_actions import (
     ENUMERATE_SCOPE_ALL, ENUMERATE_SCOPE_CURRENT_NOTEBOOK, ENUMERATE_SCOPES,
@@ -7731,6 +7731,15 @@ class ReasoningRetriever:
             result = self.paper_tools.finder.find(
                 state.notebook_id, request, ceiling_binds=self._run_ceiling_binds(),
                 cancel_event=self.cancel_event)
+        except FindSourcesCursorStaleError:
+            # 元数据刚被抽取(本 run 的 get_paper_cards 或别处),排序已变:旧偏移会漏篇或重复。
+            self._paper_skip(
+                state, "跳过文档级检索(元数据已变化,需从第一页重来)",
+                "find_sources_cursor_stale",
+                "find_sources.cursor 已失效:翻页之间论文元数据有更新(刚抽取了元数据),"
+                "排序已经变化;请清空 cursor、用同样的条件从第一页重新检索"
+                "(已发过的句柄不变,重新列出的文档沿用原句柄)")
+            return
         except FindSourcesCursorError as exc:
             self._paper_skip(
                 state, "跳过文档级检索(翻页游标无效)", "find_sources_cursor_invalid",
