@@ -1145,8 +1145,9 @@ def archive_document_count(
 
     The work is bounded before any entry is decompressed (``check_web_archive``'s
     checks); then the Knowhow tables and the sources are read once each, verified
-    against the manifest's sha256 and row count. A table can hide only a source
-    the archive holds, so more ``knowhow_tables`` rows than the manifest declares
+    against the manifest's sha256 and row count. A table hides at most the one
+    source it names (a table never projected -- an empty one -- names none), so
+    more distinct ``hidden_source_id`` values than the manifest declares
     ``sources`` refuses the archive (the set of hidden ids stays bounded). With
     ``stop_above`` the count stops as soon as it exceeds that number (and returns
     ``stop_above + 1``). Raises ``NotebookImportTooLarge`` past the bound and
@@ -1159,13 +1160,14 @@ def archive_document_count(
                 archive, manifest, adapt=lambda table, row: row, page_rows=1000
             )
             hidden: set[str] = set()
-            tables = 0
             for page in source.batches("knowhow_tables"):
                 for row in page:
-                    tables += 1
-                    if tables > sources_declared:
-                        raise ArchiveError("导出文件里的 Knowhow 表多于来源")
-                    hidden.add(str(row.get("hidden_source_id") or ""))
+                    hidden_id = row.get("hidden_source_id")
+                    if not hidden_id:
+                        continue  # a table never projected (an empty one) hides nothing
+                    hidden.add(str(hidden_id))
+                    if len(hidden) > sources_declared:
+                        raise ArchiveError("导出文件里 Knowhow 表引用的来源多于文件里的来源")
             counted = 0
             for page in source.batches("sources"):
                 for row in page:
