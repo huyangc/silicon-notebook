@@ -149,7 +149,7 @@ _PUBLISHED_IMPORT_PHASES = frozenset({"project", "reembed", "index", "done"})
 #: Fields a sidecar carries (everything but the in-memory cancellation state).
 _PERSISTED = (
     "id", "kind", "user_id", "state", "phase", "created_at", "updated_at",
-    "finished_at", "notebook_id", "notebook_name", "requested_name",
+    "finished_at", "notebook_id", "notebook_name", "requested_name", "client_upload_id",
     "archive_bytes", "progress", "report", "reembed", "index", "error", "downloaded",
 )
 
@@ -196,6 +196,23 @@ class TransferBusy(RuntimeError):
     """The user already has ``MAX_ACTIVE_JOBS_PER_USER`` active jobs."""
 
 
+class UploadInProgress(RuntimeError):
+    """An upload of the user with the same client upload id is still being
+    received or checked (its reservation is held, no job exists yet)."""
+
+
+@dataclasses.dataclass(frozen=True)
+class ImportReservation:
+    """``reserve_import``'s answer: either the user's job that already carries
+    this client upload id (``existing``, nothing reserved) or a fresh slot --
+    ``job_id`` and the part file the upload streams into."""
+
+    job_id: str = ""
+    #: Meaningful only for a fresh slot (``existing`` is ``None``).
+    part: Path = Path()
+    existing: "dict | None" = None
+
+
 class _Stopped(Exception):
     """Raised inside a run whose job was cancelled."""
 
@@ -236,6 +253,9 @@ class _Job:
     notebook_name: str = ""
     #: An import's name for the new notebook (``""``: the archive's).
     requested_name: str = ""
+    #: An import's client upload id (``""``: none was sent). A second upload
+    #: with the same id by the same user gets this job back instead of a new one.
+    client_upload_id: str = ""
     archive_bytes: int = 0
     progress: dict = dataclasses.field(default_factory=dict)
     report: "dict | None" = None
@@ -364,6 +384,8 @@ class NotebookTransferJobs:
         self._tickets: dict[str, _Ticket] = {}
         #: Upload slots taken before the body is read: job id -> user id.
         self._reserved: dict[str, str] = {}
+        #: ``(user_id, client_upload_id)`` -> the job id of a held reservation.
+        self._reserved_uploads: dict[tuple[str, str], str] = {}
         #: Deleted jobs whose run has not ended yet: still holding their slot.
         self._draining: dict[str, _Job] = {}
         #: The armed expiry timer: when it is due, its generation, its handle.
@@ -438,22 +460,47 @@ class NotebookTransferJobs:
             self._register(job)
         return self._launch(job, f"{EXPORT_JOB_PREFIX}{job.id}", self._run_export, job)
 
-    def reserve_import(self, user_id: str) -> tuple[str, Path]:
+    def reserve_import(self, user_id: str, client_upload_id: str = "") -> ImportReservation:
         """Take one of the user's slots for an upload, before its body is read
         (``TransferBusy`` when none is free): a new job id and the part file the
         upload streams into (created by the caller, ``O_EXCL``). The slot is the
         job's once ``start_import`` takes it; the caller gives it back with
-        ``release_upload`` on any other outcome."""
+        ``release_upload`` on any other outcome.
+
+        With a ``client_upload_id``, a retry is harmless: when the user already
+        has a job (in any state still in the registry) that carries the id, that
+        job comes back as ``existing`` -- no slot is taken and the body must not
+        be read; when an upload with the id is still being received or checked
+        (no job yet), ``UploadInProgress``. Both are decided under the lock,
+        before the capacity check, so a same-id request is never a new slot."""
         job_id = _new_job_id()
+        self._expire()
         with self._lock:
+            if client_upload_id:
+                for job in self._jobs.values():
+                    if job.user_id == user_id and job.client_upload_id == client_upload_id:
+                        return ImportReservation(existing=self._view(job))
+                if (user_id, client_upload_id) in self._reserved_uploads:
+                    raise UploadInProgress(user_id)
             self._check_capacity(user_id)
             self._reserved[job_id] = user_id
-        return job_id, self._directory("imports") / f"{job_id}{_UPLOAD_PART_SUFFIX}"
+            if client_upload_id:
+                self._reserved_uploads[(user_id, client_upload_id)] = job_id
+        return ImportReservation(
+            job_id=job_id, part=self._directory("imports") / f"{job_id}{_UPLOAD_PART_SUFFIX}",
+        )
 
     def release_upload(self, job_id: str) -> None:
         """Give back the slot of an upload that did not become a job (idempotent)."""
         with self._lock:
             self._reserved.pop(job_id, None)
+            self._drop_upload_key(job_id)
+
+    def _drop_upload_key(self, job_id: str) -> None:
+        """Under the lock: forget the client upload id held by ``job_id``'s reservation."""
+        for key, held in list(self._reserved_uploads.items()):
+            if held == job_id:
+                del self._reserved_uploads[key]
 
     def start_import(
         self, repo: Any, *, job_id: str, upload: Path, user_id: str, name: str
@@ -470,10 +517,15 @@ class NotebookTransferJobs:
                 raise ValueError("no reserved slot for this upload")
             os.replace(upload, self._upload_path(job_id))
             del self._reserved[job_id]
+            client_upload_id = next(
+                (key[1] for key, held in self._reserved_uploads.items() if held == job_id), ""
+            )
+            self._drop_upload_key(job_id)
             now = self._clock()
             job = _Job(
                 id=job_id, kind=IMPORT, user_id=user_id, state=QUEUED, phase=QUEUED,
                 created_at=now, updated_at=now, requested_name=name,
+                client_upload_id=client_upload_id,
             )
             self._register(job)
         return self._launch(job, f"{IMPORT_JOB_PREFIX}{job.id}", self._run_import, repo, job)
@@ -565,6 +617,7 @@ class NotebookTransferJobs:
             "reembed": job.reembed,
             "index": job.index,
             "error": job.error,
+            "client_upload_id": job.client_upload_id,
         })
 
     # ------------------------------------------------------------ delete
@@ -1165,6 +1218,7 @@ def _load_sidecar(path: Path) -> "_Job | None":
             notebook_id=str(data.get("notebook_id") or ""),
             notebook_name=str(data.get("notebook_name") or ""),
             requested_name=str(data.get("requested_name") or ""),
+            client_upload_id=str(data.get("client_upload_id") or ""),
             archive_bytes=int(data.get("archive_bytes") or 0),
             progress=dict(data.get("progress") or {}),
             report=data.get("report") if isinstance(data.get("report"), dict) else None,

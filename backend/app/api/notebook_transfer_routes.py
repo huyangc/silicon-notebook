@@ -35,6 +35,7 @@ download (docs/superpowers/plans/2026-10-22-notebook-export-import.md §7, §9).
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -71,6 +72,7 @@ from app.services.notebook_transfer.jobs import (
     TransferBusy,
     TransferJobNotFound,
     TransferNotReady,
+    UploadInProgress,
 )
 
 router = APIRouter()
@@ -90,6 +92,16 @@ _ARCHIVE_MEDIA_TYPE = "application/zip"
 _DOWNLOAD_REFUSED = {"detail": "Not found"}
 _DOWNLOAD_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 _JOB_NOT_FOUND = "Transfer job not found"
+#: The client's id for one upload attempt chain (``X-Upload-Id``): a retry with
+#: the same id gets the job it already created back instead of a second import.
+#: A header, not a query value, so it never reaches an access log.
+UPLOAD_ID_HEADER = "X-Upload-Id"
+_UPLOAD_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+#: 409 while an upload with the same id is still being received or checked.
+_UPLOAD_IN_PROGRESS = {
+    "code": "upload_in_progress",
+    "message": "上一次上传的这个文件还在处理中，请稍后查看导入记录。",
+}
 #: 400 for an archive written by a newer build (a newer format version, or a
 #: column this deployment lacks): ``code`` for the client to branch on,
 #: ``message`` a complete Chinese sentence.
@@ -203,7 +215,13 @@ async def import_notebook_route(
     job). The body is the raw file (``Content-Type: application/zip``); ``name``
     renames the new notebook (empty: the exported name). A file that is not an
     archive or is damaged is 400; one written by a newer build is 400 with the
-    detail ``{"code": "archive_too_new", "message"}`` (upgrade this deployment)."""
+    detail ``{"code": "archive_too_new", "message"}`` (upgrade this deployment).
+
+    ``X-Upload-Id`` (optional; 8-64 of ``A-Z a-z 0-9 _ -``, else 400) names this
+    upload attempt chain. When the caller already has a job carrying the id, that
+    job is answered (202, the same body) and the request body is not read: a
+    retry never makes a second import. While an upload with the id is still being
+    received or checked, 409 ``{"code": "upload_in_progress", "message"}``."""
     media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if media_type != _ARCHIVE_MEDIA_TYPE:
         raise user_error(415, "请上传笔记本导出文件（.snbk）。")
@@ -211,13 +229,21 @@ async def import_notebook_route(
     declared = request.headers.get("content-length", "")
     if declared.isdigit() and int(declared) > limit:
         raise _upload_too_large(limit)
+    client_upload_id = request.headers.get(UPLOAD_ID_HEADER, "")
+    if client_upload_id and not _UPLOAD_ID.fullmatch(client_upload_id):
+        raise user_error(400, "上传标识的格式不对，请刷新页面后重试。")
     jobs = notebook_transfer_jobs()
     try:
         # The slot is taken before a byte of the body is read, and given back on
-        # every outcome but the job (below).
-        job_id, part = jobs.reserve_import(user.id)
+        # every outcome but the job (below). A same-id retry takes no slot.
+        reservation = jobs.reserve_import(user.id, client_upload_id)
     except TransferBusy:
         raise _busy() from None
+    except UploadInProgress:
+        raise HTTPException(status_code=409, detail=_UPLOAD_IN_PROGRESS) from None
+    if reservation.existing is not None:
+        return reservation.existing
+    job_id, part = reservation.job_id, reservation.part
     try:
         received = await _receive_upload(request, part, limit)
         if received == 0:

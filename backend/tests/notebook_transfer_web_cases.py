@@ -1657,3 +1657,64 @@ def check_the_follow_up_messages_promise_no_button() -> None:
         assert "部分检索可能不全" in message and "可以删除这本笔记本后重新导入" in message, code
         assert "「" not in message and "补齐" not in message, code
     assert "请不要再导入一份" in jobs_module._MESSAGES["import_followup_interrupted"]
+
+
+def check_a_retry_with_the_same_upload_id_returns_its_job(world: World) -> None:
+    """``X-Upload-Id`` makes a retry harmless: the caller's job that carries the id
+    comes back (202, the same body) without the body being read -- even with every
+    slot taken -- so a retry never makes a second import. The id is the caller's:
+    another user's same id is a separate upload. An upload with the id still being
+    received is 409 ``upload_in_progress``; a malformed id is 400. The id is on the
+    job, in its JSON and on its sidecar."""
+    data = archive_bytes(world)
+    first = upload(world, data, **{"X-Upload-Id": "up-abcdef12"})
+    assert first.status_code == 202, first.text
+    job = first.json()
+    assert job["client_upload_id"] == "up-abcdef12"
+    assert job["state"] == "succeeded", job
+    sidecar = world.storage / "transfers" / "jobs" / f"{job['id']}.json"
+    import json as _json
+
+    assert _json.loads(sidecar.read_text("utf-8"))["client_upload_id"] == "up-abcdef12"
+
+    def imports(headers) -> list:
+        listed = world.client.get("/api/notebook-transfers", headers=headers).json()["jobs"]
+        return [j for j in listed if j["kind"] == "import"]
+
+    # Every slot taken: a new upload would be 409 busy; the retry is not a new slot.
+    held = [world.jobs.reserve_import(world.owner_id).job_id for _ in range(2)]
+    try:
+        busy = upload(world, data, **{"X-Upload-Id": "up-other-99"})
+        assert busy.status_code == 409, busy.text
+        # The body is not read: garbage would be refused with 400 if it were.
+        retry = upload(world, b"not an archive", **{"X-Upload-Id": "up-abcdef12"})
+        assert retry.status_code == 202, retry.text
+        assert retry.json() == job | {"updated_at": retry.json()["updated_at"]}
+        assert retry.json()["id"] == job["id"]
+    finally:
+        for job_id in held:
+            world.jobs.release_upload(job_id)
+    assert [j["id"] for j in imports(world.owner)] == [job["id"]]
+    before = world.repo.list_notebooks()
+
+    # Another user with the same id: their own upload, their own job.
+    theirs = upload(world, data, world.other, **{"X-Upload-Id": "up-abcdef12"})
+    assert theirs.status_code == 202, theirs.text
+    assert theirs.json()["id"] != job["id"]
+    assert [j["id"] for j in imports(world.owner)] == [job["id"]]
+    assert len(world.repo.list_notebooks()) >= len(before)
+
+    # Still being received (a reservation holds the id): 409, nothing reserved.
+    world.jobs.reserve_import(world.owner_id, "up-inflight1")
+    try:
+        racing = upload(world, data, **{"X-Upload-Id": "up-inflight1"})
+        assert racing.status_code == 409, racing.text
+        assert racing.json()["detail"]["code"] == "upload_in_progress"
+    finally:
+        for job_id in list(world.jobs._reserved):
+            world.jobs.release_upload(job_id)
+
+    for bad in ("short", "x" * 65, "has space1", "semi;colon1", "dots.in.id1"):
+        refused = upload(world, data, **{"X-Upload-Id": bad})
+        assert refused.status_code == 400, (bad, refused.text)
+    assert [f for f in world.transfer_files() if f.startswith("imports/")] == []

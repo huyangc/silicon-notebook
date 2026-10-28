@@ -191,3 +191,7 @@ def test_refusals_say_whether_to_upgrade_or_retry(world):
 
 def test_the_follow_up_messages_promise_no_button():
     cases.check_the_follow_up_messages_promise_no_button()
+
+
+def test_a_retry_with_the_same_upload_id_returns_its_job(world):
+    cases.check_a_retry_with_the_same_upload_id_returns_its_job(world)
