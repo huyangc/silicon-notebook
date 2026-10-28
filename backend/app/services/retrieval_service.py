@@ -407,6 +407,38 @@ class RetrievalService:
             ),
         )
 
+    def retrieve_chunks_in_sources(
+        self, notebook_id, query, recall, allowed_source_ids,
+    ):
+        """``find_sources``' semantic leg: ``(chunks, lane)`` for ONE library.
+
+        The ordinary single-library chunk recall (``_retrieve_chunks``: ANN with
+        its source-filter callback, the FTS-degraded lane on a large library
+        without one, otherwise the bounded brute force) with an EXPLICIT allow
+        list, applied before Top-K -- and intersected there with the run's
+        frozen ceiling when a run scope is installed
+        (``scoped_allowed_source_ids``).  Without a run scope (MCP) nothing
+        else narrows it, so the caller's list is the whole authority: it must
+        be ``all_visible ∪ hidden(owner)`` or narrower, never a library-wide
+        read.  ``filter_retrieval_items`` stays at the result boundary like
+        every chunk producer.  An empty list reads nothing."""
+        from app.services.chunk_lane import observed_chunk_lane
+
+        allowed = tuple(dict.fromkeys(
+            str(value) for value in allowed_source_ids if str(value or "")
+        ))
+        if not allowed:
+            return [], "baseline"
+        with observed_chunk_lane() as lanes:
+            scored, _ids, _matrix = self.candidates._retrieve_chunks(
+                notebook_id, query, max(1, int(recall)),
+                allowed_source_ids=allowed,
+            )
+        return (
+            filter_retrieval_items(notebook_id, "chunk", scored),
+            lanes[0] if lanes else "baseline",
+        )
+
     def retrieve_chunk_candidates(self, notebook_id, query):
         """单查询原文段落召回 —— 范围是**参与集**,不再是 active 一本。
 

@@ -1122,6 +1122,31 @@ class Settings(BaseSettings):
         256 * 1024 * 1024, ge=0, le=16 * 1024 * 1024 * 1024,
         validation_alias="REASONING_SECTION_VECTOR_CACHE_MAX_BYTES",
     )
+    # 文档级检索 find_sources(``app.services.source_finder``)的语义腿:每个库一次
+    # 受限来源的 chunk 召回,最多这么多个片段(按来源分组后取每篇最佳 relevance 与
+    # 命中数)。第 N 个片段仍高于「相关」线时回报 ``semantic_recall_capped``。
+    find_sources_chunk_recall: int = Field(
+        400, ge=1, le=2000, validation_alias="FIND_SOURCES_CHUNK_RECALL"
+    )
+    # 分档阈值(融合 relevance,0..1,不是余弦):每篇最佳片段 ≥ 强相关线进 strong,
+    # ≥ 相关线进 related;只在有语义信号的车道(baseline/ann)适用,FTS 降级车道按
+    # 元数据命中与命中数分档。**临时保守值**(偏高的强相关线、偏低的相关线),
+    # 由 ``find_sources_calibrate`` 在当前嵌入模型下校准后写死;换嵌入模型要重跑校准。
+    find_sources_strong_relevance: float = Field(
+        0.7, ge=0.0, le=1.0, validation_alias="FIND_SOURCES_STRONG_RELEVANCE"
+    )
+    find_sources_related_relevance: float = Field(
+        0.3, ge=0.0, le=1.0, validation_alias="FIND_SOURCES_RELATED_RELEVANCE"
+    )
+
+    @model_validator(mode="after")
+    def validate_find_sources_relevance_order(self):
+        if self.find_sources_related_relevance > self.find_sources_strong_relevance:
+            raise ValueError(
+                "FIND_SOURCES_RELATED_RELEVANCE 不得大于 FIND_SOURCES_STRONG_RELEVANCE"
+            )
+        return self
+
     # 文档内导航的总闸与各项上限(reflect 动作 browse_sections / read_section 与
     # 章节向量线索块)。总闸关、两个次数上限都为 0、或上面的大纲扫描界为 0 时,两个
     # 动作与线索块整体不提供(prompt / schema / allowed_actions 三处同时消失,单点
