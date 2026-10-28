@@ -1041,3 +1041,115 @@ def test_peers_without_a_run_plan_share_one_budget(repo, monkeypatch):
     assert result.skipped_libraries in (
         {refs[2]: "timeout"}, {refs[2]: "queue_deadline"},
     )
+
+
+# ------------------------------------------------ page hydration isolation
+class DisplayFailingStore(FailingStore):
+    """The real store, except the page's display read
+    (``paper_meta_for_sources``) misbehaves for one library: ``fail`` raises,
+    ``stall`` sleeps then reads, ``cancel`` sets the run's stop then reads."""
+
+    def __init__(self, store, notebook_id, *, fail=None, stall=0.0, cancel=None):
+        super().__init__(store, "none")
+        self._display_nb = notebook_id
+        self.display_fail, self._display_stall = fail, stall
+        self._cancel = cancel
+        self.display_calls = 0
+
+    def paper_meta_for_sources(self, db, ids, *, notebook_id):
+        self.display_calls += 1
+        if notebook_id == self._display_nb:
+            if self.display_fail is not None:
+                raise self.display_fail
+            if self._cancel is not None:
+                self._cancel.set()
+            if self._display_stall:
+                import time
+
+                time.sleep(self._display_stall)
+        return self._store.paper_meta_for_sources(db, ids, notebook_id=notebook_id)
+
+
+def _two_kalman_libraries(instance, nb):
+    ref = _reference_library(instance)
+    _source(instance, nb, "s-local", title="kalman filter")
+    _meta(instance, nb, "s-local", year=2020)
+    _source(instance, ref, "s-ref", title="kalman smoother")
+    _meta(instance, ref, "s-ref", year=2021)
+    return ref
+
+
+def test_a_peer_whose_page_hydration_fails_drops_only_its_items(repo):
+    from app.services.retrieval_run import retrieval_run
+
+    instance, nb, *_ = repo
+    ref = _two_kalman_libraries(instance, nb)
+    events = Events()
+    store = DisplayFailingStore(instance._runtime.source_store, ref,
+                                fail=RuntimeError("display down"))
+    finder = _finder(instance, enumeration=TwoLibraries(instance, nb, ref),
+                     sources=store, event_log=events)
+    request = FindSourcesRequest(terms=("kalman",), kind="all")
+    with retrieval_run(run_kind="ask_reasoning"):
+        result = finder.find(nb, request)
+        assert [item.source_id for item in result.items] == ["s-local"]
+        assert result.skipped_libraries == {ref: "hydrate:unavailable"}
+        assert result.lexical_complete is False
+        assert [e for e in events.events if e["kind"] == "find_sources_library_skipped"] == [{
+            "kind": "find_sources_library_skipped", "notebook_id": ref,
+            "error_type": "RuntimeError", "latency_ms": events.events[0]["latency_ms"],
+            "reason": "hydrate:unavailable",
+        }]
+        # The memo kept the ranking, not the skip: the next call in the same
+        # run re-reads the peer's display rows and shows its item.
+        store.display_fail = None
+        again = finder.find(nb, request)
+    assert {item.source_id for item in again.items} == {"s-local", "s-ref"}
+    assert again.skipped_libraries == {}
+    assert again.lexical_complete is True
+    assert store.calls == 2                       # ranked once per library
+
+
+def test_a_peer_page_hydration_runs_under_a_per_library_deadline(repo, monkeypatch):
+    instance, nb, *_ = repo
+    ref = _two_kalman_libraries(instance, nb)
+    monkeypatch.setattr(instance.settings, "global_ask_notebook_timeout_seconds", 0.05)
+    store = DisplayFailingStore(instance._runtime.source_store, ref, stall=0.2)
+    result = _finder(
+        instance, enumeration=TwoLibraries(instance, nb, ref), sources=store,
+    ).find(nb, FindSourcesRequest(terms=("kalman",), kind="all"))
+    assert [item.source_id for item in result.items] == ["s-local"]
+    assert result.skipped_libraries == {ref: "hydrate:timeout"}
+
+
+def test_a_stop_during_a_peer_page_hydration_is_a_cancellation(repo):
+    import threading
+
+    from app.services.cancellation import AskCancelled
+
+    instance, nb, *_ = repo
+    ref = _two_kalman_libraries(instance, nb)
+    cancel = threading.Event()
+    events = Events()
+    store = DisplayFailingStore(instance._runtime.source_store, ref, cancel=cancel)
+    with pytest.raises(AskCancelled):
+        _finder(instance, enumeration=TwoLibraries(instance, nb, ref), sources=store,
+                event_log=events).find(
+            nb, FindSourcesRequest(terms=("kalman",), kind="all"), cancel_event=cancel)
+    assert events.events == []                    # no "timeout" skip receipt
+    raised = DisplayFailingStore(instance._runtime.source_store, ref, fail=AskCancelled())
+    with pytest.raises(AskCancelled):
+        _finder(instance, enumeration=TwoLibraries(instance, nb, ref), sources=raised,
+                event_log=events).find(nb, FindSourcesRequest(terms=("kalman",), kind="all"))
+    assert events.events == []
+
+
+def test_the_subject_librarys_page_hydration_failure_fails_the_call(repo):
+    instance, nb, *_ = repo
+    ref = _two_kalman_libraries(instance, nb)
+    store = DisplayFailingStore(instance._runtime.source_store, nb,
+                                fail=RuntimeError("display down"))
+    with pytest.raises(RuntimeError, match="display down"):
+        _finder(instance, enumeration=TwoLibraries(instance, nb, ref),
+                sources=store).find(nb, FindSourcesRequest(terms=("kalman",), kind="all"))
+

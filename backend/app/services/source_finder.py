@@ -42,6 +42,10 @@ read budget (the federation's per-library timeout, capped by the phase when a
 run plan is installed) with failure isolation: a library that fails or times
 out is skipped, reported in ``skipped_libraries`` and a
 ``find_sources_library_skipped`` event, and makes ``lexical_complete`` false.
+The page's display hydration runs under the same isolation and budget: a peer
+whose display read fails or times out drops only its own items from the page
+(``hydrate:<reason>``).  Hydration is outside the run memo, so such a skip is
+never kept for a later page or call.
 """
 from __future__ import annotations
 
@@ -109,6 +113,9 @@ _CURSOR_PREFIX = "fs1."
 PEER_BUDGET_LIBRARIES = 2
 #: ``skipped_libraries`` reasons with this prefix lost only the semantic leg.
 SEMANTIC_SKIP_PREFIX = "semantic:"
+#: ``skipped_libraries`` reasons with this prefix were ranked but their page
+#: items could not be displayed (the display read failed or timed out).
+HYDRATE_SKIP_PREFIX = "hydrate:"
 
 
 #: The title of a source that has neither a paper title, a stored title nor a
@@ -209,7 +216,8 @@ class FindSourcesResult:
     #: ``{notebook_id: reason}`` of the participant libraries skipped in this
     #: call (``timeout`` / ``saturated`` / ``queue_deadline`` / ``unavailable``;
     #: prefixed ``semantic:`` when only the semantic leg failed and the
-    #: library's metadata hits are still in the result).
+    #: library's metadata hits are still in the result; ``hydrate:`` when the
+    #: library ranked but its items on this page could not be displayed).
     skipped_libraries: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -253,6 +261,26 @@ class _LibraryRead:
     lane: str = ""
     capped: bool = False
     chunks: Tuple[RetrievedChunk, ...] = ()
+
+
+@dataclass(frozen=True)
+class _PeerBudget:
+    """How peer libraries are bounded in one phase: each read gets
+    ``min(now + timeout, phase_deadline)`` under ``cancel``."""
+
+    timeout: float
+    phase_deadline: float
+    cancel: Any
+
+
+@dataclass(frozen=True)
+class _Display:
+    """One library's display rows for a page."""
+
+    listings: Dict[str, Mapping[str, Any]]
+    metas: Dict[str, dict]
+    cards: Dict[str, dict]
+    bases: Dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -531,7 +559,11 @@ class SourceFinder:
         )
         ranked = ranking.ranked
         page = ranked[offset:offset + request.limit]
-        items = self._hydrate(page, offset)
+        # Hydration is outside the memo: a peer skipped here is re-read on the
+        # next page or call, never remembered as a skip.
+        items, hydrate_skipped = self._hydrate(
+            active_notebook_id, page, offset, cancel_event)
+        skipped = {**ranking.skipped, **hydrate_skipped}
         more = offset + request.limit < len(ranked)
         return FindSourcesResult(
             items=items,
@@ -543,14 +575,14 @@ class SourceFinder:
             and not ranking.meta_pending_unchecked
             and not any(
                 not reason.startswith(SEMANTIC_SKIP_PREFIX)
-                for reason in ranking.skipped.values()
+                for reason in skipped.values()
             ),
             semantic_recall_capped=ranking.capped,
             next_cursor=encode_cursor(offset + request.limit, fingerprint) if more else "",
             lanes=dict(ranking.lanes),
             meta_pending_excluded=ranking.meta_pending_excluded,
             meta_pending_unchecked=ranking.meta_pending_unchecked,
-            skipped_libraries=dict(ranking.skipped),
+            skipped_libraries=skipped,
         )
 
     # ------------------------------------------------------------ source set
@@ -625,20 +657,12 @@ class SourceFinder:
         the single-library chunk path does.  Cancellation is never a skip: it
         is re-checked after every failure and before the ranking is returned
         (and so before the run memo keeps it)."""
-        plan = current_federated_run_plan() if federated_ask_active() else None
-        timeout = float(
-            plan.notebook_timeout_seconds if plan is not None
-            else self._settings.global_ask_notebook_timeout_seconds
+        budget = self._peer_budget(
+            active_notebook_id, [library.notebook_id for library in libraries],
+            cancel_event,
         )
-        peers = sum(
-            1 for library in libraries
-            if is_peer_library(active_notebook_id, library.notebook_id)
-        )
-        phase_deadline = time.monotonic() + (
-            float(plan.phase_timeout_seconds) if plan is not None
-            else timeout * min(peers, PEER_BUDGET_LIBRARIES)
-        )
-        cancel = plan.cancel if plan is not None else cancel_event
+        timeout, phase_deadline, cancel = (
+            budget.timeout, budget.phase_deadline, budget.cancel)
         reads: Dict[str, _LibraryRead] = {}
         skipped: Dict[str, str] = {}
         semantic_unknown = False
@@ -721,6 +745,32 @@ class SourceFinder:
             meta_pending_unchecked=sum(
                 1 for c in candidates.values() if c.row["pending"]
             ) if request.terms else 0,
+        )
+
+    def _peer_budget(
+        self, active_notebook_id: str, notebook_ids: Sequence[str],
+        cancel_event: CancelEvent,
+    ) -> _PeerBudget:
+        """The phase budget for the peers among ``notebook_ids`` (see
+        ``_rank``): the run plan's per-library and phase timeouts, or without
+        one the configured per-library timeout and ONE shared phase of that
+        timeout × ``min(peers, PEER_BUDGET_LIBRARIES)``."""
+        plan = current_federated_run_plan() if federated_ask_active() else None
+        timeout = float(
+            plan.notebook_timeout_seconds if plan is not None
+            else self._settings.global_ask_notebook_timeout_seconds
+        )
+        peers = sum(
+            1 for notebook_id in notebook_ids
+            if is_peer_library(active_notebook_id, notebook_id)
+        )
+        return _PeerBudget(
+            timeout,
+            time.monotonic() + (
+                float(plan.phase_timeout_seconds) if plan is not None
+                else timeout * min(peers, PEER_BUDGET_LIBRARIES)
+            ),
+            plan.cancel if plan is not None else cancel_event,
         )
 
     def _skip(
@@ -897,40 +947,86 @@ class SourceFinder:
                     )
         return out
 
+    def _display_read(self, notebook_id: str, ids: Sequence[str]) -> _Display:
+        """Titles, paper metadata, card rows and card bases of one library's
+        page items: bounded primary-key reads on one connection."""
+        ids = list(ids)
+        with self._database.connect() as db:
+            listings = {
+                str(row["id"]): dict(row)
+                for row in self._sources.source_listing_rows(db, ids)
+            }
+            metas = self._sources.paper_meta_for_sources(
+                db, ids, notebook_id=notebook_id)
+            papers = [
+                source_id for source_id in ids
+                if metas.get(source_id, {}).get("is_paper")
+            ]
+            cards: Dict[str, dict] = {}
+            bases: Dict[str, str] = {}
+            if papers:
+                cards = self._sources.paper_cards_for_sources(
+                    db, papers, notebook_id=notebook_id)
+                bases = self._sources.source_card_bases(db, papers)
+        return _Display(listings, metas, cards, bases)
+
     def _hydrate(
-        self, page: Sequence[_Candidate], offset: int,
-    ) -> Tuple[FoundSource, ...]:
+        self, active_notebook_id: str, page: Sequence[_Candidate], offset: int,
+        cancel_event: CancelEvent,
+    ) -> Tuple[Tuple[FoundSource, ...], Dict[str, str]]:
         """Titles, paper metadata, authors and card status for ONE page,
-        batched per owning library (bounded primary-key reads on one
-        connection) -- the ranking never reads a display row."""
+        batched per owning library -- the ranking never reads a display row.
+
+        Isolated like ``_rank``: a PEER library's display read runs on its own
+        connection under its own budget, and its failure drops only its items
+        from the page and returns it as ``hydrate:<reason>``; the subject
+        library's failure fails the call.  Cancellation is never a skip."""
         by_notebook: Dict[str, List[str]] = {}
         for candidate in page:
             by_notebook.setdefault(candidate.row["notebook_id"], []).append(
                 candidate.row["source_id"]
             )
+        budget = self._peer_budget(active_notebook_id, list(by_notebook), cancel_event)
+        displays: Dict[str, _Display] = {}
+        skipped: Dict[str, str] = {}
+        for notebook_id, ids in by_notebook.items():
+            raise_if_cancelled(cancel_event)
+            if not is_peer_library(active_notebook_id, notebook_id):
+                displays[notebook_id] = self._display_read(notebook_id, ids)
+                continue
+            if budget.phase_deadline - time.monotonic() <= 0:
+                reason = HYDRATE_SKIP_PREFIX + "queue_deadline"
+                skipped[notebook_id] = reason
+                self._emit_skipped(notebook_id, reason, "", 0)
+                continue
+            deadline = min(time.monotonic() + budget.timeout, budget.phase_deadline)
+            started = time.perf_counter()
+            raise_if_cancelled(budget.cancel)
+            try:
+                with read_budget(deadline, budget.cancel):
+                    displays[notebook_id] = self._display_read(notebook_id, ids)
+            except (AskCancelled, RetrievalControlError):
+                raise
+            except Exception as exc:  # noqa: BLE001 - one library must not fail the page
+                self._skip(notebook_id, exc, deadline, started, skipped,
+                           HYDRATE_SKIP_PREFIX, budget.cancel, cancel_event)
+        # A stop during the last read is a cancellation, not a page with skips.
+        raise_if_cancelled(budget.cancel)
+        raise_if_cancelled(cancel_event)
         listings: Dict[str, Mapping[str, Any]] = {}
         metas: Dict[str, dict] = {}
         cards: Dict[str, dict] = {}
         bases: Dict[str, str] = {}
-        with self._database.connect() as db:
-            for notebook_id, ids in by_notebook.items():
-                listings.update(
-                    (str(row["id"]), dict(row))
-                    for row in self._sources.source_listing_rows(db, ids)
-                )
-                metas.update(self._sources.paper_meta_for_sources(
-                    db, ids, notebook_id=notebook_id))
-                papers = [
-                    source_id for source_id in ids
-                    if metas.get(source_id, {}).get("is_paper")
-                ]
-                if papers:
-                    cards.update(self._sources.paper_cards_for_sources(
-                        db, papers, notebook_id=notebook_id))
-                    bases.update(self._sources.source_card_bases(db, papers))
+        for display in displays.values():
+            listings.update(display.listings)
+            metas.update(display.metas)
+            cards.update(display.cards)
+            bases.update(display.bases)
         items = []
         for position, candidate in enumerate(page):
             row = candidate.row
+            if row["notebook_id"] in skipped:
+                continue
             source_id = row["source_id"]
             listing = listings.get(source_id) or {}
             meta = metas.get(source_id)
@@ -964,4 +1060,4 @@ class SourceFinder:
                     card_version=self._card_version,
                 ),
             ))
-        return tuple(items)
+        return tuple(items), skipped

@@ -13,10 +13,13 @@ from app.services.document_source_overview import (
     sample_paper_card_input,
 )
 from app.services.paper_cards import (
+    CONTRIBUTION_MAX_CHARS,
+    DATASET_NAME_MAX_CHARS,
     MAX_CARD_ANCHORS,
     MAX_CONTRIBUTIONS,
     MAX_METRICS,
     METRIC_COMPARED_MAX_CHARS,
+    METRIC_UNIT_MAX_CHARS,
     METRIC_VALUE_MAX_CHARS,
     PAPER_CARD_VERSION,
     TLDR_MAX_CHARS,
@@ -207,6 +210,26 @@ def test_compared_to_is_never_cut_inside_a_number():
     assert not compared.endswith(("6", "6.", "6.9"))
 
 
+def test_prose_fields_are_never_cut_inside_a_number():
+    # Codex repro: 298 characters + "85.23%" under the 300-character TL;DR
+    # bound would be stored ending in "85" -- a different, still-cited result.
+    tldr = "x" * (TLDR_MAX_CHARS - 2) + "85.23%"
+    contribution = "y" * (CONTRIBUTION_MAX_CHARS - 2) + "85.23%"
+    dataset = "z" * (DATASET_NAME_MAX_CHARS - 2) + "85.23"
+    metric = _metric("85.2")
+    metric["unit"] = "u" * (METRIC_UNIT_MAX_CHARS - 2) + "1.5"
+    card, _dropped = verify_paper_card({
+        "tldr": {"text": tldr, "anchors": ["e1"]},
+        "contributions": [{"text": contribution, "anchors": ["e1"]}],
+        "datasets": [{"name": dataset, "anchors": ["e1"]}],
+        "metrics": [metric],
+    }, ELEMENTS)
+    assert card["tldr"]["text"] == "x" * (TLDR_MAX_CHARS - 2)
+    assert card["contributions"][0]["text"] == "y" * (CONTRIBUTION_MAX_CHARS - 2)
+    assert card["datasets"][0]["name"] == "z" * (DATASET_NAME_MAX_CHARS - 2)
+    assert card["metrics"][0]["unit"] == "u" * (METRIC_UNIT_MAX_CHARS - 2)
+
+
 def test_lengths_truncate_and_counts_cap():
     long_text = "x" * (TLDR_MAX_CHARS + 50)
     card, dropped = verify_paper_card({
@@ -281,10 +304,11 @@ def test_prompt_keeps_metrics_to_the_papers_own_method():
     assert PAPER_CARD_VERSION >= 2
 
 
-def test_the_card_version_follows_the_bound_before_ground_rule():
-    """v3: a metric value is bounded (number-safe) before it is grounded, so
-    v2 cards that may hold a cut number are invalidated on read."""
-    assert PAPER_CARD_VERSION == 3
+def test_the_card_version_follows_the_number_safe_prose_rule():
+    """v3: a metric value is bounded (number-safe) before it is grounded; v4:
+    every prose field is bounded number-safe too, so v3 cards that may hold a
+    cut prose number are invalidated on read."""
+    assert PAPER_CARD_VERSION == 4
 
 
 def test_prompt_carries_the_input_block():

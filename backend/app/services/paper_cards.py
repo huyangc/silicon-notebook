@@ -24,7 +24,9 @@ from app.core.model_values import as_text
 # 3:指标值先按数字安全的上限截短再接地(截短会切到数字就丢弃,value_too_long),
 #    name/setting/compared_to 也不再切在数字中间。v2 卡片可能存着与接地数不同的
 #    截短值,升版让它们在读取时失效、按需重生成。
-PAPER_CARD_VERSION = 3
+# 4:所有文字字段(tldr/problem/method/contributions/unit/dataset name)的截短也
+#    数字安全:v3 卡片的散文字段可能在数字中间被切(85.23% 存成 85),读取时失效。
+PAPER_CARD_VERSION = 4
 
 # 示例里不写 null、空列表只给字符串列表字段(本 hint 一个都没有,所以每个列表都
 # 给一个示例项):否则严格 schema 投影整体回落 JSON 模式(json-hint-strict-alignment)。
@@ -307,7 +309,9 @@ def _scalar_text(value: Any) -> str:
 
 
 def _cap(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[:limit].rstrip()
+    """Every stored card text is bounded number-safe: a cut prose number (a
+    TL;DR ending ``85`` for ``85.23%``) is a different, still-cited result."""
+    return cap_number_safe(text, limit)
 
 
 _SPAN_NUMBER = r"(?:\d[\d,]*(?:\.\d+)?|\.\d+)"
