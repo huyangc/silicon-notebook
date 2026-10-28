@@ -661,6 +661,7 @@ def reflect_schema_hint(
     find_sources: bool = False,
     paper_cards: bool = False,
     extract: bool = False,
+    answer_layout: bool = False,
 ) -> str:
     """The reflect response schema, with the enumeration branch iff offered.
 
@@ -786,8 +787,10 @@ def reflect_schema_hint(
     -- dropped in a PEER run like the roster's -- and ``cursor``),
     ``get_paper_cards`` (``sources``) and ``extract_from_sources``
     (``sources``, ``fields``). With the card OR the extraction gate open the
-    top-level ``answer_layout`` field (``prose|paper_table``) appears too. All
-    default False: every closed state is byte-for-byte the schema from before
+    top-level ``answer_layout`` field (``prose|paper_table``) appears too, and
+    so does it with ``answer_layout`` True: the run offered cards or
+    extraction at all, though this turn's budgets are spent -- the answering
+    turn must still be able to ask for the table. All default False: every closed state is byte-for-byte the schema from before
     the tools existed.
     """
     # The SAME double gate ``reflect_prompt`` applies to the action's own prompt
@@ -928,7 +931,8 @@ def reflect_schema_hint(
            if extract else "")
     )
     answer_layout_field = (
-        '"answer_layout":"prose|paper_table",' if paper_cards or extract else ""
+        '"answer_layout":"prose|paper_table",'
+        if answer_layout or paper_cards or extract else ""
     )
     if consult_memory:
         actions += "|consult_memory"
@@ -1031,7 +1035,7 @@ def keyword_language_rule(corpus_langs: Optional[Sequence[str]]) -> str:
 
 def _paper_tool_lines(
     find_sources_cap: int, paper_cards_cap: int, extract_cap: int,
-    enumerate_scope: bool,
+    enumerate_scope: bool, answer_layout: bool = False,
 ) -> str:
     """The paper tools' action lines and usage paragraph for ``reflect_prompt``
     (spec 2026-10-28 §7.1). Only the tools whose cap is non-zero are named --
@@ -1086,7 +1090,7 @@ def _paper_tool_lines(
             "for non-papers too. You may extract from at most "
             f"{extract_cap} document(s) in this run.\n"
         )
-    if paper_cards or extract:
+    if answer_layout or paper_cards or extract:
         lines += (
             "- answer_layout (a top-level field, not an action; any turn may set "
             "it and the last value wins): \"paper_table\" when the answer should "
@@ -1141,6 +1145,7 @@ def reflect_prompt(
     find_sources_cap: int = 0,
     paper_cards_cap: int = 0,
     extract_cap: int = 0,
+    answer_layout: bool = False,
 ) -> str:
     """Next-step decision prompt.
 
@@ -1259,7 +1264,8 @@ def reflect_prompt(
     0 for a closed gate, ``ReasoningRetriever.paper_tool_flags``). A non-zero
     cap renders that tool's line; the workflow paragraph (which forbids
     claiming a complete list while find_sources reports a coverage gap) rides
-    ``find_sources``, the ``answer_layout`` line rides cards OR extraction,
+    ``find_sources``, the ``answer_layout`` line rides cards OR extraction (or
+    ``answer_layout`` True: offered this run, budgets spent),
     and ``find_sources.query`` / ``find_sources.terms`` join the scope-field
     rule. All 0 (the default) is byte for byte the prompt from before the
     tools existed.
@@ -1594,7 +1600,8 @@ def reflect_prompt(
         if read_document and enumeration_tools else ""
     )
     paper_tool_actions = _paper_tool_lines(
-        find_sources_cap, paper_cards_cap, extract_cap, enumerate_scope)
+        find_sources_cap, paper_cards_cap, extract_cap, enumerate_scope,
+        answer_layout)
     # The outline scratchpad (design doc §3.1).  Three things have to be said
     # here or the action is worse than useless:
     #   * WHEN — it earns its turns on answers that have structure to build

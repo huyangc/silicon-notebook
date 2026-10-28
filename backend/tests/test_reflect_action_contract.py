@@ -528,6 +528,8 @@ _KNOWN_REFLECT_SCHEMA_GATES = frozenset({
     "find_sources",
     "paper_cards",
     "extract",
+    # 论文表字段的「本 run 提供过卡片/抽取」闸:额度用完后它单独留住 answer_layout。
+    "answer_layout",
 })
 # The full whitelist each sequence-shaped gate is opened with.
 _REFLECT_SCHEMA_SEQUENCE_GATES = {

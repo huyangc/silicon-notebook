@@ -1220,6 +1220,9 @@ test("论文工具三步的 detail 各有专属读法,不被通用 found/count �
     detail: { sources: 3, fields: ["mAP"], found: 2, result_ids: [] },
   };
   assert.equal(getTraceStepDetail(extract), "3 篇，提取到 2 个值");
+  // 全部推迟:后端不写 found,只报推迟篇数(不是零命中)。
+  assert.equal(getTraceStepDetail({ ...cards, detail: { requested: 2, deferred: 2, result_ids: [] } }), "推迟 2 篇");
+  assert.equal(getTraceStepDetail({ ...extract, detail: { sources: 3, deferred: 3, result_ids: [] } }), "推迟 3 篇");
 });
 
 test("the final citation check step (PR-D) has its own label and no borrowed detail", () => {

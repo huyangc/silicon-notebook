@@ -849,3 +849,18 @@ def test_answer_layout_rides_the_card_or_the_extraction_gate():
     assert "- answer_layout" in extract_only
     assert "the cards do not hold" not in extract_only
     assert "from find_sources" not in extract_only
+
+
+def test_answer_layout_gate_alone_keeps_only_the_field_and_its_line():
+    """Budgets spent (both tool caps 0) but the run offered them: only the
+    ``answer_layout`` field and line remain; closed it is byte-identical."""
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+
+    schema = json.loads(reflect_schema_hint(answer_layout=True))
+    assert schema["answer_layout"] == "prose|paper_table"
+    assert "get_paper_cards" not in schema and "get_paper_cards" not in schema["next_action"]
+    prompt = reflect_prompt("q", "c", answer_layout=True)
+    assert "- answer_layout (a top-level field" in prompt
+    assert "- get_paper_cards:" not in prompt
+    assert reflect_schema_hint(answer_layout=False) == reflect_schema_hint()
+    assert reflect_prompt("q", "c", answer_layout=False) == reflect_prompt("q", "c")

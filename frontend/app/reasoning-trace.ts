@@ -447,8 +447,11 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   }
   // paper_cards(get_paper_cards 的步):found = 拿到的卡片数,generated = 其中新生成的,
   // deferred = 推迟到下次的篇数(生成额度用完或模型暂不可用)。
+  // 全部推迟时后端不写 found(那不是零命中),只报推迟篇数。
   if (step.step_type === "paper_cards") {
-    if (typeof detail.found !== "number") return "";
+    if (typeof detail.found !== "number") {
+      return typeof detail.deferred === "number" && detail.deferred > 0 ? `推迟 ${detail.deferred} 篇` : "";
+    }
     const parts = [`${detail.found} 张卡片`];
     if (typeof detail.generated === "number" && detail.generated > 0) parts.push(`新生成 ${detail.generated} 张`);
     if (typeof detail.deferred === "number" && detail.deferred > 0) parts.push(`推迟 ${detail.deferred} 篇`);
@@ -456,7 +459,9 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   }
   // extract_fields(extract_from_sources 的步):found = 抽到的值的个数,sources = 篇数。
   if (step.step_type === "extract_fields") {
-    if (typeof detail.found !== "number") return "";
+    if (typeof detail.found !== "number") {
+      return typeof detail.deferred === "number" && detail.deferred > 0 ? `推迟 ${detail.deferred} 篇` : "";
+    }
     const sources = typeof detail.sources === "number" ? `${detail.sources} 篇，` : "";
     return `${sources}提取到 ${detail.found} 个值`;
   }

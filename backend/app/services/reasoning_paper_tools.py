@@ -289,6 +289,7 @@ def parse_paper_tool_arguments(
     paper_cards: bool,
     extract: bool,
     enumerate_scope: bool,
+    answer_layout: bool = False,
 ) -> None:
     """Fill the paper-tool fields of a ``ReflectDecision`` from the payload.
 
@@ -323,7 +324,7 @@ def parse_paper_tool_arguments(
     if extract and isinstance(request, Mapping):
         decision.extract_sources = _text_list(request.get("sources"))
         decision.extract_fields = _text_list(request.get("fields"))
-    if paper_cards or extract:
+    if answer_layout or paper_cards or extract:
         decision.answer_layout = answer_layout_value(data)
 
 
