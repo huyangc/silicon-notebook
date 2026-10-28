@@ -41,6 +41,7 @@ from app.services.kg.json_utils import safe_json
 from app.services.model_work import (
     is_transient_model_error,
     model_artifact_scope,
+    model_error_code,
     model_failure_reason,
 )
 from app.services.paper_cards import (
@@ -414,7 +415,11 @@ class PaperCardService:
             if is_transient_model_error(exc):
                 # 暂时不可用:这一篇稍后再试,不写失败行、不进冷却。
                 return CardResult(*plan.key, "deferred", reason="model_unavailable")
-            self._event_log.logger.exception("paper card generation failed for %s", plan.source_id)
+            # 只记类名与稳定错误码:异常链(``raise ... from``)可能带服务商原文或含凭证的 URL。
+            self._event_log.logger.warning(
+                "paper card generation failed for %s: %s (%s)",
+                plan.source_id, type(exc).__name__, model_error_code(exc) or "-",
+            )
             return CardResult(*plan.key, "failed", reason=f"error:{type(exc).__name__}")
 
     def _ensure_meta(self, plan: _Plan, cancel_event: CancelEvent) -> CardResult | None:

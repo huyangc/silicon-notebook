@@ -3372,8 +3372,11 @@ class SourceIngestionService:
         except Exception as exc:
             if is_transient_model_error(exc):
                 raise
-            self.event_log.logger.exception(
-                "paper metadata extraction failed for %s", source.id
+            # 只记类名与稳定错误码:调度适配器 ``raise ... from`` 原始服务商异常,
+            # 打堆栈会把服务商原文或含凭证的 URL 带进日志。
+            self.event_log.logger.warning(
+                "paper metadata extraction failed for %s: %s (%s)",
+                source.id, type(exc).__name__, model_error_code(exc) or "-",
             )
             content = isinstance(exc, PaperMetaContentError) or (
                 model_error_code(exc) in INPUT_DETERMINISTIC_MODEL_ERROR_CODES

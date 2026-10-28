@@ -44,6 +44,7 @@ from app.repositories.ports import RepositoryDatabasePort, SourceStorePort
 from app.services.model_work import (
     is_transient_model_error,
     model_artifact_scope,
+    model_error_code,
     model_failure_reason,
 )
 from app.services.paper_card_service import parse_model_object
@@ -455,7 +456,11 @@ class PaperExtractionService:
             if is_transient_model_error(exc):
                 result = ExtractionResult(*key, "deferred", reason="model_unavailable")
             else:
-                self._event_log.logger.exception("paper extraction failed for %s", key[1])
+                # 只记类名与稳定错误码,不带异常链(同 paper_card_service)。
+                self._event_log.logger.warning(
+                    "paper extraction failed for %s: %s (%s)",
+                    key[1], type(exc).__name__, model_error_code(exc) or "-",
+                )
                 result = ExtractionResult(*key, "failed", reason=f"error:{type(exc).__name__}")
         return dataclasses.replace(result, elapsed_ms=_ms(started))
 
