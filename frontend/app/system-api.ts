@@ -65,6 +65,10 @@ export type SystemConfiguration = {
    *  而不是承诺过的 409 文案;「部署默认开启」描述的是新后端的 Settings 默认值,
    *  救不了一个路由都不存在的旧后端。 */
   user_search_profile_enabled: boolean;
+  /** 网页导出与导入单本笔记本的文件字节上限(镜像 NOTEBOOK_TRANSFER_WEB_MAX_MB)。
+   *  旧后端不下发时为 `null`——与 `source_image_max_bytes` 同一口径:拿不到就不在本地
+   *  预检、不显示一个猜出来的上限,由服务端的 413 兜底。 */
+  notebook_transfer_max_bytes: number | null;
 };
 
 export type ParserEngineCapability = {
@@ -160,6 +164,10 @@ const PARSER_UNAVAILABLE_REASONS = new Set([
  *  负数/非整数/缺失仍归 `null`:那些是坏值,不是可执行的配置。 */
 function nonNegativeIntOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function positiveIntOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 function normalizedExtensions(value: unknown): string[] | null {
@@ -282,6 +290,7 @@ function parseSystemConfiguration(value: unknown): SystemConfiguration {
     source_images_enabled: imagesEnabled !== false,
     agent_profile_enabled: agentProfileEnabled === true,
     user_search_profile_enabled: searchProfileEnabled === true,
+    notebook_transfer_max_bytes: positiveIntOrNull(record.notebook_transfer_max_bytes),
   };
 }
 

@@ -294,6 +294,7 @@ test("workspace capabilities separate notebook type ownership from the global ba
     canMountBases: false,
     canManageNotebook: false,
     canDeleteNotebook: false,
+    canExportNotebook: false,
     canManageReports: true,
     canManageNotebookSchemas: false,
     canManageGlobalSchemas: false,
@@ -311,6 +312,7 @@ test("workspace capabilities separate notebook type ownership from the global ba
     canMountBases: true,
     canManageNotebook: true,
     canDeleteNotebook: true,
+    canExportNotebook: true,
     canManageReports: true,
     canManageNotebookSchemas: true,
     canManageGlobalSchemas: false,
@@ -328,6 +330,7 @@ test("workspace capabilities separate notebook type ownership from the global ba
     canMountBases: true,
     canManageNotebook: true,
     canDeleteNotebook: true,
+    canExportNotebook: true,
     canManageReports: true,
     canManageNotebookSchemas: true,
     canManageGlobalSchemas: true,
@@ -358,6 +361,8 @@ test("group admins get the content-management bits on a notebook that is still `
     canManageNotebook: true,
     // 删库恒 owner。
     canDeleteNotebook: false,
+    // 导出整本库同样恒 owner(notebook:export):组管理员有内容管理权也拿不到。
+    canExportNotebook: false,
     canManageReports: true,
     canManageNotebookSchemas: true,
     // 全局图谱类型基线仍只认系统管理员——组管理员在**这本库**里有权，不是全站有权。
@@ -377,6 +382,21 @@ test("group admins get the content-management bits on a notebook that is still `
     workspaceCapabilities("reader", "admin", true).canManageGlobalSchemas,
     true,
   );
+});
+
+
+test("canExportNotebook is owner-only and stays on a mirror (notebook:export: owner, not fenced)", () => {
+  // 后端 `_CAPABILITY_LEVELS["notebook:export"] == "owner"`、围栏表里是 False:导出只读
+  // 这本库,写的是请求者自己的导出作业。所以判据只看 access——内容管理权不放宽它,镜像
+  // 不收它(计划 §9 推荐默认「镜像也允许导出」)。
+  assert.equal(workspaceCapabilities("owner", "user").canExportNotebook, true);
+  assert.equal(workspaceCapabilities("owner", "admin").canExportNotebook, true);
+  assert.equal(workspaceCapabilities("reader", "user").canExportNotebook, false);
+  assert.equal(workspaceCapabilities("reader", "user", true).canExportNotebook, false, "组管理员不是库主");
+  assert.equal(workspaceCapabilities("reader", "admin", true).canExportNotebook, false, "系统管理员身份不翻这一格");
+  assert.equal(workspaceCapabilities("owner", "user", false, "site-a").canExportNotebook, true, "镜像也能导出");
+  assert.equal(workspaceCapabilities("reader", "user", true, "site-a").canExportNotebook, false);
+  assert.equal(workspaceCapabilities(undefined, "user").canExportNotebook, true, "旧行缺 access 时按 owner(同 canDeleteNotebook)");
 });
 
 

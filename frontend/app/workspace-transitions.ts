@@ -253,6 +253,13 @@ export function workspaceCapabilities(
      * 导入退役，目标端删掉它只会让下一次导入把整本库重新造出来。
      */
     canDeleteNotebook: isOwner && !mirrored,
+    /**
+     * 网页导出整本笔记本（`POST /notebooks/{id}/export`,后端 `notebook:export`,恒 owner）。
+     * 级别与链接分享同理由:导出文件带走整本库,能在别处导入成归导入者所有的新笔记本,
+     * 是 owner 对本库的对外处置,不随内容管理权翻给组管理员。**不加镜像与项**:围栏表里
+     * 它是 False——导出只读这本库,镜像也允许导出（计划 §9 推荐默认）。
+     */
+    canExportNotebook: isOwner,
     // 深度报告对**只读成员也开放**（群组知识共享 P1）。它不是 `canWrite` 的一部分：
     // 报告按创建者行级隔离——成员只看得见、也只改得动**自己建的**那些，owner 也
     // 一样（不引入「owner 看全部」这条新披露）。所以列表里出现的每一份报告都是
