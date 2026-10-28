@@ -8,6 +8,9 @@ share tokens, custom object schema type names. Every place that records a reques
 the ``requests`` event channel) passes it through :func:`loggable_path`, which keeps
 the route and replaces those segments with a placeholder. The request itself is
 untouched -- only the copy a log line records -- and the API shape does not change.
+Two routes carry a credential or user content in the query string instead (the
+notebook download ticket, an imported notebook's name): :func:`loggable_target`
+drops their query whole.
 
 The patterns match the decoded path (``request.url.path`` / ``scope["path"]``) and
 the percent-encoded request target uvicorn logs alike, with or without a root path
@@ -56,6 +59,12 @@ _CONTENT_SEGMENTS: tuple[tuple[str, re.Pattern[str], str], ...] = (
 )
 
 
+#: Routes whose query string carries a credential or user content and is never
+#: logged at all: the one-time notebook download ticket (``?ticket=``) and the
+#: name given to an imported notebook (``?name=``).
+_QUERY_FREE_PATHS = re.compile(r"(?:^|/)api/(?:notebook-transfers/download|notebook-imports)/?$")
+
+
 def loggable_path(path: str) -> str:
     """``path`` (no query string) with any content-bearing segment replaced."""
     for needle, pattern, replacement in _CONTENT_SEGMENTS:
@@ -68,6 +77,10 @@ def loggable_path(path: str) -> str:
 
 
 def loggable_target(target: str) -> str:
-    """A request target (path plus optional ``?query``): the path part made loggable."""
+    """A request target (path plus optional ``?query``): the path part made
+    loggable, and the query dropped on a route that carries a credential in it."""
     path, separator, query = target.partition("?")
+    # The substring test first, as the table above does: most lines have neither.
+    if separator and "/notebook-" in path and _QUERY_FREE_PATHS.search(path):
+        return loggable_path(path)
     return f"{loggable_path(path)}{separator}{query}"
