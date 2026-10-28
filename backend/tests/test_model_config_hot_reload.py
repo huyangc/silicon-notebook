@@ -385,11 +385,11 @@ def test_strict_reload_is_rejected_and_keeps_the_previous_registry(
         provider.close()
 
 
-def test_strict_reload_accepts_a_leftover_ignorable_retired_binding(
+def test_strict_reload_rejects_a_leftover_community_summary_binding(
     monkeypatch, tmp_path
 ):
-    """社区摘要退役(裁决 8):热重载与启动走同一个 ``load``,残留的
-    kg_community_summary 两行同样只提示、不拒——新文件照常发布。"""
+    """kg_community_summary 的「可忽略」例外已移除:热重载与启动走同一个
+    ``load``,残留的两行按已退役 id 拒绝新文件,旧注册表继续服务。"""
     monkeypatch.setenv("HOT_RELOAD_KEY", "secret")
     monkeypatch.setattr(
         provider_module, "_MODEL_CONFIG_RELOAD_INTERVAL_SECONDS", 60.0
@@ -415,10 +415,9 @@ def test_strict_reload_accepts_a_leftover_ignorable_retired_binding(
             + '[thinking]\nkg_community_summary = "disabled"\n',
             encoding="utf-8",
         )
-        assert provider.reload_if_changed(force=True) is True
-        assert provider.chat("ask_answer").model == "model-two"
-        assert provider.registry.unknown_bindings() == ()
-        assert not any(
+        assert provider.reload_if_changed(force=True) is False
+        assert provider.chat("ask_answer").model == "model-one"
+        assert any(
             event.get("kind") == "model_config_reload"
             and event.get("status") == "error"
             for event in events.events

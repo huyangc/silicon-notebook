@@ -9,14 +9,12 @@ import pytest
 from app.core.config import Settings
 from app.services.model_registry import (
     BINDING_GAP_PREFIX,
-    IGNORABLE_RETIRED_WORKLOADS,
     RETIRED_WORKLOADS,
     WORKLOADS,
     ModelBindingGapError,
     ModelCapacityConfigurationError,
     SystemModelServiceRegistry,
     describe_binding_gap,
-    ignorable_retired_hint,
     loggable_binding_gap,
 )
 
@@ -792,10 +790,6 @@ def test_the_deployment_docs_quote_the_refusal_message_verbatim():
             "ask_anwser": {"[bindings]"},
         },
     )
-    # 社区摘要退役后的可忽略提示行同样逐字引用(它进的是同一份日志)。
-    hint = ignorable_retired_hint(
-        {"kg_community_summary": {"[bindings]", "[thinking]"}}
-    )
     root = Path(__file__).resolve().parents[2] / "docs"
     for name in (
         "deployment-and-configuration_zh.md",
@@ -806,7 +800,7 @@ def test_the_deployment_docs_quote_the_refusal_message_verbatim():
             for line in (root / name).read_text(encoding="utf-8").splitlines()
             if line.startswith(BINDING_GAP_PREFIX)
         ]
-        assert quoted == [produced, hint], name
+        assert quoted == [produced], name
 
 
 def test_the_log_rendering_drops_the_path_and_any_key_it_cannot_vouch_for():
@@ -878,9 +872,9 @@ def test_the_strict_refusal_is_its_own_exception_type_carrying_both_renderings(
 
 
 # ---------------------------------------------------------------------------
-# 社区摘要退役(用户裁决 8):kg_community_summary 是「已退役且可忽略」的 id。
-# 每份部署的 model-services.toml 都按模板绑过它,install.sh 不改已存在的文件;
-# 残留的两行只打一条脱敏提示、照常启动。其它未知 id 仍按 #779 拒启。
+# 社区摘要退役:kg_community_summary 曾是「已退役且可忽略」的 id(用户裁决 8),
+# 部署文件清掉残留行后(2026-10-28 用户确认)例外已移除——它现在只是普通的
+# 已退役 id,残留的行按 #779 的严格校验拒启,消息与日志遵守脱敏规则。
 # ---------------------------------------------------------------------------
 
 _BASELINE_TEMPLATE = (
@@ -898,13 +892,15 @@ _TEMPLATE_KEYS = {
 _REGISTRY_LOGGER = "silicon_notebook.model_registry"
 
 
-def test_the_ignorable_ledger_is_exactly_the_community_summary_id():
-    """例外刻意最小:只有这一个 id,且它必须同时在退役名单里、不在现行目录里。"""
-    assert IGNORABLE_RETIRED_WORKLOADS == frozenset({"kg_community_summary"})
-    assert IGNORABLE_RETIRED_WORKLOADS <= RETIRED_WORKLOADS
-    assert not IGNORABLE_RETIRED_WORKLOADS & set(WORKLOADS)
-    # graph_chain_verify 仍是「退役但要删」——不随这次例外一起被放过。
-    assert "graph_chain_verify" not in IGNORABLE_RETIRED_WORKLOADS
+def test_the_community_summary_id_is_retired_and_no_longer_ignorable():
+    """它仍在退役名单里(拒启消息据此说「删掉那一行」),不在现行目录里;
+    「可忽略」名单与对应的 hint 渲染器已不存在,没有第二条通道把它放行。"""
+    from app.services import model_registry
+
+    assert "kg_community_summary" in RETIRED_WORKLOADS
+    assert "kg_community_summary" not in WORKLOADS
+    assert not hasattr(model_registry, "IGNORABLE_RETIRED_WORKLOADS")
+    assert not hasattr(model_registry, "ignorable_retired_hint")
 
 
 def test_the_pre_retirement_template_requires_explicit_capacity_upgrade(caplog):
@@ -922,59 +918,53 @@ def test_the_pre_retirement_template_requires_explicit_capacity_upgrade(caplog):
     assert [record for record in caplog.records if record.name == _REGISTRY_LOGGER] == []
 
 
-def test_operator_upgraded_historical_template_still_ignores_retired_workload(tmp_path, caplog):
-    """运维在临时副本补容量与新增绑定后，原有退役条目的忽略语义保持。"""
+def test_operator_upgraded_historical_template_now_refuses_the_retired_workload(
+    tmp_path, caplog
+):
+    """运维在临时副本补容量与新增绑定后，历史模板里残留的退役条目不再被忽略：
+    严格档拒启，消息点名两张表里的落点，且不带路径。"""
     baseline = _BASELINE_TEMPLATE.read_text(encoding="utf-8")
     upgraded = baseline.replace('kind = "chat"\n', 'kind = "chat"\ncontext_window_tokens = 1048576\nmax_output_tokens = 32768\n')
     upgraded = upgraded.replace('report_summary = "general"\n', 'report_summary = "general"\nreport_context_compress = "general"\n')
     path = _write_config(tmp_path / "operator-upgraded-models.toml", upgraded)
 
-    with caplog.at_level(logging.WARNING, logger=_REGISTRY_LOGGER):
-        registry = SystemModelServiceRegistry.load(
-            _settings(path, strict=True), _TEMPLATE_KEYS
-        )
+    with caplog.at_level(logging.DEBUG, logger=_REGISTRY_LOGGER):
+        with pytest.raises(ModelBindingGapError) as exc_info:
+            SystemModelServiceRegistry.load(
+                _settings(path, strict=True), _TEMPLATE_KEYS
+            )
 
-    assert all(registry.service_for(workload_id) for workload_id in WORKLOADS)
-    assert registry.unknown_bindings() == ()
-    hints = [
-        record.getMessage()
-        for record in caplog.records
-        if record.name == _REGISTRY_LOGGER
-    ]
-    assert hints == [
-        "model-bindings: MODEL_SERVICES_CONFIG 指向的文件的 [bindings]/[thinking] "
-        "里有已退役、可忽略的工作负载：kg_community_summary（[bindings]/[thinking]）。"
-        "已忽略，不影响启动；可以删除这些行。"
-    ]
+    message = exc_info.value.loggable()
+    assert (
+        "已退役、升级后请删除的绑定：kg_community_summary（[bindings]/[thinking]）"
+        in message
+    )
+    assert "缺少绑定" not in message and "未知、疑似拼写错误" not in message
+    assert str(tmp_path) not in message and str(path) not in message
+    assert [r for r in caplog.records if r.name == _REGISTRY_LOGGER] == []
 
 
 @pytest.mark.parametrize("table", ["[bindings]", "[thinking]"])
-def test_a_leftover_community_summary_line_in_either_table_is_ignored(
-    tmp_path, caplog, table
-):
+def test_a_leftover_community_summary_line_in_either_table_refuses(tmp_path, table):
     body = _all_services() + "\n" + _bindings()
     if table == "[bindings]":
-        # 指向一个已删掉的 service 也照样忽略:分流发生在一切校验之前。
+        # 指向一个已删掉的 service 也走同一条拒启:分流发生在一切校验之前。
         body += '\nkg_community_summary = "service_removed_with_it"\n'
     else:
         body += '\n[thinking]\nkg_community_summary = "disabled"\n'
     path = _write_config(tmp_path / "models.toml", body)
 
-    with caplog.at_level(logging.WARNING, logger=_REGISTRY_LOGGER):
-        registry = SystemModelServiceRegistry.load(
-            _settings(path, strict=True), _ALL_KEYS
-        )
+    with pytest.raises(ModelBindingGapError) as exc_info:
+        SystemModelServiceRegistry.load(_settings(path, strict=True), _ALL_KEYS)
 
-    assert registry.unknown_bindings() == ()
-    assert registry.service_for("kg_community_summary") is None
-    logged = [r.getMessage() for r in caplog.records if r.name == _REGISTRY_LOGGER]
-    assert len(logged) == 1
-    assert f"kg_community_summary（{table}）" in logged[0]
+    assert (
+        f"已退役、升级后请删除的绑定：kg_community_summary（{table}）"
+        in exc_info.value.loggable()
+    )
 
 
-def test_other_unknown_ids_still_refuse_next_to_the_ignorable_one(tmp_path):
-    """例外不外溢:同一份文件里别的未知 id、别的退役 id 照样拒启;拒启消息里不
-    点名可忽略的那个(它不需要运维动作)。"""
+def test_retired_and_mistyped_ids_are_named_in_separate_segments(tmp_path):
+    """退役 id 与拼错的 id 并存:拒启消息把它们分两段(运维要做的事相反)。"""
     path = _write_config(
         tmp_path / "models.toml",
         _all_services()
@@ -991,35 +981,16 @@ def test_other_unknown_ids_still_refuse_next_to_the_ignorable_one(tmp_path):
         SystemModelServiceRegistry.load(_settings(path, strict=True), _ALL_KEYS)
 
     message = exc_info.value.loggable()
-    assert "已退役、升级后请删除的绑定：graph_chain_verify（[bindings]）" in message
+    assert (
+        "已退役、升级后请删除的绑定：graph_chain_verify（[bindings]），"
+        "kg_community_summary（[bindings]/[thinking]）"
+    ) in message
     assert "未知、疑似拼写错误的绑定：kg_community_summaryy（[bindings]）" in message
-    assert "kg_community_summary（" not in message
 
 
-def test_non_strict_load_does_not_list_the_ignorable_id_as_unknown(tmp_path, caplog):
-    """放行档的启动告警(「未知或已退役的 id」)也不再点它:它有自己的提示,
-    而且放行档同样要打这一行(裁决 8 要求有提示,不分档)。"""
-    path = _write_config(
-        tmp_path / "models.toml",
-        _all_services()
-        + "\n"
-        + _bindings(
-            extra='\nkg_community_summary = "general"\nask_anwser = "general"\n'
-        ),
-    )
-
-    with caplog.at_level(logging.WARNING, logger=_REGISTRY_LOGGER):
-        registry = SystemModelServiceRegistry.load(_settings(path), _ALL_KEYS)
-
-    assert registry.unknown_bindings() == ("ask_anwser",)
-    hints = [r.getMessage() for r in caplog.records if r.name == _REGISTRY_LOGGER]
-    assert len(hints) == 1 and "kg_community_summary（[bindings]）" in hints[0]
-
-
-def test_a_refusal_does_not_also_claim_the_leftover_line_is_harmless(
-    tmp_path, caplog
-):
-    """要拒启时不打「已忽略，不影响启动」:那句话会和紧随其后的拒启信息自相矛盾。"""
+def test_non_strict_load_lists_the_community_summary_id_as_unknown(tmp_path, caplog):
+    """放行档(MODEL_BINDINGS_STRICT=false)与其它退役 id 同口径:丢弃并计入
+    unknown_bindings(启动告警据此点名),注册表自己不再另打一行提示。"""
     path = _write_config(
         tmp_path / "models.toml",
         _all_services()
@@ -1030,17 +1001,16 @@ def test_a_refusal_does_not_also_claim_the_leftover_line_is_harmless(
     )
 
     with caplog.at_level(logging.DEBUG, logger=_REGISTRY_LOGGER):
-        with pytest.raises(ModelBindingGapError):
-            SystemModelServiceRegistry.load(_settings(path, strict=True), _ALL_KEYS)
+        registry = SystemModelServiceRegistry.load(_settings(path), _ALL_KEYS)
 
+    assert registry.unknown_bindings() == ("ask_anwser", "kg_community_summary")
+    assert registry.service_for("kg_community_summary") is None
     assert [r for r in caplog.records if r.name == _REGISTRY_LOGGER] == []
 
 
-def test_the_ignorable_hint_never_carries_the_path_or_the_file_s_text(
-    tmp_path, caplog
-):
-    """提示行只由代码里的名单与表名拼成:配置路径、服务 id、密钥环境变量名、
-    以及文件里的其它键都不进日志。"""
+def test_the_refusal_never_carries_the_path_or_the_file_s_text(tmp_path):
+    """拒启的日志形态只由代码里的退役名单与表名拼成:配置路径、服务 id、密钥
+    环境变量名、文件里的其它键都不进 loggable 文本。"""
     config_dir = tmp_path / "private-config-dir"
     config_dir.mkdir()
     path = _write_config(
@@ -1051,18 +1021,18 @@ def test_the_ignorable_hint_never_carries_the_path_or_the_file_s_text(
         + '\n[thinking]\nkg_community_summary = "disabled"\n',
     )
 
-    with caplog.at_level(logging.DEBUG, logger=_REGISTRY_LOGGER):
+    with pytest.raises(ModelBindingGapError) as exc_info:
         SystemModelServiceRegistry.load(_settings(path, strict=True), _ALL_KEYS)
 
-    logged = [r.getMessage() for r in caplog.records if r.name == _REGISTRY_LOGGER]
-    assert len(logged) == 1
-    line = logged[0]
+    line = exc_info.value.loggable()
     assert line.startswith(BINDING_GAP_PREFIX)
     assert str(tmp_path) not in line and "private-config-dir" not in line
     assert "models.toml" not in line
     assert "GENERAL_KEY" not in line and "llm.example" not in line
-    assert '"general"' not in line and "general" not in line
+    assert '"general"' not in line
     assert "\n" not in line
+    # 带路径的形态只存在于异常自身,供交互式调用方使用。
+    assert str(path) in str(exc_info.value)
 
 
 def test_product_docs_list_exactly_the_live_chat_workloads_by_area():

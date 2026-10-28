@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from hashlib import sha256
-import logging
 import math
 import os
 from pathlib import Path
@@ -18,8 +17,6 @@ from dotenv import dotenv_values
 from app.core.config import Settings, _ROOT_DIR
 from app.core.model_safety import safe_model_label
 
-
-logger = logging.getLogger("silicon_notebook.model_registry")
 
 ModelKind = Literal["chat", "embedding", "rerank"]
 ModelPriorityName = Literal["interactive", "report", "background"]
@@ -280,40 +277,23 @@ _LOGGABLE_ID_RE = re.compile(r"[a-z0-9_]{1,64}\Z")
 # to the reader.  It is also the reason the escape hatch exists: an upgrade that
 # retires a workload can be rolled out with MODEL_BINDINGS_STRICT=false, which
 # drops these entries and warns instead.  Add an id here when you retire it.
-# The one exception to "named in the refusal" is IGNORABLE_RETIRED_WORKLOADS
-# below.
 RETIRED_WORKLOADS = frozenset({
     # graph ask mode retired (this branch); its chain-verification workload
     # went with it.  verify_chain_edges survives as an unwired library helper.
     "graph_chain_verify",
     # The community-report summarizer was never wired into any runtime path
     # (its feature switch defaulted off and nothing called it); it was retired
-    # together with KG_COMMUNITY_SUMMARY_ENABLED.  Ignorable — see below.
+    # together with KG_COMMUNITY_SUMMARY_ENABLED.  A leftover line refuses like
+    # any other retired id (its short-lived "ignorable" exception was removed
+    # once deployments had cleaned the lines).
     "kg_community_summary",
 })
-
-# Retired ids whose leftover [bindings]/[thinking] lines are IGNORED with a
-# sanitised hint instead of refusing startup (user ruling 8, 2026-10-12).
-# Every deployment's model-services.toml was generated from a template that
-# bound this id, and install.sh never rewrites an existing file, so refusing
-# would turn a dead-code cleanup into a mandatory operator step on upgrade.
-# The exception is deliberately minimal: only ids listed here, and only ids
-# that are also in RETIRED_WORKLOADS; every other unknown id still refuses
-# under MODEL_BINDINGS_STRICT.  Startup preflight, provider construction and
-# hot reload all go through ``SystemModelServiceRegistry.load`` and therefore
-# share this one classification.  Scheduled for removal two releases after
-# the retirement (fangan_todo.md), after which a leftover line refuses again.
-IGNORABLE_RETIRED_WORKLOADS = frozenset({"kg_community_summary"})
 
 if RETIRED_WORKLOADS & set(WORKLOADS):
     # Import-time, because a workload id that is both live and retired makes
     # the startup diagnostic lie in both directions: the catalog demands a
     # binding the ledger says to delete.
     raise ValueError("retired workload ledger overlaps the live catalog")
-if not IGNORABLE_RETIRED_WORKLOADS <= RETIRED_WORKLOADS:
-    # An "ignorable" id that is not retired is either live (would silently
-    # drop a real binding) or never existed (would hide a typo).
-    raise ValueError("ignorable retired workloads must all be retired")
 
 _SERVICE_ID_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -472,9 +452,6 @@ class SystemModelServiceRegistry:
         # is what lets the refusal tell an operator which table to edit: a
         # stale id that lives only in [thinking] is invisible in [bindings].
         unknown_ids: dict[str, set[str]] = {}
-        # Leftover lines for IGNORABLE_RETIRED_WORKLOADS: never "unknown",
-        # only a sanitised hint below.
-        ignored_ids: dict[str, set[str]] = {}
         for workload_id, service_id in raw_bindings.items():
             if workload_id not in WORKLOADS:
                 # Collected BEFORE every other check rather than raised on the
@@ -482,7 +459,7 @@ class SystemModelServiceRegistry:
                 # with it, and an operator fixing a stale file deserves ONE
                 # message listing every id to delete plus every workload to
                 # add, not a one-at-a-time crawl through restarts.
-                _note_stale_id(workload_id, "[bindings]", unknown_ids, ignored_ids)
+                unknown_ids.setdefault(str(workload_id), set()).add("[bindings]")
                 continue
             if not isinstance(service_id, str) or service_id not in services:
                 raise ValueError(
@@ -500,7 +477,7 @@ class SystemModelServiceRegistry:
                 # Same ledger as [bindings] above, for the same reason: a
                 # retired workload is normally removed from both tables at
                 # once, so both halves belong in one diagnostic.
-                _note_stale_id(workload_id, "[thinking]", unknown_ids, ignored_ids)
+                unknown_ids.setdefault(str(workload_id), set()).add("[thinking]")
                 continue
             if workload.kind != "chat":
                 raise ValueError(
@@ -515,12 +492,6 @@ class SystemModelServiceRegistry:
         missing, unknown = binding_gap(bindings, unknown_ids)
         if (missing or unknown) and settings.model_bindings_strict:
             raise ModelBindingGapError(missing, unknown_ids, path)
-        # Only once the load will succeed: next to a refusal, "已忽略，不影响启动"
-        # would contradict the line that stops the process.  One line per load
-        # (startup preflight and provider construction each load once; a hot
-        # reload logs again when it publishes), in strict and non-strict mode.
-        if ignored_ids:
-            logger.warning("%s", ignorable_retired_hint(ignored_ids))
         return cls(services, bindings, thinking_modes, unknown)
 
     def service(self, service_id: str) -> ModelServiceDefinition:
@@ -554,38 +525,6 @@ class SystemModelServiceRegistry:
         to build a registry that would have to carry them.
         """
         return self._unknown_binding_ids
-
-
-def _note_stale_id(
-    workload_id: object,
-    table: str,
-    unknown: dict[str, set[str]],
-    ignored: dict[str, set[str]],
-) -> None:
-    """File one non-workload key from ``table`` as unknown or as ignorable."""
-    key = str(workload_id)
-    target = ignored if key in IGNORABLE_RETIRED_WORKLOADS else unknown
-    target.setdefault(key, set()).add(table)
-
-
-def ignorable_retired_hint(ignored: Mapping[str, Iterable[str]]) -> str:
-    """The log line for leftover IGNORABLE_RETIRED_WORKLOADS entries.
-
-    Sanitised by construction: ids are rendered from the in-code ledger (a key
-    from the file only selects which ledger entries to name), tables are this
-    module's own ``[bindings]``/``[thinking]`` literals, and the configured path
-    is never mentioned.
-    """
-    named = "，".join(
-        f"{workload_id}（{'/'.join(sorted(ignored[workload_id]))}）"
-        for workload_id in sorted(IGNORABLE_RETIRED_WORKLOADS)
-        if workload_id in ignored
-    )
-    return (
-        BINDING_GAP_PREFIX
-        + "MODEL_SERVICES_CONFIG 指向的文件的 [bindings]/[thinking] 里有已退役、"
-        f"可忽略的工作负载：{named}。已忽略，不影响启动；可以删除这些行。"
-    )
 
 
 def binding_gap(

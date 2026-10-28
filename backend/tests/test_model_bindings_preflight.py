@@ -151,11 +151,11 @@ def test_a_stale_binding_alone_is_enough_to_refuse(monkeypatch, tmp_path):
         _model_bindings_preflight(settings)
 
 
-def test_a_leftover_ignorable_retired_binding_still_starts(
+def test_a_leftover_community_summary_binding_refuses_like_any_retired_id(
     monkeypatch, tmp_path, caplog
 ):
-    """社区摘要退役(裁决 8):升级前生成的配置两张表都还绑着
-    kg_community_summary。严格预检照常放行,只留一条脱敏提示。"""
+    """kg_community_summary 的「可忽略」例外已移除(部署文件已清掉):两张表里
+    残留的行按已退役 id 拒启,消息与日志都脱敏、不带配置路径。"""
     monkeypatch.setenv("PREFLIGHT_KEY", "secret")
     config = _config(
         tmp_path,
@@ -164,20 +164,24 @@ def test_a_leftover_ignorable_retired_binding_still_starts(
     )
 
     with caplog.at_level(logging.WARNING):
-        assert _model_bindings_preflight(_settings(config)) is None
+        with pytest.raises(SystemExit) as exc_info:
+            _model_bindings_preflight(_settings(config))
 
-    hints = [
-        record.getMessage()
-        for record in caplog.records
-        if record.name == "silicon_notebook.model_registry"
-    ]
-    assert len(hints) == 1
-    assert "kg_community_summary（[bindings]/[thinking]）" in hints[0]
-    assert config not in hints[0] and str(tmp_path) not in hints[0]
-    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    message = str(exc_info.value)
+    assert (
+        "已退役、升级后请删除的绑定：kg_community_summary（[bindings]/[thinking]）"
+        in message
+    )
+    assert "未知、疑似拼写错误" not in message
+    assert config not in message and str(tmp_path) not in message
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__ is True
+    assert [record.getMessage() for record in caplog.records] == [message]
 
 
-def test_an_unknown_id_beside_the_ignorable_one_still_refuses(monkeypatch, tmp_path):
+def test_an_unknown_id_beside_the_retired_one_is_named_separately(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("PREFLIGHT_KEY", "secret")
     settings = _settings(_config(
         tmp_path,
@@ -187,8 +191,9 @@ def test_an_unknown_id_beside_the_ignorable_one_still_refuses(monkeypatch, tmp_p
     with pytest.raises(SystemExit) as exc_info:
         _model_bindings_preflight(settings)
 
-    assert "ask_anwser（[bindings]）" in str(exc_info.value)
-    assert "kg_community_summary" not in str(exc_info.value)
+    message = str(exc_info.value)
+    assert "已退役、升级后请删除的绑定：kg_community_summary（[bindings]）" in message
+    assert "未知、疑似拼写错误的绑定：ask_anwser（[bindings]）" in message
 
 
 def test_a_stale_key_that_is_not_shaped_like_an_id_never_reaches_the_log(
