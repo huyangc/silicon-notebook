@@ -83,6 +83,8 @@ def test_the_table_is_bounded_by_rows_least_recently_used_out_first():
     assert state.chunk_recall("c") is None
     assert state.chunk_recall("b") is not None
     assert _kept(state) == (2, 8)
+    assert (state.chunk_recall_stores, state.chunk_recall_evictions) == (4, 2)
+    assert state.event()["chunk_recall_evictions"] == 2
 
 
 def test_a_recall_larger_than_the_bound_is_not_kept():
@@ -172,7 +174,35 @@ def test_only_run_kinds_with_an_element_reader_keep_recalls():
     assert _state("report_generation").keeps_chunk_recalls()
     assert _state("ask_plugin_engine").keeps_chunk_recalls()
     assert not _state("ask_chunk").keeps_chunk_recalls()
+    assert not _state("report_planning").keeps_chunk_recalls()
     assert not _state("something_new").keeps_chunk_recalls()
+
+
+def test_a_frozen_ceilings_digest_is_cached_per_scope(monkeypatch):
+    """The frozen ceiling's digest is computed once per run, scope and
+    library -- and never handed to another scope that happens to sit at the
+    address a freed one left behind (simulated by seeding the memo slot the
+    new scope's id names with the old scope's digest)."""
+    from app.services import chunk_recall_memo as memo
+    from app.services import source_scope
+
+    first, second = object(), object()
+    ceiling = ("src-a", "src-b")
+    other = ("src-c", "src-d")
+    with retrieval_run(run_kind="ask_reasoning") as run:
+        monkeypatch.setattr(source_scope, "current_source_scope", lambda: first)
+        digest = memo._frozen_digest(run, "nb", ceiling)
+        assert digest == memo._ceiling_digest(ceiling)
+        computed: list = []
+        real = memo._ceiling_digest
+        monkeypatch.setattr(memo, "_ceiling_digest",
+                            lambda value: computed.append(value) or real(value))
+        assert memo._frozen_digest(run, "nb", ceiling) == digest
+        assert computed == []                          # cached
+        monkeypatch.setattr(source_scope, "current_source_scope", lambda: second)
+        run._value_cache[("chunk_recall_ceiling_digest", id(second), "nb", 2)] = (
+            first, digest)
+        assert memo._frozen_digest(run, "nb", other) == real(other)
 
 
 def test_concurrent_legs_keep_the_table_consistent():
@@ -490,17 +520,41 @@ def test_an_unbound_recall_found_after_a_flip_is_not_served(library, monkeypatch
     assert all(not entry.unbound for entry in run._chunk_recalls.values())
 
 
+def test_a_recall_read_across_a_flip_is_not_kept_as_unbound(library, monkeypatch):
+    """The verdict flips after the recall took its (unbound) key but before it
+    read: the read itself binds, and a bound read must not be kept under a key
+    that names no ceiling."""
+    repo, owner, nb, _sources, _recalls = library
+    candidates = repo.retrieval.candidates
+    with _ceiling(repo, nb, owner), retrieval_run(
+        run_kind="ask_reasoning", actor_id=owner,
+    ) as run:
+        scope = current_source_scope()
+        assert run_ceiling_binds(scope, nb) is False
+        original = CandidateRetrievalService._retrieve_chunks_once
+
+        def flip_then_read(self, *args, **kwargs):
+            record_ceiling_drift(scope, nb)
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(CandidateRetrievalService, "_retrieve_chunks_once",
+                            flip_then_read)
+        candidates._retrieve_chunks(nb, "bandgap")
+    assert run.chunk_recall_stores == 0
+    assert _kept(run) == (0, 0)
+
+
 # ---------------------------------------------------------------------------
 # End to end, memo on vs off
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def world(tmp_path, monkeypatch):
+@pytest.fixture(params=cases.LANES)
+def world(request, tmp_path, monkeypatch):
     from tests import global_citation_e2e_kit as kit
 
     instance = kit.make_repo(tmp_path, monkeypatch)
     try:
-        yield cases.build(instance)
+        yield cases.build(instance, lane=request.param)
     finally:
         instance.close()
 

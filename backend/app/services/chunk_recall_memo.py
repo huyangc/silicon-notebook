@@ -27,12 +27,21 @@ What is kept, and why only that:
   ``chunk_federation_max_participants x chunk_recall`` rows (one federated
   fan-out's full windows) and ``CHUNK_RECALL_MEMO_MAX_ENTRIES`` entries per
   run; a recall larger than the row bound is not kept.
-* **Discarded**: a run kind with no element reader (``ask_chunk``) keeps
-  nothing; a recall during which any lane failed open (a model-error note,
-  an FTS timeout or failure: ``note_recall_failure``) is not kept, so a later
-  element search retries exactly as before instead of inheriting a degraded
-  pool; a recall that failed verify-on-read is not kept, and the flip drops
-  every unbound recall of that library (``forget_unbound_chunk_recalls``).
+* **Discarded**: a run kind whose element searches cannot read a recall back
+  (``ask_chunk``, report planning) keeps nothing, and neither does a recall
+  no element search could match (``_recall_readable_by_element_arm``); a
+  recall during which any lane failed open (``chunk_lane
+  .note_recall_failure``, called directly, through ``_note_model_error`` or
+  through the hooks below; ``test_chunk_recall_failure_guard`` holds every
+  handler on the tree to it) is not kept, so a later element search retries
+  exactly as before instead of inheriting a degraded pool; a recall that
+  failed verify-on-read is not kept, and the flip drops every unbound recall
+  of that library (``forget_unbound_chunk_recalls``).
+
+Only ``CandidateRetrievalService._element_chunk_recall`` reads the memo; every
+``_retrieve_chunks`` writes it.  A hit is a snapshot of an earlier moment of
+the run: a write, a delete or a scale-index generation swap in between can
+make a fresh recall differ, never widen the frozen ceiling.
 
 The key is everything the recall's result depends on that can differ inside
 one run (``recall_slot``): the service, library, text, window, the
@@ -50,11 +59,10 @@ kept or served outside a retrieval run.
 """
 from __future__ import annotations
 
-import contextvars
 import hashlib
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from app.domain.retrieval import RetrievalSupport, RetrievedChunk
 from app.services.cancellation import raise_if_cancelled
@@ -62,7 +70,9 @@ from app.services.chunk_lane import (
     _CHUNK_ARM_DRIFTED,
     _CHUNK_PEEK_ONLY,
     _CHUNK_PEER_LEG,
+    _CHUNK_RECALL_FAILURES,
     _lexical_gate_drift_probe,
+    note_recall_failure,
 )
 from app.services.retrieval import is_generated_question_only_chunk
 from app.services.retrieval_run import (
@@ -71,20 +81,6 @@ from app.services.retrieval_run import (
     current_retrieval_run,
 )
 
-# "The caller reads only the light projection of this recall's chunks" -- set
-# by the element arm around its one ``_retrieve_chunks`` call
-# (``element_recall``).  A context variable rather than a parameter because
-# several suites replace ``_retrieve_chunks`` with narrower doubles, which a
-# new keyword would break; a double never reads it.
-_SERVE_LIGHT: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "_chunk_recall_serve_light", default=False
-)
-# The fail-open notes of the recall being computed (``computing``): a list the
-# lanes' failure points append to, shared by reference with any worker thread
-# that copies the context.  ``None`` outside a memoised recall.
-_FAILURES: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar(
-    "_chunk_recall_failures", default=None
-)
 # What a rebuilt chunk carries when only the question index found it: the one
 # shape ``is_generated_question_only_chunk`` reads as supplemental.
 _QUESTION_INDEX_ONLY = (RetrievalSupport("generated_question", "chunk"),)
@@ -107,7 +103,8 @@ class RecallSlot:
 
 def recall_slot(candidates, notebook_id: str, query: str, recall: int,
                 ceiling, *, producer_explicit: bool,
-                drifted: Optional[bool]) -> Optional[RecallSlot]:
+                drifted: Optional[bool],
+                ceiling_is_frozen: bool = False) -> Optional[RecallSlot]:
     """The memo key for one ``_retrieve_chunks`` call, or ``None`` (no run,
     a run kind that keeps nothing, or an empty ceiling: nothing to reuse).
 
@@ -116,7 +113,12 @@ def recall_slot(candidates, notebook_id: str, query: str, recall: int,
     through ``_lexical_gate_source_scoped``, so the key holds that answer; the
     verdict is resolved (keyword, the arm's context variable, else the probe)
     only when the answer depends on it, and handed down so the recall does
-    not probe again."""
+    not probe again.
+
+    ``ceiling_is_frozen``: the caller handed no list, so a non-``None``
+    ceiling is the run's frozen library ceiling (or a report's memoised
+    authorised sources) -- the same list on every call of this run -- and its
+    digest is computed once per run, scope and library."""
     run = current_retrieval_run()
     if run is None or not run.keeps_chunk_recalls():
         return None
@@ -136,7 +138,9 @@ def recall_slot(candidates, notebook_id: str, query: str, recall: int,
     key = (
         # The service itself, not its ``id()``: the run holds it for its own
         # short life, so no later object can take over its address.
-        candidates, notebook_id, query, window, _ceiling_digest(ceiling),
+        candidates, notebook_id, query, window,
+        _frozen_digest(run, notebook_id, ceiling) if ceiling_is_frozen
+        else _ceiling_digest(ceiling),
         bool(bounded), bool(_CHUNK_PEEK_ONLY.get()), bool(_CHUNK_PEER_LEG.get()),
         run.chunk_fts_open(notebook_id),
     )
@@ -147,6 +151,23 @@ def recall_slot(candidates, notebook_id: str, query: str, recall: int,
             settings, "chunk_federation_max_participants", 8)))
         * max(1, int(settings.chunk_recall)),
     )
+
+
+def _frozen_digest(run: RetrievalRunState, notebook_id: str, ceiling):
+    """``_ceiling_digest`` of a frozen ceiling, once per run, scope and
+    library (``recall_slot``'s ``ceiling_is_frozen``)."""
+    if ceiling is None:
+        return None
+    from app.services.source_scope import current_source_scope
+
+    scope = current_source_scope()
+    owner, digest = run.memoized_value(
+        ("chunk_recall_ceiling_digest", id(scope), notebook_id, len(ceiling)),
+        lambda: (scope, _ceiling_digest(ceiling)),
+    )
+    # The scope object is kept beside its digest, so an address a freed scope
+    # left behind can never hand its digest to another one.
+    return digest if owner is scope else _ceiling_digest(ceiling)
 
 
 def _ceiling_digest(ceiling) -> Optional[str]:
@@ -225,51 +246,56 @@ def _rebuilt(row: tuple) -> RetrievedChunk:
 
 
 @contextmanager
-def element_recall() -> Iterator[None]:
-    """Mark the ``_retrieve_chunks`` call inside as the element arm's, which
-    reads only the light projection and may therefore be served from the
-    memo."""
-    token = _SERVE_LIGHT.set(True)
-    try:
-        yield
-    finally:
-        _SERVE_LIGHT.reset(token)
-
-
-def serves_light() -> bool:
-    return _SERVE_LIGHT.get()
-
-
-@contextmanager
 def computing() -> Iterator[list]:
-    """The block computes one memoised recall: collect its fail-open notes,
-    and turn the light-serving mark off for anything it calls."""
+    """The block computes one memoised recall: collect its fail-open notes."""
     failures: list = []
-    failures_token = _FAILURES.set(failures)
-    light_token = _SERVE_LIGHT.set(False)
+    token = _CHUNK_RECALL_FAILURES.set(failures)
     try:
         yield failures
     finally:
-        _SERVE_LIGHT.reset(light_token)
-        _FAILURES.reset(failures_token)
+        _CHUNK_RECALL_FAILURES.reset(token)
 
 
-def note_recall_failure(stage: Any = "") -> None:
-    """A lane failed open inside the recall being computed, if any: that
-    recall's pool is degraded and is not kept."""
-    failures = _FAILURES.get()
-    if failures is not None:
-        failures.append(str(stage or ""))
+def noting(stage: str, callback: Callable[[], Any]) -> Callable[[], Any]:
+    """``callback`` that first notes a failure of the recall being computed:
+    for the failure hooks a lane hands to a component that swallows its own
+    exceptions (the generated-question call's ``failure_event``)."""
+    def hook():
+        note_recall_failure(stage)
+        return callback()
+    return hook
+
+
+#: The contribution host's outcomes that mean the contributor did not get to
+#: answer (``extensions/retrieval.py``): a recall during which one occurred is
+#: not what a healthy repeat gives.  ``available``/``partial`` (answered),
+#: ``rejected`` (admission judged the answer) and ``disabled`` (switched off
+#: for the run) are answers, not failures.
+_DEGRADED_CONTRIBUTION_OUTCOMES = frozenset({
+    "timeout", "failed", "invalid", "invalid_context", "invalid_result",
+    "blocked", "unavailable", "cancelled",
+})
+
+
+def noting_contribution_events(sink: Optional[Callable[[dict], Any]]):
+    """The contribution host's event sink, noting a failure of the recall
+    being computed for every degraded outcome before forwarding the event."""
+    def forward(event: dict) -> Any:
+        if (event.get("kind") == "retrieval_contribution"
+                and str(event.get("outcome") or "") in _DEGRADED_CONTRIBUTION_OUTCOMES):
+            note_recall_failure("retrieval_contribution")
+        return sink(event) if sink is not None else None
+    return forward
 
 
 __all__ = [
     "RecallSlot",
     "computing",
-    "element_recall",
     "forget_unbound",
     "keep",
     "note_recall_failure",
+    "noting",
+    "noting_contribution_events",
     "recall_slot",
     "serve",
-    "serves_light",
 ]

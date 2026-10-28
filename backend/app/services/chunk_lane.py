@@ -70,6 +70,7 @@ def _lexical_gate_drift_probe(retrieval_state, notebook_id: str) -> bool:
     try:
         return bool(probe(notebook_id))
     except Exception as exc:  # noqa: BLE001 — a routing-only probe must never break retrieval
+        note_recall_failure("lexical_gate_drift_probe")
         emit = getattr(getattr(retrieval_state, "event_log", None), "emit", None)
         if callable(emit):
             try:
@@ -154,11 +155,32 @@ _CHUNK_SUPPLEMENT_LEG: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "_chunk_supplement_leg", default=False
 )
 
+# The fail-open notes of the chunk recall being computed
+# (``chunk_recall_memo.computing``): a list the lane's failure points append to
+# (``note_recall_failure``), shared by reference with any worker thread that
+# copies the context; ``None`` outside a memoised recall.  Here rather than in
+# ``chunk_recall_memo`` because failure points live in modules that module
+# imports (this one, ``generated_question_contribution``).
+_CHUNK_RECALL_FAILURES: contextvars.ContextVar[Optional[list]] = (
+    contextvars.ContextVar("_chunk_recall_failures", default=None)
+)
+
+
+def note_recall_failure(stage: object = "") -> None:
+    """A lane failed open inside the chunk recall being computed, if any:
+    that recall's pool is degraded, so the run's recall memo does not keep
+    it (``chunk_recall_memo``)."""
+    failures = _CHUNK_RECALL_FAILURES.get()
+    if failures is not None:
+        failures.append(str(stage or ""))
+
 
 __all__ = [
     "_CHUNK_ARM_DRIFTED",
     "_CHUNK_PEEK_ONLY",
     "_CHUNK_PEER_LEG",
+    "_CHUNK_RECALL_FAILURES",
     "_CHUNK_SUPPLEMENT_LEG",
     "_lexical_gate_drift_probe",
+    "note_recall_failure",
 ]
