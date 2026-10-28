@@ -509,3 +509,18 @@ test("导出记忆的请求本身抛错:结果落在那几个字旁边,不悄悄
   expect(result.current.view.memoryResult).toBe("failed");
   expect(result.current.view.memoryText).toBe("记忆没有导出，请重试。");
 });
+
+
+test("上传的响应回来时导入已经做完(小文件):照样报告一次新笔记本,列表跟着刷新", async () => {
+  const { result, onNotebookReady } = renderImport();
+  await waitFor(() => expect(result.current.view.limitBytes).toBe(LIMIT));
+  api.uploadNotebookImport.mockResolvedValueOnce(imp("tiny", { state: "succeeded", phase: "done", notebook_id: "nb-tiny" }));
+  act(() => result.current.chooseFile(new File([new Uint8Array(10)], "tiny.snbk")));
+  act(() => result.current.start());
+  await waitFor(() => expect(result.current.view.jobs[0]?.id).toBe("tiny"));
+  expect(onNotebookReady).toHaveBeenCalledExactlyOnceWith("nb-tiny");
+  // 终态不轮询;再打开弹窗读到它,也不再报第二次。
+  api.listNotebookTransfers.mockResolvedValue([imp("tiny", { state: "succeeded", phase: "done", notebook_id: "nb-tiny" })]);
+  await tick();
+  expect(onNotebookReady).toHaveBeenCalledTimes(1);
+});

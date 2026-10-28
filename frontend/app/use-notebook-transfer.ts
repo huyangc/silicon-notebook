@@ -419,6 +419,9 @@ export function useNotebookImport(options: {
     if (outcome.kind === "uploaded") {
       const { job } = outcome;
       uploadedRef.current.add(job.id);
+      // 小文件的导入可能在上传的响应回来之前就已经做完:那时它是终态,不会再被轮询,
+      // 「新笔记本出现了」只能在这里报(与打开弹窗时那条同一个去重入口)。
+      if (importedNotebookReady(job)) announce(job.id, job.notebook_id);
       setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
       setFileNames((current) => ({ ...current, [job.id]: outcome.fileName }));
       setFile(null);
@@ -435,7 +438,7 @@ export function useNotebookImport(options: {
       // 弹窗关着时失败的:失败要落在发起它的那颗按钮(工具栏「导入」)上。
       if (!openRef.current) setUploadFailedUnseen(true);
     }
-  }), []);
+  }), [announce]);
 
   // 弹窗一打开,失败原因就在「开始导入」旁边了:工具栏上的「导入失败」撤掉。
   useEffect(() => {
