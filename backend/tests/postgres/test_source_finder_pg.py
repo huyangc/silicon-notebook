@@ -60,3 +60,22 @@ test_a_pushed_down_read_is_verified_and_cut_to_the_plan = (
 test_without_a_run_scope_another_members_memory_never_appears = (
     cases.test_without_a_run_scope_another_members_memory_never_appears)
 test_every_real_lane_groups_by_source = cases.test_every_real_lane_groups_by_source
+test_ids_are_unique_per_item = cases.test_ids_are_unique_per_item
+test_lexical_complete_reports_the_unjudgeable_papers = (
+    cases.test_lexical_complete_reports_the_unjudgeable_papers)
+test_a_peer_library_never_cold_loads_its_scale_index = (
+    cases.test_a_peer_library_never_cold_loads_its_scale_index)
+test_a_peer_library_that_fails_is_skipped_and_reported = (
+    cases.test_a_peer_library_that_fails_is_skipped_and_reported)
+test_a_peer_library_read_runs_under_a_per_library_deadline = (
+    cases.test_a_peer_library_read_runs_under_a_per_library_deadline)
+test_a_page_turn_inside_a_run_only_slices_the_ranking = (
+    cases.test_a_page_turn_inside_a_run_only_slices_the_ranking)
+test_only_a_filter_narrowed_list_is_attested_explicit = (
+    cases.test_only_a_filter_narrowed_list_is_attested_explicit)
+test_a_filter_narrowed_fts_degraded_search_keeps_its_lexical_candidates = (
+    cases.test_a_filter_narrowed_fts_degraded_search_keeps_its_lexical_candidates)
+test_a_changed_explicit_list_invalidates_the_cursor = (
+    cases.test_a_changed_explicit_list_invalidates_the_cursor)
+test_an_explicit_subset_never_shows_a_hit_outside_it = (
+    cases.test_an_explicit_subset_never_shows_a_hit_outside_it)

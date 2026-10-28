@@ -2208,19 +2208,23 @@ class SourceStorePort(Protocol):
         author: str = "",
         kind: str = "papers",
         allowed_source_ids: Sequence[str] | None = None,
-    ) -> list[dict]:
+        with_titles: bool = False,
+    ) -> dict:
         """``find_sources``' metadata leg over ONE library, on the caller's
-        connection: one dict per USER-VISIBLE source (``list_sources_page``'s
-        predicate) that passes ``kind`` (``"papers"``: ``is_paper=1`` plus
-        eligible sources without a paper-meta row; ``"all"``), the year range,
-        the venue / author substrings and, when given, ``allowed_source_ids``.
-        Each dict carries ``source_id, notebook_id, title, source_type,
-        doc_type, parse_status, has_meta, is_paper (None without a meta row),
-        paper_title, venue, pub_year`` and ``matches``: ``{field:
-        word_boundary}`` for the ``terms`` (fields of
+        connection.  ``rows``: one light dict per USER-VISIBLE source
+        (``list_sources_page``'s predicate) that passes ``kind``
+        (``"papers"``: ``is_paper=1`` plus eligible sources without a
+        paper-meta row; ``"all"``), the year range, the venue / author
+        substrings and, when given, ``allowed_source_ids`` -- ``source_id,
+        notebook_id, pub_year, pending`` (eligible for paper meta, none
+        extracted yet), ``sort_title`` with ``with_titles``, and ``matches``:
+        ``{field: word_boundary}`` for the ``terms`` (fields of
         ``source_find_terms.FIND_SOURCES_FIELDS``; the file name counts as
-        ``title``).  Matching is ``lower(col) LIKE`` with ``%``/``_`` escaped,
-        re-checked in Python with SQL's ASCII-only fold."""
+        ``title``; keywords one element at a time).  Counts: ``scope_total``
+        (visible ∧ allowed, before the filters), ``visible_total`` and
+        ``meta_pending_excluded`` (eligible meta-less sources a year / venue /
+        author filter excluded).  Matching is ``lower(col) LIKE`` with
+        ``%``/``_`` escaped, re-checked in Python with SQL's ASCII-only fold."""
         ...
 
 
@@ -3543,7 +3547,7 @@ class RetrievalPort(Protocol):
     # ceiling filter.  Returns ``(chunks, lane)``; ``lane`` is the recall lane
     # that ran: ``baseline`` (bounded brute force), ``ann`` or ``fts_degraded``
     # (lexical candidates only).  A federated caller calls it per library.
-    def retrieve_chunks_in_sources(self, notebook_id: str, query: str, recall: int, allowed_source_ids: Sequence[str]) -> tuple[list[RetrievedChunk], str]: ...
+    def retrieve_chunks_in_sources(self, notebook_id: str, query: str, recall: int, allowed_source_ids: Sequence[str], *, peer: bool = False, narrowed: bool = False) -> tuple[list[RetrievedChunk], str]: ...
     # The raw-passage retrieval pair (reasoning's ``search_chunks`` channel).
     # Spelled here as well as on ``AskCandidatePort`` because reasoning reaches
     # them through its own ``RetrievalPort`` handle, not through the ask

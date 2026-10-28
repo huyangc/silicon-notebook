@@ -93,5 +93,5 @@ def test_the_summary_leg_is_served_by_its_own_gin(postgres_database):
     store = SourceStore(postgres_database, now=lambda: NOW)
     with postgres_database.connect() as connection:
         rows = store.find_sources_metadata_rows(
-            connection, _NB, terms=["zqxjsummary"], kind="all")
+            connection, _NB, terms=["zqxjsummary"], kind="all")["rows"]
     assert [row["source_id"] for row in rows if row["matches"]] == ["b7-000042"]

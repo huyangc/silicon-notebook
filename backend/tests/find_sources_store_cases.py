@@ -67,11 +67,17 @@ class Env:
             "model": "m",
         })
 
-    def find(self, notebook_id: str = NB, **kwargs) -> dict[str, dict]:
+    def scope(self, notebook_id: str = NB, *, capture=None, **kwargs) -> dict:
         kwargs.setdefault("kind", "all")
         with self.connect() as db:
-            rows = self.store.find_sources_metadata_rows(db, notebook_id, **kwargs)
-        return {row["source_id"]: row for row in rows}
+            connection = db if capture is None else capture.wrap(db)
+            return self.store.find_sources_metadata_rows(
+                connection, notebook_id, **kwargs)
+
+    def find(self, notebook_id: str = NB, **kwargs) -> dict[str, dict]:
+        return {
+            row["source_id"]: row for row in self.scope(notebook_id, **kwargs)["rows"]
+        }
 
     def matches(self, terms, **kwargs) -> dict[str, dict]:
         return {
@@ -79,6 +85,42 @@ class Env:
             for source_id, row in self.find(terms=list(terms), **kwargs).items()
             if row["matches"]
         }
+
+
+class Capture:
+    """A connection proxy recording each statement and the rows it returned."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list]] = []
+
+    def wrap(self, connection):
+        capture = self
+
+        class _Cursor:
+            def __init__(self, sql, cursor):
+                self._sql, self._cursor = sql, cursor
+
+            def fetchall(self):
+                rows = [dict(row) for row in self._cursor.fetchall()]
+                capture.calls.append((self._sql, rows))
+                return rows
+
+            def fetchone(self):
+                row = self._cursor.fetchone()
+                capture.calls.append((self._sql, [dict(row)] if row else []))
+                return row
+
+        class _Connection:
+            def execute(self, sql, params=(), **kwargs):
+                return _Cursor(sql, connection.execute(sql, params, **kwargs))
+
+            def __getattr__(self, name):
+                return getattr(connection, name)
+
+        return _Connection()
+
+    def rows_of(self, marker: str) -> list[dict]:
+        return [row for sql, rows in self.calls if marker in sql for row in rows]
 
 
 def assert_every_field_matches(env: Env) -> None:
@@ -160,6 +202,36 @@ def assert_keyword_matches_stay_inside_one_keyword(env: Env) -> None:
     assert env.matches(["alph"]) == {"s-kw": {"keywords": False}}
 
 
+def assert_keywords_match_each_element_as_written(env: Env) -> None:
+    """A quote or a backslash in a keyword is matched as written: the legs
+    read one array element at a time, never the JSON text (where they are
+    escaped)."""
+    env.seed()
+    env.source("s-quote", title="x1")
+    env.meta("s-quote", keywords=['the "attention" trick'])
+    env.source("s-bs", title="x2")
+    env.meta("s-bs", keywords=["c:\\data loader"])
+    assert env.matches(['"attention"']) == {"s-quote": {"keywords": True}}
+    assert env.matches(["c:\\data"]) == {"s-bs": {"keywords": True}}
+
+
+def assert_plural_keeps_a_short_term_on_the_word_boundary(env: Env) -> None:
+    env.seed()
+    env.source("s-plural", title="Training GANs at scale")
+    env.source("s-es", title="Two VAEes compared")
+    env.source("s-organ", title="Organ printing")
+    env.source("s-organs", title="organs on chips")
+    env.source("s-gansu", title="Gansu province survey")
+    got = env.matches(["gan", "vae"])
+    assert got == {
+        "s-plural": {"title": True},
+        "s-es": {"title": True},
+        "s-organ": {"title": False},
+        "s-organs": {"title": False},
+        "s-gansu": {"title": False},
+    }
+
+
 def assert_filters_compose(env: Env) -> None:
     env.seed()
     env.source("s-2019", title="a")
@@ -195,10 +267,9 @@ def assert_kind_papers_includes_unextracted_eligible_sources(env: Env) -> None:
     env.source("s-promo", title="f", source_type="promotion")
     papers = env.find(kind="papers")
     assert set(papers) == {"s-paper", "s-pending", "s-pending-blank"}
-    assert papers["s-paper"]["has_meta"] is True
-    assert papers["s-paper"]["is_paper"] is True
-    assert papers["s-pending"]["has_meta"] is False
-    assert papers["s-pending"]["is_paper"] is None
+    assert papers["s-paper"]["pending"] is False
+    assert papers["s-pending"]["pending"] is True
+    assert papers["s-pending-blank"]["pending"] is True
     everything = env.find(kind="all")
     assert set(everything) == {
         "s-paper", "s-notpaper", "s-pending", "s-pending-blank", "s-manual",
@@ -238,14 +309,75 @@ def assert_row_shape(env: Env) -> None:
     env.seed()
     env.source("s-a", title="Stored title", doc_type="academic_paper")
     env.meta("s-a", paper_title="Paper Title", venue="ICLR", year=2024)
-    row = env.find()["s-a"]
-    assert row == {
-        "source_id": "s-a", "notebook_id": NB, "title": "Stored title",
-        "source_type": "pdf", "doc_type": "academic_paper",
-        "parse_status": "extracted", "has_meta": True, "is_paper": True,
-        "paper_title": "Paper Title", "venue": "ICLR", "pub_year": 2024,
-        "matches": {},
+    env.source("s-b", title="Plain title")
+    assert env.find()["s-a"] == {
+        "source_id": "s-a", "notebook_id": NB, "pub_year": 2024,
+        "pending": False, "matches": {},
     }
+    titled = env.find(with_titles=True)
+    assert titled["s-a"]["sort_title"] == "Paper Title"
+    assert titled["s-b"]["sort_title"] == "Plain title"
+
+
+def assert_the_scope_statement_reads_ids_not_display_rows(env: Env) -> None:
+    """The ranking reads ids, years and the pending flag; titles only for the
+    pure-filter ordering (``with_titles``)."""
+    env.seed()
+    env.source("s-a", title="vision a", summary="a long summary " * 20)
+    env.meta("s-a", paper_title="Vision", venue="CVPR", year=2024)
+    capture = Capture()
+    env.scope(terms=["vision"], capture=capture)
+    scope_rows = capture.rows_of("AS pending FROM")
+    assert scope_rows and set(scope_rows[0]) == {"id", "pub_year", "pending"}
+
+
+def assert_counts_report_the_unjudgeable_papers(env: Env) -> None:
+    env.seed()
+    env.source("s-meta", title="a")
+    env.meta("s-meta", year=2022, venue="CVPR", authors=["Kaiming He"])
+    env.source("s-pending-1", title="b", doc_type="academic_paper")
+    env.source("s-pending-2", title="c")
+    env.source("s-manual", title="d", doc_type="manual")
+    env.source("s-memory", title="e", source_type="memory")
+    for filters in ({"year_from": 2020}, {"venue": "cvpr"}, {"author": "he"}):
+        scope = env.scope(kind="papers", **filters)
+        assert [row["source_id"] for row in scope["rows"]] == ["s-meta"]
+        assert scope["meta_pending_excluded"] == 2, filters
+        assert scope["scope_total"] == 4
+        assert scope["visible_total"] == 4
+    scope = env.scope(kind="papers")
+    assert scope["meta_pending_excluded"] == 0
+    assert sorted(row["source_id"] for row in scope["rows"] if row["pending"]) == [
+        "s-pending-1", "s-pending-2"]
+    # The allow list bounds the counts too.
+    scope = env.scope(kind="all", year_from=2020,
+                      allowed_source_ids=["s-meta", "s-pending-1"])
+    assert (scope["scope_total"], scope["visible_total"]) == (2, 4)
+    assert scope["meta_pending_excluded"] == 1
+
+
+def assert_term_legs_are_bound_only_to_a_narrowed_scope(env: Env) -> None:
+    env.seed()
+    for index in range(12):
+        env.source(f"s-{index:02d}", title=f"vision paper {index}", doc_type="manual")
+    env.source("s-paper", title="vision paper", doc_type="academic_paper")
+    env.meta("s-paper", year=2024)
+    narrowed = Capture()
+    got = env.scope(terms=["vision"], kind="papers", capture=narrowed)
+    assert [row["source_id"] for row in got["rows"]] == ["s-paper"]
+    assert {row["source_id"] for row in narrowed.rows_of("UNION ALL")} == {"s-paper"}
+    listed = Capture()
+    env.scope(terms=["vision"], allowed_source_ids=["s-01"], capture=listed)
+    assert {row["source_id"] for row in listed.rows_of("UNION ALL")} == {"s-01"}
+    # A list covering a large share of the library is not bound (it would
+    # cost more than the hits it drops), nor is an unnarrowed scope.
+    wide = Capture()
+    env.scope(terms=["vision"], allowed_source_ids=[f"s-{i:02d}" for i in range(6)],
+              capture=wide)
+    assert len({row["source_id"] for row in wide.rows_of("UNION ALL")}) == 13
+    whole = Capture()
+    env.scope(terms=["vision"], kind="all", capture=whole)
+    assert len({row["source_id"] for row in whole.rows_of("UNION ALL")}) == 13
 
 
 ALL_CASES = [
@@ -254,9 +386,14 @@ ALL_CASES = [
     assert_like_metacharacters_are_escaped,
     assert_short_ascii_terms_need_a_word_boundary,
     assert_keyword_matches_stay_inside_one_keyword,
+    assert_keywords_match_each_element_as_written,
+    assert_plural_keeps_a_short_term_on_the_word_boundary,
     assert_filters_compose,
     assert_kind_papers_includes_unextracted_eligible_sources,
     assert_hidden_projections_and_other_libraries_never_appear,
     assert_allow_list_narrows_the_scope,
     assert_row_shape,
+    assert_the_scope_statement_reads_ids_not_display_rows,
+    assert_counts_report_the_unjudgeable_papers,
+    assert_term_legs_are_bound_only_to_a_narrowed_scope,
 ]
