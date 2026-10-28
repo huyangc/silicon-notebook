@@ -5,21 +5,26 @@
 标题),于是两篇以上时模型无法点名其中任何一篇。裁决是**无名条目共享子预算并编号**:
 
 * 编号沿用同名序号那一套(`_RosterNumbering`,「未命名来源（第 N 篇）」,凑够两篇才
-  发号、发号后不变),账目、`read_document` 解析、已读账目、轨迹摘要与
-  `enumerate_elements` 来源名读同一份发号簿;
+  发号、发号后不变),账目、`read_document` 解析、已读账目、轨迹摘要、
+  `enumerate_elements` 来源名与章节导航的回显读同一份发号簿;
 * 所有无名条目整组仍只占改前那一个标题位,主预算对它的收费与改前那一个
   「《未命名来源》」相同,所以真标题列到哪一篇、`(+N more)` 是几与无名文档多少无关;
-* 组内按清单顺序列前 `_ENUM_NOTE_UNNAMED_TITLES` 篇,其余折叠成
+* 组内按清单顺序列前 N 篇(N = 本 run 实际生效的按篇读取次数上限),其余折叠成
   「(另有 N 篇未命名来源从略)」——折叠的几篇照样有号、照样读得到;
-* 花名册里没有或只有一篇无名文档时,账目与解析与改前逐字节相同。
+* 花名册里没有无名文档时,账目与解析与改前逐字节相同;只有一篇时只差 `(+N more)`
+  这个计数——顺带修了它:以前有无名文档时少报 1。
 """
 from __future__ import annotations
+
+from dataclasses import replace
 
 from app.models.schemas import NotebookCreate
 from app.services import reasoning_retrieval as rr
 from app.services.collection_enumeration import UNNAMED_SOURCE_LABEL
 from app.services.reports.policy import DEFAULT_REASONING_MAX_DOCUMENT_READS
+from app.services.section_outline import HINT_BLOCK_TITLE
 from tests import test_reasoning_enumeration_tools as _enumeration_tests
+from tests import test_reasoning_section_nav as nav
 from tests.test_reasoning_document_read import (
     ANSWER,
     _read_action,
@@ -37,6 +42,7 @@ from tests.test_reasoning_enumeration_tools import (
 repo = _enumeration_tests.repo          # pytest fixture, resolved by name
 
 PLAN = {"sub_queries": [{"query": "报告"}]}
+NOW = "2026-10-28T00:00:00+08:00"
 MARK = rr._ENUM_NOTE_NO_SUMMARY_MARK
 K = rr._ENUM_NOTE_UNNAMED_TITLES
 
@@ -87,10 +93,23 @@ def _group(numbers, folded=0):
 # ------------------------------------------------------------ 预算与不变量
 
 
-def test_the_shared_sub_budget_equals_the_default_per_run_read_cap():
-    """子预算取每 run 按篇读取的默认次数上限:列出比一个 run 能读的更多的无名句柄
-    不给模型新的可操作信息。两者绑在同一个常量上,改一处另一处跟着动。"""
+def test_the_shared_sub_budget_defaults_to_the_default_per_run_read_cap():
+    """子预算跟本 run 的按篇读取次数上限走;不传上限时(单测、无 run 上下文)的缺省
+    就是默认上限,所以默认配置下的输出与这里的 K 相同。"""
     assert K == DEFAULT_REASONING_MAX_DOCUMENT_READS == 4
+
+
+def test_the_sub_budget_follows_the_limit_it_is_given():
+    """组内列几篇由传入的上限决定(生产传本 run 的 `max_document_reads`),折叠数随之变;
+    主预算那一位与真标题不受影响。"""
+    rows = _unnamed(6) + [_Row("a", "甲")]
+    placeholders = rr._roster_placeholders(rows)
+    for limit in (1, 2, 6, 9):
+        note = rr._source_titles_note(rows, placeholders, limit)
+        shown = min(limit, 6)
+        assert note == "，标题: " + _group(range(1, shown + 1), 6 - shown) + "《甲》"
+    assert rr._source_titles_note(rows, placeholders) == rr._source_titles_note(
+        rows, placeholders, DEFAULT_REASONING_MAX_DOCUMENT_READS)
 
 
 def test_twenty_unnamed_documents_never_move_or_drop_a_real_title():
@@ -126,7 +145,7 @@ def test_the_group_is_charged_like_the_old_placeholder_against_the_char_budget()
     tight += [_Row("t-last", "末" * 42, "摘要"), _Row("t-more", "多", "摘要")]
     assert 5 + 2 + len(MARK) + 12 * 62 + 44 == rr._ENUM_NOTE_TITLES_TOTAL_CHARS
     note = _note(_unnamed(6) + tight)
-    assert note.endswith("《" + "末" * 42 + "》")       # 第 13 篇在,「多」被预算挡下
+    assert note.endswith("《" + "末" * 42 + "》(+1 more)")  # 第 13 篇在,「多」被挡下
     assert "《多》" not in note
     assert note == _note(_unnamed(1) + tight).replace(
         f"《{UNNAMED_SOURCE_LABEL}》{MARK}", _group(range(1, K + 1), 6 - K), 1)
@@ -143,8 +162,8 @@ def test_the_group_sits_where_the_first_unnamed_row_is_and_folds_the_rest_in_ord
 
 
 def test_zero_or_one_unnamed_document_is_byte_identical_to_before():
-    """没有或只有一篇无名文档:与无名编号之前逐字节相同(一篇时不编号,与同名序号
-    「凑够两篇才发号」同一条规则)。字面值钉死,不靠与自己比。"""
+    """没有或只有一篇无名文档(且没有被省略的真标题):与无名编号之前逐字节相同
+    (一篇时不编号,与同名序号「凑够两篇才发号」同一条规则)。字面值钉死。"""
     rows = [_Row("a", "甲", ""), _Row("u", "", ""), _Row("b", "乙")]
     assert rr._roster_placeholders(rows) == {}
     assert _note(rows) == f"，标题: 《甲》{MARK}《未命名来源》{MARK}《乙》"
@@ -300,3 +319,156 @@ def test_a_numbered_unnamed_placeholder_in_enumerate_source_title_targets_that_d
     elements = [o for o in result.enumerations if o.collection == "elements"]
     assert [o.source_id for o in elements] == [roster[1]]
     assert len(elements[0].items) == {"s-1": 1, "s-2": 2}[roster[1]]
+
+
+# ------------------------------------------------- (+N more) 省略数(顺带修复)
+
+
+def test_the_more_count_is_exact_when_untitled_documents_are_present():
+    """以前分母不算无名文档、分子却算了无名那一位,有无名文档时 `(+N more)` 少报 1:
+    25 篇真标题只列出 19 篇,却写 `(+5 more)`。现在省略数就是没列出的真标题篇数;
+    无名组自己报自己的数(列出的 + 折叠计数),不进这个计数。"""
+    real = _real(25)
+    for unnamed in (_unnamed(1), _unnamed(20)):
+        note = _note(unnamed + real)
+        listed = [t for t in note.split("《") if t.startswith("论文")]
+        assert len(listed) == 19
+        assert note.endswith(f"(+{25 - 19} more)")
+    # 没有无名文档时这个数本来就对,逐字节不变。
+    assert _note(real).endswith(f"(+{25 - 20} more)")
+    # 真标题恰好就叫「未命名来源」的那一篇(只有一篇、不编号)以前就算得对,仍然对。
+    labelled = [_Row("x", UNNAMED_SOURCE_LABEL)] + real
+    assert _note(labelled).endswith("(+6 more)")
+
+
+# ------------------------------------------------- 子预算跟本 run 的读取上限走(e2e)
+
+
+def test_a_run_with_a_different_read_cap_lists_that_many_untitled_documents(repo):
+    """把 `REASONING_MAX_DOCUMENT_READS` 调成 2:账目里无名组只列 2 篇带号,其余 3 篇
+    折叠;调成 6:5 篇全列、没有折叠。默认配置(4)见上面的 e2e。"""
+    for cap, shown in ((2, 2), (6, 5)):
+        repo.settings.reasoning_max_document_reads = cap
+        notebook = repo.create_notebook(NotebookCreate(name=f"资料{cap}"))
+        for index in range(5):
+            _seed_document(repo, notebook.id, f"s{cap}-u{index}", "", "",
+                           (f"第{index}篇。",))
+        llm = _ValidatingLLM([_enumerate_sources_action(), ANSWER], plan=PLAN)
+        _reader(repo, llm).run(notebook.id, "这个库讲了什么", "")
+        prompt = llm.reflect_prompts[1]
+        assert "，标题: " + _group(range(1, shown + 1), 5 - shown) + "。" in prompt
+
+
+# --------------------------------------------------- 章节导航回显带号(e2e)
+
+
+def _seed_sectioned(repo, notebook_id, source_id, sections):
+    """一篇无标题来源 + 按章节路径切好的 chunk(章节导航读的是 chunks.section_path)。"""
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,summary,created_at,updated_at) "
+            "VALUES (?,?,'','markdown','extracted','extracted','',?,?)",
+            (source_id, notebook_id, NOW, NOW))
+        for index, (path, text) in enumerate(sections):
+            db.execute(
+                "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+                "element_ids,created_at,navigation) VALUES (?,?,?,?,?,?,?,0)",
+                (f"{source_id}-c{index}", notebook_id, source_id, text, path, "[]", NOW))
+    repo.collection_catalog.invalidate()
+
+
+def _browse(source):
+    return {"next_action": "browse_sections", "reason": "看目录",
+            "browse_sections": {"source": source, "under": "", "query": ""}}
+
+
+def _read_section(section, source=""):
+    return {"next_action": "read_section", "reason": "读这一节",
+            "read_section": {"source": source, "section": section}}
+
+
+def _navigate(repo, untitled, browse_as):
+    notebook = repo.create_notebook(NotebookCreate(name=f"导航{untitled}"))
+    for index in range(untitled):
+        _seed_sectioned(repo, notebook.id, f"n{untitled}-u{index}", (
+            ("1 概述", f"第{index}篇概述。"), ("2 结论", f"第{index}篇结论。")))
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(), _browse(browse_as), _read_section("s2"), ANSWER,
+    ], plan=PLAN)
+    result = _reader(repo, llm).run(notebook.id, "这个库讲了什么", "")
+    browse = [s for s in result.trace if s.step_type == "browse_sections"]
+    read = [s for s in result.trace if s.step_type == "read_section"]
+    return result, llm, browse, read
+
+
+def test_section_navigation_echoes_the_numbered_untitled_title(repo):
+    """两篇无标题文档:按「未命名来源（第 2 篇）」看目录、再按 [sN] 读一节,目录块、
+    轨迹、导航账目里的来源标题都是「未命名来源（第 2 篇）」——与清单账目、已读账目
+    同一个串,模型读完知道读的是哪一篇。"""
+    result, llm, browse, read = _navigate(repo, 2, "未命名来源（第 2 篇）")
+    roster = [row.source_id for outcome in result.enumerations
+              if outcome.collection == "sources" for row in outcome.items]
+    wanted = "未命名来源（第 2 篇）"
+    assert len(browse) == 1 and len(read) == 1
+    assert f"《{wanted}》" in browse[0].summary
+    assert browse[0].detail["source"] == wanted
+    assert read[0].detail["source"] == wanted
+    assert read[0].detail["result_ids"] == [f"{roster[1]}-c1"]
+    assert f"章节目录:《{wanted}》" in llm.reflect_prompts[2]
+    assert f"已浏览《{wanted}》" in llm.reflect_prompts[2]
+
+
+def test_reading_a_section_by_numbered_source_title_echoes_that_title(repo):
+    """不先看目录,直接按「来源 + 章节标题」读:来源用带号的占位串解析到那一篇,
+    轨迹与导航账目里的来源标题同样带号。"""
+    notebook = repo.create_notebook(NotebookCreate(name="按名读节"))
+    for index in range(2):
+        _seed_sectioned(repo, notebook.id, f"r-u{index}", (
+            ("1 概述", f"第{index}篇概述。"), ("2 结论", f"第{index}篇结论。")))
+    wanted = "未命名来源（第 1 篇）"
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(), _read_section("2 结论", source=wanted), ANSWER,
+    ], plan=PLAN)
+    result = _reader(repo, llm).run(notebook.id, "这个库讲了什么", "")
+
+    roster = [row.source_id for outcome in result.enumerations
+              if outcome.collection == "sources" for row in outcome.items]
+    read = [s for s in result.trace if s.step_type == "read_section"]
+    assert len(read) == 1
+    assert read[0].detail["source"] == wanted
+    assert read[0].detail["result_ids"] == [f"{roster[0]}-c1"]
+    assert f"已读《{wanted}》 2 结论" in llm.reflect_prompts[2]
+
+
+def test_the_section_hint_block_echoes_the_numbered_untitled_title(tmp_path, monkeypatch):
+    """章节线索块同一口径:证据来自一篇无标题文档,列出花名册(库里共两篇无标题)之后,
+    线索行写「未命名来源（第 N 篇）」;列出之前还没有号,写「未命名来源」。"""
+    section_repo = nav.make_section_repo(tmp_path, monkeypatch)
+    nb = nav._seed(section_repo, extra_sources=(("src-other", ""),))
+    with section_repo._write() as db:
+        db.execute("UPDATE sources SET title='' WHERE id='src-spec'")
+    section_repo.collection_catalog.invalidate()
+    llm = nav._llm(_enumerate_sources_action())
+    retriever = nav._reasoner(section_repo, monkeypatch, llm, seed=(),
+                              extra_hits=(replace(nav._hit("c-s0"), source_title=""),))
+    result = nav._run(retriever, nb)
+
+    untitled = [row.source_id for outcome in result.enumerations
+                if outcome.collection == "sources" for row in outcome.items
+                if not row.source_title]
+    wanted = f"未命名来源（第 {untitled.index('src-spec') + 1} 篇）"
+
+    def _hint_lines(prompt):
+        return prompt[prompt.index(HINT_BLOCK_TITLE):].split("\n\n")[0].splitlines()[1:]
+
+    assert _hint_lines(llm.reflect_prompts[0])[0].startswith(f"[s1]《{UNNAMED_SOURCE_LABEL}》 ")
+    assert _hint_lines(llm.reflect_prompts[1])[0].startswith(f"[s1]《{wanted}》 ")
+
+
+def test_section_navigation_keeps_the_bare_label_for_a_single_untitled_document(repo):
+    """只有一篇无标题文档:不编号,回显仍是「未命名来源」(与改前相同)。"""
+    _result, _llm, browse, read = _navigate(repo, 1, UNNAMED_SOURCE_LABEL)
+    assert browse[0].detail["source"] == UNNAMED_SOURCE_LABEL
+    assert f"《{UNNAMED_SOURCE_LABEL}》" in browse[0].summary
+    assert read[0].detail["source"] == UNNAMED_SOURCE_LABEL

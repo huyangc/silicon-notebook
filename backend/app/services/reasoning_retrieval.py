@@ -886,6 +886,20 @@ def _section_text(value) -> str:
     return text[:_SECTION_ECHO_CHARS - 1] + "…"
 
 
+def _section_source_title(issued, source_id, raw_title) -> str:
+    """章节导航(目录、读取、线索块)回显的来源标题。
+
+    无标题文档在本 run 花名册里编了号(「未命名来源（第 N 篇）」,`issued` 是 run 级
+    发号簿)时回显那个号,与清单账目、已读账目同一个串——否则两篇无名文档的目录、
+    读取记录都叫「未命名来源」,模型读完分不清读的是哪一篇。只有一篇无名文档(不编号)
+    或不是无名文档时与以前相同。
+    """
+    title = _section_text(raw_title or UNNAMED_SOURCE_LABEL)
+    if title == UNNAMED_SOURCE_LABEL and source_id in issued:
+        return _section_text(issued[source_id])
+    return title
+
+
 def _display_occurrence(occurrence):
     """渲染用的出现副本:标签与面包屑各段按 `_section_text` 截成有界的一行。地址簿
     里登记的仍是原出现(只有显示被截,解析与读取不受影响)。"""
@@ -1125,7 +1139,7 @@ class _RosterNumbering:
     不编号(与同名序号「凑够两篇才发号」同一条规则)。账目对无名文档「最多占一个
     标题位」的硬规矩(codex #724 R2:20 篇无名文档不得挤掉真标题)不在这里守,
     在 `_source_titles_note`:所有无名条目合起来仍只占改前那一个标题位,编号的
-    条目另走一份共享小预算(`_ENUM_NOTE_UNNAMED_TITLES`),超出的折叠成一句计数。
+    条目另走一份共享小预算(本 run 的按篇读取次数上限),超出的折叠成一句计数。
     """
 
     __slots__ = ("issued", "_groups", "_taken", "_real", "_seen", "_synced")
@@ -1989,11 +2003,12 @@ _ENUM_NOTE_TITLE_CHARS = 60
 # 编号的无名文档(「未命名来源（第 N 篇）」)在一份来源清单账目里**合起来**最多列几篇
 # (用户 2026-10-28 裁决:无名条目共享子预算并编号)。它们在主预算里仍只占改前那
 # 一个标题位(见 `_source_titles_note`),这个数是另起的小预算,超出的折叠成
-# 「(另有 N 篇未命名来源从略)」。取值与每 run 按篇读取的默认次数上限
-# (`REASONING_MAX_DOCUMENT_READS` 的默认值)同一个数:无名文档没有标题、通常也
-# 没有摘要,能对它做的事就是按篇读取(章节导航的默认上限 3 更小),列出比一个 run
-# 默认能读的篇数更多的句柄不给模型任何新的可操作信息,只把账目烧在同一类条目上。
-# 每条至多十几个字(占位串 + 书名号 + 标记),所以这份预算是常数级的。
+# 「(另有 N 篇未命名来源从略)」。取值跟**本 run 实际生效的**按篇读取次数上限走
+# (`ReasoningActionPolicy.max_document_reads`,即 `REASONING_MAX_DOCUMENT_READS`;
+# 生产由 `_enumeration_note` 的调用方传入):无名文档没有标题、通常也没有摘要,能对
+# 它做的事就是按篇读取,列出比这个 run 能读的篇数更多的句柄不给模型任何新的可操作
+# 信息,只把账目烧在同一类条目上。这里的常量只是不传上限时(单测、无 run 上下文)的
+# 缺省,等于默认上限。每条至多十几个字(占位串 + 书名号 + 标记)。
 _ENUM_NOTE_UNNAMED_TITLES = DEFAULT_REASONING_MAX_DOCUMENT_READS
 # 花名册账目里「这一行没有已存摘要」的标记。它是 read_document 的选读依据(账目只带
 # 标题不带摘要,模型没有它就无从知道该读哪几篇),也是模型可能连着标题一起抄回来
@@ -2002,14 +2017,16 @@ _ENUM_NOTE_NO_SUMMARY_MARK = "(无摘要)"
 _ENUM_NOTE_TITLES_TOTAL_CHARS = 800
 
 
-def _source_titles_note(items, placeholders=None) -> str:
+def _source_titles_note(items, placeholders=None,
+                        unnamed_limit=_ENUM_NOTE_UNNAMED_TITLES) -> str:
     """来源清单账目后面附的**有界**标题清单。
 
     `placeholders` 是本 run 花名册的同名序号占位串(`_roster_placeholders`):命中
     的行按「标题（第 N 篇）」列出,其余行与此前逐字节相同;不传/为空时整份输出
     与加入这个参数之前一致。编号的无名文档(「未命名来源（第 N 篇）」)整组占一个
-    标题位,组内另走 `_ENUM_NOTE_UNNAMED_TITLES` 共享小预算;花名册里没有或只有
-    一篇无名文档时与无名编号之前逐字节相同。
+    标题位,组内另走一份共享小预算 `unnamed_limit`(本 run 实际生效的按篇读取次数
+    上限,生产由 `_enumeration_note` 传入;缺省是默认上限);花名册里没有无名文档时
+    与无名编号之前逐字节相同,只有一篇时只差 `(+N more)` 那个计数(以前少报 1)。
 
     **这是对「账目回喂只报账目、不带条目正文」那条规则的定向豁免**,只对 sources
     集合成立,理由是那条规则在这里恰好自相矛盾:reflect prompt 教模型「先枚举目录
@@ -2062,19 +2079,23 @@ def _source_titles_note(items, placeholders=None) -> str:
         cost = len(shown if unnamed else text) + 2 + len(mark)
         if used + cost > _ENUM_NOTE_TITLES_TOTAL_CHARS:
             break
-        titles.append(_unnamed_group_note(items, placeholders)
+        titles.append(_unnamed_group_note(items, placeholders, unnamed_limit)
                       if unnamed and listed else f"《{text}》{mark}")
         unnamed_placed = unnamed_placed or unnamed
         used += cost
     if not titles:
         return ""
     # 分母用「有名字的条目数」而不是 len(items):没有显示名的文档在这份清单里本来
-    # 就没有可回喂的句柄,把它算进 (+N more) 会让模型去找一个不存在的标题。
+    # 就没有可回喂的句柄,把它算进 (+N more) 会让模型去找一个不存在的标题。显示成
+    # 「未命名来源」的行(含真标题恰好就是它的)归无名组自己报数(列出的 + 折叠计数),
+    # 分子分母都不算它:以前分母不算无名文档、分子却算了无名那一位,有无名文档时
+    # 省略数少报 1。
     nameable = sum(
         1 for item in items
         if str(getattr(item, "source_title", "") or "").strip()
+        and " ".join(_roster_display_title(item).split()) != UNNAMED_SOURCE_LABEL
     )
-    omitted = max(0, nameable - len(titles))
+    omitted = max(0, nameable - (len(titles) - unnamed_placed))
     tail = f"(+{omitted} more)" if omitted else ""
     return "，标题: " + "".join(titles) + tail
 
@@ -2087,10 +2108,10 @@ def _no_summary_mark(item) -> str:
             if summary is not None and not str(summary).strip() else "")
 
 
-def _unnamed_group_note(items, placeholders) -> str:
+def _unnamed_group_note(items, placeholders, limit) -> str:
     """一份来源清单里**编号的**无名文档整组(占 `_source_titles_note` 的一个标题位)。
 
-    按清单顺序列前 `_ENUM_NOTE_UNNAMED_TITLES` 篇,每篇是发号簿给它的
+    按清单顺序列前 `limit` 篇(本 run 的按篇读取次数上限),每篇是发号簿给它的
     「未命名来源（第 N 篇）」(与同名序号同一份 `issued`,所以账目、`read_document`
     解析、已读账目与 `enumerate_elements` 来源名读到的是同一个串);其余折叠成
     「(另有 N 篇未命名来源从略)」——折叠的几篇照样有号,只是不在账目里占字。
@@ -2099,7 +2120,7 @@ def _unnamed_group_note(items, placeholders) -> str:
     """
     members = [item for item in items
                if " ".join(_roster_display_title(item).split()) == UNNAMED_SOURCE_LABEL]
-    listed = members[:_ENUM_NOTE_UNNAMED_TITLES]
+    listed = members[:limit]
     note = "".join(
         f"《{placeholders.get(item.source_id) or UNNAMED_SOURCE_LABEL}》"
         f"{_no_summary_mark(item)}" for item in listed)
@@ -2107,7 +2128,8 @@ def _unnamed_group_note(items, placeholders) -> str:
     return note + (f"(另有 {folded} 篇未命名来源从略)" if folded else "")
 
 
-def _enumeration_note(chains, numbering=None) -> str:
+def _enumeration_note(chains, numbering=None,
+                      unnamed_limit=_ENUM_NOTE_UNNAMED_TITLES) -> str:
     """把本 run 的枚举账目回喂给 reflect(镜像 visited / attempted 回喂)。
 
     没有它,模型看不到自己刚枚举出的东西:清单结果刻意不进 collected/elements
@@ -2117,6 +2139,9 @@ def _enumeration_note(chains, numbering=None) -> str:
     证据预算(T5),塞进每一轮 reflect 会让 prompt 随清单长度线性膨胀。**唯一的
     定向豁免是来源清单的标题**,见 ``_source_titles_note``:对那一个集合,标题就是
     模型下一步动作的句柄,不给它等于把 prompt 教的「按标题逐篇深挖」当场掐断。
+
+    ``unnamed_limit`` 是编号无名文档组内最多列几篇(本 run 实际生效的按篇读取次数
+    上限,生产传 ``state.action_policy.max_document_reads``;缺省为默认上限)。
     """
     if not chains:
         return ""
@@ -2133,7 +2158,7 @@ def _enumeration_note(chains, numbering=None) -> str:
         label = _collection_label(chain.outcome.collection, chain.outcome.kind)
         returned_total = getattr(coverage, "returned_total", 0)
         titles = (
-            _source_titles_note(chain.outcome.items, placeholders)
+            _source_titles_note(chain.outcome.items, placeholders, unnamed_limit)
             if chain.outcome.collection == "sources" else ""
         )
         # 范围后缀与上屏摘要同形同词。模型看的是这份账目:不写范围的话,「已完整
@@ -7542,9 +7567,10 @@ class ReasoningRetriever:
         """`_section_hint_block` 的计算体(异常由调用方失败开放):
         `(线索块文本, 参与排序的来源数, 列出的条数)`。"""
         # 与来源解析同一份候选、同一个首次出现序(原文段,再原文元素)。
+        issued = state.roster_numbering.sync(state.enum_chains).issued
         sources: Dict[tuple, str] = {
-            (row.notebook_id, row.source_id): _section_text(
-                row.source_title or UNNAMED_SOURCE_LABEL)
+            (row.notebook_id, row.source_id): _section_source_title(
+                issued, row.source_id, row.source_title)
             for row in self._section_evidence_sources(state)[:max_sources]}
         # 只用本 run 已经嵌入过的文本(问题 + 已执行的查询),且只取检索 run 的嵌入
         # 记忆里已有向量的那些(`embedded_query_texts`):线索块不新增嵌入调用;未执行
@@ -7691,7 +7717,9 @@ class ReasoningRetriever:
         under = " ".join(decision.browse_sections_under.split())[:_SECTION_ECHO_CHARS]
         query = " ".join(decision.browse_sections_query.split())[:SECTION_QUERY_MAX_CHARS]
         browse_key = (row.notebook_id, row.source_id, under.casefold(), query.casefold())
-        title = _section_text(row.source_title or UNNAMED_SOURCE_LABEL)
+        title = _section_source_title(
+            state.roster_numbering.sync(state.enum_chains).issued,
+            row.source_id, row.source_title)
         if browse_key in state.section_browse_cache:
             self._replay_section_listing(state, row, title, browse_key, under, query)
             return
@@ -7914,7 +7942,9 @@ class ReasoningRetriever:
             reason, summary, detail = title_or_skip
             self._section_skip(state, reason, summary, **detail)
             return
-        title = _section_text(title_or_skip or UNNAMED_SOURCE_LABEL)
+        title = _section_source_title(
+            state.roster_numbering.sync(state.enum_chains).issued,
+            address.source_id, title_or_skip)
         label = _section_text(address.label or UNTITLED)
         read_key = (address.notebook_id, address.source_id, address.occurrence)
         if read_key in state.section_read_keys:
@@ -9151,7 +9181,9 @@ class ReasoningRetriever:
         大纲引导文本(非空即这一轮发出了引导,reflect 步据它加 `outline_nudged`)。
         `terminal_overflow_repair` 是终态纠错轮标记:这一轮弱支撑边既不展示也不消费。"""
         # 已枚举清单的账目回喂(镜像上面几处),再接本 run 唯一那份集合地图。
-        enum_note = _enumeration_note(state.enum_chains, state.roster_numbering)
+        enum_note = _enumeration_note(
+            state.enum_chains, state.roster_numbering,
+            state.action_policy.max_document_reads)
         if enum_note:
             summary = f"{summary}\n\n{enum_note}"
         # 大纲便签接在几份账目之后、地图之前:它同样是「本轮已经做了什么」,
