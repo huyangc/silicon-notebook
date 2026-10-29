@@ -28,7 +28,10 @@ _CALIBRATION = "app.eval.kg_attrs_calibration"
 
 # "<path under backend/>" admits a whole module; "<path>::<Qualname>" admits
 # one function (nested helpers are NOT covered by their parent's entry).
-CALL_SITE_WHITELIST: frozenset[str] = frozenset()
+CALL_SITE_WHITELIST: frozenset[str] = frozenset({
+    # Gate 0 calibration tool (manual, never imported by app; see below).
+    "app/eval/kg_attrs_calibration.py",
+})
 
 
 def _module_name(rel: str) -> tuple[str, bool]:

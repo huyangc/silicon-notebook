@@ -647,6 +647,13 @@ class Settings(BaseSettings):
         validation_alias="KG_FINDINGS_MAX_CANDIDATE_PAIRS",
     )
 
+    # 图谱节点属性(attrs,规格 docs/superpowers/specs/2026-10-28-kg-node-attrs-design_zh.md §7.3):
+    # 公式「识别符号说明」送给模型的上下文总字数(证据元素 + 下一个元素),以及核验时
+    # 含义与符号之间允许的最大归一化字符间距。两个值都是 Gate 0 公式结论的测量参数——
+    # 生产上改其中任何一个,Gate 0 的公式结论即失效,必须重测(部署文档同句)。
+    kg_attrs_context_chars: int = Field(1200, ge=1, validation_alias="KG_ATTRS_CONTEXT_CHARS")
+    kg_attrs_pair_window: int = Field(120, ge=1, validation_alias="KG_ATTRS_PAIR_WINDOW")
+
     # 共提桥接层(P2):claim 文本确定性提取 mention 边/共提对,治对比题坍缩。默认开(零 LLM,有界)。
     mention_bridge_enabled: bool = Field(True, validation_alias="MENTION_BRIDGE_ENABLED")
     # 别名 DF 双门:命中 claim 数 > max(floor, cap×总claims) 判泛词整体丢弃(如 "model"),事件计数。
