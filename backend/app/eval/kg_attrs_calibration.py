@@ -1014,25 +1014,35 @@ class Budget:
         self.exceeded = False
         self._lock = threading.Lock()
 
-    def reserve(self, chars: int) -> None:
+    def reserve(self, chars: int, count: int = 1) -> None:
+        """Book ``count`` requests of ``chars`` each, all or nothing: when the
+        whole booking does not fit, nothing is booked and nothing may be sent."""
         with self._lock:
-            if self.calls + 1 > self.max_calls or self.chars + chars > self.max_chars:
+            if self.calls + count > self.max_calls or self.chars + chars * count > self.max_chars:
                 self.exceeded = True
                 raise BudgetExceeded(
                     f"budget reached: {self.calls} calls / {self.chars} chars sent "
                     f"(caps {self.max_calls} / {self.max_chars})"
                 )
-            self.calls += 1
-            self.chars += chars
+            self.calls += count
+            self.chars += chars * count
 
-    def refund(self, chars: int, *, cache_hit: bool = True) -> None:
-        """A reserved request was not sent (answered from the cache, or never
-        needed)."""
+    def refund(self, chars: int, count: int = 1) -> None:
+        """Booked requests that were never sent."""
         with self._lock:
-            self.calls -= 1
-            self.chars -= chars
-            if cache_hit:
-                self.cache_hits += 1
+            self.calls -= count
+            self.chars -= chars * count
+
+    def overrun(self, chars: int, count: int) -> None:
+        """Requests the transport reports beyond the booking (should not
+        happen): recorded so the totals stay true, even past the cap."""
+        with self._lock:
+            self.calls += count
+            self.chars += chars * count
+
+    def note_cache_hit(self) -> None:
+        with self._lock:
+            self.cache_hits += 1
 
 
 def messages_chars(messages: Sequence[Mapping[str, str]]) -> int:
@@ -1111,11 +1121,20 @@ def formula_workload(registry: Any, service_id: str, *, explicit: str | None = N
 
 # Retries are the tool's, never the clients': every transport request is
 # booked before it can go out. One product attempt runs with the client's own
-# retries off (max_retries=0) but may still send up to three requests (the
-# json_schema -> json_object -> plain response-format fallback), so an attempt
-# books three and hands back what call_stats says was not sent.
+# retries off (max_retries=0) but may still send, all counted in call_stats
+# "attempts" (app.core.llm._RequestCount):
+#   * one json_schema capability probe, sent by the first call of a fresh
+#     client runtime BEFORE the cache lookup (so a cache hit can carry it too);
+#   * up to three completion requests: json_schema -> json_object -> plain
+#     response-format fallback;
+#   * on the streaming path (a cancel_event was passed) each completion may be
+#     rebuilt once without stream_options: a second request per format.
+# An attempt books that worst case and hands back what call_stats says was
+# not sent.
 FORMULA_ATTEMPTS = 2
-PRODUCT_REQUESTS_PER_ATTEMPT = 3
+RESPONSE_FORMATS = 3
+PRODUCT_REQUESTS_PER_ATTEMPT = 1 + RESPONSE_FORMATS          # probe + formats
+STREAMED_REQUESTS_PER_ATTEMPT = 1 + 2 * RESPONSE_FORMATS     # probe + formats x stream_options rebuild
 JUDGE_ATTEMPTS = 3
 RETRY_ATTEMPTS = {"formula": FORMULA_ATTEMPTS * PRODUCT_REQUESTS_PER_ATTEMPT, "judge": JUDGE_ATTEMPTS}
 
@@ -1128,8 +1147,7 @@ def call_formula(client: Any, formula: str, segments: Sequence[Sequence[str]],
     chars = messages_chars(messages)
     error = None
     for _attempt in range(FORMULA_ATTEMPTS):
-        for _ in range(PRODUCT_REQUESTS_PER_ATTEMPT):
-            budget.reserve(chars)
+        budget.reserve(chars, PRODUCT_REQUESTS_PER_ATTEMPT)
         stats: dict = {}
         try:
             raw = client.chat_json(
@@ -1138,24 +1156,26 @@ def call_formula(client: Any, formula: str, segments: Sequence[Sequence[str]],
             )
         except Exception as exc:  # counted; retried by this loop only
             error = type(exc).__name__
-            _settle(budget, chars, stats)
+            _settle(budget, chars, PRODUCT_REQUESTS_PER_ATTEMPT, stats)
             continue
-        if stats.get("status") == "cache_hit":
-            for index in range(PRODUCT_REQUESTS_PER_ATTEMPT):
-                budget.refund(chars, cache_hit=index == 0)
-        else:
-            _settle(budget, chars, stats)
+        _settle(budget, chars, PRODUCT_REQUESTS_PER_ATTEMPT, stats)
         return raw, None
     return None, error
 
 
-def _settle(budget: Budget, chars: int, stats: Mapping[str, Any]) -> None:
-    """Hand back the booked requests the transport reports it did not send.
-    Without an observed count the whole booking stands."""
+def _settle(budget: Budget, chars: int, booked: int, stats: Mapping[str, Any]) -> None:
+    """Charge exactly what the transport reports it sent (probe and
+    completions alike, a cache hit included) and hand back the rest of the
+    booking. Without an observed count the whole booking stands."""
+    if stats.get("status") == "cache_hit":
+        budget.note_cache_hit()
     sent = stats.get("attempts") if stats.get("attempts_observed") else None
-    if isinstance(sent, int):
-        for _ in range(max(0, PRODUCT_REQUESTS_PER_ATTEMPT - sent)):
-            budget.refund(chars, cache_hit=False)
+    if not isinstance(sent, int) or isinstance(sent, bool):
+        return
+    if sent < booked:
+        budget.refund(chars, booked - sent)
+    elif sent > booked:
+        budget.overrun(chars, sent - booked)
 
 
 class BudgetedModels:
@@ -1177,9 +1197,9 @@ class BudgetedChat:
     """One chat client with the retries moved out of it: each call runs with
     ``max_retries=0`` and is retried here up to ``retries`` times, mirroring
     the client's own default (OPENAI_COMPAT_MAX_RETRIES). Every attempt books
-    ``PRODUCT_REQUESTS_PER_ATTEMPT`` requests first (the response-format
-    fallback can send that many) and hands back what call_stats says was not
-    sent; a cache hit hands back everything."""
+    the worst case first (capability probe + response-format fallback, doubled
+    on the streaming path) and settles on what call_stats says was sent; a
+    cache hit is charged for its probe, if any, and nothing else."""
 
     supports_call_stats = True
 
@@ -1193,22 +1213,19 @@ class BudgetedChat:
         caller_stats = kwargs.pop("call_stats", None)
         chars = messages_chars(messages) + len(response_schema_hint or "")
         last: Exception | None = None
+        booked = (STREAMED_REQUESTS_PER_ATTEMPT if kwargs.get("cancel_event") is not None
+                  else PRODUCT_REQUESTS_PER_ATTEMPT)
         for _attempt in range(1 + self._retries):
-            for _ in range(PRODUCT_REQUESTS_PER_ATTEMPT):
-                self._budget.reserve(chars)
+            self._budget.reserve(chars, booked)
             stats: dict = {}
             try:
                 raw = self._inner.chat_json(messages, response_schema_hint,
                                             **{**kwargs, "max_retries": 0, "call_stats": stats})
             except Exception as exc:  # counted; retried by this loop only
-                _settle(self._budget, chars, stats)
+                _settle(self._budget, chars, booked, stats)
                 last = exc
                 continue
-            if stats.get("status") == "cache_hit":
-                for index in range(PRODUCT_REQUESTS_PER_ATTEMPT):
-                    self._budget.refund(chars, cache_hit=index == 0)
-            else:
-                _settle(self._budget, chars, stats)
+            _settle(self._budget, chars, booked, stats)
             if caller_stats is not None:
                 caller_stats.update(stats)
             return raw
@@ -2131,9 +2148,19 @@ def run_identity(*, seed: int, fixture: Mapping[str, Any], max_chars: int, pair_
 
 
 def run_id(identity: Mapping[str, Any]) -> str:
-    """Namespace of one calibration run (labels file, browser storage): a
-    compatible --top-up keeps it, any other configuration gets a new one."""
+    """Hash of a run's configuration (the first half of its run id)."""
     return _sha(json.dumps(identity, sort_keys=True, ensure_ascii=False))[:16]
+
+
+def new_run_id(identity: Mapping[str, Any]) -> str:
+    """Namespace of one calibration run (labels file, browser storage):
+    configuration hash plus a random nonce, minted for a first run and for
+    every --reset, so an independent run with an unchanged configuration
+    still never reads an earlier run's labels. Only a compatible --top-up
+    keeps the saved id."""
+    import secrets
+
+    return f"{run_id(identity)}-{secrets.token_hex(6)}"
 
 
 def run_labels_file(out_dir: Path, run: str) -> Path:
@@ -2302,7 +2329,8 @@ def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_
         for language in LANGUAGES
     }
     return {
-        "run": run_id(identity or {"seed": args.seed, "rules_signature": kg_attrs.rules_signature()}),
+        "run": (previous or {}).get("run") or new_run_id(
+            identity or {"seed": args.seed, "rules_signature": kg_attrs.rules_signature()}),
         "identity": identity,
         "created": datetime.datetime.now().isoformat(timespec="seconds"),
         "incomplete": incomplete,
