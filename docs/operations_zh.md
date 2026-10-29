@@ -348,8 +348,8 @@ PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --all-notebooks 
 之前，所有读者都把 id 的字节序当成文档序，从第 10 000 个元素起就错了：`...-10000` 排在
 `...-1000` 与 `...-1001` 之间。本版起所有读者按 `created_at`、序号位数、id 排列一篇来源的元素
 （`backend/app/repositories/element_reading_order.py`）。不超过 9 999 个解析元素的来源、knowhow
-单元格与晋升出处，读出来与以前完全一样。深拷贝与导入的笔记本是另一个既有缺陷，本改动既不造成
-也不修复：它们的元素 id 是随机生成的，任何篇幅的拷贝来源在本版前后都一样乱序。不改写任何数据：
+单元格与晋升出处，读出来与以前完全一样。深拷贝与导入的笔记本乱序是另一个既有缺陷，另行修复，
+见[深拷贝与导入的笔记本：元素顺序](#深拷贝与导入的笔记本元素顺序)。不改写任何数据：
 顺序由 id 算出，所以来源详情、引用所在页、文档概览、按类型列举（公式、表格、图片）与过程步骤
 顺序立即就对。
 
@@ -389,6 +389,43 @@ GROUP BY s.notebook_id, e.source_id;
   打乱了对齐），重建之后对该来源（`--source-id`）再跑一次即可补上。
 
 不超过 9 999 个元素的来源无需处理。
+
+## 深拷贝与导入的笔记本：元素顺序
+
+深拷贝与 `.snbk` 导入保留元素的 `created_at`，以前却给每个非 knowhow 元素铸一个随机的
+`el-<uuid>`；读者按 `created_at`、序号位数、id 排列，这种 id 的位数项恒为 0，于是拷贝出来的来源
+在同一时刻内按随机 id 排——任何篇幅都乱序：来源详情、引用所在页、文档概览、按类型列举、过程步骤
+顺序，以及在副本上**重新**分块、重新抽取或图片回填时读到的元素顺序。分块本身的 `element_ids`
+列表保序，所以检索不受影响。
+
+本版起拷贝与导入**沿用**原 id 的序号：`el-<原来源 id>-<后缀>` 变成 `el-<新来源 id>-<后缀>`
+（`-NNNN`、超过四位的序号与图片回填的 `-gMMM` 原样保留），其它形态的 id（晋升出处
+`el-promo-<hash>`、更早的拷贝留下的 `el-<uuid>`）变成 `el-<新来源 id>-~<原 id>`；knowhow
+单元格仍按投影公式重算。于是副本里每个读者的顺序与原库逐元素一致，再拷贝一次也一样，且 id 不会
+随拷贝代数变长（`backend/app/repositories/element_reading_order.py` 的 `copied_element_id`）。
+分块、知识对象与事实的证据、事实元素、元素向量照旧随同一张映射改写，仍指向同一个元素。
+
+**存量：** 本版之前做的副本与导入**仍然乱序**，本版不改写它们。找出这类来源（两种后端通用；
+会把每一行元素读一遍，大库请在低峰期跑）：
+
+```sql
+SELECT s.notebook_id, e.source_id, COUNT(*) AS minted_elements
+FROM source_elements e JOIN sources s ON s.id = e.source_id
+WHERE s.source_type NOT IN ('knowhow', 'promotion', 'memory')
+  AND substr(e.id,1,length(e.source_id)+4) <> ('el-'||e.source_id||'-')
+GROUP BY s.notebook_id, e.source_id
+HAVING COUNT(*) > 1;
+```
+
+现有的处理办法（任选其一，均为用户侧操作）：
+
+- **原库还在：** 重新深拷贝或重新导出、导入一次，新副本按原顺序；旧副本确认无用后删除。
+- **原库已不在：** 在副本的来源详情里点 **「重新解析」**，按文档重新生成元素（`el-<来源 id>-NNNN`）
+  并重建该来源的分块与知识图谱抽取（会调用模型）；以前回填过的图片要对该来源（`--source-id`）
+  再跑一次 `backfill-images`。
+
+原地改写存量 id 的维护命令本版不提供：元素 id 还被问答记录、报告与分享快照里的引用，以及增量同步的
+变更日志引用，改写它们需要另行决定（见 `fangan_todo.md`）。
 
 ## 无主 Memory 来源
 

@@ -20,9 +20,9 @@ What it changes, and what it leaves alone, by construction:
 * A source of at most 9 999 parsed elements: every id has four digits, the key
   is a constant 4, the order is byte for byte the old one.
 * An id NOT of the form ``el-<own source_id>-<digits>...`` (knowhow cells
-  ``el-kh-<hash>``, promotion evidence ``el-promo-<hash>``, a copied
-  notebook's ``el-<uuid>``, smoke seeds): the key is 0, the order is the old
-  byte order.
+  ``el-kh-<hash>``, promotion evidence ``el-promo-<hash>``, the ``el-<uuid>``
+  a deep copy or import minted before ``copied_element_id``, smoke seeds): the
+  key is 0, the order is the old byte order.
 * Only a source past 9 999 elements reads differently -- in its true order.
 
 The key is computed from ``id`` and ``source_id`` alone, so it needs no column,
@@ -47,6 +47,7 @@ neither pays for the expression on the sources it does not change.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Callable, Sequence
 
 #: Every element id this repository mints for a parsed source starts with
@@ -103,6 +104,53 @@ def index_digits(source_id: str, element_id: str) -> int:
 def reading_order_key(source_id: str, created_at: object, element_id: str) -> tuple:
     """``(created_at, digits, id)`` for one row -- a keyset cursor's bound."""
     return (created_at, index_digits(source_id, element_id), element_id)
+
+
+# ------------------------------------------------- ids a copy carries over
+#: Marks an id carried over from a form other than ``el-<source_id>-...``: not
+#: a digit, so the copy's digits term is 0, as the original's was.
+FOREIGN_ID_MARK = "~"
+#: What a carried id may hold after ``el-<new source id>-``: an import must not
+#: let an archive's text steer a new id beyond this (same reason as the
+#: writer's ``_SAFE_ID_PREFIX``).
+_CARRIED_REST = re.compile(r"[A-Za-z0-9_~-]{1,128}")
+
+
+def copied_element_id(element_id: str, old_source_id: str, new_source_id: str) -> "str | None":
+    """The id a deep copy or a ``.snbk`` import gives an element of
+    ``old_source_id`` once that source is ``new_source_id`` -- or ``None`` when
+    the id cannot be carried (the caller then mints a fresh one).
+
+    A copy keeps ``created_at``, so it reads in the original's order exactly
+    when, for every pair of the source's elements, ``(digits, id)`` compares
+    as it did. Two shapes:
+
+    * ``el-<old>-<rest>`` becomes ``el-<new>-<rest>``: same digits, and with
+      one prefix on each side the byte order of the ids is that of ``rest``
+      (``el-<source>-0012-g001`` stays right after ``...-0012``);
+    * any other id ``X`` (digits 0: promotion ``el-promo-<hash>``, the
+      ``el-<hex>`` an earlier copy minted, smoke seeds) becomes
+      ``el-<new>-~X``: digits 0 again, byte order that of ``X``. Copying that
+      copy carries ``~X`` as its ``rest``, so the mark is added once and an id
+      never grows with each generation.
+
+    The one pair this does not keep is a ``rest`` that starts with neither a
+    digit nor the mark beside a foreign id in the same source: no writer makes
+    both kinds in one source (parsing and backfill write ``el-<source>-<digits>
+    ...``; the other forms each fill a source of their own).
+
+    The result is the id ingestion itself would give the element (``el-<source
+    id>-NNNN``), so the copy's sources keep the cheap ``ORDER BY id`` path of
+    ``id_order_for``."""
+    prefix = f"{ELEMENT_ID_PREFIX}{old_source_id}-"
+    element_id = str(element_id or "")
+    if element_id.startswith(prefix):
+        rest = element_id[len(prefix):]
+    else:
+        rest = FOREIGN_ID_MARK + element_id
+    if not element_id or not _CARRIED_REST.fullmatch(rest):
+        return None
+    return f"{ELEMENT_ID_PREFIX}{new_source_id}-{rest}"
 
 
 # ------------------------------------------------------------ keyset pages
