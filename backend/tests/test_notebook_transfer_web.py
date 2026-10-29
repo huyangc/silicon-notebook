@@ -199,3 +199,32 @@ def test_a_retry_with_the_same_upload_id_returns_its_job(world):
 
 def test_the_upload_status_answers_authoritatively(world):
     cases.check_the_upload_status_answers_authoritatively(world)
+
+
+def test_the_leak_probe_reads_a_reused_descriptor_number_as_closed(tmp_path):
+    """``fd_still_names`` backs the download-leak assertion: a closed descriptor whose
+    number another thread was handed must not read as a leak, a real leak must."""
+    import os
+
+    export, other = tmp_path / "export.snbk", tmp_path / "other.bin"
+    export.write_bytes(b"x")
+    other.write_bytes(b"y")
+    fd = os.open(export, os.O_RDONLY)
+    identity = cases.file_identity(fd)
+    try:
+        assert cases.fd_still_names(fd, identity)  # really leaked: still the export
+        os.close(fd)
+        with pytest.raises(OSError):
+            os.fstat(fd)
+        assert not cases.fd_still_names(fd, identity)  # gone
+        stranger = os.open(other, os.O_RDONLY)
+        if stranger != fd:  # another thread is handed exactly this number
+            os.dup2(stranger, fd)
+            os.close(stranger)
+        os.fstat(fd)  # a bare fstat-by-number would call this a leak
+        assert not cases.fd_still_names(fd, identity)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass

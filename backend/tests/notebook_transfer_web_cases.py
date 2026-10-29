@@ -1043,19 +1043,38 @@ def check_a_finished_export_supersedes_the_older_ones(world: World) -> None:
         assert (exports / f"{kept['id']}.snbk").exists()
 
 
+def file_identity(fd: int) -> tuple[int, int]:
+    """Which file a descriptor names: ``(st_dev, st_ino)``, stable on macOS and Linux."""
+    status = os.fstat(fd)
+    return status.st_dev, status.st_ino
+
+
+def fd_still_names(fd: int, identity: tuple[int, int]) -> bool:
+    """True while descriptor number ``fd`` still names the file ``identity``.
+
+    A bare "does ``fstat(fd)`` succeed" is wrong for a closed descriptor: the number is
+    free to be handed to any other thread's next ``open``/``socket`` (the PG lane has
+    connection-pool and server threads), and then it reads as a leak that is not there.
+    A closed descriptor is one that is gone or now names something else."""
+    try:
+        return file_identity(fd) == identity
+    except OSError:
+        return False
+
+
 def check_a_download_closes_its_file_and_counts_only_when_sent_whole(world: World) -> None:
     import gc
 
     from app.api import notebook_transfer_routes as routes
 
     job = exported(world)
-    opened: list[int] = []
+    opened: list[tuple[int, tuple[int, int]]] = []
     real_redeem = world.jobs.redeem_ticket
 
     def recording(token, **kwargs):
         download = real_redeem(token, **kwargs)
         if download is not None:
-            opened.append(download.fd)
+            opened.append((download.fd, file_identity(download.fd)))
         return download
 
     world.monkeypatch.setattr(world.jobs, "redeem_ticket", recording)
@@ -1063,12 +1082,8 @@ def check_a_download_closes_its_file_and_counts_only_when_sent_whole(world: Worl
     def token() -> str:
         return ticket(world, job["id"]).json()["url"].split("ticket=", 1)[1]
 
-    def is_open(fd: int) -> bool:
-        try:
-            os.fstat(fd)
-        except OSError:
-            return False
-        return True
+    def is_open(entry: tuple[int, tuple[int, int]]) -> bool:
+        return fd_still_names(*entry)
 
     # A response whose body never starts (the client went away first).
     response = routes.download_notebook_transfer(ticket=token())
