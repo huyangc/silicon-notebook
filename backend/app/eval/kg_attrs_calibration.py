@@ -12,6 +12,8 @@ Subcommands (run from ``backend/`` with ``PYTHONPATH=.``)::
     python -m app.eval.kg_attrs_calibration prepare --database-url URL --dry-run
     python -m app.eval.kg_attrs_calibration prepare --database-url URL --confirm-budget \\
         [--allow-local-content-egress]
+    python -m app.eval.kg_attrs_calibration prepare ... --top-up    # continue the same run
+    python -m app.eval.kg_attrs_calibration prepare ... --reset     # independent new run
     python -m app.eval.kg_attrs_calibration render
     python -m app.eval.kg_attrs_calibration ingest --labels ~/Downloads/kg_attrs_labels.json
     python -m app.eval.kg_attrs_calibration report
@@ -182,6 +184,14 @@ def dedup_by_key(items: Iterable[Mapping[str, Any]], key: Callable[[Mapping[str,
         if k not in chosen or (item.get("pool") == "A" and chosen[k].get("pool") != "A"):
             chosen[k] = item
     return list(chosen.values())
+
+
+def card_label_key(key: str, pairs: Sequence[Mapping[str, Any]]) -> str:
+    """The key a card's missing count is stored under: the formula/context key
+    plus a digest of its candidate list. "How many stated meanings are NOT
+    listed" depends on the list, so a different list is a different card."""
+    return json.dumps(json.loads(key) + [_sha("\n".join(sorted(p["group"] for p in pairs)))],
+                      ensure_ascii=False)
 
 
 def card_key(segments: Sequence[Sequence[str]], formula: str) -> str:
@@ -999,11 +1009,15 @@ class Budget:
         self.max_calls, self.max_chars = max_calls, max_chars
         self.calls = self.chars = 0
         self.cache_hits = 0
+        # Set when a reservation is refused: a caller that swallows the error
+        # (extract_graph isolates window failures) can still see the cap hit.
+        self.exceeded = False
         self._lock = threading.Lock()
 
     def reserve(self, chars: int) -> None:
         with self._lock:
             if self.calls + 1 > self.max_calls or self.chars + chars > self.max_chars:
+                self.exceeded = True
                 raise BudgetExceeded(
                     f"budget reached: {self.calls} calls / {self.chars} chars sent "
                     f"(caps {self.max_calls} / {self.max_chars})"
@@ -1142,6 +1156,64 @@ def _settle(budget: Budget, chars: int, stats: Mapping[str, Any]) -> None:
     if isinstance(sent, int):
         for _ in range(max(0, PRODUCT_REQUESTS_PER_ATTEMPT - sent)):
             budget.refund(chars, cache_hit=False)
+
+
+class BudgetedModels:
+    """The model provider handed to ``kg_ingest.extract_graph`` by extract-en.
+    Every chat client it gives out books each transport request (extraction,
+    refine and gleaning alike) before it can be sent: see ``BudgetedChat``."""
+
+    def __init__(self, provider: Any, budget: Budget, *, retries: int) -> None:
+        self._provider, self._budget, self._retries = provider, budget, retries
+
+    def chat(self, workload_id: str) -> "BudgetedChat":
+        return BudgetedChat(self._provider.chat(workload_id), self._budget, retries=self._retries)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._provider, name)
+
+
+class BudgetedChat:
+    """One chat client with the retries moved out of it: each call runs with
+    ``max_retries=0`` and is retried here up to ``retries`` times, mirroring
+    the client's own default (OPENAI_COMPAT_MAX_RETRIES). Every attempt books
+    ``PRODUCT_REQUESTS_PER_ATTEMPT`` requests first (the response-format
+    fallback can send that many) and hands back what call_stats says was not
+    sent; a cache hit hands back everything."""
+
+    supports_call_stats = True
+
+    def __init__(self, inner: Any, budget: Budget, *, retries: int) -> None:
+        self._inner, self._budget, self._retries = inner, budget, retries
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def chat_json(self, messages, response_schema_hint="", **kwargs):
+        caller_stats = kwargs.pop("call_stats", None)
+        chars = messages_chars(messages) + len(response_schema_hint or "")
+        last: Exception | None = None
+        for _attempt in range(1 + self._retries):
+            for _ in range(PRODUCT_REQUESTS_PER_ATTEMPT):
+                self._budget.reserve(chars)
+            stats: dict = {}
+            try:
+                raw = self._inner.chat_json(messages, response_schema_hint,
+                                            **{**kwargs, "max_retries": 0, "call_stats": stats})
+            except Exception as exc:  # counted; retried by this loop only
+                _settle(self._budget, chars, stats)
+                last = exc
+                continue
+            if stats.get("status") == "cache_hit":
+                for index in range(PRODUCT_REQUESTS_PER_ATTEMPT):
+                    self._budget.refund(chars, cache_hit=index == 0)
+            else:
+                _settle(self._budget, chars, stats)
+            if caller_stats is not None:
+                caller_stats.update(stats)
+            return raw
+        assert last is not None
+        raise last
 
 
 def verification_record(formula: str, segments: Sequence[Sequence[str]], reply: str | None,
@@ -1290,7 +1362,6 @@ def run_extract_en(args: Any) -> int:
         budget = Budget(args.max_calls, args.max_input_chars)
         if est_calls > args.max_calls or est_chars > args.max_input_chars:
             raise SystemExit("extraction estimate exceeds --max-calls / --max-input-chars")
-        budget.calls, budget.chars = est_calls, est_chars
         workload = formula_workload(provider.registry, args.formula_service, explicit=args.formula_workload)
         extract_service = provider.registry.service_for("kg_extract")
         formula_service = provider.registry.service_for(workload)
@@ -1309,8 +1380,8 @@ def run_extract_en(args: Any) -> int:
         out.write_text(json.dumps(fixture, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
                        encoding="utf-8")
         print(f"[extract-en] wrote {out} ({len(fixture['concepts'])} concepts, "
-              f"{len(fixture['formulas'])} formulas); formula calls sent "
-              f"{budget.calls - est_calls}, cache hits {budget.cache_hits}")
+              f"{len(fixture['formulas'])} formulas); requests sent {budget.calls} "
+              f"({budget.chars} chars), cache hits {budget.cache_hits}")
         return 0
     finally:
         provider.close()
@@ -1334,10 +1405,16 @@ def _extract_slice(chapters, settings, provider, workload: str, budget: Budget) 
             element.id = element_id_for(book, chapter, index)
         kg_doc_type = kg_ingest.DOC_TYPE_MAP.get(doc_type, "academic")
         graph = kg_ingest.extract_graph(
-            provider, raw, f"{chapter}.md", kg_doc_type,
+            BudgetedModels(provider, budget, retries=int(settings.openai_compat_max_retries)),
+            raw, f"{chapter}.md", kg_doc_type,
             n=EXTRACT_WINDOW_N, m=EXTRACT_WINDOW_M,
             refine=settings.kg_refine_enabled, gleaning_rounds=gleaning,
         )
+        if budget.exceeded:
+            # extract_graph records a refused window as a failed window and
+            # carries on; a slice missing windows must never be written.
+            raise SystemExit(f"budget reached during extraction of {book}/{chapter}: "
+                             f"{budget.calls} requests / {budget.chars} chars; nothing written")
         objects, _relations = kg_ingest.build_records(graph, source_id, chapter, parsed)
         chapter_concepts, chapter_formulas, used = chapter_records(
             book, chapter, parsed, objects, max_chars=settings.kg_attrs_context_chars)
@@ -1695,7 +1772,7 @@ def scan_formulas(
             state["pooled"] += 1
             state["kept_pairs"] += sum(p["origin"] == "kept" for p in pairs)
             state["cards"].append({
-                "key": key,
+                "key": card_label_key(key, pairs),
                 "language": formula["language"], "pool": formula["pool"], "ref": formula["ref"],
                 "formula": formula["name"], "segments": formula["segments"], "pairs": pairs,
                 "status": record["status"], "error": error,
@@ -1923,7 +2000,11 @@ def run_prepare(args: Any) -> int:
         local_concepts, local_formulas = load_local_pools(conn)
         concepts = a_concepts + local_concepts
         candidates = alias_candidates(concepts, egress=egress)
-        previous = _read_json(out_dir / "items.json") if args.top_up and (out_dir / "items.json").is_file() else None
+        existing = out_dir / "items.json"
+        if existing.is_file() and not (args.top_up or args.reset or args.dry_run):
+            raise SystemExit("an earlier Gate 0 run exists: continue it with --top-up, or start an "
+                             "independent run with --reset (its labels stay under the old run id)")
+        previous = _read_json(existing) if args.top_up and existing.is_file() else None
         alias_items = sample_aliases(candidates, per_rule=args.per_rule, seed=args.seed,
                                      existing=(previous or {}).get("alias_items", []))
         def materialized(plan):
@@ -1979,9 +2060,8 @@ def run_prepare(args: Any) -> int:
         items = _execute_prepare(
             args, fixture, provider.chat(workload), judge, planned_lists, alias_items,
             concepts=concepts, previous=previous, max_chars=max_chars, pair_window=pair_window,
-            hosts={"formula": formula_host, "judge": judge_host},
+            hosts={"formula": formula_host, "judge": judge_host}, identity=identity,
         )
-        items["identity"] = identity
         items["models"] = {"extract": fixture.get("models", {}).get("extract"),
                            "formula": formula_record, "judge": judge.model or None}
         _write_json(out_dir / "items.json", items)
@@ -2050,6 +2130,30 @@ def run_identity(*, seed: int, fixture: Mapping[str, Any], max_chars: int, pair_
     }
 
 
+def run_id(identity: Mapping[str, Any]) -> str:
+    """Namespace of one calibration run (labels file, browser storage): a
+    compatible --top-up keeps it, any other configuration gets a new one."""
+    return _sha(json.dumps(identity, sort_keys=True, ensure_ascii=False))[:16]
+
+
+def run_labels_file(out_dir: Path, run: str) -> Path:
+    return out_dir / f"labels-{run}.json"
+
+
+def scan_targets(prior: Mapping[str, Any] | None, *, top_up: bool, interrupted: bool, step: int) -> dict:
+    """Scan targets for one language. A fresh run starts at the base targets;
+    every new --top-up raises the SAVED targets by ``step`` (so successive
+    top-ups keep scanning further); resuming a run the budget interrupted
+    keeps its targets unchanged."""
+    base = {"pooled": FORMULA_SCAN_TARGET_POOLED, "kept_pairs": FORMULA_SCAN_TARGET_KEPT_PAIRS}
+    if not prior:
+        return base
+    saved = dict(prior.get("targets") or base)
+    if top_up and not interrupted:
+        return {name: value + step for name, value in saved.items()}
+    return saved
+
+
 def scan_order_sha(formulas: Sequence[Mapping[str, Any]]) -> str:
     """Identity of a scan order: a saved position only means something in it."""
     return _sha("\n".join(f["ref"] for f in formulas))
@@ -2088,7 +2192,7 @@ def assign_blind(entries: Sequence[dict], *, seed: int) -> None:
 
 
 def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_items, *,
-                     concepts, previous, max_chars, pair_window, hosts) -> dict:
+                     concepts, previous, max_chars, pair_window, hosts, identity=None) -> dict:
     """Run the scan, drafts and pre-labels. One failed draft or pre-label is
     recorded as None and the run goes on; hitting the budget cap stops the run
     but returns everything finished so far (with the scan position), marked
@@ -2143,16 +2247,17 @@ def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_
             "scanned": prior["scanned"] if prior else 0, "kept_pairs": prior["kept_pairs"] if prior else 0,
             "pooled": prior["pooled"] if prior else 0, "seen": list(prior.get("seen", [])) if prior else [],
             "position": prior["position"] if prior else 0,
+            "targets": scan_targets(prior, top_up=args.top_up, interrupted=bool((previous or {}).get("incomplete")),
+                                    step=args.top_up_formulas),
         }
     incomplete = None
     try:
-        boost = args.top_up_formulas if args.top_up else 0
         for language in LANGUAGES:
             scan_formulas(
                 planned_lists.get(language, []), product=product, draft=draft, pair_window=pair_window,
                 max_formulas=args.max_formulas_per_language,
-                target_pooled=FORMULA_SCAN_TARGET_POOLED + boost,
-                target_kept_pairs=FORMULA_SCAN_TARGET_KEPT_PAIRS + boost,
+                target_pooled=scans[language]["targets"]["pooled"],
+                target_kept_pairs=scans[language]["targets"]["kept_pairs"],
                 start=scans[language]["position"], state=scans[language],
             )
         cards = [c for lang in LANGUAGES for c in scans[lang]["cards"]]
@@ -2197,7 +2302,8 @@ def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_
         for language in LANGUAGES
     }
     return {
-        "run": hashlib.sha256(f"{args.seed}:{kg_attrs.rules_signature()}".encode()).hexdigest()[:12],
+        "run": run_id(identity or {"seed": args.seed, "rules_signature": kg_attrs.rules_signature()}),
+        "identity": identity,
         "created": datetime.datetime.now().isoformat(timespec="seconds"),
         "incomplete": incomplete,
         "seed": args.seed,
@@ -2290,13 +2396,14 @@ def item_keys(items: Mapping[str, Any]) -> set[str]:
 
 
 def ingest_labels(out_dir: Path, labels_path: Path) -> tuple[int, int]:
-    """Merge an exported label file (opaque ids) into ``labels.json`` (keys);
-    returns (merged, ignored-unknown). Ids this run does not have are dropped."""
+    """Merge an exported label file (opaque ids) into this run's
+    ``labels-<run>.json`` (keys); returns (merged, ignored-unknown). Ids this
+    run does not have are dropped, and another run's labels are never read."""
     items = _read_json(out_dir / "items.json")
     incoming = parse_labels(_read_json(labels_path))
     ids = {opaque_id(key): key for key in item_keys(items)}
     accepted = {ids[i]: v for i, v in incoming.items() if i in ids}
-    store = out_dir / "labels.json"
+    store = run_labels_file(out_dir, items["run"])
     old = _read_json(store) if store.is_file() else {}
     _write_json(store, merge_labels(old, accepted))
     return len(accepted), len(incoming) - len(accepted)
@@ -2327,7 +2434,7 @@ def error_examples(items: Mapping[str, Any], labels: Mapping[str, Mapping[str, A
 
 def write_report(out_dir: Path) -> dict:
     items = _read_json(out_dir / "items.json")
-    store = out_dir / "labels.json"
+    store = run_labels_file(out_dir, items["run"])
     labels = _read_json(store) if store.is_file() else {}
     report = build_report(items, labels)
     _write_json(out_dir / "report.json", report)
@@ -2395,6 +2502,8 @@ def build_parser():
     prepare.add_argument("--allow-local-content-egress", action="store_true",
                          help="let pool B/C (local library) text reach the configured endpoints")
     prepare.add_argument("--top-up", action="store_true", help="keep items.json and draw only the shortfall")
+    prepare.add_argument("--reset", action="store_true",
+                         help="start an independent run over an existing items.json (labels are not carried over)")
     prepare.add_argument("--top-up-formulas", type=int, default=20,
                          help="with --top-up: raise both formula scan targets by this much")
     _budget_args(prepare)
