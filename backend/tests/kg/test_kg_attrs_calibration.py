@@ -614,3 +614,75 @@ def test_alias_recall_reference_counts_abbreviation_shaped_gold(tmp_path):
     out = cal.alias_recall_reference(concepts, repo_root=tmp_path)
     assert out == {"gold_aliases": 3, "abbreviation_shaped": 2,
                    "hit_by_rule": {"R1": 0, "R2": 1, "R3": 0, "R4": 0}, "hit_any_rule": 1}
+
+
+# --- render / ingest / report (plan G0-T5) ------------------------------------
+
+_SECRET = "LOCAL-ONLY-SOURCE-TEXT"
+
+
+def _run_dir(tmp_path):
+    items = _items()
+    items["alias_items"][0]["segments"] = [["e", _SECRET]]
+    items["alias_items"][1]["pool"] = "B"
+    items["alias_items"][1]["name"] = _SECRET
+    for alias in items["alias_items"]:
+        alias.setdefault("pool", "A")
+    items["formula_cards"][0]["pool"] = "A"
+    (tmp_path / "items.json").write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+    return items
+
+
+def test_write_review_renders_the_items(tmp_path):
+    _run_dir(tmp_path)
+    page = cal.write_review(tmp_path).read_text(encoding="utf-8")
+    tags = _Tags()
+    tags.feed(page)
+    data = json.loads(tags.data["kg-data"])
+    assert data["run"] == "r" and len(data["cards"]) == 101
+
+
+def test_ingest_merges_known_keys_only(tmp_path):
+    _run_dir(tmp_path)
+    exported = tmp_path / "kg_attrs_labels.json"
+    exported.write_text(json.dumps({"labels": [
+        {"key": "a1", "verdict": "correct"}, {"key": "g1", "verdict": "unsure"},
+        {"key": "c-en", "missing": 2}, {"key": "nope", "verdict": "correct"}]}), encoding="utf-8")
+    assert cal.ingest_labels(tmp_path, exported) == (3, 1)
+    exported.write_text(json.dumps({"labels": [{"key": "a1", "verdict": "incorrect"}]}), encoding="utf-8")
+    assert cal.ingest_labels(tmp_path, exported) == (1, 0)
+    stored = json.loads((tmp_path / "labels.json").read_text(encoding="utf-8"))
+    assert stored == {"a1": {"verdict": "incorrect"}, "g1": {"verdict": "unsure"}, "c-en": {"missing": 2}}
+    exported.write_text(json.dumps({"labels": [{"key": "a1", "verdict": "correct", "text": "x"}]}),
+                        encoding="utf-8")
+    with pytest.raises(ValueError):
+        cal.ingest_labels(tmp_path, exported)
+
+
+def test_report_json_carries_no_source_text_and_examples_stay_in_pool_a(tmp_path):
+    _run_dir(tmp_path)
+    labels = {f"a{i}": {"verdict": "incorrect"} for i in range(8)}
+    labels["g1"] = {"verdict": "incorrect"}
+    labels["g2"] = {"verdict": "correct"}
+    (tmp_path / "labels.json").write_text(json.dumps(labels), encoding="utf-8")
+    report = cal.write_report(tmp_path)
+    assert _SECRET not in (tmp_path / "report.json").read_text(encoding="utf-8")
+    assert report["alias"][0]["verdict"] == "fail"
+    examples = cal.error_examples(json.loads((tmp_path / "items.json").read_text(encoding="utf-8")), labels)
+    alias_examples = [e for e in examples if e.startswith("别名 R1")]
+    assert len(alias_examples) == cal.MAX_ERROR_EXAMPLES
+    assert not any(_SECRET in e for e in examples)              # pool B item never shown
+    assert any(e.startswith("公式保留但判错") for e in examples)
+    assert any(e.startswith("公式误杀（too_far）") for e in examples)
+    assert "## 错例" in (tmp_path / "report.md").read_text(encoding="utf-8")
+
+
+def test_cli_wires_every_subcommand():
+    parser = cal.build_parser()
+    for command in ("extract-en", "render", "report"):
+        assert parser.parse_args([command]).run.__name__ == f"run_{command.replace('-', '_')}"
+    args = parser.parse_args(["prepare", "--database-url", "postgresql:///x", "--dry-run"])
+    assert (args.run.__name__, args.dry_run, args.confirm_budget, args.allow_local_content_egress) == (
+        "run_prepare", True, False, False)
+    assert (args.max_calls, args.max_input_chars, args.per_rule) == (4000, 20_000_000, 100)
+    assert parser.parse_args(["ingest", "--labels", "f.json"]).run.__name__ == "run_ingest"
