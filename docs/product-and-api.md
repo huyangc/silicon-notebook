@@ -4966,6 +4966,8 @@ The final editor's complete section material enters capacity-aware processing wh
 
 Global synthesis receives confirmed section titles and scopes in full, without a separate prefix limit before capacity checks. If these user instructions alone exceed the model budget, the stage fails explicitly instead of silently dropping their trailing constraints.
 
+Every final-editor send, including a smaller provider-overflow retry, must retain material from at least one completed chapter. A blueprint alone cannot substitute for all chapter text as the summary's factual basis; when no completed chapter material fits, final editing remains unfinished and its limitation is disclosed.
+
 `understanding.context_processing` is an additive, counts-only receipt: `extra_calls`, `extra_calls_max`, `max_level`, `compression_max_levels`, `compressed`, `estimated_counting`, and `stages`. Stage keys are `planning_intent`, `planning_outline`, `planning_sufficiency`, `retrieve`, `draft`, `synthesis`, `final_editor`; each records `failed`, `compressed`, `input_items`, `output_items`, `omitted_items`, `partial_items`, `invalid_items`. Counts concern material items at each stage and may count one original more than once, not unique sources. The interface shows informative compression/limitation receipts and keeps old reports without them quiet. Necessary coverage limitations also remain in report Markdown, export and public share. Diagnostics record only stage, budgets, counting method and counts, never prompts, excerpts or compressed content.
 
 ### Follow-up questions on a deep report

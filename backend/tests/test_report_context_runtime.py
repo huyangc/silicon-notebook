@@ -398,6 +398,33 @@ def test_editor_still_rejects_oversized_user_frame():
     assert not eng.dependencies.model_clients._llm.calls
 
 
+def test_editor_cannot_replace_all_completed_chapters_with_blueprint_only():
+    target = Transport({"summary": "Summary"}, maximum=3000)
+    eng = engine(target)
+    chapters = [{"title": "A", "markdown": "BODY-ONLY-FACT. " * 2000,
+                 "context_processing": {"max_level": 2}}]
+    blueprint = {"central_answer": "BLUEPRINT-ONLY-FACT", "sections": [
+        {"section_id": "section-1", "_context_level": 2}]}
+    with pytest.raises(ReportContextOverflow):
+        report_editor_call(eng, "Question", chapters, None, blueprint, "USER-INTENT")
+    assert not target.calls
+    assert receipt_for(eng)["stages"]["final_editor"]["failed"]
+
+
+def test_editor_provider_recovery_cannot_send_blueprint_without_completed_chapters():
+    target = Transport(lambda messages: ModelContextExceeded(), maximum=5000)
+    eng = engine(target)
+    chapters = [{"title": "A", "markdown": "Body fact. " * 240,
+                 "context_processing": {"max_level": 2}}]
+    blueprint = {"central_answer": "Small blueprint", "sections": [
+        {"section_id": "section-1", "_context_level": 2}]}
+    with pytest.raises(ReportContextOverflow):
+        report_editor_call(eng, "Question", chapters, None, blueprint, "USER-INTENT")
+    assert len(target.calls) == 1
+    assert "Body fact." in target.calls[0][-1]["content"]
+    assert receipt_for(eng)["stages"]["final_editor"]["failed"]
+
+
 @pytest.mark.parametrize("reject_retry", [False, True])
 def test_remote_overflow_gets_one_smaller_retry_and_counts_each_extra_send(reject_retry):
     def respond(messages):

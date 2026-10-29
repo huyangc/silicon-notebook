@@ -19,6 +19,7 @@ from app.services.context_spans import recorded_spans, recording_spans
 from app.services.report_context import (
     ContextProjection,
     EvidenceUnit,
+    ReportContextOverflow,
     ReportContextSession,
 )
 
@@ -85,6 +86,7 @@ class PreparedReportCall:
     projection: ContextProjection
     max_tokens: int | None
     recovered: bool = False
+    validate_projection: Callable[[ContextProjection], None] | None = None
 
     @property
     def messages(self):
@@ -97,6 +99,8 @@ class PreparedReportCall:
         if self.max_tokens is not None:
             kwargs["max_tokens"] = self.max_tokens
         kwargs.setdefault("cancel_event", self.runtime.cancel_event)
+        if self.validate_projection is not None:
+            self.validate_projection(self.projection)
         previous_messages = self.messages
         try:
             # A section's bounded empty/JSON retry may call us again after
@@ -124,6 +128,8 @@ class PreparedReportCall:
                 raise ModelContextExceeded() from exc
             with request_admission(lambda: self.runtime.session.admit_attempt(self.stage)):
                 try:
+                    if self.validate_projection is not None:
+                        self.validate_projection(self.projection)
                     return self.client.chat_json(self.messages, self.schema, **kwargs)
                 except AskCancelled:
                     raise
@@ -598,6 +604,17 @@ def report_editor_call(engine, question, sections, frame, blueprint, intent_bloc
     prepared = runtime.prepare("report_summary", REPORT_SUMMARY_SCHEMA_HINT, render,
                                units, stage="final_editor",
                                max_tokens=engine.settings.report_summary_max_tokens)
+    completed = {unit.handle for unit, section in zip(chapter_units, sections)
+                 if str(section.get("markdown") or "").strip() and not section.get("failed")}
+
+    def require_completed_chapter(projection):
+        if not completed.intersection(projection.source_handles):
+            # A synthesis blueprint may suggest claims absent from the final
+            # prose. Keep this gate on every send, including provider recovery.
+            runtime.session.note_failure("final_editor")
+            raise ReportContextOverflow()
+
+    prepared.validate_projection = require_completed_chapter
     try:
         return prepared.chat_json()
     finally:
