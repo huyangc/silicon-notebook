@@ -53,6 +53,7 @@ from app.domain.kg_attrs_contracts import (
     REJECT_SYMBOL_NOT_IN_CONTEXT,
     REJECT_SYMBOL_NOT_IN_FORMULA,
     REJECT_TOO_FAR,
+    SEGMENT_SEPARATOR,
     SYMBOL_CHARS_MAX,
     VARIABLES_MAX,
 )
@@ -458,6 +459,8 @@ def verify_formula_variables(
     if items is None:
         return FormulaVerification((), (), FORMULA_STATUS_FAILED)
     norm_formula = normalize_latex(formula)
+    # Segments are joined with SEGMENT_SEPARATOR, which the offsets count: a
+    # plain join would glue "...gain" to "b is bias" and hide the symbol b.
     bounds: list[tuple[int, str]] = []
     parts: list[str] = []
     offset = 0
@@ -465,8 +468,8 @@ def verify_formula_variables(
         part = normalize_latex(text)
         bounds.append((offset, element_id))
         parts.append(part)
-        offset += len(part)
-    context = "".join(parts)
+        offset += len(part) + len(SEGMENT_SEPARATOR)
+    context = SEGMENT_SEPARATOR.join(parts)
     symbols = [normalize_latex(i["symbol"]) for i in items]
     # Rivals for "nearest symbol": only reply symbols that pass checks 1-2
     # (in the formula, standing on their own in the context).

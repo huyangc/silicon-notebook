@@ -1011,12 +1011,14 @@ class Budget:
             self.calls += 1
             self.chars += chars
 
-    def refund(self, chars: int) -> None:
-        """The reserved call was answered from the cache: nothing was sent."""
+    def refund(self, chars: int, *, cache_hit: bool = True) -> None:
+        """A reserved request was not sent (answered from the cache, or never
+        needed)."""
         with self._lock:
             self.calls -= 1
             self.chars -= chars
-            self.cache_hits += 1
+            if cache_hit:
+                self.cache_hits += 1
 
 
 def messages_chars(messages: Sequence[Mapping[str, str]]) -> int:
@@ -1093,24 +1095,53 @@ def formula_workload(registry: Any, service_id: str, *, explicit: str | None = N
     return workload
 
 
+# Retries are the tool's, never the clients': every transport request is
+# booked before it can go out. One product attempt runs with the client's own
+# retries off (max_retries=0) but may still send up to three requests (the
+# json_schema -> json_object -> plain response-format fallback), so an attempt
+# books three and hands back what call_stats says was not sent.
+FORMULA_ATTEMPTS = 2
+PRODUCT_REQUESTS_PER_ATTEMPT = 3
+JUDGE_ATTEMPTS = 3
+RETRY_ATTEMPTS = {"formula": FORMULA_ATTEMPTS * PRODUCT_REQUESTS_PER_ATTEMPT, "judge": JUDGE_ATTEMPTS}
+
+
 def call_formula(client: Any, formula: str, segments: Sequence[Sequence[str]],
                  budget: Budget) -> tuple[str | None, str | None]:
     """The product formula call (no thinking, shape validator => cached).
-    Returns (raw reply, None) or (None, exception class name)."""
+    Returns (raw reply, None) or (None, exception class name of the last try)."""
     messages = kg_attrs.formula_variables_messages(formula, [tuple(s) for s in segments])
     chars = messages_chars(messages)
-    budget.reserve(chars)
-    stats: dict = {}
-    try:
-        raw = client.chat_json(
-            messages, kg_attrs.FORMULA_VARIABLES_HINT, thinking_mode="disabled",
-            response_validator=kg_attrs.formula_variables_reply_ok, call_stats=stats,
-        )
-    except Exception as exc:  # recorded as status "failed" (still counted), never retried here
-        return None, type(exc).__name__
-    if stats.get("status") == "cache_hit":
-        budget.refund(chars)
-    return raw, None
+    error = None
+    for _attempt in range(FORMULA_ATTEMPTS):
+        for _ in range(PRODUCT_REQUESTS_PER_ATTEMPT):
+            budget.reserve(chars)
+        stats: dict = {}
+        try:
+            raw = client.chat_json(
+                messages, kg_attrs.FORMULA_VARIABLES_HINT, thinking_mode="disabled", max_retries=0,
+                response_validator=kg_attrs.formula_variables_reply_ok, call_stats=stats,
+            )
+        except Exception as exc:  # counted; retried by this loop only
+            error = type(exc).__name__
+            _settle(budget, chars, stats)
+            continue
+        if stats.get("status") == "cache_hit":
+            for index in range(PRODUCT_REQUESTS_PER_ATTEMPT):
+                budget.refund(chars, cache_hit=index == 0)
+        else:
+            _settle(budget, chars, stats)
+        return raw, None
+    return None, error
+
+
+def _settle(budget: Budget, chars: int, stats: Mapping[str, Any]) -> None:
+    """Hand back the booked requests the transport reports it did not send.
+    Without an observed count the whole booking stands."""
+    sent = stats.get("attempts") if stats.get("attempts_observed") else None
+    if isinstance(sent, int):
+        for _ in range(max(0, PRODUCT_REQUESTS_PER_ATTEMPT - sent)):
+            budget.refund(chars, cache_hit=False)
 
 
 def verification_record(formula: str, segments: Sequence[Sequence[str]], reply: str | None,
@@ -1771,8 +1802,9 @@ def budget_table(rows: Iterable[Mapping[str, Any]]) -> list[dict]:
         entry = table.setdefault(key, {"host": row["host"], "pool": row["pool"], "kind": row["kind"],
                                        "calls": 0, "chars": 0,
                                        "needs_egress": row["pool"] in LOCAL_POOLS})
-        entry["calls"] += 1
-        entry["chars"] += row["chars"]
+        count = int(row.get("count", 1))
+        entry["calls"] += count
+        entry["chars"] += row["chars"] * count
     return [table[k] for k in sorted(table)]
 
 
@@ -1789,15 +1821,19 @@ def render_budget_table(table: Sequence[Mapping[str, Any]]) -> str:
 def plan_calls(
     alias_items: Sequence[dict], scan_lists: Mapping[str, Sequence[dict]], *,
     formula_host: str, judge_host: str, max_formulas: int,
+    attempts: Mapping[str, int] | None = None,
 ) -> list[dict]:
     """Upper-bound call plan for the dry run (before any reply is known):
     every formula among the first ``max_formulas`` of each language's scan
     order gets a product call (pool A replies come from the fixture) and a
     draft call; at most ``MAX_PAIR_PRELABEL_CARDS`` cards get a pair
-    pre-label; every sampled alias gets one pre-label."""
+    pre-label; every sampled alias gets one pre-label. With ``attempts``
+    ({"formula": n, "judge": m}) each call counts as that many transport
+    requests, the worst case the run may book."""
+    tries = {"formula": 1, "judge": 1, **(attempts or {})}
     rows = []
     for item in alias_items:
-        rows.append({"host": judge_host, "pool": item["pool"], "kind": "alias_prelabel",
+        rows.append({"host": judge_host, "pool": item["pool"], "kind": "alias_prelabel", "count": tries["judge"],
                      "chars": messages_chars(alias_prelabel_messages(item)) + len(ALIAS_PRELABEL_HINT)})
     card_budget = MAX_PAIR_PRELABEL_CARDS
     for language in LANGUAGES:
@@ -1805,20 +1841,32 @@ def plan_calls(
             segments = formula["segments"]
             if formula["pool"] != "A":
                 rows.append({"host": formula_host, "pool": formula["pool"], "kind": "formula",
-                             "chars": messages_chars(kg_attrs.formula_variables_messages(
+                             "count": tries["formula"], "chars": messages_chars(kg_attrs.formula_variables_messages(
                                  formula["name"], [tuple(s) for s in segments]))})
-            rows.append({"host": judge_host, "pool": formula["pool"], "kind": "draft",
+            rows.append({"host": judge_host, "pool": formula["pool"], "kind": "draft", "count": tries["judge"],
                          "chars": messages_chars(draft_messages(formula["name"], segments)) + len(DRAFT_HINT)})
             if card_budget > 0:
                 card_budget -= 1
                 fake = {"formula": formula["name"], "segments": segments,
                         "pairs": [{"symbol": "x", "meaning": "m" * 20}] * ESTIMATED_PAIRS_PER_CARD}
                 rows.append({"host": judge_host, "pool": formula["pool"], "kind": "pair_prelabel",
-                             "chars": messages_chars(pair_prelabel_messages(fake)) + len(PAIR_PRELABEL_HINT)})
+                             "count": tries["judge"], "chars": messages_chars(pair_prelabel_messages(fake)) + len(PAIR_PRELABEL_HINT)})
     return rows
 
 
 # --- prepare orchestration --------------------------------------------------
+
+def judge_once(judge: Any, messages: Sequence[Mapping[str, str]], hint: str) -> str:
+    """Exactly one transport request: KGClient's own loop limited to one try
+    and the OpenAI SDK's hidden retries pinned to zero (KGClient drops its SDK
+    client after a failure, so the pin is re-applied on every call)."""
+    if getattr(judge, "configured", False) and getattr(judge, "api_key", None):
+        from openai import OpenAI
+
+        judge._client = OpenAI(api_key=judge.api_key, base_url=judge.base_url,
+                               timeout=judge.timeout, max_retries=0)
+    return judge.chat_json(list(messages), hint, retries=1)
+
 
 def _judge_client():
     from app.services.kg.client import make_client
@@ -1878,17 +1926,30 @@ def run_prepare(args: Any) -> int:
         previous = _read_json(out_dir / "items.json") if args.top_up and (out_dir / "items.json").is_file() else None
         alias_items = sample_aliases(candidates, per_rule=args.per_rule, seed=args.seed,
                                      existing=(previous or {}).get("alias_items", []))
-        # The plan always covers every pool, so the dry run shows the rows that
-        # need the egress switch whether or not it is on.
-        planned_lists = {
-            lang: dedup_by_key(
-                [_materialize(f, conn, max_chars) for f in formulas[: args.max_formulas_per_language]],
-                key=lambda f: card_key(f["segments"], f["name"]))
-            for lang, formulas in _scan_lists(a_formulas, local_formulas, seed=args.seed, egress=True).items()
-        }
-        table = budget_table(plan_calls(alias_items, planned_lists, formula_host=formula_host,
+        def materialized(plan):
+            return {lang: dedup_by_key([_materialize(f, conn, max_chars) for f in formulas],
+                                       key=lambda f: card_key(f["segments"], f["name"]))
+                    for lang, formulas in plan.items()}
+
+        # The preview always covers every pool, so the dry run shows the rows
+        # that need the egress switch whether or not it is on. What actually
+        # runs is planned separately, excluding disallowed pools BEFORE the
+        # per-language cap, so a large local pool cannot crowd pool A out.
+        preview_lists = materialized(scan_plan(a_formulas, local_formulas, seed=args.seed, egress=True,
+                                               max_formulas=args.max_formulas_per_language))
+        planned_lists = preview_lists if egress else materialized(
+            scan_plan(a_formulas, local_formulas, seed=args.seed, egress=False,
+                      max_formulas=args.max_formulas_per_language))
+        table = budget_table(plan_calls(alias_items, preview_lists, formula_host=formula_host,
                                         judge_host=judge_host, max_formulas=args.max_formulas_per_language))
         print(render_budget_table(table))
+        worst = budget_table(plan_calls(alias_items, preview_lists, formula_host=formula_host,
+                                        judge_host=judge_host, max_formulas=args.max_formulas_per_language,
+                                        attempts=RETRY_ATTEMPTS))
+        print(f"[prepare] worst case if every request is retried (formula x{RETRY_ATTEMPTS['formula']}, "
+              f"judge x{RETRY_ATTEMPTS['judge']}): {sum(r['calls'] for r in worst)} requests / "
+              f"{sum(r['chars'] for r in worst)} chars; --max-calls {args.max_calls} / "
+              f"--max-input-chars {args.max_input_chars} must cover the rows that will run")
         print(f"[prepare] concepts A/B/C = {dict(Counter(c['pool'] for c in concepts))}; "
               f"formulas en/zh = {dict(Counter(f['language'] for f in a_formulas + local_formulas))}; "
               f"egress={'on' if egress else 'off'} (rows marked 是 run only with the switch)")
@@ -1900,13 +1961,14 @@ def run_prepare(args: Any) -> int:
             raise SystemExit("re-run with --confirm-budget after the budget above is approved")
         if not judge.configured:
             raise SystemExit("EVAL_JUDGE_OPENAI_COMPAT_* is not configured: drafts and pre-labels need it")
-        runnable = [row for row in table if egress or not row["needs_egress"]]
+        runnable = budget_table(plan_calls(
+            [a for a in alias_items if a["prelabel_allowed"]], planned_lists, formula_host=formula_host,
+            judge_host=judge_host, max_formulas=args.max_formulas_per_language,
+            attempts=RETRY_ATTEMPTS))
         calls, chars = sum(r["calls"] for r in runnable), sum(r["chars"] for r in runnable)
         if calls > args.max_calls or chars > args.max_input_chars:
             raise SystemExit(f"the plan's upper bound ({calls} calls / {chars} chars) exceeds "
                              f"--max-calls {args.max_calls} / --max-input-chars {args.max_input_chars}")
-        if not egress:
-            planned_lists = {lang: [f for f in fs if f["pool"] == "A"] for lang, fs in planned_lists.items()}
         identity = run_identity(seed=args.seed, fixture=fixture, max_chars=max_chars, pair_window=pair_window,
                                 formula=formula_record, egress=egress)
         if previous is not None:
@@ -1935,6 +1997,13 @@ def run_prepare(args: Any) -> int:
         finally:
             conn.close()
             provider.close()
+
+
+def scan_plan(a_formulas, local_formulas, *, seed: int, egress: bool, max_formulas: int) -> dict[str, list[dict]]:
+    """The scan order per language, disallowed pools left out FIRST and only
+    then capped at ``max_formulas``."""
+    return {lang: formulas[:max_formulas]
+            for lang, formulas in _scan_lists(a_formulas, local_formulas, seed=seed, egress=egress).items()}
 
 
 def _scan_lists(a_formulas, local_formulas, *, seed: int, egress: bool) -> dict[str, list[dict]]:
@@ -1986,6 +2055,13 @@ def scan_order_sha(formulas: Sequence[Mapping[str, Any]]) -> str:
     return _sha("\n".join(f["ref"] for f in formulas))
 
 
+def scan_order_record(formulas: Sequence[Mapping[str, Any]], position: int) -> dict:
+    """The part of the order a saved run already consumed: its length and hash.
+    A later run may continue as long as its order starts with that prefix
+    (for example after raising --max-formulas-per-language)."""
+    return {"length": position, "sha": scan_order_sha(formulas[:position])}
+
+
 def resume_problems(previous: Mapping[str, Any], identity: Mapping[str, Any],
                     planned_lists: Mapping[str, Sequence[Mapping[str, Any]]]) -> list[str]:
     problems = [
@@ -1993,7 +2069,11 @@ def resume_problems(previous: Mapping[str, Any], identity: Mapping[str, Any],
         for field, value in identity.items() if previous.get("identity", {}).get(field) != value
     ]
     for language, state in (previous.get("scan_state") or {}).items():
-        if state.get("order") != scan_order_sha(planned_lists.get(language, [])):
+        order = state.get("order") or {}
+        formulas = planned_lists.get(language, [])
+        length = order.get("length")
+        if not isinstance(length, int) or length > len(formulas) \
+                or scan_order_sha(formulas[:length]) != order.get("sha"):
             problems.append(f"the {language} scan order differs from the saved run")
     return problems
 
@@ -2024,17 +2104,17 @@ def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_
         if pool in LOCAL_POOLS and not egress:
             raise AssertionError("local pool text would leave the machine without the egress switch")
 
-    def send(kind: str, pool: str, host_key: str, messages, call) -> Any:
+    def send(kind: str, pool: str, host_key: str, messages, hint: str) -> Any:
         guard(pool)
-        chars = messages_chars(messages)
-        budget.reserve(chars)
-        try:
-            result = call()
-        except Exception as exc:  # one failed judge call never ends the run
-            failures[f"{kind}:{type(exc).__name__}"] += 1
-            return None
-        egress_log[f"{hosts[host_key]}|{pool}|{kind}"] += chars
-        return result
+        chars = messages_chars(messages) + len(hint)
+        for _attempt in range(JUDGE_ATTEMPTS):
+            budget.reserve(chars)                 # one booked request per attempt
+            egress_log[f"{hosts[host_key]}|{pool}|{kind}"] += chars
+            try:
+                return judge_once(judge, messages, hint)
+            except Exception as exc:  # one failed judge call never ends the run
+                failures[f"{kind}:{type(exc).__name__}"] += 1
+        return None
 
     def product(formula: dict) -> tuple[str | None, str | None]:
         if formula["pool"] == "A":
@@ -2049,7 +2129,7 @@ def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_
 
     def draft(formula: dict) -> list[dict] | None:
         messages = draft_messages(formula["name"], formula["segments"])
-        raw = send("draft", formula["pool"], "judge", messages, lambda: judge.chat_json(messages, DRAFT_HINT))
+        raw = send("draft", formula["pool"], "judge", messages, DRAFT_HINT)
         return None if raw is None else parse_draft_reply(raw)
 
     scan_state = (previous or {}).get("scan_state", {})
@@ -2082,8 +2162,7 @@ def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_
             if item.get("prelabel") is None and item["prelabel_allowed"]:
                 messages = alias_prelabel_messages(item)
                 item["prelabel"] = parse_verdict(send(
-                    "alias_prelabel", item["pool"], "judge", messages,
-                    lambda m=messages: judge.chat_json(m, ALIAS_PRELABEL_HINT)))
+                    "alias_prelabel", item["pool"], "judge", messages, ALIAS_PRELABEL_HINT))
         labelled = 0
         for card in cards:
             if labelled >= MAX_PAIR_PRELABEL_CARDS:
@@ -2093,8 +2172,7 @@ def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_
                 continue
             messages = pair_prelabel_messages(card)
             judgements = parse_judgements(send(
-                "pair_prelabel", card["pool"], "judge", messages,
-                lambda m=messages: judge.chat_json(m, PAIR_PRELABEL_HINT)), len(card["pairs"]))
+                "pair_prelabel", card["pool"], "judge", messages, PAIR_PRELABEL_HINT), len(card["pairs"]))
             for pair, verdict in zip(card["pairs"], judgements):
                 pair["prelabel"] = verdict
     except BudgetExceeded as exc:
@@ -2134,7 +2212,7 @@ def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_
         "formula_scan": formula_scan,
         "scan_state": {lang: {**{k: (dict(v) if k == "status" else v) for k, v in scans[lang].items()
                                  if k != "cards"},
-                              "order": scan_order_sha(planned_lists.get(lang, []))}
+                              "order": scan_order_record(planned_lists.get(lang, []), scans[lang]["position"])}
                        for lang in LANGUAGES},
         "yield": alias_yield(concepts) | {"formula_status": {lang: dict(scans[lang]["status"]) for lang in LANGUAGES}},
         "egress_log": {"sent_chars": dict(egress_log), "calls": budget.calls, "chars": budget.chars,
