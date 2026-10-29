@@ -491,6 +491,7 @@ export function CitationPopover({
   importController,
   notes,
   imageCaptions,
+  takeFocus = false,
   dismissSuspended = false,
 }: {
   reference: AnswerReference;
@@ -517,11 +518,23 @@ export function CitationPopover({
   notes?: readonly string[];
   /** 本段附图下显示图注，原样透传给 SelectedReferenceDetail。 */
   imageCaptions?: boolean;
+  /** 打开（及换一条引用）时把焦点移进卡片，Esc 收起时交还给打开前的那个标记。公开
+   *  分享页用：那里的卡片上没有任何可聚焦的控件，不移焦的话键盘用户滚不动被限高
+   *  裁掉的长摘录（此前点标记会把焦点移到页底清单那一条，这是它的等价物）。点卡片
+   *  外收起时不抢回焦点——那一下点的地方才是用户要去的。 */
+  takeFocus?: boolean;
   /** Keep the thumbnail trigger mounted while its page-level preview is open,
    * so the modal coordinator can return focus to a live element. */
   dismissSuspended?: boolean;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!takeFocus) return;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && !ref.current?.contains(active)) returnFocusRef.current = active;
+    ref.current?.focus({ preventScroll: true });
+  }, [takeFocus, reference.id]);
   const [pos, setPos] = useState<{ top: number; left: number }>(
     () => ({ top: anchorRect.bottom + 6, left: anchorRect.left })
   );
@@ -559,7 +572,9 @@ export function CitationPopover({
       if (!claimEscapePress()) return;
       event.preventDefault();
       event.stopPropagation();
+      const returnTo = takeFocus ? returnFocusRef.current : null;
       onClose();
+      if (returnTo?.isConnected) returnTo.focus({ preventScroll: true });
     };
     const onScroll = (event: Event) => {
       // 浮层内部滚动(查看长内容)不应关闭;只有外部页面/祖先滚动导致脱锚时才关。
@@ -576,12 +591,14 @@ export function CitationPopover({
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("scroll", onScroll, true);
     };
-  }, [dismissSuspended, onClose]);
+  }, [dismissSuspended, onClose, takeFocus]);
   return (
     <div
       ref={ref}
       className="cite-popover"
       role="dialog"
+      tabIndex={takeFocus ? -1 : undefined}
+      aria-label={takeFocus ? `引用 ${reference.displayLabel}` : undefined}
       style={{ position: "fixed", top: pos.top, left: pos.left }}
     >
       <SelectedReferenceDetail
