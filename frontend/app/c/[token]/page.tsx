@@ -585,7 +585,12 @@ function PublicTurnView({
           只为正文没标到的条目与打印/存档时仍可核对，不再把每轮回答底下铺满引用。 */}
       {turn.references.length > 0 && (
         <details className="public-report-references public-references-fold">
-          <summary>引用出处 · {turn.references.length} 条</summary>
+          {/* 截断说明放在折叠头上：收起时也看得见，不让投影条数被读成完整清单。 */}
+          <summary>
+            引用出处 · {turn.truncated_references
+              ? `引用过多，只展示前 ${turn.references.length} 条`
+              : `${turn.references.length} 条`}
+          </summary>
           <ol>
             {turn.references.map((reference, refIndex) => (
               <li
@@ -631,11 +636,6 @@ function PublicTurnView({
               </li>
             ))}
           </ol>
-          {turn.truncated_references && (
-            <p className="public-report-note">
-              引用出处过多，此处只展示前 {turn.references.length} 条。
-            </p>
-          )}
         </details>
       )}
     </section>

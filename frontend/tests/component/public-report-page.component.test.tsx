@@ -137,6 +137,15 @@ test("打印时展开所有收起的引用折叠，打印后只收回打印前�
   expect(bottom.open).toBe(true);
 });
 
+test("引用出处被截断时，收起的折叠头上就写明只展示前 N 条", async () => {
+  mocks.fetchPublicReport.mockResolvedValue({ ...REPORT, truncated_references: true, reference_count: 2 });
+  const { container } = render(<PublicReportPage />);
+
+  const summary = await screen.findByText("引用出处 · 引用过多，只展示前 2 条");
+  expect(summary.tagName).toBe("SUMMARY");
+  expect(container.querySelector("details.public-references-fold")).not.toHaveAttribute("open");
+});
+
 test("宽表格与代码块走共用包装，才能在自己的内容块里横向滚动", async () => {
   const { container } = render(<PublicReportPage />);
 
