@@ -28,7 +28,7 @@ def _parse(argv: list[str]) -> "tuple[str, str, bool] | None":
     source_id = ""
     if "--source" in args:
         at = args.index("--source")
-        if at + 1 >= len(args) or args.count("--source") != 1:
+        if at + 1 >= len(args):
             return None
         source_id = args[at + 1]
         del args[at:at + 2]
