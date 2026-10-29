@@ -54,9 +54,8 @@ test("正文 [k] 标记渲染成可点编号，点开在标记旁弹出与站内
   expect(chip).toHaveClass("cite-chip");
   expect(screen.queryByText("[k7]")).toBeNull();
 
-  const entry = container.querySelector("#ref-k7");
-  expect(entry).not.toBeNull();
-  expect(entry!.querySelector(".public-report-refnum")!.textContent).toBe("7");
+  // 页底不再另列一份引用出处（与正文参考文献重复）：引用只看这张卡。
+  expect(container.querySelector(".public-report-references")).toBeNull();
 
   await user.click(chip);
   const card = await screen.findByRole("dialog");
@@ -96,7 +95,7 @@ test("引用卡上显式披露截断，个人记忆读作「作者的个人记�
   expect(card).not.toHaveTextContent("（标题过长，已截断）");
 });
 
-test("正文的「参考文献」与页底的「引用出处」都默认收起、可展开", async () => {
+test("只留正文的「参考文献」：默认收起、可展开，页底不再重复列「引用出处」", async () => {
   const user = userEvent.setup();
   mocks.fetchPublicReport.mockResolvedValue({
     ...REPORT,
@@ -109,41 +108,42 @@ test("正文的「参考文献」与页底的「引用出处」都默认收起�
   expect(bodyFold).toHaveClass("report-references-fold");
   expect(bodyFold).not.toHaveAttribute("open");
   expect(bodyFold).not.toHaveTextContent("证据有限");
+  expect(container.querySelectorAll("details")).toHaveLength(1);
+  expect(screen.queryByText(/^引用出处/)).toBeNull();
 
-  const bottom = container.querySelector<HTMLDetailsElement>("details.public-references-fold")!;
-  expect(bottom).not.toHaveAttribute("open");
-  const summary = within(bottom).getByText("引用出处 · 2 条");
-  await user.click(summary);
-  expect(bottom).toHaveAttribute("open");
-  expect(within(bottom).getAllByRole("listitem")).toHaveLength(2);
+  await user.click(heading);
+  expect(bodyFold).toHaveAttribute("open");
+  // 参考文献里的编号同样弹引用卡。
+  await user.click(within(bodyFold).getByRole("button", { name: "[7]" }));
+  expect(await screen.findByRole("dialog")).toHaveTextContent("乙摘录");
 });
 
-test("打印时展开所有收起的引用折叠，打印后只收回打印前收起的那些", async () => {
+test("打印时展开收起的参考文献，打印后收回", async () => {
   mocks.fetchPublicReport.mockResolvedValue({
     ...REPORT,
     content_md: `${REPORT.content_md}\n\n## 参考文献\n\n- [k1] 甲文`,
   });
-  const { container } = render(<PublicReportPage />);
+  render(<PublicReportPage />);
   const bodyFold = (await screen.findByRole("heading", { name: "参考文献" })).closest("details")!;
-  const bottom = container.querySelector<HTMLDetailsElement>("details.public-references-fold")!;
-  bottom.open = true; // 读者自己点开的
 
   window.dispatchEvent(new Event("beforeprint"));
   expect(bodyFold.open).toBe(true);
-  expect(bottom.open).toBe(true);
-
   window.dispatchEvent(new Event("afterprint"));
   expect(bodyFold.open).toBe(false);
-  expect(bottom.open).toBe(true);
 });
 
-test("引用出处被截断时，收起的折叠头上就写明只展示前 N 条", async () => {
+test("引用出处被截断时页面上写明只收录前 N 条", async () => {
   mocks.fetchPublicReport.mockResolvedValue({ ...REPORT, truncated_references: true, reference_count: 2 });
-  const { container } = render(<PublicReportPage />);
+  render(<PublicReportPage />);
 
-  const summary = await screen.findByText("引用出处 · 引用过多，只展示前 2 条");
-  expect(summary.tagName).toBe("SUMMARY");
-  expect(container.querySelector("details.public-references-fold")).not.toHaveAttribute("open");
+  expect(await screen.findByText("引用出处过多，分享副本只收录前 2 条，其余引用编号无法点开查看。"))
+    .toHaveClass("public-report-note");
+});
+
+test("没被截断时不挂截断说明", async () => {
+  render(<PublicReportPage />);
+  await screen.findByRole("button", { name: "[7]" });
+  expect(screen.queryByText(/引用出处过多/)).toBeNull();
 });
 
 test("宽表格与代码块走共用包装，才能在自己的内容块里横向滚动", async () => {
@@ -164,7 +164,8 @@ test("撤销或不存在的 token 给出可读的空态", async () => {
   expect(await screen.findByText("链接不可用")).toBeInTheDocument();
 });
 
-test("标题/原始文件名/摘录被截断时逐条显式披露，不静默丢尾", async () => {
+test("标题/原始文件名/摘录被截断时在引用卡上逐条显式披露，不静默丢尾", async () => {
+  const user = userEvent.setup();
   mocks.fetchPublicReport.mockResolvedValue({
     ...REPORT,
     references: [
@@ -183,9 +184,11 @@ test("标题/原始文件名/摘录被截断时逐条显式披露，不静默丢
   });
   render(<PublicReportPage />);
 
-  expect(await screen.findByText("（标题过长，已截断）")).toBeInTheDocument();
-  expect(screen.getByText("（原始文件名过长，已截断）")).toBeInTheDocument();
-  expect(screen.getByText("（摘录过长，已截断）")).toBeInTheDocument();
+  await user.click(await screen.findByRole("button", { name: "[1]" }));
+  const card = await screen.findByRole("dialog");
+  expect(within(card).getByText("（标题过长，已截断）")).toBeInTheDocument();
+  expect(within(card).getByText("（原始文件名过长，已截断）")).toBeInTheDocument();
+  expect(within(card).getByText("（摘录过长，已截断）")).toBeInTheDocument();
 });
 
 test("研究问题被截断时页头显式披露（只可能出现在护栏上线前建的报告上）", async () => {
@@ -198,9 +201,11 @@ test("研究问题被截断时页头显式披露（只可能出现在护栏上�
 test("没被截断的引用不挂假提示", async () => {
   // 空转保护：上一条可以被一个「恒渲染提示」的实现骗过去。REPORT 的两条引用都
   // 不带 `*_truncated`（旧后端也是这个形状），此时一个提示都不该出现。
+  const user = userEvent.setup();
   render(<PublicReportPage />);
 
-  await screen.findByText(/^引用出处 · /);
+  await user.click(await screen.findByRole("button", { name: "[1]" }));
+  await screen.findByRole("dialog");
   expect(screen.queryByText("（标题过长，已截断）")).toBeNull();
   expect(screen.queryByText("（原始文件名过长，已截断）")).toBeNull();
   expect(screen.queryByText("（摘录过长，已截断）")).toBeNull();
@@ -209,8 +214,10 @@ test("没被截断的引用不挂假提示", async () => {
 });
 
 test("个人记忆引用（后端的结构化布尔 is_memory）保留标题与摘录，位置标签读作「作者的个人记忆」", async () => {
+  const user = userEvent.setup();
   mocks.fetchPublicReport.mockResolvedValue({
     ...REPORT,
+    content_md: "甲[k1]，乙[k2]，丙[k7]。",
     references: [
       // 后端没有位置标签可给时，标签也照样出现（不能因为 location 为空就整行消失）。
       { key: "k1", title: "我的笔记", file_name: "", location: "", snippet: "记忆摘录", is_memory: true },
@@ -219,19 +226,27 @@ test("个人记忆引用（后端的结构化布尔 is_memory）保留标题与�
       { key: "k7", title: "乙文", file_name: "乙文", location: "p. 3", snippet: "乙摘录" },
     ],
   });
-  const { container } = render(<PublicReportPage />);
+  render(<PublicReportPage />);
 
-  await screen.findByText(/^引用出处 · /);
-  const memory = container.querySelector("#ref-k1")!;
-  expect(memory.querySelector("strong")!.textContent).toBe("我的笔记");
-  expect(memory.querySelector("blockquote")!.textContent).toBe("记忆摘录");
-  expect(memory.querySelector(".public-report-locus")!.textContent).toBe("作者的个人记忆");
-  expect(container.querySelector("#ref-k2 .public-report-locus")!.textContent).toBe("作者的个人记忆");
+  const cardFor = async (label: string) => {
+    await user.click(await screen.findByRole("button", { name: label }));
+    return screen.findByRole("dialog");
+  };
+  const memory = await cardFor("[1]");
+  expect(memory.querySelector("h4")!.textContent).toBe("我的笔记");
+  expect(memory).toHaveTextContent("记忆摘录");
+  expect(memory).toHaveTextContent("作者的个人记忆");
+  await waitFor(async () => expect(await cardFor("[2]")).toHaveTextContent("另一条笔记"));
+  expect(screen.getByRole("dialog")).toHaveTextContent("作者的个人记忆");
+  expect(screen.getByRole("dialog")).not.toHaveTextContent("第 2 页");
   // 不是个人记忆的引用：位置标签原样，也没有个人记忆标签。
-  expect(container.querySelector("#ref-k7 .public-report-locus")!.textContent).toBe("p. 3");
+  await waitFor(async () => expect(await cardFor("[7]")).toHaveTextContent("乙摘录"));
+  expect(screen.getByRole("dialog")).toHaveTextContent("p. 3");
+  expect(screen.getByRole("dialog")).not.toHaveTextContent("作者的个人记忆");
 });
 
 test("只认结构化布尔：位置标签恰好叫 Memory 的普通文档引用不会被标成个人记忆", async () => {
+  const user = userEvent.setup();
   mocks.fetchPublicReport.mockResolvedValue({
     ...REPORT,
     references: [
@@ -239,13 +254,13 @@ test("只认结构化布尔：位置标签恰好叫 Memory 的普通文档引用
       { key: "k1", title: "芯片手册", file_name: "chip.pdf", location: "Memory", snippet: "章节摘录" },
     ],
   });
-  const { container } = render(<PublicReportPage />);
+  render(<PublicReportPage />);
 
-  await screen.findByText(/^引用出处 · /);
-  expect(container.querySelector("#ref-k1 .public-report-locus")!.textContent).toBe("Memory");
-  expect(screen.queryByText("作者的个人记忆")).toBeNull();
+  await user.click(await screen.findByRole("button", { name: "[1]" }));
+  const card = await screen.findByRole("dialog");
+  expect(card).toHaveTextContent("chip.pdf · Memory");
+  expect(screen.queryByText(/作者的个人记忆/)).toBeNull();
 });
-
 
 test("分享页只显示失败章节的中性说明，不显示失败原因", async () => {
   // 公开接口本就不返回 sections;即便响应里混进了带原文的字段,页面也不读它。
