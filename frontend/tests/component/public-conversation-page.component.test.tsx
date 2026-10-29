@@ -193,6 +193,23 @@ test("整页只有一张引用卡：键盘从一轮的标记换到另一轮的�
   expect(first).not.toHaveClass("active");
 });
 
+test("键盘打开引用卡时焦点进卡片（长摘录可用键盘滚动），Esc 收起后回到那个标记", async () => {
+  const user = userEvent.setup();
+  render(<PublicConversationPage />);
+
+  const chip = await screen.findByRole("button", { name: "[7]" });
+  chip.focus();
+  await user.keyboard("{Enter}");
+  const card = await screen.findByRole("dialog", { name: "引用 [7]" });
+  expect(card).toHaveFocus();
+  expect(card).toHaveAttribute("tabindex", "-1");
+
+  fireEvent.keyDown(card, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  fireEvent.keyUp(window, { key: "Escape" });
+  expect(chip).toHaveFocus();
+});
+
 test("多轮问答右缘有提问导航圆点，点圆点跳到对应那一轮", async () => {
   const user = userEvent.setup();
   render(<PublicConversationPage />);

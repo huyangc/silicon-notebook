@@ -89,6 +89,7 @@ export function PublicCitationPopover({
       anchorRect={anchorRect}
       onClose={onClose}
       notes={publicReferenceNotes(reference)}
+      takeFocus
     />
   );
 }
