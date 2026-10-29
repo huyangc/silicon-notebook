@@ -3632,7 +3632,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 ### 模型上下文容量与报告压缩
 
-每个 chat 服务必须声明实际生效的 `context_window_tokens`、`max_output_tokens`，可选 `max_input_tokens`。必填容量缺失或无效时（包括旧配置）拒绝启动；无效热更新保留上一份有效 registry。容量不按模型名称推测。离线运行不需要容量声明，embedding/rerank 服务不使用聊天容量字段。模型服务状态里的声明容量仅管理员可见。
+每个 chat 服务必须声明实际生效的 `context_window_tokens`、`max_output_tokens`，可选 `max_input_tokens`。必填容量缺失或无效时（包括旧配置）拒绝启动；无效热更新保留上一份有效 registry。容量不按模型名称推测。离线运行不需要容量声明，embedding/rerank 服务不使用聊天容量字段。模型服务状态里的声明容量仅管理员可见。每张聊天服务卡片将容量与使用位置分区展示，沿用并发、队列的指标样式：标签在上，完整的千分位数值在下，`tokens` 单位弱化显示；最大输入仅在配置时出现，窄屏下容量指标自动换行。兼容旧后端时，缺失的必填容量仍保留对应指标，显示「未配置」且不带单位；界面不根据模型名称推测容量。
 
 报告持久化的 `understanding` 完整保留冻结的 `source_scope` 与 `base_scope`，用于检索约束、重试及后续追问。大纲规划、全篇综合和终审接收的意图合同排除这些执行范围及 `context_processing`、`credibility` 回执；章节的 `intent_contract` 副本使用同一投影。确认后的澄清答案、必答主题、对比维度、约束和假设等研究语义完整保留。含完整合同的旧大纲在构造提示时使用同一投影，无需数据迁移。最终组装补充审计结果时保留存储中的 understanding 元数据。
 

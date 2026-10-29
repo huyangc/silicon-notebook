@@ -77,12 +77,23 @@ test("chat capacity appears only for administrators, including independent input
     context_window_tokens: 131072, max_output_tokens: 32768, max_input_tokens: 98304,
   })] };
   const view = renderPanel({ isAdmin: true, status: capacityStatus });
-  expect(screen.getByLabelText("模型容量")).toHaveTextContent("上下文窗口 131,072 tokens");
-  expect(screen.getByLabelText("模型容量")).toHaveTextContent("最大输出 32,768 tokens");
-  expect(screen.getByLabelText("模型容量")).toHaveTextContent("最大输入 98,304 tokens");
+  const capacity = within(screen.getByLabelText("模型容量"));
+  expect(capacity.getAllByRole("term").map((item) => item.textContent))
+    .toEqual(["上下文窗口", "最大输出", "最大输入"]);
+  expect(capacity.getAllByRole("definition").map((item) => item.textContent))
+    .toEqual(["131,072 tokens", "32,768 tokens", "98,304 tokens"]);
   view.unmount();
   renderPanel({ isAdmin: false, status: capacityStatus });
   expect(screen.queryByLabelText("模型容量")).not.toBeInTheDocument();
+});
+
+test("administrators can see missing required capacity from an older backend", () => {
+  renderPanel({ isAdmin: true, status: { services: [status("general", "通用服务", "ok")] } });
+  const capacity = within(screen.getByLabelText("模型容量"));
+  expect(capacity.getAllByRole("term").map((item) => item.textContent))
+    .toEqual(["上下文窗口", "最大输出"]);
+  expect(capacity.getAllByRole("definition").map((item) => item.textContent))
+    .toEqual(["未配置", "未配置"]);
 });
 
 function servicesWithSupportId(supportId: string) {

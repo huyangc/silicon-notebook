@@ -9440,13 +9440,15 @@ button.tag:hover {
   color: #a12b20;
 }
 
-.model-service-metrics {
+.model-service-metrics,
+.model-service-capacity {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
-.model-service-metrics > div {
+.model-service-metrics > div,
+.model-service-capacity > div {
   display: grid;
   gap: 3px;
   min-width: 0;
@@ -9456,15 +9458,33 @@ button.tag:hover {
 }
 
 .model-service-metrics small,
+.model-service-capacity dt,
+.model-service-capacity small,
 .model-service-workloads small {
   color: var(--muted);
   font-size: 11px;
 }
 
-.model-service-metrics strong {
+.model-service-metrics strong,
+.model-service-capacity strong {
   color: #273244;
   font-size: 13px;
   overflow-wrap: anywhere;
+}
+
+.model-service-capacity {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
+  margin: 0;
+}
+
+.model-service-capacity dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
 }
 
 .model-service-workloads,
