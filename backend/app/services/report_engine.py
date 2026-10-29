@@ -65,7 +65,7 @@ from app.services.report_memory_use import RetrievalSourceLog
 from app.services.report_context_runtime import (
     CONTEXT_RECEIPT_KEY, context_disclosure, inherit_blueprint_context_levels,
     intent_context_limited, prepare_section_call,
-    planning_context_call, preserve_context_error, projected_section_map,
+    planning_context_call, preserve_context_error, projected_section_map, prompt_intent_contract,
     receipt_for, record_report_context, record_section_baseline,
     ReportIntentClient,
     report_context_failure,
@@ -1862,6 +1862,7 @@ class ReportEngine:
     def _storm_outline(self, notebook_id, question, history, corpus_map, *,
                        intent_contract=None, intent_probe=None) -> List[dict]:
         from app.services.prompts import report_storm_outline_prompt, REPORT_STORM_SCHEMA_HINT
+        intent_block = json.dumps(prompt_intent_contract(intent_contract), ensure_ascii=False)
         try:
             raw = planning_context_call(
                 self, "report_outline", REPORT_STORM_SCHEMA_HINT,
@@ -1869,7 +1870,7 @@ class ReportEngine:
                     question, blocks["corpus_map"], max_sections=self.settings.report_max_sections,
                     max_subqueries=self.settings.report_max_subqueries_per_section,
                     history_block=history,
-                    intent_block=json.dumps(intent_contract or {}, ensure_ascii=False),
+                    intent_block=intent_block,
                     coverage_block=json.dumps(intent_probe or [], ensure_ascii=False),
                 ), {"corpus_map": corpus_map}, stage="planning_outline")
             data = json.loads(raw)
@@ -1910,6 +1911,7 @@ class ReportEngine:
                                 intent_probe: List[dict]) -> List[dict]:
         """Validate model output and guarantee every mandatory intent is retained."""
         catalog = self._intent_catalog(intent_contract)
+        section_intent = prompt_intent_contract(intent_contract)
         known = {topic["id"]: topic for topic in catalog}
         coverage_by_id = {row.get("intent_id"): row for row in intent_probe}
         out = [dict(section) for section in sections[: self.settings.report_max_sections]]
@@ -1968,7 +1970,7 @@ class ReportEngine:
             # Replicate the small catalog so user removal/reordering cannot erase the
             # final editor's knowledge of an originally mandatory topic.
             section["intent_catalog"] = catalog
-            section["intent_contract"] = intent_contract
+            section["intent_contract"] = section_intent
             if intent_contract.get("report_frame"):
                 section["report_frame"] = intent_contract["report_frame"]
         return out
@@ -3636,6 +3638,28 @@ class ReportEngine:
             emit=getattr(getattr(dependencies, "event_log", None), "emit", None),
         )
 
+    def _persist_report_audit(self, notebook_id, rid, intent_contract, report_frame, credibility):
+        try:
+            # Sections carry only research semantics. Keep the store-owned
+            # frozen ceilings and confirmation state for retries/follow-ups.
+            current = self.dependencies.reports.get_report(notebook_id, rid)
+            understanding = {
+                **dict((current or {}).get("understanding") or {}),
+                **prompt_intent_contract(intent_contract),
+            }
+            if report_frame:
+                understanding["report_frame"] = report_frame
+            understanding["credibility"] = credibility
+            if receipt_for(self):
+                understanding[CONTEXT_RECEIPT_KEY] = receipt_for(self)
+            self.dependencies.reports.update_report(
+                notebook_id, rid, understanding=understanding
+            )
+        except Exception:
+            # Reporting disclosure must not become a terminal write failure; the
+            # same statistics remain derivable from persisted references.
+            pass
+
     def _assemble(self, notebook_id, rid, question, outline, sections, *,
                   display_question: str | None = None):
         intent_contract = next(
@@ -3649,7 +3673,8 @@ class ReportEngine:
             [],
         )
         intent_block = json.dumps(
-            intent_contract or {"objective": question, "mandatory_topics": intent_catalog},
+            prompt_intent_contract(intent_contract)
+            or {"objective": question, "mandatory_topics": intent_catalog},
             ensure_ascii=False,
         )
         # The section-level value crossed the user confirmation boundary and
@@ -4004,20 +4029,7 @@ class ReportEngine:
             "claim_ledgers_total": len(sections),
             "trend_wording_violations": trend_wording_violations,
         }
-        persisted_understanding = dict(intent_contract)
-        if report_frame:
-            persisted_understanding["report_frame"] = report_frame
-        persisted_understanding["credibility"] = credibility
-        if receipt_for(self):
-            persisted_understanding[CONTEXT_RECEIPT_KEY] = receipt_for(self)
-        try:
-            self.dependencies.reports.update_report(
-                notebook_id, rid, understanding=persisted_understanding
-            )
-        except Exception:
-            # Reporting disclosure must not become a terminal write failure; the
-            # same statistics remain derivable from persisted references.
-            pass
+        self._persist_report_audit(notebook_id, rid, intent_contract, report_frame, credibility)
 
         # --- 组装 content_md:执行摘要 + 章节 + 参考文献 +(结尾)局限 ---
         parts = [f"# 深度报告:{display_question or question}", ""]

@@ -142,6 +142,60 @@ def test_fitting_planning_prompt_is_byte_identical_and_does_not_compress():
     assert receipt_for(eng)["extra_calls"] == 0
 
 
+@pytest.mark.parametrize("narrowed", [False, True])
+def test_storm_large_frozen_scope_does_not_consume_model_context(narrowed):
+    target = Transport({"sections": [{"title": "Measurements", "scope": "Compare at 25 C",
+                                       "sub_queries": ["measured conditions"], "intent_ids": ["t1"]}]})
+    target.context_budget = ContextBudget(200000, 8192)
+    eng = engine(target)
+    semantic = {"objective": "Compare measured conditions", "assumptions": ["Only at 25 C"],
+                "constraints": ["Keep negative results"], "exclusions": ["No extrapolation"],
+                "comparison_axes": ["voltage", "temperature"], "result_scope": "ranked",
+                "completeness_required": False, "expected_output": "A technical comparison",
+                "confirmed_input": {"resolved_question": "Compare measurements", "answers": [
+                    {"id": "a1", "question": "Which supply?", "answer": "1.2 V"}]},
+                "mandatory_topics": [{"id": "t1", "title": "Measurements",
+                                      "question": "What was measured?"}]}
+    # These are execution ceilings, not evidence or research instructions.
+    contract = {**semantic, "source_scope": {"mode": "include", "narrowed": narrowed,
+                                             "source_ids": [f"src-{i:016d}" for i in range(60878)]},
+                "base_scope": {"mode": "include", "base_ids": ["base-execution-only"]},
+                "context_processing": {"stages": {"planning_intent": {"input_items": 1}}},
+                "credibility": {"legacy-audit-only": True}}
+    before = deepcopy(contract)
+    baseline = eng._storm_outline("nb", "Compare measurements", "", "", intent_contract=semantic)
+    sections = eng._storm_outline("nb", "Compare measurements", "", "", intent_contract=contract)
+    assert sections == baseline
+    assert target.calls[1] == target.calls[0]
+    assert receipt_for(eng)["extra_calls"] == 0
+    bound = eng._bind_outline_to_intent(sections, contract, [])
+    assert bound[0]["intent_contract"] == semantic
+    assert contract == before
+
+
+def test_storm_oversized_semantics_still_fail_without_fallback(monkeypatch):
+    eng = engine()
+    monkeypatch.setattr(eng, "_plan_outline", lambda *args: pytest.fail("lost confirmed intent"))
+    with pytest.raises(ReportContextOverflow):
+        eng._storm_outline("nb", "Question", "", "", intent_contract={
+            "constraints": ["A necessary user instruction. " * 10000]})
+    assert not eng.dependencies.model_clients._llm.calls
+
+
+def test_blueprint_legacy_contract_does_not_send_execution_metadata():
+    target = Transport({"central_answer": "supported"})
+    eng = engine(target)
+    semantic = {"assumptions": ["Keep all measurements at 25 C"]}
+    legacy = {**semantic, "source_scope": {"source_ids": [f"src-{i:016d}" for i in range(60878)]},
+              "base_scope": {"base_ids": ["execution-only"]},
+              "context_processing": {"extra_calls": 24}, "credibility": {"old-audit": True}}
+    evidence = [{"section_id": "s1", "evidence": [{"evidence_id": "e1", "body": "Measured 1.2 V"}]}]
+    _, legal = report_blueprint_call(eng, "Question", semantic, None, evidence)
+    _, legacy_legal = report_blueprint_call(eng, "Question", legacy, None, evidence)
+    assert legacy_legal == legal == {"e1"}
+    assert target.calls[1] == target.calls[0]
+
+
 def test_blueprint_allowed_ids_exclude_evidence_not_received_by_model():
     target = Transport({"central_answer": "supported"}, maximum=9500)
     eng = engine(target)
@@ -229,7 +283,8 @@ def test_editor_compresses_all_chapters_without_mutating_bodies_and_reports_gaps
     def compress(messages):
         payload = json.loads(messages[-1]["content"])
         seen.extend(item["handle"] for item in payload)
-        return {"cards": [finding(item["handle"], "1.2 V") for item in payload]}
+        return {"cards": [finding(item["handle"], "1.2 V") for item in payload
+                          if "1.2 V" in item["text"]]}
     target, compressor = Transport({"summary": "Summary"}, maximum=9000), Transport(compress)
     eng = engine(target, compressor)
     chapters = [{"title": f"Chapter {index}", "markdown": "1.2 V " + "long. " * 1000,
@@ -237,13 +292,110 @@ def test_editor_compresses_all_chapters_without_mutating_bodies_and_reports_gaps
     before = deepcopy(chapters)
     report_editor_call(eng, "Question", chapters, {"fixed": "frame"}, {"fixed": "blueprint"}, "all assumptions")
     assert chapters == before
-    assert set(seen) == {f"editor-section-{index}" for index in range(4)}
+    assert set(seen) == {f"editor-section-{index}" for index in range(4)} | {"editor-blueprint:fixed:0"}
     prompt = target.calls[0][-1]["content"]
     assert "frame" in prompt and "blueprint" in prompt and "all assumptions" in prompt
     receipt = receipt_for(eng)
     assert receipt["stages"]["final_editor"]["omitted_items"] == 0
     assert receipt["stages"]["final_editor"]["partial_items"] == 4
     assert "不代表完整覆盖" in "".join(context_disclosure(eng))
+
+
+@pytest.mark.parametrize("compress", [False, True])
+def test_editor_projects_large_valid_blueprint_instead_of_treating_it_as_fixed(compress):
+    from app.services.report_synthesis import normalize_synthesis_blueprint
+
+    sections = [{"title": f"Section {index}", "markdown": "A brief finished chapter.",
+                 "claims": [], "citation_audit": {}} for index in range(1, 6)]
+    raw = {"central_answer": "Global answer", "shared_definitions": [],
+           "sections": [{"section_id": f"section-{index}", "thesis": "Result"}
+                        for index in range(1, 6)],
+           "claims": [{"id": f"c{index}", "statement": "技术结论" * 75, "type": "inference",
+                       "owner_section_id": f"section-{index // 12 + 1}",
+                       "evidence_keys": ["e1"], "counterevidence_keys": ["e2"],
+                       "conditions": ["适用条件" * 60, "实验条件" * 60]} for index in range(60)]}
+    blueprint = normalize_synthesis_blueprint(raw, outline=sections,
+        legal_evidence_ids={"e1", "e2"}, frame=None)
+    assert blueprint is not None
+    before = deepcopy(blueprint)
+    seen = []
+
+    def compress_material(messages):
+        payload = json.loads(messages[-1]["content"])
+        seen.extend(payload)
+        return {"cards": [finding(item["handle"], "技术结论")
+                          for item in payload if item["kind"] == "blueprint_claims"]}
+
+    target = Transport({"summary": "Summary"})
+    target.context_budget = ContextBudget(200000, 102400)
+    eng = engine(target, Transport(compress_material))
+    if not compress:
+        eng.settings.report_context_extra_calls_max = 0
+    report_editor_call(eng, "Question", sections, {"fixed": "USER-FRAME"}, blueprint, "USER-INTENT")
+    prompt = target.calls[0][-1]["content"]
+    assert "USER-FRAME" in prompt and "USER-INTENT" in prompt
+    assert '"owner_section_id"' in prompt and '"counterevidence_keys"' in prompt
+    assert '"e1"' in prompt and '"e2"' in prompt
+    assert "适用条件" * 60 in prompt and "实验条件" * 60 in prompt
+    if compress:
+        assert '"inference": true' in prompt
+    assert blueprint == before
+    receipt = receipt_for(eng)
+    stage = receipt["stages"]["final_editor"]
+    assert stage["input_items"] > len(sections)
+    assert stage["omitted_items"] or stage["partial_items"]
+    assert bool(receipt["extra_calls"]) == compress
+    assert any(item["kind"] == "blueprint_claims" for item in seen) == compress
+    assert report_context_runtime(eng).editor_limited_sections
+
+
+@pytest.mark.parametrize("component", ["central_answer", "shared_definitions", "claims"])
+def test_editor_blueprint_inherits_depth_and_discloses_affected_sections(component):
+    blueprint = {"central_answer": "Short conclusion.",
+                 "sections": [{"section_id": f"section-{index}", "_context_level": 2}
+                              for index in (1, 2)], "claims": [], "shared_definitions": []}
+    if component == "central_answer":
+        blueprint[component] = "共享结论" * 400
+    elif component == "shared_definitions":
+        blueprint[component] = [{"term": "Measurement", "definition": "共享定义" * 200,
+                                 "evidence_keys": ["e1"]}]
+    else:
+        blueprint[component] = [{"id": "c1", "statement": "技术结论" * 300, "type": "inference",
+                                 "owner_section_id": "section-2", "evidence_keys": ["e1"]}]
+    sections = [{"title": f"Chapter {index}", "markdown": "Small completed chapter.", "claims": [],
+                 "context_processing": {"max_level": 2}} for index in (1, 2)]
+    target = Transport({"summary": "Summary"}, maximum=3000)
+    compressor = Transport({"cards": []})
+    eng = engine(target, compressor)
+    report_editor_call(eng, "Question", sections, None, blueprint, "USER-INTENT")
+    assert not compressor.calls
+    expected = {1} if component == "claims" else {0, 1}
+    assert report_context_runtime(eng).editor_limited_sections == expected
+    assert receipt_for(eng)["stages"]["final_editor"]["omitted_items"] > 0
+
+
+def test_fitting_editor_blueprint_preserves_prompt_without_extra_calls():
+    from app.services.prompts import report_summary_prompt
+    from app.services.report_synthesis import fair_editor_context
+
+    sections = [{"title": "A", "markdown": "A small completed chapter.", "claims": []}]
+    blueprint = {"central_answer": "Small shared conclusion.", "claims": [],
+                 "sections": [{"section_id": "section-1", "thesis": "Supported answer"}]}
+    target = Transport({"summary": "Summary"})
+    eng = engine(target)
+    report_editor_call(eng, "Question", sections, None, blueprint, "USER-INTENT")
+    assert target.calls[0][-1]["content"] == report_summary_prompt(
+        "Question", fair_editor_context(sections, blueprint=blueprint), intent_block="USER-INTENT")
+    assert receipt_for(eng)["extra_calls"] == 0
+    assert not report_context_runtime(eng).editor_limited_sections
+
+
+def test_editor_still_rejects_oversized_user_frame():
+    eng = engine(Transport({"summary": "Summary"}, maximum=4000))
+    with pytest.raises(ReportContextOverflow):
+        report_editor_call(eng, "Question", [{"title": "A", "markdown": "Short"}],
+                           {"confirmed": "不可丢弃的用户约束" * 2000}, None, "USER-INTENT")
+    assert not eng.dependencies.model_clients._llm.calls
 
 
 @pytest.mark.parametrize("reject_retry", [False, True])
@@ -417,6 +569,42 @@ def test_generation_persists_compression_receipt_and_keeps_planning_count(stored
     assert receipt["stages"]["draft"]["partial_items"] == 1
     assert "材料处理" in row["content_md"]
     assert "Measured 1.2 V" in row["sections"][0]["markdown"]
+
+
+@pytest.mark.parametrize("legacy_outline", [False, True])
+def test_generation_keeps_frozen_scope_and_summarizes_legacy_large_contract(
+        stored_report, monkeypatch, legacy_outline):
+    reports, nb, rid = stored_report
+    semantic = {"objective": "Compare measured conditions", "assumptions": ["Only at 25 C"],
+                "constraints": ["Do not extrapolate"], "result_scope": "ranked",
+                "completeness_required": False}
+    contract = {**semantic,
+                "source_scope": {"mode": "include", "narrowed": True,
+                                 "source_ids": [f"src-{i:016d}" for i in range(60878)]},
+                "base_scope": {"mode": "include", "narrowed": True, "base_ids": ["base-only"]},
+                "context_processing": {"extra_calls": 0, "stages": {}},
+                "confirmed_input": {"resolved_question": "Compare measurements", "answers": []}}
+    before = deepcopy(contract)
+    reports.update_report(nb, rid, status="outline_ready", understanding=contract,
+                          outline=[{"title": "A", "scope": "Measurements", "sub_queries": [],
+                                    "intent_contract": contract if legacy_outline else semantic}])
+    target = Transport(lambda messages: ({"summary": "A summary"}
+        if "EXECUTIVE SUMMARY" in messages[-1]["content"]
+        else {"markdown": "## A\nMeasured 1.2 V", "grounded": True}))
+    eng = engine(target, reports=reports, evidence_context=Evidence([]))
+    monkeypatch.setattr(eng, "_deep_dive", lambda *args, **kwargs: ReasoningResult())
+    eng.generate(nb, rid, "Compare measurements", depth=1)
+    row = reports.get_report(nb, rid)
+    assert row["status"] == "done", row.get("error")
+    assert "A summary" in row["content_md"]
+    for key in ("source_scope", "base_scope", "confirmed_input"):
+        assert row["understanding"][key] == before[key]
+    for messages in target.calls:
+        prompt = messages[-1]["content"]
+        assert "source_scope" not in prompt and "base_scope" not in prompt
+        assert "context_processing" not in prompt
+        assert "Only at 25 C" in prompt
+    assert not row["understanding"]["context_processing"]["stages"]["final_editor"].get("failed")
 
 
 def test_summary_capacity_failure_keeps_finished_body_and_discloses_unfinished_stage(stored_report, monkeypatch):
