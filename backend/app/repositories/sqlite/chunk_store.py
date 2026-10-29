@@ -5,6 +5,7 @@ import sqlite3
 from typing import Iterable, Mapping, Sequence
 
 from app.repositories.chunk_elements import decode_element_ids, reverse_rows_for_writes
+from app.repositories.element_reading_order import id_order_for, id_order_probe_sql
 from app.repositories.navigation_version import navigation_bump
 from app.repositories.like_pattern import escape_like_pattern
 from app.repositories.ports import CHUNKED_AT_UNCHECKED, ChunkWrite
@@ -26,6 +27,10 @@ from app.domain.indexing_pipeline import IndexingPipelineStalePlanError
 # default SQLITE_MAX_VARIABLE_NUMBER is far higher, but a fixed batch keeps the
 # statement shape stable no matter how many evidence elements one query hit.
 CHUNK_ELEMENT_LOOKUP_BATCH = 500
+
+#: Readers that order by id alone: ``id_order_for`` picks their ORDER BY from
+#: this two-row probe (``element_reading_order``).
+_ID_ORDER_PROBE = id_order_probe_sql()
 
 # ``ChunkStore.replace_source_chunks`` and ``ChunkStore.insert_rows`` raise
 # ``ValueError(MEMORY_SOURCE_NOT_CHUNKED)`` when the target source is a private
@@ -236,7 +241,8 @@ class ChunkStore:
         ).fetchall()
 
     def source_elements_for_chunking(self, source_id: str) -> list:
-        """元素 id 形如 el-<sid>-0001 零补位, 故 ORDER BY id == 插入顺序。
+        """元素 id 形如 el-<sid>-0001 零补位, 故 id 字典序 == 插入顺序;过了 9 999 个元素
+        位数不再一致,由 ``element_reading_order`` 的位数项接上(``id_order_for``)。
         额外带出 metadata 里的 caption 与 description：MinerU 带图注的 image 元素
         需凭前者进检索 chunk，markdown 的 `> **图片描述**` 引用块凭后者（没有 alt
         的图只有描述这一个入口；build_chunks 对 image/figure 仅在两者皆空时跳过）。
@@ -246,9 +252,10 @@ class ChunkStore:
         （如 Arguments/Examples）覆盖掉上级标题（命令名）；缺省时 build_chunks 自行
         回退到标题自身文本，字节不变。"""
         with self.database.connect() as db:
+            order = id_order_for(db.execute(_ID_ORDER_PROBE, (source_id, source_id)).fetchall())
             erows = db.execute(
                 "SELECT id, element_type, text, metadata FROM source_elements "
-                "WHERE source_id=? ORDER BY id", (source_id,)).fetchall()
+                f"WHERE source_id=? ORDER BY {order}", (source_id,)).fetchall()
         out = []
         for r in erows:
             caption = ""
@@ -578,9 +585,10 @@ class ChunkStore:
         ``{id, element_type, text, section_path}`` -- what the navigation
         detector reads; the pass never loads the body elements' text."""
         with self.database.connect() as db:
+            order = id_order_for(db.execute(_ID_ORDER_PROBE, (source_id, source_id)).fetchall())
             rows = db.execute(
                 "SELECT id, element_type, text, metadata FROM source_elements "
-                "WHERE source_id=? AND element_type='heading' ORDER BY id",
+                f"WHERE source_id=? AND element_type='heading' ORDER BY {order}",
                 (source_id,),
             ).fetchall()
         output = []

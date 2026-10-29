@@ -363,7 +363,27 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # FK source_id -> sources and notebook_id -> notebooks ON DELETE CASCADE,
 # idx_source_paper_cards_nb over notebook_id). No backfill. See
 # ``_migration_104``.
-SCHEMA_VERSION = 104
+# v105 (paired with PostgreSQL 0086_source_element_reading_order.sql) puts a
+# source's elements in reading order past 9 999 elements: the two element
+# indexes that ordered by (created_at, id) are replaced by successors with the
+# index-digits term of ``app.repositories.element_reading_order`` before id --
+# idx_source_elements_reading_order (source_id, created_at, <digits>, id) and
+# idx_source_elements_type_reading_order (source_id, element_type, created_at,
+# <digits>, id) -- and idx_source_elements_source_created /
+# idx_source_elements_source_type are dropped. Index only, no backfill. See
+# ``_migration_105``.
+SCHEMA_VERSION = 105
+
+# Frozen copy of ``element_reading_order.INDEX_DIGITS_SQL`` as v105 built it (a
+# migration must not change meaning when the live module changes). The readers
+# order by the live constant; tests/test_source_element_reading_order.py pins
+# the two equal, which is what lets SQLite match the readers' ORDER BY against
+# these index expressions.
+_V105_INDEX_DIGITS_SQL = (
+    "(CASE WHEN substr(id,1,length(source_id)+4)=('el-'||source_id||'-') "
+    "THEN length(substr(id,length(source_id)+5))-length(ltrim(substr(id,"
+    "length(source_id)+5),'0123456789')) ELSE 0 END)"
+)
 
 # Frozen copies of what ``app/repositories/sqlite/memory_sql.py`` rendered
 # when v87 was written (a migration must not change meaning when the live
@@ -6346,6 +6366,37 @@ class SqliteMigrator:
                   ON source_paper_cards(notebook_id);
                 """
             )
+
+    def _migration_105(self) -> None:
+        """A source's elements in reading order past 9 999 elements, parity
+        with PostgreSQL ``0086_source_element_reading_order.sql``.
+
+        Element ids are ``el-<source_id>-NNNN`` (four-digit zero padding), so
+        their byte order stops being the document order at the 10 000th
+        element. The readers now order by ``created_at, <index digits>, id``
+        (``app.repositories.element_reading_order``); the two indexes that
+        served ``(created_at, id)`` are replaced by successors carrying that
+        term (``_V105_INDEX_DIGITS_SQL``) before ``id``, so every reader keeps
+        an index range walk with no sort. The successors serve every prefix the
+        old indexes served (``source_id``; ``source_id, created_at``;
+        ``source_id, element_type``), so the old ones are dropped rather than
+        kept as write amplification. Index only, no backfill: the key is
+        computed from ``id`` and ``source_id``, so existing rows read in the
+        right order at once.
+        """
+        with self._connect() as db:
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_source_elements_reading_order "
+                "ON source_elements(source_id, created_at, "
+                f"{_V105_INDEX_DIGITS_SQL}, id)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_source_elements_type_reading_order "
+                "ON source_elements(source_id, element_type, created_at, "
+                f"{_V105_INDEX_DIGITS_SQL}, id)"
+            )
+            db.execute("DROP INDEX IF EXISTS idx_source_elements_source_created")
+            db.execute("DROP INDEX IF EXISTS idx_source_elements_source_type")
 
     def migrate(self) -> list[int]:
         with self._connect() as db:

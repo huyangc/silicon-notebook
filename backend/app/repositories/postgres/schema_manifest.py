@@ -538,7 +538,14 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # both ON DELETE CASCADE; card and raw_json jsonb; NON-UNIQUE
 # idx_source_paper_cards_nb over notebook_id). A local cache: no backfill, not
 # synced, not copied.
+# SQLite v105 / PostgreSQL 0086 (hot-path batch 9) put a source's elements in
+# reading order past 9 999 elements: idx_source_elements_reading_order and
+# idx_source_elements_type_reading_order (the index-digits expression of
+# app.repositories.element_reading_order before id) replace
+# idx_source_elements_source_created / idx_source_elements_source_type, which
+# are dropped. Index only: no table, column, FK or unique-surface change, no
+# backfill.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=104,
-    postgres_version=85,
+    sqlite_version=105,
+    postgres_version=86,
 )

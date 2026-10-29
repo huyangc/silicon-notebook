@@ -2826,8 +2826,10 @@ def _plan_for(repo, run, needle):
 
 
 def test_element_page_query_rides_the_typed_index(repo):
-    """元素翻页的**实际执行**语句必须走 idx_source_elements_source_type,
-    首页与续页都是索引 range,不得退回扫描或临时排序。"""
+    """元素翻页的**实际执行**语句必须走 idx_source_elements_type_reading_order,
+    首页与续页都是索引 range,不得退回扫描或临时排序。续页把游标拆成阅读顺序的
+    三段不相交区间:首段不满时再一条语句取后两段(SQLite 不在行值区间里用表达式列,见
+    ``element_reading_order.after_cursor_sqls``);本例第一段就取满。"""
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     _add_source(repo, notebook.id, "s-a", [("formula", 4), ("paragraph", 6)])
     store = repo._runtime.source_store
@@ -2842,13 +2844,14 @@ def test_element_page_query_rides_the_typed_index(repo):
     plans = _plan_for(repo, run, "FROM source_elements")
     assert len(plans) == 2
     assert (
-        "SEARCH source_elements USING INDEX idx_source_elements_source_type "
+        "SEARCH source_elements USING INDEX idx_source_elements_type_reading_order "
         "(source_id=? AND element_type=?)"
     ) in plans[0], plans[0]
-    # 续页的键必须真的进索引:行值比较退化成 OR 展开就会掉出这条计划。
+    # 续页的键必须真的进索引:四段键全进 range,退化成 OR 展开或行值比较只用
+    # created_at 就会掉出这条计划。
     assert (
-        "SEARCH source_elements USING INDEX idx_source_elements_source_type "
-        "(source_id=? AND element_type=? AND (created_at,id)>(?,?))"
+        "SEARCH source_elements USING INDEX idx_source_elements_type_reading_order "
+        "(source_id=? AND element_type=? AND created_at=? AND <expr>=? AND id>?)"
     ) in plans[1], plans[1]
     for plan in plans:
         assert "SCAN source_elements" not in plan, plan

@@ -1885,18 +1885,18 @@
         "type": "index"
       },
       {
+        "name": "idx_source_elements_reading_order",
+        "sql_sha256": "a8c6af72e73e29463536fa226792155960b4c5011a0511ca43d6ad0ee0739370",
+        "type": "index"
+      },
+      {
         "name": "idx_source_elements_source",
         "sql_sha256": "9a9faabe675ef91b0009936a4e01a0e58e61e7af2ffe8b0f5f23bbf9fc171567",
         "type": "index"
       },
       {
-        "name": "idx_source_elements_source_created",
-        "sql_sha256": "955ecda9b187b810f32409dbae4770fafead611ecaff0f16e19c71829a297e69",
-        "type": "index"
-      },
-      {
-        "name": "idx_source_elements_source_type",
-        "sql_sha256": "06470d736236f9e2c0f392dd2a4bc062ba258c12578f696ca225c4ec227120a7",
+        "name": "idx_source_elements_type_reading_order",
+        "sql_sha256": "424eddf4f505fe432b33668182ac62df2fbbe6796be0dd8720bc34a0a80408ad",
         "type": "index"
       },
       {
@@ -3370,6 +3370,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 104
+    "user_version": 105
   }
 }

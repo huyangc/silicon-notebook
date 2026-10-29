@@ -44,10 +44,28 @@ V78_AUTH_TABLES = {
 }
 
 
+def rollback_v105(db: sqlite3.Connection) -> None:
+    """Undo SQLite migration 105: drop the two reading-order indexes and put
+    back the two ``(created_at, id)`` indexes it retired, spelled exactly as
+    their original migrations left them in sqlite_master. Callers lower
+    ``user_version`` themselves."""
+    db.execute("DROP INDEX idx_source_elements_reading_order")
+    db.execute("DROP INDEX idx_source_elements_type_reading_order")
+    db.execute(
+        "CREATE INDEX idx_source_elements_source_created "
+        "ON source_elements(source_id, created_at, id)"
+    )
+    db.execute(
+        "CREATE INDEX idx_source_elements_source_type\n"
+        "                  ON source_elements(source_id, element_type, created_at, id)"
+    )
+
+
 def rollback_v104(db: sqlite3.Connection) -> None:
     """Remove what SQLite migration 104 added: the ``source_paper_cards`` table
-    with ``idx_source_paper_cards_nb``. Callers lower ``user_version``
-    themselves."""
+    with ``idx_source_paper_cards_nb``. v105 is undone first (newest-first).
+    Callers lower ``user_version`` themselves."""
+    rollback_v105(db)
     db.execute("DROP INDEX idx_source_paper_cards_nb")
     db.execute("DROP TABLE source_paper_cards")
 

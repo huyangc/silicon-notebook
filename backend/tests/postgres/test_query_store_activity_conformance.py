@@ -177,7 +177,7 @@ def _insert_global_ask(connection, job_id, conv_id, user_id, created_at, *,
 
 @pytest.fixture
 def store(postgres_database, postgres_settings):
-    assert PostgresMigrator(postgres_database).migrate() == 85
+    assert PostgresMigrator(postgres_database).migrate() == 86
     return PostgresQueryStore(postgres_database, postgres_settings)
 
 
@@ -1412,7 +1412,7 @@ def test_readonly_activity_time_input_matrix(postgres_database, postgres_setting
     invalid-input transaction can leak into the following case. Other activity
     tests still own their independent function-scoped, really migrated schemas.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 85
+    assert PostgresMigrator(postgres_database).migrate() == 86
     with postgres_database.write() as connection:
         _seed_parity_rows(connection)
     checks = [

@@ -21,6 +21,7 @@ from app.repositories.postgres._store_utils import (
     jsonb,
     normalized_clock,
 )
+from app.repositories.element_reading_order import id_order_for, id_order_probe_sql
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.ports import (
     CATALOG_CANDIDATE_STATES,
@@ -30,6 +31,10 @@ from app.repositories.ports import (
     CatalogJobAlreadyRunning,
 )
 
+
+#: Readers that order by id alone: ``id_order_for`` picks their ORDER BY from
+#: this two-row probe (``element_reading_order``).
+_ID_ORDER_PROBE = id_order_probe_sql(placeholder="%s", id_collate='COLLATE "C"')
 
 class CatalogStore:
     def __init__(
@@ -429,11 +434,14 @@ class CatalogStore:
         rows_bound = max(1, int(limit))
         chars_bound = max(1, int(text_chars))
         with self.database.connect() as connection:
+            order = id_order_for(
+                connection.execute(_ID_ORDER_PROBE, (source_id, source_id)).fetchall(),
+                id_collate='COLLATE "C"')
             rows = connection.execute(
                 "SELECT id,element_type,substr(text,1,%s) AS text,metadata,"
                 "(length(text) > %s) AS clipped,"
                 "length(btrim(text, E' \\t\\n\\r')) AS full_chars "
-                'FROM source_elements WHERE source_id=%s ORDER BY id COLLATE "C" '
+                f"FROM source_elements WHERE source_id=%s ORDER BY {order} "
                 "LIMIT %s",
                 (chars_bound, chars_bound, source_id, rows_bound),
             ).fetchall()

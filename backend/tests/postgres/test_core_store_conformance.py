@@ -14,6 +14,7 @@ import pytest
 
 from app.core.config import Settings
 from app.models.notebooks import NotebookCreate, NotebookUpdate, SharedByMeItem
+from app.repositories.element_reading_order import reading_order_sql
 from app.repositories.ports import (
     ChunkWrite,
     DocumentCapacityExceeded,
@@ -91,7 +92,7 @@ def core_stores(request) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 85
+    assert PostgresMigrator(postgres_database).migrate() == 86
     yield CoreStores(
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
@@ -2342,7 +2343,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 85
+    assert PostgresMigrator(postgres_database).migrate() == 86
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -2425,7 +2426,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 85
+    assert PostgresMigrator(postgres_database).migrate() == 86
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -2497,7 +2498,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 85
+    assert PostgresMigrator(postgres_database).migrate() == 86
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )
@@ -4680,7 +4681,8 @@ def test_report_representative_prefix_matches_sqlite_with_null_years(
 
 def test_postgres_element_page_stays_on_the_typed_index(core_stores: CoreStores):
     """禁全表扫描:PostgreSQL 侧的翻页也必须落在
-    ``idx_source_elements_source_type`` 上。计划器细节(Index Scan /
+    ``idx_source_elements_type_reading_order`` 上(阅读顺序的行值比较是它的
+    Index Cond)。计划器细节(Index Scan /
     Index Only Scan)不是契约,「不是 Seq Scan」和「用的是这条索引」才是。"""
     owner = core_stores.identity.create_user("p00123456", "password-12")
     notebook_id = core_stores.notebooks.create_row(
@@ -4717,16 +4719,17 @@ def test_postgres_element_page_stays_on_the_typed_index(core_stores: CoreStores)
         # for this exact shape EXIST at all?".  If none did, the plan would
         # still come back as a Seq Scan and both assertions would fire.
         connection.execute("SET LOCAL enable_seqscan=off")
+        order = reading_order_sql()
         plan_rows = connection.execute(
             "EXPLAIN SELECT id,source_id,element_type,location_label,text,"
             "created_at,metadata->>'asset_id' AS asset_id "
             "FROM source_elements WHERE source_id=%s AND "
-            "element_type=%s AND (created_at,id) > (%s,%s) "
-            "ORDER BY created_at,id LIMIT %s",
-            ("src-plan", "formula", NOW, "el-plan-0", 25),
+            f"element_type=%s AND ({order}) > (%s,%s,%s) "
+            f"ORDER BY {order} LIMIT %s",
+            ("src-plan", "formula", NOW, 0, "el-plan-0", 25),
         ).fetchall()
     plan = "\n".join(str(next(iter(row.values()))) for row in plan_rows)
-    assert "idx_source_elements_source_type" in plan, plan
+    assert "idx_source_elements_type_reading_order" in plan, plan
     assert "Seq Scan" not in plan, plan
     # An index range, not a sort of the whole (source, type) group.
     assert "Sort" not in plan, plan

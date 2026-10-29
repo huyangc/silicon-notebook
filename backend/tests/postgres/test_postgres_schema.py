@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 85
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 86
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -69,10 +69,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 85
-    assert migrator.migrate() == 85
-    assert migrator.current_version() == 85
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 85
+    assert migrator.migrate() == 86
+    assert migrator.migrate() == 86
+    assert migrator.current_version() == 86
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 86
 
 
 @pytest.mark.postgres_integration
@@ -92,7 +92,7 @@ def test_concept_seed_space_columns_match_the_sqlite_v102_contract(postgres_data
                 "VALUES (%s,'n',now(),now())", (notebook_id,))
         conn.execute("INSERT INTO unified_kg_state (notebook_id, updated_at) "
                      "VALUES ('nb-0082', now())")
-    assert PostgresMigrator(postgres_database).migrate() == 85
+    assert PostgresMigrator(postgres_database).migrate() == 86
     with postgres_database.write() as conn:
         conn.execute("INSERT INTO unified_kg_state (notebook_id, updated_at) "
                      "VALUES ('nb-0083', now())")
@@ -129,7 +129,7 @@ def test_kg_findings_storage_matches_the_sqlite_v97_contract(postgres_database):
 
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 85
+    assert PostgresMigrator(postgres_database).migrate() == 86
     with postgres_database.connect() as conn:
         def columns(table):
             return [
@@ -213,8 +213,8 @@ def test_ask_job_report_id_matches_the_sqlite_v99_contract(postgres_database):
             "INSERT INTO ask_jobs (id, notebook_id, question, status, created_at, "
             "updated_at) VALUES ('job-v79', 'nb-v80', 'why?', 'running', now(), now())"
         )
-    assert migrator.migrate() == 85
-    assert migrator.migrate() == 85
+    assert migrator.migrate() == 86
+    assert migrator.migrate() == 86
     # The ledger skips an applied version, so re-execute the file itself: the
     # statement is IF NOT EXISTS and must neither fail nor touch the column.
     with postgres_database.write() as db:
@@ -264,7 +264,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 85
+    assert migrator.migrate() == 86
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -347,7 +347,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 85
+        assert PostgresMigrator(databases[1]).migrate() == 86
     finally:
         for database in databases:
             database.close()
@@ -457,6 +457,7 @@ def test_packaged_index_migration_phases_are_exact():
         (83, "kg_seed_space_and_board_partition"),
         (84, "source_paper_meta_source_nb"),
         (85, "source_paper_cards"),
+        (86, "source_element_reading_order"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -1006,6 +1007,14 @@ def test_packaged_index_migration_phases_are_exact():
     ]
     # Migration 85 (the paper-card cache table) adds its notebook_id index.
     assert index_declarations(85) == [(False, "idx_source_paper_cards_nb")]
+    # Migration 86 (hot-path batch 9) replaces the two (created_at, id)
+    # element indexes with reading-order successors (the index-digits
+    # expression before id); IF NOT EXISTS for the offline builder, and the
+    # retired two go with DROP INDEX IF EXISTS (the 0051 pattern).
+    assert index_declarations(86) == [
+        (False, "idx_source_elements_reading_order"),
+        (False, "idx_source_elements_type_reading_order"),
+    ]
     # Spelled without ``IF NOT EXISTS`` on purpose, and that is asserted
     # rather than merely commented: app/migration/shadow/postgres_catalog.py
     # parses CREATE INDEX straight out of these files to build the catalog

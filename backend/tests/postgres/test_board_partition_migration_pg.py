@@ -75,7 +75,7 @@ def test_0083_adds_the_columns_and_backfills_every_generation(postgres_database)
                 "INSERT INTO communities (id, notebook_id, level, member_ids, size, "
                 "created_at, generation) VALUES (%s, %s, 0, '[\"K-x\"]'::jsonb, 1, %s, %s)",
                 (cid, NB, NOW, generation))
-    assert migrator.migrate() == 85
+    assert migrator.migrate() == 86
     with postgres_database.write() as db:
         db.execute("INSERT INTO unified_kg_state (notebook_id, updated_at) VALUES (%s, %s)",
                    (NB_AFTER, NOW))
@@ -139,7 +139,7 @@ def test_0083_gives_a_copy_without_a_state_row_one_in_seed_space_1(postgres_data
         clustered(db, "nb-copy", "cc-1", "concept")
         clustered(db, "nb-claims", "cc-2", "claim")
         clustered(db, "nb-bare", "", "")
-    assert migrator.migrate() == 85
+    assert migrator.migrate() == 86
     with postgres_database.write() as db:
         clustered(db, "nb-ref", "", "")
         db.execute("INSERT INTO unified_kg_state (notebook_id, updated_at) "

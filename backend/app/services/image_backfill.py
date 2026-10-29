@@ -555,8 +555,9 @@ class Alignment:
 def align(lines: Sequence[MarkdownLine], elements: Sequence[ElementView]) -> Alignment:
     """markdown 行与既有元素的单调双指针对齐。
 
-    单调是关键：元素 id 字典序就是文档序（`el-<sid>-NNNN` 零补位，`chunking`
-    的读取按 ``ORDER BY id``），所以指针只前进不回退，一旦对齐漂掉就自然停止
+    单调是关键：元素按文档序读来（`el-<sid>-NNNN` 零补位，id 字典序即文档序；过了
+    9 999 个元素由 ``element_reading_order`` 的位数项接上，`chunking` 与回填计划的
+    读取同口径），所以指针只前进不回退，一旦对齐漂掉就自然停止
     匹配，而不是在文档后半段乱认。
 
     前瞻预算只对**可匹配**元素计数：`UNMATCHABLE_ELEMENT_TYPES` 里的元素在

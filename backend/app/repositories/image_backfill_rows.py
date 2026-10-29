@@ -38,7 +38,8 @@ def image_backfill_state(
 
     ``element_created_at`` 取既有元素批次里最大的那个原样值（SQLite 是 ISO 文本、
     PostgreSQL 是 ``datetime``），调用方只把它当不透明句柄传回写入口——回填出来
-    的图片元素必须与既有批次共享这一刻，详情分页的 ``(created_at,id)`` 排序与
+    的图片元素必须与既有批次共享这一刻，详情分页的阅读顺序（``created_at`` 领头，
+    见 ``element_reading_order``）与
     命令目录的 ``source_element_generation`` 才不会漂。"""
     elements: list[dict] = []
     newest: Any = None

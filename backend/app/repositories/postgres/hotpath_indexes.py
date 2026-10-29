@@ -75,6 +75,7 @@ import psycopg
 from psycopg import sql
 from psycopg.rows import dict_row
 
+from app.repositories.element_reading_order import INDEX_DIGITS_SQL  # 读者 ORDER BY 与索引表达式的唯一真源
 from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,H5 谓词字面量的唯一真源
 
 
@@ -177,6 +178,16 @@ class HotpathIndexSpec:
 # predicate text here must stay semantically identical to
 # migrations/0039_hotpath_batch1_indexes.sql -- see this module's docstring
 # and backend/tests/test_hotpath_indexes.py.
+# What ``pg_get_indexdef(indexrelid, n, true)`` echoes for the reading-order
+# digits key (``element_reading_order.INDEX_DIGITS_SQL``), as ``_normalized_expr``
+# compares it -- captured against a live PostgreSQL 16 catalog; the live tests
+# build the index and compare.
+_READING_DIGITS_SHAPE = (
+    "( case when substr(id, 1, length(source_id) + 4) = (('el-' || source_id) || '-') "
+    "then length(substr(id, length(source_id) + 5)) - length(ltrim(substr(id, "
+    "length(source_id) + 5), '0123456789')) else 0 end)"
+)
+
 HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
     HotpathIndexSpec(
         name="idx_clusters_nb_canonical_name_lower",
@@ -586,6 +597,42 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
         opclasses=("public:text_ops", "public:gin_trgm_ops"),
         collations=("pg_catalog:C", "pg_catalog:C"),
         serves="source_store.py:find_sources_metadata_rows (summary leg)",
+    ),
+    # ── 批 9(迁移 0086):来源元素的阅读顺序。元素 id 是 el-<sid>-NNNN(四位补零),
+    # 过了 9 999 个元素字节序就不再是文档序;读者改按
+    # ``created_at, <index digits>, id``(``element_reading_order``),这两条把位数项
+    # 放进键里,接替只到 (created_at, id) 的 idx_source_elements_source_created(0003)
+    # 与 idx_source_elements_source_type(0015)。生产顺序 = 本脚本 --apply 在线建两条
+    # 新的 → 操作员 DROP INDEX CONCURRENTLY 两条旧的 → 迁移落账(届时全部 no-op);
+    # 理由与实测见 0086 头注释。``columns`` 第三/四列是目录回显形态(pg_get_indexdef
+    # 逐列,经 _normalized_expr),``ddl_columns`` 是建索引文本,表达式取读者同一常量。
+    HotpathIndexSpec(
+        name="idx_source_elements_reading_order",
+        table="source_elements",
+        columns=("source_id", "created_at", _READING_DIGITS_SHAPE, "id"),
+        ddl_columns=f"source_id, created_at, {INDEX_DIGITS_SQL}, id",
+        predicate="",
+        predicate_shape="",
+        opclasses=(
+            "pg_catalog:text_ops", "pg_catalog:timestamptz_ops",
+            "pg_catalog:int4_ops", "pg_catalog:text_ops",
+        ),
+        collations=("pg_catalog:C", "", "", "pg_catalog:C"),
+        serves="a source's elements in reading order: full read, keyset walk, offset/anchor page, positional reads, first-excerpt probe (replaces idx_source_elements_source_created)",
+    ),
+    HotpathIndexSpec(
+        name="idx_source_elements_type_reading_order",
+        table="source_elements",
+        columns=("source_id", "element_type", "created_at", _READING_DIGITS_SHAPE, "id"),
+        ddl_columns=f"source_id, element_type, created_at, {INDEX_DIGITS_SQL}, id",
+        predicate="",
+        predicate_shape="",
+        opclasses=(
+            "pg_catalog:text_ops", "pg_catalog:text_ops", "pg_catalog:timestamptz_ops",
+            "pg_catalog:int4_ops", "pg_catalog:text_ops",
+        ),
+        collations=("pg_catalog:C", "pg_catalog:C", "", "", "pg_catalog:C"),
+        serves="typed-collection keyset enumeration in reading order + per-type element counts as an Index Only Scan (replaces idx_source_elements_source_type)",
     ),
 )
 

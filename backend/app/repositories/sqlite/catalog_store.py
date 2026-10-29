@@ -12,6 +12,7 @@ import json
 import sqlite3
 from typing import Any, Callable, Mapping, Sequence
 
+from app.repositories.element_reading_order import id_order_for, id_order_probe_sql
 from app.repositories.ports import (
     CATALOG_CANDIDATE_STATES,
     CATALOG_MAX_CANDIDATE_BATCH,
@@ -20,6 +21,10 @@ from app.repositories.ports import (
     CatalogJobAlreadyRunning,
 )
 from app.repositories.sqlite.database import SqliteDatabase
+
+#: Readers that order by id alone: ``id_order_for`` picks their ORDER BY from
+#: this two-row probe (``element_reading_order``).
+_ID_ORDER_PROBE = id_order_probe_sql()
 
 
 def _loads(raw: object) -> dict:
@@ -476,9 +481,9 @@ class CatalogStore:
         a whole paid re-extraction on top of a claim that is not true.
 
         One indexed aggregate on a human-paced path (start/apply/dismiss), never
-        in a loop: ``idx_source_elements_source_type`` covers
-        ``(source_id, element_type, created_at, id)``, so this is an index-only
-        read of one source's entries.
+        in a loop: ``idx_source_elements_reading_order`` covers
+        ``(source_id, created_at, <index digits>, id)``, so this is an
+        index-only read of one source's entries.
         """
         with self.database.connect() as db:
             row = db.execute(
@@ -518,12 +523,13 @@ class CatalogStore:
         rows_bound = max(1, int(limit))
         chars_bound = max(1, int(text_chars))
         with self.database.connect() as db:
+            order = id_order_for(db.execute(_ID_ORDER_PROBE, (source_id, source_id)).fetchall())
             rows = db.execute(
                 "SELECT id, element_type, substr(text,1,?) AS text, metadata, "
                 "(length(text) > ?) AS clipped, "
                 "length(trim(text, char(32)||char(9)||char(10)||char(13))) "
                 "AS full_chars "
-                "FROM source_elements WHERE source_id=? ORDER BY id LIMIT ?",
+                f"FROM source_elements WHERE source_id=? ORDER BY {order} LIMIT ?",
                 (chars_bound, chars_bound, source_id, rows_bound),
             ).fetchall()
         out: list[dict] = []

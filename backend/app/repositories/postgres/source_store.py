@@ -24,6 +24,13 @@ from app.domain.source_display import summary_display_title
 from app.domain.source_positions import normalize_positions, positions_page
 from app.models.question_suggestions import QUESTION_SUGGESTION_REVISION_PAGE_SIZE
 from app.domain.promotion_source import PROMOTION_SOURCE_TYPE, presented_source_title
+from app.repositories.element_reading_order import (
+    INDEX_DIGITS_SQL,
+    after_cursor_sqls,
+    page_after,
+    reading_order_key,
+    reading_order_sql,
+)
 from app.repositories.promotion_title_sql import (
     mapped_title_sql,
     needle_names_current_wording,
@@ -70,6 +77,49 @@ from app.repositories.postgres.memory_sql import (
 
 
 _UNSET = SOURCE_PAPER_META_UNSET
+
+# A source's elements in reading order (``app.repositories.element_reading_order``):
+# ``created_at, <index digits>, id`` -- the key of ``idx_source_elements_reading_order``
+# (0085).
+_READING_ORDER = reading_order_sql(id_collate='COLLATE "C"')
+# An OFFSET window in reading order. The skipped rows are walked in the index
+# only (id, created_at and the digits key all come from
+# ``idx_source_elements_reading_order``), and just the window's rows are read
+# back by primary key: a plain ``SELECT * ... ORDER BY <digits expression>``
+# evaluates that expression for every row it walks past (measured: OFFSET
+# 14 000 of a 15 003-element source, 6.4 ms against 2.8 ms for the old
+# ``(created_at, id)`` walk; picked like this, 1.3 ms).
+_PAGE_SQL = (
+    "SELECT element.* FROM (SELECT id,created_at,"
+    f"{INDEX_DIGITS_SQL} AS digits FROM source_elements WHERE source_id=%s "
+    f"ORDER BY {_READING_ORDER} LIMIT %s OFFSET %s) AS pick "
+    "JOIN source_elements AS element ON element.id=pick.id "
+    'ORDER BY pick.created_at,pick.digits,pick.id COLLATE "C"'
+)
+# A window near the head (the source detail's first pages) is read directly:
+# the digits are then evaluated for at most this many rows, cheaper than the
+# primary-key join back.
+_DIRECT_PAGE_MAX_OFFSET = 1000
+_DIRECT_PAGE_SQL = (
+    f"SELECT * FROM source_elements WHERE source_id=%s ORDER BY {_READING_ORDER} "
+    "LIMIT %s OFFSET %s"
+)
+# The typed enumeration's spelling of the same order (its statement never
+# carried the redundant ``COLLATE "C"``; the column is "C" either way).
+_TYPED_READING_ORDER = reading_order_sql()
+# Keyset continuations: ``after_cursor_sqls``' head and tail, so the common page
+# orders by ``id`` within one (created_at, digits) and never evaluates the
+# digits expression per returned row.
+_AFTER_COLUMNS = (
+    "id", "source_id", "element_type", "location_label", "text", "metadata",
+    "created_at",
+)
+_AFTER_PAGE_SQLS = after_cursor_sqls(
+    _AFTER_COLUMNS, "source_id = %s", placeholder="%s", id_collate='COLLATE "C"')
+_TYPED_COLUMNS = (
+    "id", "source_id", "element_type", "location_label", "text", "created_at",
+    "metadata->>'asset_id' AS asset_id",
+)
 
 
 # 「用户可见文档」的判定谓词，与 SQLite 侧 ``source_store.
@@ -347,7 +397,7 @@ class SourceStore:
     # though the predicate only needs a couple of bytes (measured ~22x more
     # buffer hits, 7ms -> 60-100ms on a 2M-row table). `location_label` is
     # short and never TOASTed, so this predicate still costs a heap fetch —
-    # it is not part of `idx_source_elements_source_type`, so this is not an
+    # it is not part of `idx_source_elements_type_reading_order`, so this is not an
     # index-only scan — but not a decompression.
     #   * ``!~ ' part ([2-9]|[1-9][0-9]+)$'`` — does NOT end in " part " plus
     #     a number >= 2 (single digit 2-9, or 2+ digits with no leading
@@ -948,7 +998,7 @@ class SourceStore:
         with self.database.connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM source_elements WHERE source_id=%s "
-                "ORDER BY created_at,id COLLATE \"C\"",
+                f"ORDER BY {_READING_ORDER}",
                 (source_id,),
             ).fetchall()
         return [
@@ -975,23 +1025,25 @@ class SourceStore:
         ``created_at`` is ``timestamptz`` here, so the cursor carries the
         ``datetime`` this adapter returned — never a re-rendered string (same
         reason as ``source_element_type_page``).  The ordering matches
-        ``source_elements`` verbatim, ``COLLATE "C"`` included.
+        ``source_elements`` verbatim (``element_reading_order``), and the
+        cursor stays ``(created_at, id)``: the digits term in between is
+        rebuilt from the id (``reading_order_key``) and the continuation runs
+        as ``after_cursor_sqls``' ranges.
         """
         limit = max(1, int(limit))
-        params: list[Any] = [source_id]
-        clause = ""
-        if after is not None:
-            clause = "AND (created_at, id COLLATE \"C\") > (%s, %s) "
-            params.extend([after[0], after[1]])
-        params.append(limit)
         with self.database.connect() as connection:
-            rows = connection.execute(
-                "SELECT id,source_id,element_type,location_label,text,"
-                "metadata,created_at FROM source_elements WHERE source_id=%s "
-                f"{clause}"
-                "ORDER BY created_at,id COLLATE \"C\" LIMIT %s",
-                tuple(params),
-            ).fetchall()
+            if after is None:
+                rows = connection.execute(
+                    f"SELECT {','.join(_AFTER_COLUMNS)} FROM source_elements "
+                    f"WHERE source_id=%s ORDER BY {_READING_ORDER} LIMIT %s",
+                    (source_id, limit),
+                ).fetchall()
+            else:
+                rows = page_after(
+                    lambda sql, params: connection.execute(sql, params).fetchall(),
+                    _AFTER_PAGE_SQLS, (source_id,),
+                    reading_order_key(source_id, after[0], after[1]), limit,
+                )
         items = [
             SourceElement(
                 id=row["id"],
@@ -1046,14 +1098,13 @@ class SourceStore:
                 if anchor is not None:
                     before = int(connection.execute(
                         "SELECT COUNT(*) AS c FROM source_elements "
-                        "WHERE source_id=%s AND (created_at<%s OR "
-                        "(created_at=%s AND id COLLATE \"C\"<%s))",
-                        (source_id, anchor["created_at"], anchor["created_at"], anchor["id"]),
+                        f"WHERE source_id=%s AND ({_READING_ORDER}) < (%s, %s, %s)",
+                        (source_id, *reading_order_key(
+                            source_id, anchor["created_at"], anchor["id"])),
                     ).fetchone()["c"])
                     offset = (before // limit) * limit
             rows = connection.execute(
-                "SELECT * FROM source_elements WHERE source_id=%s "
-                "ORDER BY created_at,id COLLATE \"C\" LIMIT %s OFFSET %s",
+                _DIRECT_PAGE_SQL if offset < _DIRECT_PAGE_MAX_OFFSET else _PAGE_SQL,
                 (source_id, limit, offset),
             ).fetchall()
         return PaginatedSourceElements(
@@ -1077,8 +1128,11 @@ class SourceStore:
     # -- in one of two shapes, both starting with the same three CTEs:
     #
     # * per offset: each position is a ``LATERAL ... OFFSET pos LIMIT 1`` walk
-    #   of ``idx_source_elements_source_created`` and the heap, the plan the
-    #   windowed read gets for one offset; the work is the sum of the offsets.
+    #   of ``idx_source_elements_reading_order`` that picks the id (``_PICK``:
+    #   an index-only walk, so the digits key is read from the index rather
+    #   than computed per skipped row), and the element back by primary key --
+    #   the windowed read's plan for one offset; the work is the sum of the
+    #   offsets.
     # * head walk: one walk of that index up to the largest position
     #   (``span``) numbers the rows with ``row_number()``; only the hits go
     #   back to the heap, by primary key. The work is ``span`` -- index only
@@ -1103,17 +1157,18 @@ class SourceStore:
         "FROM present CROSS JOIN counted LEFT JOIN LATERAL ("
         "SELECT wanted.ord,element.id,element.source_id,element.element_type,"
         "element.location_label,element.text,element.metadata "
-        "FROM wanted CROSS JOIN LATERAL (SELECT * FROM source_elements "
+        "FROM wanted CROSS JOIN LATERAL (SELECT id FROM source_elements "
         "WHERE source_id=%(source_id)s "
-        "ORDER BY created_at,id COLLATE \"C\" OFFSET wanted.pos LIMIT 1) AS element"
+        f"ORDER BY {_READING_ORDER} OFFSET wanted.pos LIMIT 1) AS pick "
+        "JOIN source_elements AS element ON element.id=pick.id"
         ") AS picked ON true ORDER BY picked.ord"
     )
     _POSITIONS_HEAD_WALK_SQL = (
         _POSITIONS_PREFIX
         + ", ranked AS (SELECT id,row_number() OVER "
-        "(ORDER BY created_at,id COLLATE \"C\")-1 AS pos "
-        "FROM (SELECT created_at,id FROM source_elements "
-        "WHERE source_id=%(source_id)s ORDER BY created_at,id COLLATE \"C\" "
+        "(ORDER BY created_at,digits,id COLLATE \"C\")-1 AS pos "
+        f"FROM (SELECT created_at,{INDEX_DIGITS_SQL} AS digits,id FROM source_elements "
+        f"WHERE source_id=%(source_id)s ORDER BY {_READING_ORDER} "
         "LIMIT %(span)s) AS head) "
         "SELECT counted.c AS total_count, picked.* "
         "FROM present CROSS JOIN counted LEFT JOIN LATERAL ("
@@ -1291,7 +1346,7 @@ class SourceStore:
         element_types: Sequence[str],
     ) -> list[tuple[str, str, int]]:
         """``[(source_id, element_type, count)]``, bounded and index-assisted
-        via ``idx_source_elements_source_type``.
+        via ``idx_source_elements_type_reading_order``.
 
         ``= ANY(%s)`` keeps one bound parameter per list (no placeholder
         explosion).  The planner still chooses the access path — an index scan
@@ -1305,7 +1360,7 @@ class SourceStore:
         below rather than folded into the one above.  Folding it in would
         force a ``location_label`` read on every whitelisted row just to
         evaluate one type's condition, giving up the Index Only Scan the
-        other kinds get from ``idx_source_elements_source_type`` alone.
+        other kinds get from ``idx_source_elements_type_reading_order`` alone.
         """
         ids = list(dict.fromkeys(value for value in source_ids if value))
         types = list(dict.fromkeys(value for value in element_types if value))
@@ -1315,7 +1370,7 @@ class SourceStore:
         out: list[tuple[str, str, int]] = []
         # A batched key probe (id_binding exemption class 2): each batch holds
         # at most COUNT_IN_CHUNK source ids, the leading column of
-        # ``idx_source_elements_source_type``, and is the statement's only
+        # ``idx_source_elements_type_reading_order``, and is the statement's only
         # selective predicate, so a generic plan probes the same index as a
         # custom one; the batches keep the plan cache instead of paying a
         # re-plan each.
@@ -1362,9 +1417,11 @@ class SourceStore:
         Here it matters more than on SQLite: ``created_at`` is ``timestamptz``,
         so the value handed back is a ``datetime``.  Re-rendering it as text
         and re-parsing it would risk a microsecond/offset round-trip that
-        silently skips or repeats a row at a page boundary.  Row values
-        ``(created_at, id) > (%s, %s)`` are index-comparable, keeping this on
-        ``idx_source_elements_source_type``.
+        silently skips or repeats a row at a page boundary.  The page is in
+        reading order (``element_reading_order``), every range an index range
+        on ``idx_source_elements_type_reading_order``; the cursor stays
+        ``(created_at, id)``, the digits are rebuilt from the id and the
+        continuation runs as ``after_cursor_sqls``' ranges.
 
         ``table`` enumeration additionally skips continuation parts (see
         ``_NOT_TABLE_CONTINUATION_SQL``): those rows are the same overlong
@@ -1372,22 +1429,22 @@ class SourceStore:
         not distinct tables, and listing each one would show a 400-row sheet
         as ~100 "tables".
         """
-        params: list[Any] = [source_id, element_type]
-        clause = ""
+        limit = max(1, int(limit))
+        scope = "source_id=%s AND element_type=%s"
         if element_type == "table":
-            clause += f"AND {self._NOT_TABLE_CONTINUATION_SQL}"
-        if after is not None:
-            clause += "AND (created_at,id) > (%s,%s) "
-            params.extend([after[0], after[1]])
-        params.append(max(1, int(limit)))
-        return connection.execute(
-            "SELECT id,source_id,element_type,location_label,text,created_at,"
-            "metadata->>'asset_id' AS asset_id "
-            "FROM source_elements WHERE source_id=%s AND element_type=%s "
-            f"{clause}"
-            "ORDER BY created_at,id LIMIT %s",
-            tuple(params),
-        ).fetchall()
+            scope += f" AND {self._NOT_TABLE_CONTINUATION_SQL.strip()}"
+        if after is None:
+            return connection.execute(
+                f"SELECT {','.join(_TYPED_COLUMNS)} FROM source_elements "
+                f"WHERE {scope} ORDER BY {_TYPED_READING_ORDER} LIMIT %s",
+                (source_id, element_type, limit),
+            ).fetchall()
+        return page_after(
+            lambda sql, params: connection.execute(sql, params).fetchall(),
+            after_cursor_sqls(_TYPED_COLUMNS, scope, placeholder="%s"),
+            (source_id, element_type),
+            reading_order_key(source_id, after[0], after[1]), limit,
+        )
 
     def source_display_rows(
         self, connection: Any, source_ids: Sequence[str]
@@ -1559,7 +1616,7 @@ class SourceStore:
                 "substr(s.title,1,%s) AS title,substr(s.summary,1,%s) AS summary,"
                 "(SELECT substr(e.text,1,%s) FROM source_elements e "
                 "WHERE e.source_id=s.id AND btrim(e.text, chr(32)||chr(9)||chr(10)||chr(13))<>'' "
-                "ORDER BY e.created_at,e.id LIMIT 1) AS excerpt "
+                f"ORDER BY {reading_order_sql('e')} LIMIT 1) AS excerpt "
                 "FROM sources s WHERE s.notebook_id=%s "
                 "AND s.source_type NOT IN ('memory','knowhow') "
                 "AND s.parse_status IN ('parsed','extracting','extracted') "
@@ -2812,7 +2869,8 @@ class SourceStore:
 
     def source_card_bases(self, connection, source_ids: Sequence[str]) -> dict[str, str]:
         """``source_card_basis`` 的批量版,在调用方的连接上:每批(<=1024 个 id)一条
-        ``GROUP BY source_id``,经 ``idx_source_elements_source_type`` 的前缀走。没有
+        ``GROUP BY source_id``,经 v105/0086 两条阅读顺序索引之一的 source_id 前缀走(SQLite 实测为
+        ``idx_source_elements_reading_order`` 的覆盖扫描)。没有
         元素的来源不在结果里(调用方按 ``""`` 处理)。"""
         bases: dict[str, str] = {}
         ids = list(source_ids)

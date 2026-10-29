@@ -1926,14 +1926,18 @@ class SourceStorePort(Protocol):
         self, source_id: str, after: "tuple[Any, str] | None", limit: int
     ) -> "tuple[list[SourceElement], tuple[Any, str] | None]":
         """One keyset page of ``source_id``'s elements in the SAME global order
-        ``source_elements`` returns (``ORDER BY created_at, id``), plus the
-        cursor for the next page (``None`` once the walk is exhausted).
+        ``source_elements`` returns (the reading order of
+        ``app.repositories.element_reading_order``: ``created_at, <index
+        digits>, id``), plus the cursor for the next page (``None`` once the
+        walk is exhausted).
 
         This is the bounded reader for whole-source PIPELINES (re-embedding),
         distinct from ``source_elements_page``: that one is the source-detail
         window and pages by ``OFFSET``, which is O(n²) over a whole source.
-        The row-value comparison ``(created_at, id) > (?, ?)`` keeps every page
-        an index range seek on ``idx_source_elements_source_created``.
+        The cursor keeps every page an index range seek on
+        ``idx_source_elements_reading_order`` (a row-value comparison on
+        PostgreSQL; on SQLite, which does not range over an index expression,
+        the same comparison as disjoint ranges, ``after_cursor_sqls``).
 
         ``after`` carries values THIS adapter returned earlier and is never
         reparsed or reformatted — the same contract (and the same reason) as
@@ -2053,8 +2057,8 @@ class SourceStorePort(Protocol):
         Bounded and index-assisted by contract: the query shape is
         ``WHERE source_id IN (...) AND element_type IN (...)
         GROUP BY source_id, element_type``, which
-        ``idx_source_elements_source_type`` (source_id, element_type,
-        created_at, id) covers.  For every requested type EXCEPT ``table``,
+        ``idx_source_elements_type_reading_order`` (source_id, element_type,
+        created_at, <index digits>, id) covers.  For every requested type EXCEPT ``table``,
         both adapters resolve this as a covering index search on the first
         two key columns (no heap/row fetch). ``table`` is the one exception:
         a ``table`` element whose ``location_label`` ends in " part N" (N>=2)
@@ -2092,8 +2096,10 @@ class SourceStorePort(Protocol):
         never a reformatted one — the cursor is opaque and process-local for
         exactly that reason (see ``app.services.collection_enumeration``).
 
-        Index path is part of the contract: ``idx_source_elements_source_type``
-        (source_id, element_type, created_at, id) makes this an equality seek
+        Index path is part of the contract:
+        ``idx_source_elements_type_reading_order`` (source_id, element_type,
+        created_at, <index digits>, id; reading order, see
+        ``app.repositories.element_reading_order``) makes this an equality seek
         on the first two columns plus a range on the rest, so the page cost is
         O(limit) regardless of how many prose elements the source holds and no
         ORDER BY sort is materialized.  Rows carry id / source_id /

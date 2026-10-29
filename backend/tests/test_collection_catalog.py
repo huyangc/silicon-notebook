@@ -3,7 +3,7 @@
 覆盖:白名单过滤、per-source 计数与来源计数、两层缓存(notebook 指纹 / per-source
 变更信号)、LRU 有界、地图文本形态与硬截断、作用域(挂载 base 计入、未挂载不越权)、
 KG/knowhow 计数,以及「索引不可绕」——真实执行的 SQL 必须走
-idx_source_elements_source_type。
+idx_source_elements_type_reading_order。
 """
 from __future__ import annotations
 
@@ -774,7 +774,7 @@ def test_render_carries_no_user_content(repo):
 # --------------------------------------------------------- 索引不可绕(EXPLAIN)
 
 def test_element_count_query_is_served_by_the_typed_index(repo):
-    """真实执行的元素计数 SQL 必须走 idx_source_elements_source_type。
+    """真实执行的元素计数 SQL 必须走 idx_source_elements_type_reading_order。
 
     捕获的是**实际执行**的语句(sqlite3 trace callback 给的是参数展开后的
     SQL),不是测试里另抄一份查询文本——所以查询形状一旦漂到全表扫,这条会红。
@@ -808,11 +808,11 @@ def test_element_count_query_is_served_by_the_typed_index(repo):
     non_table_plan = next(p for p in plans if "COVERING INDEX" in p)
     table_plan = next(p for p in plans if "COVERING INDEX" not in p)
     assert (
-        "USING COVERING INDEX idx_source_elements_source_type "
+        "USING COVERING INDEX idx_source_elements_type_reading_order "
         "(source_id=? AND element_type=?)"
     ) in non_table_plan, non_table_plan
     assert (
-        "USING INDEX idx_source_elements_source_type "
+        "USING INDEX idx_source_elements_type_reading_order "
         "(source_id=? AND element_type=?)"
     ) in table_plan, table_plan
     assert "SCAN source_elements" not in non_table_plan, non_table_plan
