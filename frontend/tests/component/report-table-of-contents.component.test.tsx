@@ -52,6 +52,23 @@ test("正文末尾的「参考文献」一节默认收起、可展开，目录�
   expect(heading).toHaveFocus();
 });
 
+test("只折叠末尾那个标题恰为「参考文献」的一节，标题里含这几个字的正文章节不折叠", () => {
+  const markdown = [
+    "## 参考文献中的方法比较", "", "正文章节。", "",
+    "## 参考文献", "", "- 模型在章节里写的同名小节", "",
+    "## 结论", "", "收尾。", "",
+    "## 参考文献", "", "- 甲文 · p. 2", "",
+    "> 引证分布：1 处",
+  ].join("\n");
+  const { container } = render(documentView(markdown));
+
+  const folds = container.querySelectorAll("details.report-references-fold");
+  expect(folds).toHaveLength(1);
+  expect(folds[0]).toHaveTextContent("甲文 · p. 2");
+  expect(folds[0]).not.toHaveTextContent("同名小节");
+  expect(screen.getByText("正文章节。").closest("details")).toBeNull();
+});
+
 test("同名标题分别跳转到对应的正文位置，并移动键盘焦点", async () => {
   const user = userEvent.setup();
   render(documentView("## 相同标题\n\n第一节\n\n### 子节\n\n## 相同标题\n\n第二节"));
