@@ -1946,14 +1946,106 @@ def alias_recall_reference(concepts: Sequence[Mapping[str, Any]], repo_root: Pat
 
 
 # ===========================================================================
-# CLI
+# render / ingest / report (plan G0-T5, §2.4-§2.6)
 # ===========================================================================
 
-def _not_yet(name: str) -> Callable[[Any], int]:
-    def run(_args: Any) -> int:
-        raise SystemExit(f"{name}: not implemented in this revision")
-    return run
+MAX_ERROR_EXAMPLES = 5
 
+
+def write_review(out_dir: Path) -> Path:
+    items = _read_json(out_dir / "items.json")
+    page = render_review_html(review_page_data(items, seed=items["seed"]))
+    target = out_dir / "review.html"
+    target.write_text(page, encoding="utf-8")
+    return target
+
+
+def item_keys(items: Mapping[str, Any]) -> set[str]:
+    """Every key a label may carry: alias items, formula cards (missing
+    count), candidate-pair groups, empty-pool spot checks."""
+    keys = {a["key"] for a in items.get("alias_items", [])}
+    for card in items.get("formula_cards", []):
+        keys.add(card["key"])
+        keys |= {p["group"] for p in card["pairs"]}
+    keys |= {c["key"] for c in items.get("empty_checks", [])}
+    return keys
+
+
+def ingest_labels(out_dir: Path, labels_path: Path) -> tuple[int, int]:
+    """Merge an exported label file into ``labels.json``; returns (merged,
+    ignored-unknown). Labels for keys this run does not have are dropped."""
+    items = _read_json(out_dir / "items.json")
+    incoming = parse_labels(_read_json(labels_path))
+    known = item_keys(items)
+    accepted = {k: v for k, v in incoming.items() if k in known}
+    store = out_dir / "labels.json"
+    old = _read_json(store) if store.is_file() else {}
+    _write_json(store, merge_labels(old, accepted))
+    return len(accepted), len(incoming) - len(accepted)
+
+
+def error_examples(items: Mapping[str, Any], labels: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    """English-slice (pool A) error examples for the local report only, at
+    most ``MAX_ERROR_EXAMPLES`` per class."""
+    buckets: dict[str, list[str]] = {}
+    for alias in items.get("alias_items", []):
+        verdict = labels.get(alias["key"], {}).get("verdict")
+        if alias["pool"] == "A" and verdict in ("incorrect", "unsure"):
+            buckets.setdefault(f"别名 {alias['rule']} 判错", []).append(
+                f"{alias['name']} → {alias['alias']}（{verdict}）")
+    for card in items.get("formula_cards", []):
+        if card["pool"] != "A":
+            continue
+        for pair in card["pairs"]:
+            verdict = labels.get(pair["group"], {}).get("verdict")
+            if pair["origin"] == "kept" and verdict in ("incorrect", "unsure"):
+                buckets.setdefault("公式保留但判错", []).append(
+                    f"{card['formula'][:80]} | {pair['symbol']} = {pair['meaning']}（{verdict}）")
+            elif pair["origin"] == "rejected" and verdict == "correct":
+                buckets.setdefault(f"公式误杀（{pair['reason']}）", []).append(
+                    f"{card['formula'][:80]} | {pair['symbol']} = {pair['meaning']}")
+    return [f"{kind}：{text}" for kind, rows in sorted(buckets.items()) for text in rows[:MAX_ERROR_EXAMPLES]]
+
+
+def write_report(out_dir: Path) -> dict:
+    items = _read_json(out_dir / "items.json")
+    store = out_dir / "labels.json"
+    labels = _read_json(store) if store.is_file() else {}
+    report = build_report(items, labels)
+    _write_json(out_dir / "report.json", report)
+    (out_dir / "report.md").write_text(
+        render_report_md(report, local_examples=error_examples(items, labels)), encoding="utf-8")
+    return report
+
+
+def run_render(_args: Any) -> int:
+    target = write_review(local_output_dir())
+    print(f"[render] {target} — 用浏览器以 file:// 打开；进度存在浏览器本机")
+    return 0
+
+
+def run_ingest(args: Any) -> int:
+    labels_path = Path(args.labels).expanduser()
+    merged, ignored = ingest_labels(local_output_dir(), labels_path)
+    print(f"[ingest] merged {merged} labels, ignored {ignored} unknown keys")
+    print(f"[ingest] 已读入，可以删除 {labels_path}")
+    return 0
+
+
+def run_report(_args: Any) -> int:
+    out_dir = local_output_dir()
+    report = write_report(out_dir)
+    print(f"[report] {out_dir / 'report.md'}")
+    print(f"[report] 别名通过：{report['alias_rules_passed'] or '无'}；"
+          f"公式逐语言：{report['formula_overall']}；公式上线：{report['formula_ships']}")
+    if report["top_up_needed"]:
+        print(f"[report] 样本不足，需要补抽（prepare --top-up）：{report['top_up_needed']}")
+    return 0
+
+
+# ===========================================================================
+# CLI
+# ===========================================================================
 
 def build_parser():
     import argparse
@@ -1984,8 +2076,12 @@ def build_parser():
                          help="with --top-up: raise both formula scan targets by this much")
     _budget_args(prepare)
     prepare.set_defaults(run=run_prepare)
-    for name in ("render", "ingest", "report"):
-        sub.add_parser(name).set_defaults(run=_not_yet(name))
+
+    sub.add_parser("render", help="write review.html from items.json").set_defaults(run=run_render)
+    ingest = sub.add_parser("ingest", help="merge an exported kg_attrs_labels.json")
+    ingest.add_argument("--labels", required=True)
+    ingest.set_defaults(run=run_ingest)
+    sub.add_parser("report", help="write report.md / report.json").set_defaults(run=run_report)
     return parser
 
 
