@@ -192,7 +192,7 @@ def _assert_count_with_reverse_index_never_seeks_per_ceiling_id(postgres_databas
 
 
 def test_uncertified_index_reads_evidence_json_not_the_reverse_index(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 85
+    assert PostgresMigrator(postgres_database).migrate() == 86
     _seed(postgres_database, backfilled=False)
     store = KnowledgeStore(postgres_database, _seams())
     for name, ceiling in CEILINGS.items():
@@ -262,7 +262,7 @@ def test_certified_ceiling_plan_matrix(postgres_database):
 
     The uncertified reverse-index world remains a separate test/schema.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 85
+    assert PostgresMigrator(postgres_database).migrate() == 86
     _seed(postgres_database, backfilled=True)
     checks = (
         _assert_page_with_reverse_index_keeps_keyset_scan_and_object_probe,

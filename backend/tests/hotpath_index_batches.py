@@ -19,6 +19,7 @@ BATCH_ENTRY_COUNTS: dict[int, tuple[int, str]] = {
     6: (3, "generation-aware cluster replacements (0051)"),
     7: (1, "own-notebook paper-metadata covering index (0084)"),
     8: (1, "find_sources summary trigram GIN (operator-built, no migration)"),
+    9: (2, "source-element reading-order replacements (0086)"),
 }
 EXPECTED_SPEC_TOTAL = sum(count for count, _ in BATCH_ENTRY_COUNTS.values())
 

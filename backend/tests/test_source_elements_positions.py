@@ -21,6 +21,7 @@ import pytest
 from app.core.config import Settings
 from app.domain.source_positions import MAX_POSITIONS_PER_READ, page_at_positions
 from app.models.schemas import NotebookCreate
+from app.repositories.sqlite.source_store import READING_ORDER_SQL
 from app.services.collection_enumeration import SourceItem
 from app.services.document_source_overview import prepare_source_overview
 from app.services.sqlite_repository import SQLiteRepository
@@ -122,10 +123,10 @@ def test_every_position_keeps_the_windowed_reads_plan(repo):
     windowed = _plan(
         db,
         "SELECT * FROM source_elements WHERE source_id=? "
-        "ORDER BY created_at ASC,id ASC LIMIT ? OFFSET ?",
+        f"ORDER BY {READING_ORDER_SQL} LIMIT ? OFFSET ?",
         ("src-a", 1, 70),
     )
-    assert any("idx_source_elements_source_created" in line for line in windowed), windowed
+    assert any("idx_source_elements_reading_order" in line for line in windowed), windowed
     db.set_trace_callback(statements.append)
     try:
         store.source_elements_page("src-a", positions=[3, 70, 149])
@@ -136,7 +137,7 @@ def test_every_position_keeps_the_windowed_reads_plan(repo):
     scans = [row[3] for row in plan if "source_elements" in row[3]]
     # one term per position plus the header's COUNT; each term's scan line is
     # the windowed read's scan line
-    term_scans = [line for line in scans if "idx_source_elements_source_created" in line]
+    term_scans = [line for line in scans if "idx_source_elements_reading_order" in line]
     assert len(term_scans) == 3, plan
     assert windowed == [term_scans[0]] and len(set(term_scans)) == 1, (term_scans, windowed)
     assert not any(line.startswith("SCAN source_elements") for line in scans), plan

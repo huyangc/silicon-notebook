@@ -6143,5 +6143,57 @@ MIGRATION_MANIFEST[(103, 104)] = {
     "views": {},
 }
 
+# v105 (parity with PostgreSQL 0086_source_element_reading_order.sql): a
+# source's elements in reading order past 9 999 elements. Two indexes with the
+# index-digits expression of app.repositories.element_reading_order before id
+# REPLACE the two (created_at, id) element indexes, which are retired through
+# the "dropped_indexes" allowlist (the v71 pattern): an older hop's expected
+# additions lose the retired names (built then dropped along the chain), and
+# every hop through v105 allows their drop. Index only: no table, column,
+# trigger or view; no backfill.
+_V105_INDEX_DIGITS = (
+    "(CASE WHEN substr(id,1,length(source_id)+4)=('el-'||source_id||'-') "
+    "THEN length(substr(id,length(source_id)+5))-length(ltrim(substr(id,"
+    "length(source_id)+5),'0123456789')) ELSE 0 END)"
+)
+SOURCE_ELEMENT_READING_ORDER_INDEXES = {
+    "idx_source_elements_reading_order": (
+        "CREATE INDEX idx_source_elements_reading_order ON source_elements("
+        f"source_id, created_at, {_V105_INDEX_DIGITS}, id)"
+    ),
+    "idx_source_elements_type_reading_order": (
+        "CREATE INDEX idx_source_elements_type_reading_order ON source_elements("
+        f"source_id, element_type, created_at, {_V105_INDEX_DIGITS}, id)"
+    ),
+}
+SOURCE_ELEMENT_READING_ORDER_DROPPED_INDEXES = frozenset(
+    {"idx_source_elements_source_created", "idx_source_elements_source_type"}
+)
+MIGRATION_MANIFEST = {
+    (key[0], 105, *key[2:]): {
+        **manifest,
+        "indexes": {
+            name: sql
+            for name, sql in {
+                **manifest["indexes"], **SOURCE_ELEMENT_READING_ORDER_INDEXES
+            }.items()
+            if name not in SOURCE_ELEMENT_READING_ORDER_DROPPED_INDEXES
+        },
+        "dropped_indexes": (
+            frozenset(manifest.get("dropped_indexes", frozenset()))
+            | SOURCE_ELEMENT_READING_ORDER_DROPPED_INDEXES
+        ),
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(104, 105)] = {
+    "tables": {},
+    "columns": {},
+    "indexes": SOURCE_ELEMENT_READING_ORDER_INDEXES,
+    "dropped_indexes": SOURCE_ELEMENT_READING_ORDER_DROPPED_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

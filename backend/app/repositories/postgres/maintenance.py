@@ -19,6 +19,7 @@ from app.repositories.postgres._store_utils import (
 )
 from app.domain.auth_utils import ascii_lower
 from app.domain.image_backfill import ImageBackfillConcurrentChange
+from app.repositories.element_reading_order import id_order_for, id_order_probe_sql
 from app.repositories.chunk_elements import (
     decode_element_ids,
     reverse_rows as chunk_element_reverse_rows,
@@ -51,6 +52,10 @@ from psycopg import sql
 
 
 logger = logging.getLogger("silicon_notebook.postgres.maintenance")
+
+#: The image backfill plan orders by id alone: ``id_order_for`` picks its
+#: ORDER BY from this two-row probe (``element_reading_order``).
+_ID_ORDER_PROBE = id_order_probe_sql(placeholder="%s", id_collate='COLLATE "C"')
 
 
 # Fixed, product-owned key for session-level PostgreSQL advisory locking.  It
@@ -2211,12 +2216,17 @@ class PostgresMaintenanceAdapter:
         ]
 
     def image_backfill_source_state(self, source_id: str) -> dict:
-        """SQLite 侧同名方法的对等半；元素顺序用 ``id COLLATE "C"``——与
-        `source_elements_for_chunking` 同一口径，也就是对齐算法依赖的文档序。"""
+        """SQLite 侧同名方法的对等半；元素顺序用 ``<index digits>, id COLLATE "C"``
+        （``id_order_for``）——与 `source_elements_for_chunking`
+        同一口径，也就是对齐算法依赖的文档序。"""
         with self._runtime.database.connect() as db:
+            order = id_order_for(
+                db.execute(_ID_ORDER_PROBE, (source_id, source_id)).fetchall(),
+                id_collate='COLLATE "C"')
             element_rows = db.execute(
                 "SELECT id, element_type, text, metadata, created_at "
-                "FROM source_elements WHERE source_id=%s ORDER BY id COLLATE \"C\"",
+                "FROM source_elements WHERE source_id=%s "
+                f"ORDER BY {order}",
                 (source_id,),
             ).fetchall()
             chunk_rows = db.execute(

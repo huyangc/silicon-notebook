@@ -13,7 +13,7 @@ The twin of ``tests/test_source_elements_positions.py``:
   shrinks, grows, is deleted or re-parsed after the first page;
 * both statement shapes, custom and generic plan, in both visibility-map
   states (``bystander_snapshot``): the per-offset shape is the windowed read's
-  ``Limit`` over ``idx_source_elements_source_created`` for every position
+  ``Limit`` over ``idx_source_elements_reading_order`` for every position
   whatever the visibility map says; with a verified-full map the head walk is
   one index scan of that index with hits back by ``pk_source_elements`` and
   nothing scans or sorts ``source_elements``.
@@ -298,11 +298,15 @@ def test_both_shapes_walk_the_order_index_and_never_scan_or_sort_elements(
         assert "Seq Scan on source_elements" not in plan, (name, plan)
         assert _index_keyed(plan), (name, plan)
         if shape == "per_offset":
-            # each position: the windowed read's own Limit over the order index
+            # each position: a Limit over the order index that picks the id
+            # (index-only where the visibility map allows), the element back
+            # by primary key
             assert re.search(
-                r"Limit\n\s+->  Index Scan using idx_source_elements_source_created "
-                r"on source_elements", plan,
+                r"Limit\n\s+->  Index (Only )?Scan using "
+                r"idx_source_elements_reading_order on source_elements", plan,
             ), (name, plan)
+            assert "Index Scan using pk_source_elements on source_elements" in plan, (
+                name, plan)
             assert "WindowAgg" not in plan, (name, plan)
             assert re.findall(r"Sort Key: (.*)", plan) == ["w.ord"], (name, plan)
         else:
@@ -316,7 +320,7 @@ def test_both_shapes_walk_the_order_index_and_never_scan_or_sort_elements(
         assert re.findall(r"Sort Key: (.*)", plan) == ["w.ord"], (name, plan)
         if shape == "head_walk":
             assert re.search(
-                r"Index (Only )?Scan using idx_source_elements_source_created "
+                r"Index (Only )?Scan using idx_source_elements_reading_order "
                 r"on source_elements", plan,
             ), (name, plan)
 

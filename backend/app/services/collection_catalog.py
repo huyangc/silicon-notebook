@@ -10,7 +10,7 @@ Three hard properties, in priority order:
 
 1. **Zero model calls.**  Nothing here touches an LLM or an embedder.
 2. **Bounded, index-assisted reads.**  Element counts restrict on
-   ``element_type`` inside the query (``idx_source_elements_source_type``), so
+   ``element_type`` inside the query (``idx_source_elements_type_reading_order``), so
    a source's prose is never read to count its formulas; KG object counts go
    through the existing ``knowledge_type_count_rows`` port rather than a second
    query path of our own.

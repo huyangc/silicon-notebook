@@ -6,6 +6,7 @@ from typing import Iterable, Mapping, Sequence
 import psycopg
 
 from app.repositories.chunk_elements import decode_element_ids, reverse_rows_for_writes
+from app.repositories.element_reading_order import id_order_for, id_order_probe_sql
 from app.repositories.navigation_version import navigation_bump
 from app.repositories.ports import CHUNKED_AT_UNCHECKED, ChunkWrite
 from app.repositories.postgres._store_utils import (
@@ -44,6 +45,10 @@ from app.domain.indexing_pipeline import IndexingPipelineStalePlanError
 # one another, and a fixed batch keeps the statement shape stable no matter how
 # many evidence elements one query hit.
 CHUNK_ELEMENT_LOOKUP_BATCH = 500
+
+#: Readers that order by id alone: ``id_order_for`` picks their ORDER BY from
+#: this two-row probe (``element_reading_order``).
+_ID_ORDER_PROBE = id_order_probe_sql(placeholder="%s", id_collate='COLLATE "C"')
 
 # The navigation backfill and its CLI never write a mirrored notebook
 # (``notebooks.sync_origin`` non-empty, docs/incremental-sync-design.md §5): its
@@ -282,9 +287,12 @@ class ChunkStore:
         build_chunks 的 heading 分支代替标题自身文本作 section 标签；缺省时
         build_chunks 自行回退到标题自身文本，字节不变。"""
         with self.database.connect() as connection:
+            order = id_order_for(
+                connection.execute(_ID_ORDER_PROBE, (source_id, source_id)).fetchall(),
+                id_collate='COLLATE "C"')
             rows = connection.execute(
                 "SELECT id,element_type,text,metadata FROM source_elements "
-                "WHERE source_id=%s ORDER BY id COLLATE \"C\"",
+                f"WHERE source_id=%s ORDER BY {order}",
                 (source_id,),
             ).fetchall()
         output = []
@@ -592,10 +600,13 @@ class ChunkStore:
 
     def source_heading_elements(self, source_id: str) -> list[dict]:
         with self.database.connect() as connection:
+            order = id_order_for(
+                connection.execute(_ID_ORDER_PROBE, (source_id, source_id)).fetchall(),
+                id_collate='COLLATE "C"')
             rows = connection.execute(
                 "SELECT id,element_type,text,metadata FROM source_elements "
                 "WHERE source_id=%s AND element_type='heading' "
-                "ORDER BY id COLLATE \"C\"",
+                f"ORDER BY {order}",
                 (source_id,),
             ).fetchall()
         output = []

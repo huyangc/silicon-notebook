@@ -26,6 +26,13 @@ from app.domain.source_display import summary_display_title
 from app.domain.source_positions import normalize_positions, positions_page
 from app.models.question_suggestions import QUESTION_SUGGESTION_REVISION_PAGE_SIZE
 from app.domain.promotion_source import PROMOTION_SOURCE_TYPE, presented_source_title
+from app.repositories.element_reading_order import (
+    INDEX_DIGITS_SQL,
+    after_cursor_sqls,
+    page_after,
+    reading_order_key,
+    reading_order_sql,
+)
 from app.repositories.promotion_title_sql import (
     mapped_title_sql,
     needle_names_current_wording,
@@ -59,6 +66,36 @@ from app.repositories.sqlite.memory_sql import (
 # fetched — there is no meta row"). A plain `None` default couldn't tell
 # those two cases apart.
 _UNSET = SOURCE_PAPER_META_UNSET
+
+# A source's elements in reading order (``app.repositories.element_reading_order``):
+# ``created_at, <index digits>, id`` -- the key of ``idx_source_elements_reading_order``
+# (``_migration_104``). A keyset cursor is resolved as ``after_cursor_sqls``'
+# head and tail ranges (SQLite will not range over the expression inside a row value).
+READING_ORDER_SQL = reading_order_sql()
+
+
+_AFTER_COLUMNS = (
+    "id", "source_id", "element_type", "location_label", "text", "metadata",
+    "created_at",
+)
+_AFTER_PAGE_SQLS = after_cursor_sqls(_AFTER_COLUMNS, "source_id = ?")
+# ``asset_id`` is projected with JSON1 rather than by selecting ``metadata``
+# (see ``element_page_rows``).
+_TYPED_COLUMNS = (
+    "id", "source_id", "element_type", "location_label", "text", "created_at",
+    "json_extract(metadata, '$.asset_id') AS asset_id",
+)
+
+#: Rows of one source before a cursor row in reading order, as the same three
+#: disjoint index ranges (see ``after_cursor_sqls``).
+_READING_ORDER_BEFORE_COUNT_SQL = (
+    "SELECT (SELECT COUNT(*) FROM source_elements "
+    "WHERE source_id=? AND created_at<?)"
+    "+(SELECT COUNT(*) FROM source_elements "
+    f"WHERE source_id=? AND created_at=? AND {INDEX_DIGITS_SQL}<?)"
+    "+(SELECT COUNT(*) FROM source_elements "
+    f"WHERE source_id=? AND created_at=? AND {INDEX_DIGITS_SQL}=? AND id<?) AS c"
+)
 
 
 # 「用户可见文档」的判定谓词 —— 排除 Memory 派生源与 knowhow 表隐藏投影源
@@ -793,7 +830,8 @@ class SourceStore:
         self.get_source(source_id)          # KeyError guard, same as the facade did
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT * FROM source_elements WHERE source_id = ? ORDER BY created_at ASC, id ASC",
+                "SELECT * FROM source_elements WHERE source_id = ? "
+                f"ORDER BY {READING_ORDER_SQL}",
                 (source_id,),
             ).fetchall()
         return [
@@ -816,37 +854,39 @@ class SourceStore:
     ) -> "tuple[List[SourceElement], tuple[object, str] | None]":
         """One keyset page of this source's elements + the next cursor.
 
-        Same global order as ``source_elements`` (``created_at, id``), so a
+        Same global order as ``source_elements`` (the reading order of
+        ``element_reading_order``: ``created_at, <index digits>, id``), so a
         whole-source walk visits exactly the same elements in exactly the same
         sequence — only bounded. ``source_elements_page`` deliberately is NOT
         reused for that: it pages by ``OFFSET`` (and clamps ``limit`` to 100
         for the detail view), which makes a full-source walk quadratic.
 
-        The row-value comparison is the same deliberate spelling as
-        ``source_element_type_page``: SQLite optimizes ``(a, b) > (?, ?)``
-        against the multi-column ``idx_source_elements_source_created``, while
-        the ``created_at > ? OR (created_at = ? AND id > ?)`` form degrades
-        into a scan of the whole source range on every page.
+        The cursor is resolved as index range seeks on
+        ``idx_source_elements_reading_order`` (``after_cursor_sqls``):
+        SQLite does not use the digits expression inside a row-value range,
+        and the ``created_at > ? OR (...)`` form degrades into a scan of the
+        whole source range on every page.
 
-        ``after`` values are handed straight back unparsed. ``None`` is
+        ``after`` values are handed straight back unparsed; the cursor stays
+        ``(created_at, id)`` and the digits term is rebuilt from the id
+        (``reading_order_key``). ``None`` is
         returned as the next cursor once the page came up short — the caller
         stops without a final empty query.
         """
         limit = max(1, int(limit))
-        params: List[object] = [source_id]
-        clause = ""
-        if after is not None:
-            clause = "AND (created_at, id) > (?, ?) "
-            params.extend([after[0], after[1]])
-        params.append(limit)
         with self.database.connect() as db:
-            rows = db.execute(
-                "SELECT id, source_id, element_type, location_label, text, "
-                "metadata, created_at FROM source_elements WHERE source_id = ? "
-                f"{clause}"
-                "ORDER BY created_at, id LIMIT ?",
-                params,
-            ).fetchall()
+            if after is None:
+                rows = db.execute(
+                    f"SELECT {', '.join(_AFTER_COLUMNS)} FROM source_elements "
+                    f"WHERE source_id = ? ORDER BY {READING_ORDER_SQL} LIMIT ?",
+                    (source_id, limit),
+                ).fetchall()
+            else:
+                rows = page_after(
+                    lambda sql, params: db.execute(sql, params).fetchall(),
+                    _AFTER_PAGE_SQLS, (source_id,),
+                    reading_order_key(source_id, after[0], after[1]), limit,
+                )
         items = [
             SourceElement(
                 id=row["id"],
@@ -903,16 +943,17 @@ class SourceStore:
                     (source_id, anchor_element_id),
                 ).fetchone()
                 if anchor is not None:
+                    created_at, digits, element_id = reading_order_key(
+                        source_id, anchor["created_at"], anchor["id"])
                     before = int(db.execute(
-                        "SELECT COUNT(*) AS c FROM source_elements "
-                        "WHERE source_id=? AND (created_at<? OR "
-                        "(created_at=? AND id<?))",
-                        (source_id, anchor["created_at"], anchor["created_at"], anchor["id"]),
+                        _READING_ORDER_BEFORE_COUNT_SQL,
+                        (source_id, created_at, source_id, created_at, digits,
+                         source_id, created_at, digits, element_id),
                     ).fetchone()["c"])
                     offset = (before // limit) * limit
             rows = db.execute(
                 "SELECT * FROM source_elements WHERE source_id=? "
-                "ORDER BY created_at ASC,id ASC LIMIT ? OFFSET ?",
+                f"ORDER BY {READING_ORDER_SQL} LIMIT ? OFFSET ?",
                 (source_id, limit, offset),
             ).fetchall()
         return PaginatedSourceElements(
@@ -957,7 +998,7 @@ class SourceStore:
             terms.append(
                 "SELECT * FROM (SELECT ? AS ord,NULL AS total_count,id,source_id,"
                 "element_type,location_label,text,metadata FROM source_elements "
-                "WHERE source_id=? ORDER BY created_at ASC,id ASC LIMIT ? OFFSET ?)"
+                f"WHERE source_id=? ORDER BY {READING_ORDER_SQL} LIMIT ? OFFSET ?)"
             )
             params.extend([ordinal, source_id, 1, position])
         with self.database.connect() as db:
@@ -1149,8 +1190,8 @@ class SourceStore:
         element_types: Sequence[str],
     ) -> List[tuple[str, str, int]]:
         """``[(source_id, element_type, count)]`` — covered by
-        ``idx_source_elements_source_type`` (source_id, element_type,
-        created_at, id): the whitelist keeps each source to one seek per
+        ``idx_source_elements_type_reading_order`` (source_id, element_type,
+        created_at, <index digits>, id): the whitelist keeps each source to one seek per
         requested type instead of scanning its whole element range.  Both
         lists are deduplicated; the source batch leaves room for the type
         placeholders under SQLite's variable limit.
@@ -1212,19 +1253,20 @@ class SourceStore:
         after: tuple[object, str] | None,
         limit: int,
     ) -> List[sqlite3.Row]:
-        """One keyset page of ``(source_id, element_type)`` ordered by
-        ``(created_at, id)``.
+        """One keyset page of ``(source_id, element_type)`` in reading order
+        (``element_reading_order``: ``created_at, <index digits>, id``).
 
-        The row-value comparison is deliberate: SQLite optimizes
-        ``(a, b) > (?, ?)`` against a multi-column index (since 3.15), so this
-        stays an index range seek on ``idx_source_elements_source_type``.  The
-        equivalent ``created_at > ? OR (created_at = ? AND id > ?)`` spelling
-        does NOT — it degrades into a scan of the whole (source, type) range
-        on every page, which is exactly the cost this cursor exists to avoid.
+        The cursor is resolved as index range seeks on
+        ``idx_source_elements_type_reading_order`` (``after_cursor_sqls``):
+        SQLite does not use the digits expression inside a row-value range, and
+        the ``created_at > ? OR (created_at = ? AND id > ?)`` spelling degrades
+        into a scan of the whole (source, type) range on every page, which is
+        exactly the cost this cursor exists to avoid.
 
         ``after`` carries values this adapter returned earlier; nothing is
         reparsed or reformatted, so a cursor round trip cannot skip or repeat
-        a row through a timestamp-formatting difference.
+        a row through a timestamp-formatting difference. It stays
+        ``(created_at, id)``; the digits term is rebuilt from the id.
 
         ``asset_id`` is projected with JSON1 ``json_extract`` rather than by
         selecting ``metadata``: an image needs its short asset id, while a
@@ -1237,22 +1279,22 @@ class SourceStore:
         not distinct tables, and listing each one would show a 400-row sheet
         as ~100 "tables".
         """
-        params: List[object] = [source_id, element_type]
-        clause = ""
+        limit = max(1, int(limit))
+        scope = "source_id = ? AND element_type = ?"
         if element_type == "table":
-            clause += f"AND {self._NOT_TABLE_CONTINUATION_SQL}"
-        if after is not None:
-            clause += "AND (created_at, id) > (?, ?) "
-            params.extend([after[0], after[1]])
-        params.append(max(1, int(limit)))
-        return db.execute(
-            "SELECT id, source_id, element_type, location_label, text, created_at, "
-            "json_extract(metadata, '$.asset_id') AS asset_id "
-            "FROM source_elements WHERE source_id = ? AND element_type = ? "
-            f"{clause}"
-            "ORDER BY created_at, id LIMIT ?",
-            params,
-        ).fetchall()
+            scope += f" AND {self._NOT_TABLE_CONTINUATION_SQL.strip()}"
+        if after is None:
+            return db.execute(
+                f"SELECT {', '.join(_TYPED_COLUMNS)} FROM source_elements "
+                f"WHERE {scope} ORDER BY {READING_ORDER_SQL} LIMIT ?",
+                (source_id, element_type, limit),
+            ).fetchall()
+        return page_after(
+            lambda sql, params: db.execute(sql, params).fetchall(),
+            after_cursor_sqls(_TYPED_COLUMNS, scope),
+            (source_id, element_type),
+            reading_order_key(source_id, after[0], after[1]), limit,
+        )
 
     def source_display_rows(
         self, db: sqlite3.Connection, source_ids: Sequence[str]
@@ -1432,7 +1474,7 @@ class SourceStore:
                 "substr(s.title,1,?) AS title,substr(s.summary,1,?) AS summary,"
                 "(SELECT substr(e.text,1,?) FROM source_elements e "
                 "WHERE e.source_id=s.id AND trim(e.text, char(32)||char(9)||char(10)||char(13))<>'' "
-                "ORDER BY e.created_at,e.id LIMIT 1) AS excerpt "
+                f"ORDER BY {reading_order_sql('e')} LIMIT 1) AS excerpt "
                 "FROM sources s WHERE s.notebook_id=? "
                 "AND s.source_type NOT IN ('memory','knowhow') "
                 "AND s.parse_status IN ('parsed','extracting','extracted') "
@@ -2909,7 +2951,8 @@ class SourceStore:
     def source_card_bases(self, db: sqlite3.Connection,
                           source_ids: Sequence[str]) -> Dict[str, str]:
         """``source_card_basis`` 的批量版,在调用方的连接上:每批(<=900 个 id)一条
-        ``GROUP BY source_id``,经 ``idx_source_elements_source_type`` 的前缀走。没有
+        ``GROUP BY source_id``,经 v105/0086 两条阅读顺序索引之一的 source_id 前缀走(SQLite 实测为
+        ``idx_source_elements_reading_order`` 的覆盖扫描)。没有
         元素的来源不在结果里(调用方按 ``""`` 处理)。"""
         bases: Dict[str, str] = {}
         ids = list(source_ids)

@@ -29,6 +29,7 @@ from app.domain.knowledge_contracts import (
     NODE_CONTEXT_LEGACY_SIBLING_SCAN,
 )
 from app.models.common import Evidence
+from app.repositories.element_reading_order import reading_order_sql
 from app.repositories.lexical_query import corpus_gated_recall_terms
 from app.repositories.postgres import source_ceiling
 
@@ -2485,13 +2486,13 @@ class KnowledgeStore:
                 "SELECT se.id FROM source_elements se JOIN sources s ON se.source_id=s.id "
                 "WHERE s.notebook_id=(SELECT notebook_id FROM sources WHERE id=("
                 "SELECT source_id FROM source_elements WHERE id=%s LIMIT 1)) "
-                "ORDER BY se.created_at ASC, se.id ASC",
+                f"ORDER BY {reading_order_sql('se')}",
                 (ids[0],),
             ).fetchall()
         else:
             order_rows = db.execute(
                 "SELECT se.id FROM source_elements se JOIN sources s ON se.source_id=s.id "
-                "WHERE s.notebook_id=%s ORDER BY se.created_at ASC, se.id ASC",
+                f"WHERE s.notebook_id=%s ORDER BY {reading_order_sql('se')}",
                 (owner_notebook_id,),
             ).fetchall()
         ordinal = {r["id"]: i for i, r in enumerate(order_rows)}

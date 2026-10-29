@@ -28,6 +28,7 @@ from typing import Any, Callable, Iterator, Optional, Sequence
 
 from app.domain.auth_utils import ascii_lower
 from app.domain.image_backfill import ImageBackfillConcurrentChange
+from app.repositories.element_reading_order import id_order_for, id_order_probe_sql
 from app.repositories.chunk_elements import (
     decode_element_ids,
     reverse_rows as chunk_element_reverse_rows,
@@ -1901,16 +1902,19 @@ class SQLiteMaintenanceAdapter:
     def image_backfill_source_state(self, source_id: str) -> dict:
         """回填一个来源所需的全部既有状态，一次读完。
 
-        元素按 ``ORDER BY id`` —— 与 `source_elements_for_chunking` 同一口径
-        （id 字典序即文档序），对齐算法依赖的就是这个顺序。``element_created_at``
+        元素按 ``ORDER BY <index digits>, id``（``element_reading_order.id_order_for``）
+        —— 与 `source_elements_for_chunking` 同一口径（四位补零的 id 字典序即文档序，
+        过了 9 999 个元素由位数项接上），对齐算法依赖的就是这个顺序。``element_created_at``
         是该来源既有元素批次的时间戳：新图片元素必须回填成它，否则来源详情
         按 ``(created_at,id)`` 分页会把图片全部沉底，命令目录的
         ``source_element_generation``（= MAX(created_at)）也会平白漂移，把每一份
         待审候选作废掉。"""
         with self._runtime.database.connect() as db:
+            order = id_order_for(
+                db.execute(id_order_probe_sql(), (source_id, source_id)).fetchall())
             element_rows = db.execute(
                 "SELECT id, element_type, text, metadata, created_at "
-                "FROM source_elements WHERE source_id=? ORDER BY id",
+                f"FROM source_elements WHERE source_id=? ORDER BY {order}",
                 (source_id,),
             ).fetchall()
             chunk_rows = db.execute(
