@@ -350,7 +350,7 @@ PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py --apply
 全库 trgm 命中再按 notebook 过滤，最终撞 statement timeout。监控、上线和回退步骤见
 [运维文档](./operations_zh.md#postgresql-notebook-aware-词法索引)。
 
-已有数据的 PostgreSQL 库还应在线建好热路径修复索引（批 1 六组共八条 + 批 2 两条：payload 搜索 GIN 与体检 H5 部分索引 + 批 3 一条 keyset 覆盖索引 + 批 4 三条来源检索 trgm 索引 + 批 5 三条删除作业化 FK/keyset 索引 + 批 6 三条代次化簇索引接替者(批 3 W2 PR-1) + 批 7 一条论文元数据覆盖索引；批 2 的 GIN 体积按合成低熵语料基准外推约为 knowledge_objects 表段的 1.5×（真实语料 trigram 更杂,可能更大,建后以实际为准），属登记过的写放大债，劣化超阈值可 DROP INDEX CONCURRENTLY 无损回退）
+已有数据的 PostgreSQL 库还应在线建好热路径修复索引（批 1 六组共八条 + 批 2 两条：payload 搜索 GIN 与体检 H5 部分索引 + 批 3 一条 keyset 覆盖索引 + 批 4 三条来源检索 trgm 索引 + 批 5 三条删除作业化 FK/keyset 索引 + 批 6 三条代次化簇索引接替者(批 3 W2 PR-1) + 批 7 一条论文元数据覆盖索引 + 批 9 两条来源元素阅读顺序接替索引；批 2 的 GIN 体积按合成低熵语料基准外推约为 knowledge_objects 表段的 1.5×（真实语料 trigram 更杂,可能更大,建后以实际为准），属登记过的写放大债，劣化超阈值可 DROP INDEX CONCURRENTLY 无损回退）
 （`concept_clusters(notebook_id, canonical_id)`、其 `lower(canonical_name)` 搭档、三条
 反向 FK 覆盖——`extraction_runs`/`knowledge_source_fact_elements`/`memory_items`、
 `knowledge_relations(notebook_id, source_object_id, target_object_id, edge_type)`、
@@ -431,6 +431,27 @@ INCLUDE (notebook_id, is_paper)` 上的 `idx_source_paper_meta_source_nb`。论�
 纯落账）。不退役任何索引。回退：`DROP INDEX CONCURRENTLY idx_source_paper_meta_source_nb;`
 （读者退回回表探针）。SQLite 在 v103 用同名索引建 `(source_id, notebook_id, is_paper)`，
 读者用 `INDEXED BY` 指名。
+
+**批 9(迁移 0086,SQLite v105)**让超过 9 999 个元素的来源按阅读顺序读取（元素 id 是
+`el-<来源>-NNNN`，四位补零，第 10 000 个元素起字节序就不再是文档序）。读者改按
+`created_at`、元素序号的位数、`id` 排序；两条以该表达式为键的 btree 接替两条
+`(created_at, id)` 索引：`source_elements(source_id, created_at, <位数>, id)` 上的
+`idx_source_elements_reading_order` 接替 `idx_source_elements_source_created`，
+`source_elements(source_id, element_type, created_at, <位数>, id)` 上的
+`idx_source_elements_type_reading_order` 接替 `idx_source_elements_source_type`（表达式全文见
+迁移文件）。有流量的库按批 6 同样的顺序：先 `scripts/build_hotpath_indexes.py --apply`
+用 `CREATE INDEX CONCURRENTLY` 在线建两条接替索引（体积与被接替的相当，数百万行的
+`source_elements` 上分钟级），再在线退役旧的两条，最后迁移（0086 校验形态、纯落账）：
+
+```bash
+psql "$DATABASE_URL" -c 'DROP INDEX CONCURRENTLY IF EXISTS idx_source_elements_source_created;'
+psql "$DATABASE_URL" -c 'DROP INDEX CONCURRENTLY IF EXISTS idx_source_elements_source_type;'
+```
+
+不走 builder 先行也能完成，但两条索引会在迁移事务里建，建索引期间 `source_elements` 的写入
+被阻塞。回退：`CONCURRENTLY` 重建旧的两条（定义见 0003 / 0015）并回退版本。SQLite 在 v105
+建同名接替索引、删同名旧索引。已经超过 9 999 个元素的来源，分块、导航判定与抽取当初都按旧
+顺序做的，见[运维文档](./operations_zh.md#超过-9-999-个元素的来源按旧顺序生成的派生数据)。
 
 若打算用离线 / 异机通道构建 scale 索引（`scripts/build_scale_index.py`，一个与在役服务
 **并存**的独立进程），PostgreSQL 侧有两条前提。其一，它的 per-notebook 互斥是
