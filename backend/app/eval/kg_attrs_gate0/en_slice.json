@@ -4844,7 +4844,7 @@
     "rejected": [
      {
       "meaning": "the dielectric constant of silicon",
-      "reason": "symbol_not_in_formula",
+      "reason": "symbol_not_in_context",
       "symbol": "\\varepsilon_{si}"
      }
     ],
@@ -7004,6 +7004,11 @@
     "kept": [
      {
       "element_id": "el-en-cmos-ch02_cmos_technology-00432",
+      "meaning": "the mean-square value of the noise current",
+      "symbol": "\\overline{i}^2"
+     },
+     {
+      "element_id": "el-en-cmos-ch02_cmos_technology-00432",
       "meaning": "the charge of an electron",
       "symbol": "q"
      },
@@ -7018,13 +7023,7 @@
       "symbol": "\\Delta f"
      }
     ],
-    "rejected": [
-     {
-      "meaning": "the mean-square value of the noise current",
-      "reason": "symbol_not_in_context",
-      "symbol": "\\overline{i}^2"
-     }
-    ],
+    "rejected": [],
     "status": "ok"
    }
   },
@@ -7270,22 +7269,21 @@
     "kept": [
      {
       "element_id": "el-en-cmos-ch02_cmos_technology-00432",
-      "meaning": "the bandwidth in hertz",
-      "symbol": "\\Delta f"
-     }
-    ],
-    "rejected": [
-     {
       "meaning": "the mean-square value of the noise current",
-      "reason": "symbol_not_in_context",
       "symbol": "\\overline{i}^2"
      },
      {
+      "element_id": "el-en-cmos-ch02_cmos_technology-00432",
+      "meaning": "the bandwidth in hertz",
+      "symbol": "\\Delta f"
+     },
+     {
+      "element_id": "el-en-cmos-ch02_cmos_technology-00432",
       "meaning": "The noise-current spectral density",
-      "reason": "symbol_not_in_context",
       "symbol": "\\overline{i}^2 / \\Delta f"
      }
     ],
+    "rejected": [],
     "status": "ok"
    }
   },
@@ -7791,15 +7789,15 @@
    "next_element_id": "el-en-cmos-ch03_device_modeling-00027",
    "reply": "{\"type\": \"json_object\", \"variables\": [{\"symbol\": \"γ\", \"meaning\": \"bulk threshold parameter (V^{1/2})\"}]}",
    "verification": {
-    "kept": [],
-    "rejected": [
+    "kept": [
      {
+      "element_id": "el-en-cmos-ch03_device_modeling-00026",
       "meaning": "bulk threshold parameter (V^{1/2})",
-      "reason": "meaning_not_in_context",
       "symbol": "γ"
      }
     ],
-    "status": "none_grounded"
+    "rejected": [],
+    "status": "ok"
    }
   },
   {
@@ -12516,15 +12514,15 @@
    "next_element_id": "el-en-cmos-ch04_analog_subcircuits-00281",
    "reply": "{\"variables\":[{\"symbol\":\"i_O/i_I\",\"meaning\":\"a function of the aspect ratios that are under the control of the designer\"}]}",
    "verification": {
-    "kept": [],
-    "rejected": [
+    "kept": [
      {
+      "element_id": "el-en-cmos-ch04_analog_subcircuits-00281",
       "meaning": "a function of the aspect ratios that are under the control of the designer",
-      "reason": "symbol_not_in_formula",
       "symbol": "i_O/i_I"
      }
     ],
-    "status": "none_grounded"
+    "rejected": [],
+    "status": "ok"
    }
   },
   {
@@ -12815,7 +12813,7 @@
       "symbol": "K'"
      },
      {
-      "element_id": "el-en-cmos-ch04_analog_subcircuits-00315",
+      "element_id": "el-en-cmos-ch04_analog_subcircuits-00314",
       "meaning": "V_T",
       "symbol": "V_T"
      }
@@ -13051,7 +13049,7 @@
     "rejected": [
      {
       "meaning": "VI(min)",
-      "reason": "too_far",
+      "reason": "symbol_not_in_formula",
       "symbol": "V_I(\\min)"
      },
      {
@@ -13559,7 +13557,7 @@
       "symbol": "I"
      },
      {
-      "element_id": "el-en-cmos-ch04_analog_subcircuits-00424",
+      "element_id": "el-en-cmos-ch04_analog_subcircuits-00423",
       "meaning": "$I _ { s }$",
       "symbol": "I_s"
      }
@@ -15842,12 +15840,12 @@
       "symbol": "\\tau_D"
      },
      {
-      "element_id": "el-en-cmos-ch09_switched_capacitor-00089",
+      "element_id": "el-en-cmos-ch09_switched_capacitor-00088",
       "meaning": "$C _ { 1 }$",
       "symbol": "C_1"
      },
      {
-      "element_id": "el-en-cmos-ch09_switched_capacitor-00089",
+      "element_id": "el-en-cmos-ch09_switched_capacitor-00088",
       "meaning": "$\\mathrm { C } _ { 2 }$",
       "symbol": "C_2"
      }
@@ -15855,7 +15853,7 @@
     "rejected": [
      {
       "meaning": "clock frequency",
-      "reason": "symbol_not_in_context",
+      "reason": "too_far",
       "symbol": "f_c"
      }
     ],
@@ -23062,15 +23060,15 @@
    "next_element_id": "el-en-cmos-ch09_switched_capacitor-01236",
    "reply": "{\"variables\":[{\"symbol\":\"\\\\varOmega _ { b }\",\"meaning\":\"a bandpass normalization of the low-pass frequency variable\"}]}",
    "verification": {
-    "kept": [],
-    "rejected": [
+    "kept": [
      {
+      "element_id": "el-en-cmos-ch09_switched_capacitor-01236",
       "meaning": "a bandpass normalization of the low-pass frequency variable",
-      "reason": "symbol_not_in_formula",
       "symbol": "\\varOmega _ { b }"
      }
     ],
-    "status": "none_grounded"
+    "rejected": [],
+    "status": "ok"
    }
   },
   {
@@ -24367,7 +24365,7 @@
    "verification": {
     "kept": [
      {
-      "element_id": "el-en-cmos-ch09_switched_capacitor-01465",
+      "element_id": "el-en-cmos-ch09_switched_capacitor-01464",
       "meaning": "R _ { 1 }",
       "symbol": "R_1"
      },
@@ -24387,7 +24385,7 @@
       "symbol": "C_4"
      },
      {
-      "element_id": "el-en-cmos-ch09_switched_capacitor-01465",
+      "element_id": "el-en-cmos-ch09_switched_capacitor-01464",
       "meaning": "K",
       "symbol": "K"
      }
@@ -25288,5 +25286,5 @@
   "window_m": 450,
   "window_n": 8000
  },
- "rules_signature": "c719f62c3a936ca62ae1da6a7e32c5a809f633d6c1164b84963b965d48c016b0"
+ "rules_signature": "2e6f3650eb4462bfae19d6971894cc919502c54f86f2bde66497b666d74dda28"
 }

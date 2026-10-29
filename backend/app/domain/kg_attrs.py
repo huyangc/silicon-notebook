@@ -204,7 +204,11 @@ def attrs_eligible(object_id: str, object_type: str) -> bool:
 
 # --- LaTeX normalization ----------------------------------------------------
 
-_WRAPPER_RE = re.compile(r"\\(?:mathrm|text|mathit|operatorname|boldsymbol)\s*\{([^{}]*)\}")
+# Commands whose single braced argument is kept as is (nested braces allowed).
+_WRAPPERS = frozenset({"mathrm", "text", "mathit", "operatorname", "boldsymbol"})
+# Two-argument fractions read as "a/b".
+_FRACTIONS = frozenset({"frac", "dfrac", "tfrac"})
+_COMMAND_RE = re.compile(r"\\([A-Za-z]+)")
 _GREEK_NAMES = (
     "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
     "iota", "kappa", "lambda", "mu", "nu", "xi", "omicron", "pi", "rho",
@@ -217,7 +221,6 @@ _GREEK = {
     **dict(zip(_GREEK_NAMES, _GREEK_LOWER)),
     **{n.capitalize(): u for n, u in zip(_GREEK_NAMES, _GREEK_UPPER)},
 }
-_GREEK_RE = re.compile(r"\\(" + "|".join(_GREEK) + r")(?![A-Za-z])")
 _WS_RE = re.compile(r"\s+")
 
 
@@ -235,19 +238,65 @@ def _squeeze_whitespace(text: str) -> str:
     return _WS_RE.sub(repl, text)
 
 
+def _braced(text: str, at: int) -> tuple[str, int] | None:
+    """The balanced ``{...}`` argument starting at ``at`` (spaces skipped):
+    (content, index after the closing brace), or None."""
+    while at < len(text) and text[at].isspace():
+        at += 1
+    if at >= len(text) or text[at] != "{":
+        return None
+    depth = 0
+    for index in range(at, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[at + 1:index], index + 1
+    return None
+
+
+def _rewrite_commands(text: str) -> str:
+    """Unwrap \\mathrm-style wrappers (nested braces allowed) and read
+    \\frac{a}{b} as a/b; Greek commands become Unicode; every other
+    \\command name is dropped whole (\\sqrt, \\cdot ...), its braced
+    argument staying as plain content."""
+    out: list[str] = []
+    at = 0
+    while at < len(text):
+        match = _COMMAND_RE.match(text, at)
+        if not match:
+            out.append(text[at])
+            at += 1
+            continue
+        name, end = match.group(1), match.end()
+        if name in _WRAPPERS and (arg := _braced(text, end)) is not None:
+            out.append(_rewrite_commands(arg[0]))
+            at = arg[1]
+        elif name in _FRACTIONS and (top := _braced(text, end)) is not None \
+                and (bottom := _braced(text, top[1])) is not None:
+            out.append(_rewrite_commands(top[0]) + "/" + _rewrite_commands(bottom[0]))
+            at = bottom[1]
+        elif name in _GREEK:
+            out.append(_GREEK[name])
+            at = end
+        else:
+            at = end
+    return "".join(out)
+
+
 def normalize_latex(text: str) -> str:
-    """N(·) of spec §7.3: unwrap \\mathrm-style commands, Greek commands to
-    Unicode, drop $ \\( \\) { } and the remaining backslashes, squeeze
-    whitespace, then NFKC + casefold. Applied identically to the formula, the
-    context, the symbol and the meaning."""
+    """N(·) of spec §7.3, applied identically to the formula, the context,
+    the symbol and the meaning: NFKC; drop the \\( \\) delimiters; unwrap
+    \\mathrm/\\text/\\mathit/\\operatorname/\\boldsymbol (nested braces
+    allowed); \\frac{a}{b} -> a/b; Greek commands -> Unicode; every other
+    \\command name dropped whole; drop $ { } and stray backslashes; drop
+    whitespace except one space between two ASCII letters/digits; NFKC +
+    casefold."""
     out = unicodedata.normalize("NFKC", text or "")
-    while True:
-        unwrapped = _WRAPPER_RE.sub(r"\1", out)
-        if unwrapped == out:
-            break
-        out = unwrapped
-    out = _GREEK_RE.sub(lambda m: _GREEK[m.group(1)], out)
     out = out.replace("\\(", "").replace("\\)", "")
+    out = re.sub(r"\\[,;:! ]", "", out)  # spacing commands, not punctuation
+    out = _rewrite_commands(out)
     out = re.sub(r"[${}\\]", "", out)
     out = _squeeze_whitespace(out)
     return unicodedata.normalize("NFKC", out).casefold()
@@ -397,8 +446,9 @@ def verify_formula_variables(
     1. N(symbol) is a substring of N(formula) and stands on its own in N(context);
     2. N(meaning) is a substring of N(context);
     3. some meaning occurrence is within ``pair_window`` normalized characters
-       of a symbol occurrence, and no other reply symbol is nearer to that
-       meaning occurrence (fewer clause breaks first, then fewer characters);
+       of a symbol occurrence, and no other reply symbol that passes check 1 is
+       nearer to that meaning occurrence (fewer clause breaks first, then
+       fewer characters);
     4. symbol/meaning within their character caps, first item per N(symbol)
        kept, at most ``VARIABLES_MAX`` kept.
 
@@ -418,6 +468,12 @@ def verify_formula_variables(
         offset += len(part)
     context = "".join(parts)
     symbols = [normalize_latex(i["symbol"]) for i in items]
+    # Rivals for "nearest symbol": only reply symbols that pass checks 1-2
+    # (in the formula, standing on their own in the context).
+    contenders = {
+        sym for sym in symbols
+        if sym and sym in norm_formula and _symbol_spans(context, sym)
+    }
     kept: list[dict] = []
     rejected: list[dict] = []
     kept_symbols: set[str] = set()
@@ -444,7 +500,7 @@ def verify_formula_variables(
                 own_key, spot = min(pairs, key=lambda p: (p[0], p[1]))
                 rivals = [
                     _gap(context, s, spot)
-                    for other in set(symbols) - {symbol} if other
+                    for other in contenders - {symbol}
                     for s in _symbol_spans(context, other)
                 ]
                 if rivals and min(rivals) < own_key:
@@ -500,6 +556,15 @@ def _module_tree(path: Path) -> ast.Module:
     return ast.parse(path.read_text(encoding="utf-8"))
 
 
+# What rules_signature() covers outside this module and kg_attrs_contracts
+# (dumped whole). tests/test_kg_attrs_domain.py pins that every name this
+# module imports from another app.domain module is listed here.
+SIGNATURE_DEPENDENCIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("kg_merge_seed", ("_PAREN_ACRONYM_RE", "_ACRONYM_TOKEN_RE", "_is_initialism_of")),
+    ("kg_concept_norm", ("norm_concept_name",)),
+)
+
+
 def rules_signature() -> str:
     """sha256 over the normalized AST of everything a Gate 0 result depends on.
 
@@ -520,10 +585,9 @@ def rules_signature() -> str:
         if "ENABLED_ALIAS_RULES" not in _assigned_names(node)
     ]
     dumps.append(ast.dump(contract_tree, include_attributes=False))
-    for module, names in (
-        (kg_merge_seed, ("_PAREN_ACRONYM_RE", "_ACRONYM_TOKEN_RE", "_is_initialism_of")),
-        (kg_concept_norm, ("norm_concept_name",)),
-    ):
+    modules = {"kg_merge_seed": kg_merge_seed, "kg_concept_norm": kg_concept_norm}
+    for module_name, names in SIGNATURE_DEPENDENCIES:
+        module = modules[module_name]
         tree = _strip_docstrings(_module_tree(Path(module.__file__)))
         for name in names:
             node = next(n for n in tree.body if name in _assigned_names(n))
