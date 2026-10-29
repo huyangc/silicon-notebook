@@ -3658,6 +3658,8 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 全篇综合完整接收确认后的章节标题和范围，不在容量检查前另行截取前缀。这些用户指令本身超过模型预算时，阶段明确失败，不静默丢弃末尾约束。
 
+终审每次发送都必须保留至少一个已完成章节的材料，包括服务端超限后的缩小输入重试。蓝图不能代替全部章节正文作为摘要的事实基础；没有已完成章节材料能够纳入时，终审保持未完成并披露限制。
+
 `understanding.context_processing` 是只含计数的可选回执：`extra_calls`、`extra_calls_max`、`max_level`、`compression_max_levels`、`compressed`、`estimated_counting`、`stages`。阶段键固定为 `planning_intent`、`planning_outline`、`planning_sufficiency`、`retrieve`、`draft`、`synthesis`、`final_editor`；每阶段记录 `failed`、`compressed`、`input_items`、`output_items`、`omitted_items`、`partial_items`、`invalid_items`。计数按处理阶段的材料项计算，同一原始材料可重复出现，不代表不同来源数。界面显示有信息量的压缩/限制回执，缺少回执的旧报告保持静默。必要的覆盖限制保留在报告正文、导出和公开分享中。诊断只记录阶段、预算、计数方式和数量，不记录提示、摘录或压缩内容。
 
 ### 就深度报告追问（关联报告）
