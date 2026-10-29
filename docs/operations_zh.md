@@ -347,9 +347,11 @@ PYTHONPATH=backend python scripts/backfill_navigation_chunks.py --all-notebooks 
 解析来源的元素 id 是 `el-<source_id>-NNNN`（解析序号，四位补零）。SQLite v105 / PostgreSQL 0086
 之前，所有读者都把 id 的字节序当成文档序，从第 10 000 个元素起就错了：`...-10000` 排在
 `...-1000` 与 `...-1001` 之间。本版起所有读者按 `created_at`、序号位数、id 排列一篇来源的元素
-（`backend/app/repositories/element_reading_order.py`）；不超过 9 999 个元素的来源，以及其它
-id 形态（knowhow 单元格、晋升出处、深拷贝），读出来与以前完全一样。不改写任何数据：顺序由 id
-算出，所以来源详情、引用所在页、文档概览、按类型列举（公式、表格、图片）与过程步骤顺序立即就对。
+（`backend/app/repositories/element_reading_order.py`）。不超过 9 999 个解析元素的来源、knowhow
+单元格与晋升出处，读出来与以前完全一样。深拷贝与导入的笔记本是另一个既有缺陷，本改动既不造成
+也不修复：它们的元素 id 是随机生成的，任何篇幅的拷贝来源在本版前后都一样乱序。不改写任何数据：
+顺序由 id 算出，所以来源详情、引用所在页、文档概览、按类型列举（公式、表格、图片）与过程步骤
+顺序立即就对。
 
 这类来源当初按旧顺序**生成**的东西，在重建之前保持原样：
 
@@ -358,17 +360,34 @@ id 形态（knowhow 单元格、晋升出处、深拷贝），读出来与以前
 - **知识图谱抽取**：抽取窗口按旧顺序读元素；
 - 基于这类来源预览或抽取的**命令目录**，以及针对它做的图片回填 `--dry-run` 计划（落库前重新规划）。
 
-找出受影响的来源（两种后端通用；计数走纯索引扫描）：
+找出受影响的来源：精确统计序号超过四位的元素（两种后端通用；会把每一行元素读一遍，大库请在
+低峰期跑）：
 
 ```sql
-SELECT s.notebook_id, e.source_id, COUNT(*) AS elements
+SELECT s.notebook_id, e.source_id, COUNT(*) AS elements_past_9999
 FROM source_elements e JOIN sources s ON s.id = e.source_id
-GROUP BY s.notebook_id, e.source_id HAVING COUNT(*) > 9999;
+WHERE (CASE WHEN substr(e.id,1,length(e.source_id)+4)=('el-'||e.source_id||'-')
+       THEN length(substr(e.id,length(e.source_id)+5))
+            -length(ltrim(substr(e.id,length(e.source_id)+5),'0123456789'))
+       ELSE 0 END) > 4
+GROUP BY s.notebook_id, e.source_id;
 ```
 
-逐篇在来源详情里点 **「重新解析」** 重建（重新解析文档，并按新顺序重建它的全部派生数据）。
-解析本身代价高、只关心检索时，`scripts/build_chunks.py <notebook_id>` 不重新解析、不重新抽取，只为
-该笔记本的全部用户来源重建分块、导航页标记与分块向量（笔记本里其它来源也会重新分块，内容不变）。
+逐篇重建受影响的来源：
+
+- **只修检索（分块、导航页标记、分块向量）：**
+  `PYTHONPATH=backend python scripts/build_chunks.py <notebook_id> --source <source_id>`
+  只重建这一个来源，不重新解析、不重新抽取，嵌入成本按它自己的分块数计。不带 `--source`
+  会重建该笔记本的全部用户来源，嵌入成本按**整本**笔记本的分块数计——优先用 `--source`。
+  在 PostgreSQL 上这属于离线维护：先停掉 API 与全部后台 writer，再加
+  `--confirm-service-stopped`（该参数只声明已经停服，不会自己停服）。
+- **全部（含知识图谱抽取）：** 在来源详情里点 **「重新解析」**，重新解析文档，并按新顺序重建它的
+  全部派生数据。
+- **镜像笔记本**（`notebooks.sync_origin` 非空）要在**源环境**里重建，增量同步会把重建后的行带
+  过来；不要在镜像上原地重建。
+- **图片回填：** 以前 `backfill-images` 在这类来源上因 `alignment_drifted` 跳过的图片（旧顺序
+  打乱了对齐），重建之后对该来源（`--source-id`）再跑一次即可补上。
+
 不超过 9 999 个元素的来源无需处理。
 
 ## 无主 Memory 来源

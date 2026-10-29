@@ -476,11 +476,13 @@ digits). Before SQLite v105 / PostgreSQL 0086 every reader took the byte order o
 the document order, which breaks from the 10 000th element on: `...-10000` sorted between
 `...-1000` and `...-1001`. Since this release every reader orders a source's elements by
 `created_at`, then the number of digits of the index, then the id
-(`backend/app/repositories/element_reading_order.py`); sources of at most 9 999 elements, and
-every other id shape (knowhow cells, promotion evidence, deep copies), read exactly as before.
-Nothing is rewritten: the order is computed from the id, so the source detail view, citations'
-containing pages, the document overview, typed listings (formulas, tables, images) and
-procedure-step order are right at once.
+(`backend/app/repositories/element_reading_order.py`). Sources of at most 9 999 parsed elements,
+knowhow cells and promotion evidence read exactly as before. Deep copies and imported
+notebooks are a separate, pre-existing defect this change neither causes nor fixes: their
+element ids are minted at random, so any copied source of any size already reads out of
+order, before and after this release. Nothing is rewritten: the order is computed from the
+id, so the source detail view, citations' containing pages, the document overview, typed
+listings (formulas, tables, images) and procedure-step order are right at once.
 
 What was **built** from the old order for such a source stays as built until it is rebuilt:
 
@@ -490,20 +492,38 @@ What was **built** from the old order for such a source stays as built until it 
 - a **command catalog** previewed or extracted from such a source, and an `--dry-run` of the
   image backfill planned against one (re-plan before applying).
 
-Find the affected sources (both backends; the count is an index-only scan):
+Find the affected sources: exactly the elements whose index has more than four digits (both
+backends; this reads every element row once, so run it off-peak on a large database):
 
 ```sql
-SELECT s.notebook_id, e.source_id, COUNT(*) AS elements
+SELECT s.notebook_id, e.source_id, COUNT(*) AS elements_past_9999
 FROM source_elements e JOIN sources s ON s.id = e.source_id
-GROUP BY s.notebook_id, e.source_id HAVING COUNT(*) > 9999;
+WHERE (CASE WHEN substr(e.id,1,length(e.source_id)+4)=('el-'||e.source_id||'-')
+       THEN length(substr(e.id,length(e.source_id)+5))
+            -length(ltrim(substr(e.id,length(e.source_id)+5),'0123456789'))
+       ELSE 0 END) > 4
+GROUP BY s.notebook_id, e.source_id;
 ```
 
-Rebuild each one with **「重新解析」** in its source detail view (re-parses the document
-and rebuilds everything derived from it, in the new order). When the parse itself is
-expensive and only retrieval matters, `scripts/build_chunks.py <notebook_id>` rebuilds chunks,
-navigation flags and chunk embeddings for every user source of that notebook without
-re-parsing or re-extracting (it re-chunks the notebook's other sources too, with identical
-content). Sources below the boundary need nothing.
+Rebuild each affected source:
+
+- **Retrieval only (chunks, navigation flags, chunk embeddings):**
+  `PYTHONPATH=backend python scripts/build_chunks.py <notebook_id> --source <source_id>`
+  rebuilds that one source without re-parsing or re-extracting; its embedding cost is that
+  source's own chunk count. Without `--source` the command rebuilds every user source of the
+  notebook and pays embeddings for **all** of the notebook's chunks -- prefer `--source`. On
+  PostgreSQL this is offline maintenance: stop the API and every background writer first and
+  add `--confirm-service-stopped` (the flag only declares that you did; it stops nothing).
+- **Everything (also KG extraction):** **「重新解析」** in the source detail view re-parses the
+  document and rebuilds everything derived from it, in the new order.
+- **Mirrored notebooks** (`notebooks.sync_origin` set) are rebuilt in their **source
+  environment**; incremental sync carries the rebuilt rows over. Do not rebuild a mirror in
+  place.
+- **Image backfill:** images an earlier `backfill-images` run skipped as `alignment_drifted` on
+  such a source (the old order broke the alignment walk) can be restored by running it again
+  for that source (`--source-id`) after the rebuild.
+
+Sources below the boundary need nothing.
 
 ## Ownerless Memory sources
 

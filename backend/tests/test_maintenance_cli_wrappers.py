@@ -240,3 +240,85 @@ def test_backfill_uses_missing_node_count_not_total_embedding_count(monkeypatch)
 
     assert module.main() == 1
     assert calls == 1
+
+
+class _ChunkMaintenance:
+    def __init__(self):
+        self.chunked: list[str] = []
+
+    def chunk_and_embed_source(self, source_id):
+        self.chunked.append(source_id)
+
+    def user_source_ids_page(self, notebook_id, *, after_id="", limit=500):
+        return [] if after_id else ["src-a", "src-b"]
+
+    def count_chunks(self, notebook_id):
+        return 0
+
+
+class _ChunkRepository:
+    def __init__(self, sources):
+        self.maintenance = _ChunkMaintenance()
+        self._sources = sources
+
+    def get_source(self, source_id):
+        if source_id not in self._sources:
+            raise KeyError(source_id)
+        notebook_id, source_type = self._sources[source_id]
+        return SimpleNamespace(id=source_id, notebook_id=notebook_id, type=source_type)
+
+
+def _run_build_chunks(monkeypatch, argv, repository):
+    module = _load_root_script("build_chunks")
+    monkeypatch.setattr(module, "Settings", lambda: SimpleNamespace(database_url="sqlite:///x"))
+
+    @contextmanager
+    def _open(_settings, *, confirm_service_stopped):
+        yield repository
+
+    monkeypatch.setattr(module, "open_maintenance_cli_repository", _open)
+    monkeypatch.setattr(sys, "argv", ["build_chunks", *argv])
+    return module.main()
+
+
+def test_build_chunks_source_rebuilds_only_that_source(monkeypatch):
+    repository = _ChunkRepository({"src-b": ("nb-x", "markdown")})
+    assert _run_build_chunks(monkeypatch, ["nb-x", "--source", "src-b"], repository) == 0
+    assert repository.maintenance.chunked == ["src-b"]
+    # Without --source every user source of the notebook is rebuilt.
+    whole = _ChunkRepository({})
+    assert _run_build_chunks(monkeypatch, ["nb-x", "--confirm-service-stopped"], whole) == 0
+    assert whole.maintenance.chunked == ["src-a", "src-b"]
+
+
+@pytest.mark.parametrize(
+    "argv,sources",
+    [
+        (["nb-x", "--source", "src-b"], {"src-b": ("nb-other", "markdown")}),
+        (["nb-x", "--source", "src-b"], {"src-b": ("nb-x", "knowhow")}),
+        (["nb-x", "--source", "src-b"], {"src-b": ("nb-x", "memory")}),
+        (["nb-x", "--source", "src-b"], {"src-b": ("nb-x", "promotion")}),
+        (["nb-x", "--source", "src-missing"], {}),
+        (["nb-x", "--source"], {}),
+        (["--source", "src-b"], {"src-b": ("nb-x", "markdown")}),
+        (["nb-x", "--source", "src-b", "--source", "src-c"], {}),
+    ],
+    ids=["other-notebook", "knowhow", "memory", "promotion", "missing",
+         "no-value", "no-notebook", "repeated"],
+)
+def test_build_chunks_source_refuses_anything_but_a_user_source_of_the_notebook(
+    monkeypatch, argv, sources
+):
+    repository = _ChunkRepository(sources)
+    assert _run_build_chunks(monkeypatch, argv, repository) == 2
+    assert repository.maintenance.chunked == []
+
+
+def test_build_chunks_source_still_needs_the_postgres_confirmation(monkeypatch):
+    module = _load_root_script("build_chunks")
+    monkeypatch.setattr(
+        module, "Settings",
+        lambda: SimpleNamespace(database_url="postgresql://localhost/silicon_notebook"),
+    )
+    monkeypatch.setattr(sys, "argv", ["build_chunks", "nb-x", "--source", "src-b"])
+    assert module.main() == 2

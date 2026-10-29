@@ -476,9 +476,9 @@ PostgreSQL 写库缺 `--confirm-service-stopped`；3 库不是本构建的 schem
 
 ### `build_chunks.py` —— 为现有 notebook 回填 chunk + 向量
 ```bash
-PYTHONPATH=backend python scripts/build_chunks.py <notebook_id> [--confirm-service-stopped]
+PYTHONPATH=backend python scripts/build_chunks.py <notebook_id> [--source <source_id>] [--confirm-service-stopped]
 ```
-chunk-native 检索的 chunk 是摄取时自动建的;**老 notebook**(chunk-native 上线前导入的)需用本脚本补建 chunk 表 + chunk_embeddings,之后默认 chunk 模式问答才有内容。幂等(重跑覆盖该 notebook 的 chunk)。
+chunk-native 检索的 chunk 是摄取时自动建的;**老 notebook**(chunk-native 上线前导入的)需用本脚本补建 chunk 表 + chunk_embeddings,之后默认 chunk 模式问答才有内容。幂等(重跑覆盖该 notebook 的 chunk)。`--source` 只重建该笔记本里的这一个用户来源(嵌入成本只按它的分块数计;不是该笔记本的用户来源则退出码 2、不写任何东西),用于修复单篇来源的分块——例如超过 9 999 个元素、按旧顺序分块的来源(见运维文档)。PostgreSQL 上须先停服并加 `--confirm-service-stopped`。
 
 ### `backfill_kg_embeddings.py` —— 补全 notebook 的 KG 对象向量
 ```bash
