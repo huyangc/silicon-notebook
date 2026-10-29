@@ -80,6 +80,39 @@ def test_continuation_crosses_digits_and_instants(tmp_path, monkeypatch):
         repo.close()
 
 
+def test_step_ranks_stay_inside_the_first_elements_notebook(tmp_path, monkeypatch):
+    """Ranks cover only the asked-for elements of the notebook the first one
+    belongs to (or the owner notebook); an element of another notebook gets
+    none, so a caller sorts it last -- as before the ranks went relative."""
+    repo = _repo(tmp_path, monkeypatch)
+    try:
+        with repo._runtime.database.write() as db:
+            for notebook, source, ids in (
+                ("nb-ra", "src-ra", ["el-src-ra-0002", "el-src-ra-0001"]),
+                ("nb-rb", "src-rb", ["el-src-rb-0001"]),
+            ):
+                db.execute(
+                    "INSERT INTO notebooks (id,name,purpose,primary_domain,status,created_by,"
+                    "created_at,updated_at) VALUES (?,?,'','S','draft','user-local',?,?)",
+                    (notebook, notebook, cases.INSTANTS[0], cases.INSTANTS[0]))
+                db.execute(
+                    "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+                    "file_name,file_path,file_size,created_at,updated_at) VALUES "
+                    "(?,?,?,'markdown','extracted','parsed','x.md','',1,?,?)",
+                    (source, notebook, source, cases.INSTANTS[0], cases.INSTANTS[0]))
+                db.executemany(
+                    "INSERT INTO source_elements (id,source_id,element_type,location_label,"
+                    "text,metadata,created_at) VALUES (?,?,'paragraph','p','t','{}',?)",
+                    [(element_id, source, cases.INSTANTS[0]) for element_id in ids])
+        probe = ["el-src-ra-0002", "el-src-rb-0001", "el-src-ra-0001"]
+        expected = {"el-src-ra-0001": 0, "el-src-ra-0002": 1}
+        assert cases.read_step_ordinals(repo, probe) == expected
+        assert cases.read_step_ordinals(repo, probe, "nb-ra") == expected
+        assert cases.read_step_ordinals(repo, probe, "nb-rb") == {"el-src-rb-0001": 0}
+    finally:
+        repo.close()
+
+
 def test_small_sources_read_exactly_as_before(small_world):
     cases.check_small_sources_read_exactly_as_before(*small_world)
 
