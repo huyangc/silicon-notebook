@@ -99,11 +99,26 @@ def failed_early(wrong: int, line: float, n_target: int = N_TARGET) -> bool:
 
 
 def precision_verdict(correct: int, wrong: int, line: float, n_target: int = N_TARGET) -> str:
-    """``pass`` / ``fail`` / ``insufficient`` for one precision row."""
+    """``pass`` / ``fail`` / ``insufficient`` for one precision row.
+
+    An early failure is final: once ``wrong`` exceeds what ``n_target`` items
+    can absorb the row fails, however many more items are judged later. So
+    the verdict does not depend on where the reviewer stopped (stopping at
+    the 9th wrong pair and judging 130 pairs with 9 wrong agree), and the
+    review page's stop hint and the report use this same rule."""
     n = correct + wrong
+    if failed_early(wrong, line, n_target):
+        return "fail"
     if n >= n_target:
         return "pass" if wilson_lower(correct, n) >= line else "fail"
-    return "fail" if failed_early(wrong, line, n_target) else "insufficient"
+    return "insufficient"
+
+
+def stop_hint(correct: int, wrong: int, line: float, n_target: int = N_TARGET) -> str:
+    """What the reviewer may do with a precision block: ``failed`` (can stop),
+    ``reached`` (can stop), or ``continue``."""
+    verdict = precision_verdict(correct, wrong, line, n_target)
+    return {"fail": "failed", "pass": "reached"}.get(verdict, "continue")
 
 
 def count_verdicts(verdicts: Iterable[str | None]) -> tuple[int, int]:
@@ -139,14 +154,34 @@ def context_hash(segments: Sequence[Sequence[str]]) -> str:
     return _sha("\n\n".join(text for _eid, text in segments))
 
 
-def pair_group_key(segments: Sequence[Sequence[str]], symbol: str, meaning: str) -> str:
-    """Cross-object dedup group of one candidate pair: (context text hash,
-    candidate). The same candidate in the same context is judged once."""
+def pair_group_key(segments: Sequence[Sequence[str]], formula: str, symbol: str, meaning: str) -> str:
+    """Dedup group of one candidate pair: (context text hash, N(formula),
+    candidate). The same candidate of the same formula in the same context is
+    judged once, whichever object or notebook it came from."""
     return json.dumps(
-        ["pair", context_hash(segments), kg_attrs.normalize_latex(symbol),
-         kg_attrs.normalize_latex(meaning)],
+        ["pair", context_hash(segments), kg_attrs.normalize_latex(formula),
+         kg_attrs.normalize_latex(symbol), kg_attrs.normalize_latex(meaning)],
         ensure_ascii=False,
     )
+
+
+def opaque_id(key: str) -> str:
+    """What the review page and the exported label file carry instead of a
+    key (keys hold names, formulas and meanings). The id -> key map lives
+    only in the local ``items.json``."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
+
+
+def dedup_by_key(items: Iterable[Mapping[str, Any]], key: Callable[[Mapping[str, Any]], str]) -> list:
+    """One item per key, in first-seen order; a pool-A item replaces an
+    earlier copy from a local pool (the same document can sit in several
+    notebooks, and the English slice is the copy that may enter the repo)."""
+    chosen: dict[str, Any] = {}
+    for item in items:
+        k = key(item)
+        if k not in chosen or (item.get("pool") == "A" and chosen[k].get("pool") != "A"):
+            chosen[k] = item
+    return list(chosen.values())
 
 
 def card_key(segments: Sequence[Sequence[str]], formula: str) -> str:
@@ -258,20 +293,28 @@ def formula_recall(
 
     * a card counts only when its missing count is filled and every pair in
       its pool is judged (an unfinished card is left out entirely);
-    * ``H``: product-kept pairs judged correct; ``G``: pool pairs judged
-      correct; ``M``: missing counts on the counted cards;
+    * ``H``: product-kept pairs judged correct; ``G``: true pairs in the pool,
+      i.e. pairs judged correct plus, conservatively, rejected or draft pairs
+      judged ``unsure`` (counted as true pairs the product missed); a kept
+      pair judged ``unsure`` counts as wrong (not in H, not in G);
+      ``M``: missing counts on the counted cards;
+    * cards and pairs count once per key (the same formula and context from
+      several objects or notebooks is one card);
     * ``M_hat``: mean missing count over the filled empty-pool spot checks,
       times the number of scanned formulas whose context had a hint word but
       whose pool was empty;
     * denominator formulas: counted cards with ``G >= 1`` or ``M >= 1``.
     """
     h = g = m = denominator = with_hit = 0
-    for card in cards:
+    for card in dedup_by_key(cards, key=lambda c: c["key"]):
         missing = labels.get(card["key"], {}).get("missing")
         verdicts = [labels.get(p["group"], {}).get("verdict") for p in card["pairs"]]
         if missing is None or any(v is None for v in verdicts):
             continue
-        card_g = sum(v == "correct" for v in verdicts)
+        card_g = sum(
+            v == "correct" or (v == "unsure" and p["origin"] != "kept")
+            for p, v in zip(card["pairs"], verdicts)
+        )
         card_h = sum(
             v == "correct" and p["origin"] == "kept" for p, v in zip(card["pairs"], verdicts)
         )
@@ -279,7 +322,8 @@ def formula_recall(
         if card_g or missing:
             denominator += 1
             with_hit += card_h > 0
-    filled = [labels[c["key"]]["missing"] for c in empty_checks if "missing" in labels.get(c["key"], {})]
+    checks = dedup_by_key(empty_checks, key=lambda c: c["key"])
+    filled = [labels[c["key"]]["missing"] for c in checks if "missing" in labels.get(c["key"], {})]
     m_hat = (sum(filled) / len(filled)) * hint_empty_scanned if filled else 0.0
     total = g + m + m_hat
     raw_total = g + m
@@ -319,7 +363,8 @@ def build_report(items: Mapping[str, Any], labels: Mapping[str, Mapping[str, Any
     """Text-free judgement summary (``report.json``) from items plus labels."""
     alias_rows = []
     for rule in kg_attrs.ALIAS_RULES:
-        block = [a for a in items.get("alias_items", []) if a["rule"] == rule]
+        block = dedup_by_key((a for a in items.get("alias_items", []) if a["rule"] == rule),
+                             key=lambda a: a["key"])
         correct, wrong = count_verdicts(labels.get(a["key"], {}).get("verdict") for a in block)
         line = ALIAS_LINES[rule]
         alias_rows.append(_precision_row("alias", rule, correct, wrong, line, len(block)))
@@ -360,7 +405,20 @@ def build_report(items: Mapping[str, Any], labels: Mapping[str, Mapping[str, Any
         "egress_log": items.get("egress_log", {}),
         "alias_recall_reference": items.get("alias_recall_reference", {}),
         "top_up_needed": _top_up_needed(alias_rows, formula_rows, recall_rows),
+        "stop": {f"{r['item']}/{r['rule']}": stop_hint(r["correct"], r["wrong"], r["line"])
+                 for r in alias_rows + formula_rows},
+        "notes": REPORT_NOTES,
     }
+
+
+REPORT_NOTES = (
+    "「不确定」：精度一律按错计；召回里产品保留的配对判「不确定」按错（不进 H），"
+    "被拒与草稿配对判「不确定」按真配对计入 G（保守，召回只会偏低）。",
+    "提前失败不可逆：已判错数一旦超过 n=100 能容纳的上限，该行判 fail，之后判再多也不翻转。",
+    "公式精度只统计产品保留的配对；被拒与草稿配对只进召回。",
+    "条目按唯一 key 计数：同一文档出现在多个笔记本里只算一次（优先保留英文切片池 A）。",
+    "本机池 B/C 排除了 Memory 派生来源（sources.memory_id 非空）。",
+)
 
 
 def _precision_row(item: str, rule: str, correct: int, wrong: int, line: float, size: int) -> dict:
@@ -457,6 +515,8 @@ def render_report_md(report: Mapping[str, Any], *, local_examples: Sequence[str]
         f"参数：max_chars={params.get('max_chars')} pair_window={params.get('pair_window')} "
         f"窗口 n={params.get('window_n')} m={params.get('window_m')}；"
         f"出站开关：{'开' if meta.get('egress') else '关'}",
+        "## 口径",
+        *[f"- {note}" for note in report["notes"]],
         "## 判定",
         "| 项 | 规则/语言 | n | 对 | 错(含不确定) | 精度 | Wilson 下界 | 线 | 结论 |",
         "|---|---|---|---|---|---|---|---|---|",
@@ -492,6 +552,8 @@ def render_report_md(report: Mapping[str, Any], *, local_examples: Sequence[str]
         "## 预标一致性",
         f"全部 {_fmt(agreement['all'])}（n={agreement['all_n']}）；盲审 {blind}（n={agreement['blind_n']}）",
         "## 提前停止、补抽、样本不足、出站记录",
+        "各块停止状态（failed=已判定失败可停，reached=已达标可停，continue=继续）：",
+        *[f"- {block}: {state}" for block, state in report["stop"].items()],
         f"需要补抽：{report['top_up_needed'] or '无'}",
         "```", json.dumps(report["egress_log"], ensure_ascii=False, indent=1), "```",
         "## 别名召回参照（只报告）",
@@ -782,7 +844,15 @@ def render_review_html(page_data: Mapping[str, Any]) -> str:
 def review_page_data(items: Mapping[str, Any], *, seed: int) -> dict:
     """Blocks in the suggested order (aliases, English formulas, Chinese
     formulas, spot checks), cards in a seeded random order per block, blind
-    cards stripped of pre-label, product keep/reject mark and reason code."""
+    cards stripped of pre-label, product keep/reject mark and reason code
+    (and their pairs shuffled, since kept pairs come first otherwise).
+
+    Every key leaves as ``opaque_id(key)``: the page and the label file it
+    exports never carry names, formulas or meanings as identifiers.
+
+    Only alias blocks get an in-page stop hint. A formula block's precision
+    counts product-kept pairs only, which a blind card must not reveal, so
+    its stop status comes from ``report`` instead."""
     cards: list[dict] = []
     blocks: list[dict] = []
     rng = random.Random(seed)
@@ -802,11 +872,11 @@ def review_page_data(items: Mapping[str, Any], *, seed: int) -> dict:
 
     for rule in kg_attrs.ALIAS_RULES:
         block_cards = []
-        for alias in items.get("alias_items", []):
+        for alias in dedup_by_key(items.get("alias_items", []), key=lambda a: a["key"]):
             if alias["rule"] != rule:
                 continue
             block_cards.append({
-                "kind": "alias", "key": alias["key"], "rule": rule, "name": alias["name"],
+                "kind": "alias", "key": opaque_id(alias["key"]), "rule": rule, "name": alias["name"],
                 "alias": alias["alias"], "segments": alias["segments"],
                 "blind": bool(alias.get("blind")),
                 "prelabel": None if alias.get("blind") else alias.get("prelabel"),
@@ -816,7 +886,7 @@ def review_page_data(items: Mapping[str, Any], *, seed: int) -> dict:
     seen_groups: set[str] = set()
     for language, title in (("en", "英文公式"), ("zh", "中文公式")):
         block_cards = []
-        for card in items.get("formula_cards", []):
+        for card in dedup_by_key(items.get("formula_cards", []), key=lambda c: c["key"]):
             if card["language"] != language:
                 continue
             blind = bool(card.get("blind"))
@@ -825,22 +895,23 @@ def review_page_data(items: Mapping[str, Any], *, seed: int) -> dict:
                 first = pair["group"] not in seen_groups
                 seen_groups.add(pair["group"])
                 pairs.append({
-                    "group": pair["group"], "symbol": pair["symbol"], "meaning": pair["meaning"],
+                    "group": opaque_id(pair["group"]), "symbol": pair["symbol"], "meaning": pair["meaning"],
                     "first": first,
                     "origin_label": None if blind else _origin_label(pair),
                     "prelabel": None if blind else pair.get("prelabel"),
                 })
+            if blind:
+                rng.shuffle(pairs)
             block_cards.append({
-                "kind": "pairs", "key": card["key"], "formula": card["formula"],
+                "kind": "pairs", "key": opaque_id(card["key"]), "formula": card["formula"],
                 "segments": card["segments"], "pairs": pairs, "blind": blind,
                 "needs_missing": True,
             })
         units = sum(p["first"] for c in block_cards for p in c["pairs"])
-        add_block(f"formula-{language}", title, block_cards, FORMULA_PRECISION_LINE,
-                  units, len(block_cards))
+        add_block(f"formula-{language}", title, block_cards, None, units, len(block_cards))
     for language, title in (("en", "英文空池抽查"), ("zh", "中文空池抽查")):
         block_cards = [
-            {"kind": "empty", "key": c["key"], "formula": c["formula"], "segments": c["segments"],
+            {"kind": "empty", "key": opaque_id(c["key"]), "formula": c["formula"], "segments": c["segments"],
              "pairs": [], "blind": False, "needs_missing": True}
             for c in items.get("empty_checks", []) if c["language"] == language
         ]
@@ -996,16 +1067,22 @@ def _service_record(service: Any) -> dict:
     }
 
 
-def formula_workload(registry: Any, service_id: str) -> str:
-    """A chat workload bound to ``service_id`` (first by id), asserted to route
-    there: the Gate 0 formula call must hit the service ``kg_attr_enrich``
-    will be bound to."""
+def formula_workload(registry: Any, service_id: str, *, explicit: str | None = None) -> str:
+    """A chat workload bound to ``service_id`` (``explicit`` if given, else the
+    first by id), checked to route there: the Gate 0 formula call must hit the
+    service ``kg_attr_enrich`` will be bound to."""
     candidates = sorted(w.id for w in registry.workloads_for(service_id) if w.kind == "chat")
-    if not candidates:
+    if explicit:
+        if explicit not in candidates:
+            raise SystemExit(f"workload {explicit!r} is not a chat workload bound to {service_id!r}")
+        workload = explicit
+    elif not candidates:
         raise SystemExit(f"no chat workload is bound to model service {service_id!r}")
-    workload = candidates[0]
+    else:
+        workload = candidates[0]
     bound = registry.service_for(workload)
-    assert bound is not None and bound.id == service_id, (workload, bound)
+    if bound is None or bound.id != service_id:
+        raise SystemExit(f"workload {workload!r} does not route to {service_id!r}")
     return workload
 
 
@@ -1105,6 +1182,27 @@ def slice_segments(entry: Mapping[str, Any], elements: Mapping[str, str], *, max
     return [list(s) for s in kg_attrs.build_formula_context(first, following, max_chars=max_chars)]
 
 
+def reverify_slice(fixture: Mapping[str, Any]) -> dict:
+    """Re-derive every rule-dependent field of the slice from what it stores
+    (element texts, model replies, measured parameters): alias hits under all
+    rules, formula contexts and verification, and ``rules_signature``. Used
+    after a rule change instead of re-running extraction; no model call."""
+    out = json.loads(json.dumps(fixture))
+    elements, params = out["elements"], out["params"]
+    for concept in out["concepts"]:
+        items = [{"element_id": eid, "element_text": elements[eid], "element_read": True}
+                 for eid in concept["evidence"]]
+        concept["hits"] = kg_attrs.trace_concept_aliases(
+            concept["name"], items, exclude_names=(), rules=kg_attrs.ALIAS_RULES)
+    for formula in out["formulas"]:
+        segments = slice_segments(formula, elements, max_chars=params["max_chars"])
+        formula["context"] = [[eid, len(text)] for eid, text in segments]
+        formula["verification"] = verification_record(
+            formula["name"], segments, formula["reply"], pair_window=params["pair_window"])
+    out["rules_signature"] = kg_attrs.rules_signature()
+    return out
+
+
 def _estimate_extraction(chapters, settings) -> tuple[int, int, list[dict]]:
     from app.services import kg_ingest
     from app.services.kg.filters import should_extract_window
@@ -1132,6 +1230,14 @@ def _estimate_extraction(chapters, settings) -> tuple[int, int, list[dict]]:
 def run_extract_en(args: Any) -> int:
     from datetime import date
 
+    if args.reverify:
+        out = Path(args.out)
+        fixture = reverify_slice(_read_json(out))
+        out.write_text(json.dumps(fixture, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+                       encoding="utf-8")
+        print(f"[extract-en] re-verified {out} with the current rules (no model call); "
+              f"rules_signature {fixture['rules_signature']}")
+        return 0
     root = main_checkout_root()
     _tool_environment(root)
     repo_root = Path(__file__).resolve().parents[3]
@@ -1149,7 +1255,7 @@ def run_extract_en(args: Any) -> int:
         if est_calls > args.max_calls or est_chars > args.max_input_chars:
             raise SystemExit("extraction estimate exceeds --max-calls / --max-input-chars")
         budget.calls, budget.chars = est_calls, est_chars
-        workload = formula_workload(provider.registry, args.formula_service)
+        workload = formula_workload(provider.registry, args.formula_service, explicit=args.formula_workload)
         extract_service = provider.registry.service_for("kg_extract")
         formula_service = provider.registry.service_for(workload)
         if extract_service is None or formula_service is None:
@@ -1284,9 +1390,20 @@ def check_local_database_url(url: str) -> None:
     info = conninfo_to_dict(url)
     for field in ("host", "hostaddr"):
         for host in filter(None, str(info.get(field) or "").split(",")):
-            if host.startswith("/") or host in ("localhost", "127.0.0.1", "::1"):
-                continue
-            raise SystemExit(f"--database-url must point at this machine (got host {host!r})")
+            _require_local_host(host)
+
+
+def _require_local_host(host: str) -> None:
+    if not (host.startswith("/") or host in ("localhost", "127.0.0.1", "::1")):
+        raise SystemExit(f"--database-url must point at this machine (got host {host!r})")
+
+
+def assert_local_connection(conn) -> None:
+    """Re-check where the connection actually went: PG* environment variables
+    can supply a host the URL never named."""
+    _require_local_host(str(conn.info.host or ""))
+    if getattr(conn.info, "hostaddr", ""):
+        _require_local_host(str(conn.info.hostaddr))
 
 
 def read_only_connection(url: str):
@@ -1296,6 +1413,11 @@ def read_only_connection(url: str):
 
     check_local_database_url(url)
     conn = psycopg.connect(url, autocommit=True, row_factory=dict_row)
+    try:
+        assert_local_connection(conn)
+    except SystemExit:
+        conn.close()
+        raise
     conn.execute("SET default_transaction_read_only = on")
     conn.execute("BEGIN READ ONLY")
     return conn
@@ -1454,7 +1576,8 @@ def alias_candidates(concepts: Sequence[Mapping[str, Any]], *, egress: bool) -> 
                 "element_id": element_id or "", "segments": segments,
                 "prelabel_allowed": concept["pool"] == "A" or egress,
             })
-    return out
+    # The same document in two notebooks yields the same key twice: keep one.
+    return {rule: dedup_by_key(items, key=lambda c: c["key"]) for rule, items in out.items()}
 
 
 def _window_around(text: str, needle: str, radius: int = 300) -> str:
@@ -1500,18 +1623,22 @@ def scan_formulas(
     candidate pairs (only asked when the pool is non-empty or a hint word is
     present). Returns the cards, the hint-but-empty formulas, counters and the
     resume position."""
-    state = state or {"cards": [], "hint_empty": [], "status": Counter(), "scanned": 0,
-                      "kept_pairs": 0, "pooled": 0}
+    state = state if state is not None else {
+        "cards": [], "hint_empty": [], "status": Counter(), "scanned": 0, "kept_pairs": 0, "pooled": 0}
+    seen = set(state.setdefault("seen", []))
     position = start
+    state["position"] = position
     while position < len(formulas) and state["scanned"] < max_formulas:
         if state["pooled"] >= target_pooled and state["kept_pairs"] >= target_kept_pairs:
             break
         formula = formulas[position]
-        position += 1
-        state["scanned"] += 1
+        key = card_key(formula["segments"], formula["name"])
+        if key in seen:                      # same formula and context from another object
+            position += 1
+            state["position"] = position
+            continue
         reply, error = product(formula)
         record = verification_record(formula["name"], formula["segments"], reply, pair_window=pair_window)
-        state["status"][record["status"]] += 1
         pairs = [{"symbol": k["symbol"], "meaning": k["meaning"], "origin": "kept"} for k in record["kept"]]
         pairs += [{"symbol": r["symbol"], "meaning": r["meaning"], "origin": "rejected", "reason": r["reason"]}
                   for r in record["rejected"]]
@@ -1519,31 +1646,38 @@ def scan_formulas(
         if pairs or hint:
             for extra in draft(formula) or []:
                 pairs.append({"symbol": extra["symbol"], "meaning": extra["meaning"], "origin": "draft"})
-        pairs = _dedup_pool(formula["segments"], pairs)
+        pairs = _dedup_pool(formula["segments"], formula["name"], pairs)
+        # Counted only once the formula is complete: a budget stop mid-formula
+        # resumes at this same formula.
+        state["scanned"] += 1
+        state["status"][record["status"]] += 1
+        seen.add(key)
+        state["seen"].append(key)
+        position += 1
+        state["position"] = position
         if pairs:
             state["pooled"] += 1
             state["kept_pairs"] += sum(p["origin"] == "kept" for p in pairs)
             state["cards"].append({
-                "key": card_key(formula["segments"], formula["name"]),
+                "key": key,
                 "language": formula["language"], "pool": formula["pool"], "ref": formula["ref"],
                 "formula": formula["name"], "segments": formula["segments"], "pairs": pairs,
                 "status": record["status"], "error": error,
             })
         elif hint:
             state["hint_empty"].append({
-                "key": card_key(formula["segments"], formula["name"]) + "|empty",
+                "key": key + "|empty",
                 "language": formula["language"], "pool": formula["pool"], "ref": formula["ref"],
                 "formula": formula["name"], "segments": formula["segments"],
             })
-    state["position"] = position
     return state
 
 
-def _dedup_pool(segments, pairs: list[dict]) -> list[dict]:
+def _dedup_pool(segments, formula: str, pairs: list[dict]) -> list[dict]:
     """One pool entry per candidate (product kept/rejected wins over draft)."""
     seen: dict[str, dict] = {}
     for pair in pairs:
-        group = pair_group_key(segments, pair["symbol"], pair["meaning"])
+        group = pair_group_key(segments, formula, pair["symbol"], pair["meaning"])
         if group not in seen:
             seen[group] = {**pair, "group": group}
     return list(seen.values())
@@ -1720,39 +1854,48 @@ def run_prepare(args: Any) -> int:
     conn = read_only_connection(args.database_url)
     try:
         max_chars, pair_window = settings.kg_attrs_context_chars, settings.kg_attrs_pair_window
-        workload = formula_workload(provider.registry, args.formula_service)
+        workload = formula_workload(provider.registry, args.formula_service, explicit=args.formula_workload)
         formula_service = provider.registry.service_for(workload)
         judge = _judge_client()
         formula_host = _service_record(formula_service)["host"]
         judge_host = _host_of(judge.base_url)
+        egress = args.allow_local_content_egress
         a_concepts, a_formulas = pool_a(fixture)
         local_concepts, local_formulas = load_local_pools(conn)
         concepts = a_concepts + local_concepts
-        candidates = alias_candidates(concepts, egress=args.allow_local_content_egress)
+        candidates = alias_candidates(concepts, egress=egress)
         previous = _read_json(out_dir / "items.json") if args.top_up and (out_dir / "items.json").is_file() else None
         alias_items = sample_aliases(candidates, per_rule=args.per_rule, seed=args.seed,
                                      existing=(previous or {}).get("alias_items", []))
-        scan_lists = _scan_lists(a_formulas, local_formulas, seed=args.seed,
-                                 egress=args.allow_local_content_egress)
+        # The plan always covers every pool, so the dry run shows the rows that
+        # need the egress switch whether or not it is on.
         planned_lists = {
-            lang: [_materialize(f, conn, max_chars) for f in formulas[: args.max_formulas_per_language]]
-            for lang, formulas in scan_lists.items()
+            lang: dedup_by_key(
+                [_materialize(f, conn, max_chars) for f in formulas[: args.max_formulas_per_language]],
+                key=lambda f: card_key(f["segments"], f["name"]))
+            for lang, formulas in _scan_lists(a_formulas, local_formulas, seed=args.seed, egress=True).items()
         }
-        planned_aliases = [a for a in alias_items if a["prelabel_allowed"]]
-        table = budget_table(plan_calls(planned_aliases, planned_lists, formula_host=formula_host,
+        table = budget_table(plan_calls(alias_items, planned_lists, formula_host=formula_host,
                                         judge_host=judge_host, max_formulas=args.max_formulas_per_language))
         print(render_budget_table(table))
-        print(f"[prepare] concepts A/B/C = {Counter(c['pool'] for c in concepts)}; "
-              f"formulas en/zh = {Counter(f['language'] for f in a_formulas + local_formulas)}; "
-              f"egress={'on' if args.allow_local_content_egress else 'off'}")
-        _write_json(out_dir / "prepare-budget.json", {"table": table, "egress": args.allow_local_content_egress,
+        print(f"[prepare] concepts A/B/C = {dict(Counter(c['pool'] for c in concepts))}; "
+              f"formulas en/zh = {dict(Counter(f['language'] for f in a_formulas + local_formulas))}; "
+              f"egress={'on' if egress else 'off'} (rows marked 是 run only with the switch)")
+        _write_json(out_dir / "prepare-budget.json", {"table": table, "egress": egress,
                                                       "generated": datetime.datetime.now().isoformat()})
         if args.dry_run:
             return 0
         if not args.confirm_budget:
             raise SystemExit("re-run with --confirm-budget after the budget above is approved")
         if not judge.configured:
-            raise SystemExit(f"{_JUDGE_ENV_PREFIX}OPENAI_COMPAT_* is not configured: drafts and pre-labels need it")
+            raise SystemExit("EVAL_JUDGE_OPENAI_COMPAT_* is not configured: drafts and pre-labels need it")
+        runnable = [row for row in table if egress or not row["needs_egress"]]
+        calls, chars = sum(r["calls"] for r in runnable), sum(r["chars"] for r in runnable)
+        if calls > args.max_calls or chars > args.max_input_chars:
+            raise SystemExit(f"the plan's upper bound ({calls} calls / {chars} chars) exceeds "
+                             f"--max-calls {args.max_calls} / --max-input-chars {args.max_input_chars}")
+        if not egress:
+            planned_lists = {lang: [f for f in fs if f["pool"] == "A"] for lang, fs in planned_lists.items()}
         print(f"[prepare] sending to: formula {formula_host}; judge {judge_host}")
         items = _execute_prepare(
             args, fixture, provider.chat(workload), judge, planned_lists, alias_items,
@@ -1760,11 +1903,14 @@ def run_prepare(args: Any) -> int:
             hosts={"formula": formula_host, "judge": judge_host},
         )
         items["models"] = {"extract": fixture.get("models", {}).get("extract"),
-                           "formula": {**_service_record(formula_service), "workload": workload,
-                                       "fingerprint_full": formula_service.fingerprint},
+                           "formula": {**_service_record(formula_service), "workload": workload},
                            "judge": judge.model or None}
         _write_json(out_dir / "items.json", items)
         print(f"[prepare] wrote {out_dir / 'items.json'}")
+        if items.get("incomplete"):
+            print("[prepare] stopped at the budget cap; finished work and the scan position are saved — "
+                  "raise the caps and re-run with --top-up to continue")
+            return 3
         return 0
     finally:
         try:
@@ -1787,20 +1933,42 @@ def _scan_lists(a_formulas, local_formulas, *, seed: int, egress: bool) -> dict[
     return lists
 
 
+def assign_blind(entries: Sequence[dict], *, seed: int) -> None:
+    """Entries that already carry ``blind`` keep it (a top-up never reshuffles
+    what the reviewer has seen); 10% of the NEW entries become blind."""
+    fresh = [e for e in entries if "blind" not in e]
+    chosen = blind_keys([e["key"] for e in fresh], seed=seed)
+    for entry in fresh:
+        entry["blind"] = entry["key"] in chosen
+
+
 def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_items, *,
                      concepts, previous, max_chars, pair_window, hosts) -> dict:
+    """Run the scan, drafts and pre-labels. One failed draft or pre-label is
+    recorded as None and the run goes on; hitting the budget cap stops the run
+    but returns everything finished so far (with the scan position), marked
+    ``incomplete``, so nothing already paid for is lost."""
     import datetime
 
     budget = Budget(args.max_calls, args.max_input_chars)
     egress_log: Counter = Counter()
+    failures: Counter = Counter()
     egress = args.allow_local_content_egress
 
-    def send(kind: str, pool: str, host_key: str, messages, call) -> Any:
+    def guard(pool: str) -> None:
         if pool in LOCAL_POOLS and not egress:
             raise AssertionError("local pool text would leave the machine without the egress switch")
+
+    def send(kind: str, pool: str, host_key: str, messages, call) -> Any:
+        guard(pool)
         chars = messages_chars(messages)
         budget.admit(chars)
-        result = call()
+        try:
+            result = call()
+        except Exception as exc:  # one failed judge call never ends the run
+            budget.charge(chars, cache_hit=False)
+            failures[f"{kind}:{type(exc).__name__}"] += 1
+            return None
         budget.charge(chars, cache_hit=False)
         egress_log[f"{hosts[host_key]}|{pool}|{kind}"] += chars
         return result
@@ -1808,44 +1976,45 @@ def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_
     def product(formula: dict) -> tuple[str | None, str | None]:
         if formula["pool"] == "A":
             return formula.get("reply"), formula.get("reply_error")
+        guard(formula["pool"])
         before = budget.chars
         reply, error = call_formula(product_client, formula["name"], formula["segments"], budget)
         egress_log[f"{hosts['formula']}|{formula['pool']}|formula"] += budget.chars - before
+        if error:
+            failures[f"formula:{error}"] += 1
         return reply, error
 
     def draft(formula: dict) -> list[dict] | None:
-        if not judge.configured:
-            return None
         messages = draft_messages(formula["name"], formula["segments"])
-        return parse_draft_reply(send("draft", formula["pool"], "judge", messages,
-                                      lambda: judge.chat_json(messages, DRAFT_HINT)))
+        raw = send("draft", formula["pool"], "judge", messages, lambda: judge.chat_json(messages, DRAFT_HINT))
+        return None if raw is None else parse_draft_reply(raw)
 
     scan_state = (previous or {}).get("scan_state", {})
     scans: dict[str, dict] = {}
     for language in LANGUAGES:
-        formulas = planned_lists.get(language, [])
         prior = scan_state.get(language)
-        state = None
-        if prior:
-            state = {"cards": [c for c in previous["formula_cards"] if c["language"] == language],
-                     "hint_empty": prior["hint_empty"], "status": Counter(prior["status"]),
-                     "scanned": prior["scanned"], "kept_pairs": prior["kept_pairs"], "pooled": prior["pooled"]}
+        scans[language] = {
+            "cards": [c for c in (previous or {}).get("formula_cards", []) if c["language"] == language],
+            "hint_empty": list(prior["hint_empty"]) if prior else [],
+            "status": Counter(prior["status"]) if prior else Counter(),
+            "scanned": prior["scanned"] if prior else 0, "kept_pairs": prior["kept_pairs"] if prior else 0,
+            "pooled": prior["pooled"] if prior else 0, "seen": list(prior.get("seen", [])) if prior else [],
+            "position": prior["position"] if prior else 0,
+        }
+    incomplete = None
+    try:
         boost = args.top_up_formulas if args.top_up else 0
-        scans[language] = scan_formulas(
-            formulas, product=product, draft=draft, pair_window=pair_window,
-            max_formulas=args.max_formulas_per_language,
-            target_pooled=FORMULA_SCAN_TARGET_POOLED + boost,
-            target_kept_pairs=FORMULA_SCAN_TARGET_KEPT_PAIRS + boost,
-            start=prior["position"] if prior else 0, state=state,
-        )
-    cards = [c for lang in LANGUAGES for c in scans[lang]["cards"]]
-    blind = blind_keys([c["key"] for c in cards], seed=args.seed) | blind_keys(
-        [a["key"] for a in alias_items], seed=args.seed)
-    for card in cards:
-        card["blind"] = card["key"] in blind
-    for item in alias_items:
-        item["blind"] = item["key"] in blind
-    if judge.configured:
+        for language in LANGUAGES:
+            scan_formulas(
+                planned_lists.get(language, []), product=product, draft=draft, pair_window=pair_window,
+                max_formulas=args.max_formulas_per_language,
+                target_pooled=FORMULA_SCAN_TARGET_POOLED + boost,
+                target_kept_pairs=FORMULA_SCAN_TARGET_KEPT_PAIRS + boost,
+                start=scans[language]["position"], state=scans[language],
+            )
+        cards = [c for lang in LANGUAGES for c in scans[lang]["cards"]]
+        assign_blind(cards, seed=args.seed)
+        assign_blind(alias_items, seed=args.seed)
         for item in alias_items:
             if item.get("prelabel") is None and item["prelabel_allowed"]:
                 messages = alias_prelabel_messages(item)
@@ -1856,8 +2025,8 @@ def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_
         for card in cards:
             if labelled >= MAX_PAIR_PRELABEL_CARDS:
                 break
-            if any("prelabel" in p for p in card["pairs"]):
-                labelled += 1
+            labelled += 1
+            if any(p.get("prelabel") for p in card["pairs"]):
                 continue
             messages = pair_prelabel_messages(card)
             judgements = parse_judgements(send(
@@ -1865,26 +2034,31 @@ def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_
                 lambda m=messages: judge.chat_json(m, PAIR_PRELABEL_HINT)), len(card["pairs"]))
             for pair, verdict in zip(card["pairs"], judgements):
                 pair["prelabel"] = verdict
-            labelled += 1
+    except BudgetExceeded as exc:
+        incomplete = str(exc)
+    cards = [c for lang in LANGUAGES for c in scans[lang]["cards"]]
+    assign_blind(cards, seed=args.seed)
+    assign_blind(alias_items, seed=args.seed)
     empty_checks = []
     for language in LANGUAGES:
-        pool = scans[language]["hint_empty"]
         previous_checks = [c for c in (previous or {}).get("empty_checks", []) if c["language"] == language]
         chosen_keys = {c["key"] for c in previous_checks}
-        fresh = [c for c in pool if c["key"] not in chosen_keys]
+        fresh = [c for c in dedup_by_key(scans[language]["hint_empty"], key=lambda c: c["key"])
+                 if c["key"] not in chosen_keys]
         random.Random(f"{args.seed}:empty:{language}").shuffle(fresh)
         empty_checks += previous_checks + fresh[: max(0, EMPTY_POOL_SPOT_CHECKS - len(previous_checks))]
-    formula_scan = {}
-    for language in LANGUAGES:
-        scan = scans[language]
-        formula_scan[language] = {
-            "scanned": scan["scanned"], "pooled": scan["pooled"], "kept_pairs": scan["kept_pairs"],
-            "hint_empty": len(scan["hint_empty"]), "status": dict(scan["status"]),
-            "untested": language == "zh" and not egress,
+    formula_scan = {
+        language: {
+            "scanned": scans[language]["scanned"], "pooled": scans[language]["pooled"],
+            "kept_pairs": scans[language]["kept_pairs"], "hint_empty": len(scans[language]["hint_empty"]),
+            "status": dict(scans[language]["status"]), "untested": language == "zh" and not egress,
         }
+        for language in LANGUAGES
+    }
     return {
         "run": hashlib.sha256(f"{args.seed}:{kg_attrs.rules_signature()}".encode()).hexdigest()[:12],
         "created": datetime.datetime.now().isoformat(timespec="seconds"),
+        "incomplete": incomplete,
         "seed": args.seed,
         "rules_signature": kg_attrs.rules_signature(),
         "fixture_sha": _sha(json.dumps(fixture, sort_keys=True, ensure_ascii=False)),
@@ -1895,13 +2069,11 @@ def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_
         "formula_cards": cards,
         "empty_checks": empty_checks,
         "formula_scan": formula_scan,
-        "scan_state": {lang: {"position": scans[lang]["position"], "scanned": scans[lang]["scanned"],
-                              "pooled": scans[lang]["pooled"], "kept_pairs": scans[lang]["kept_pairs"],
-                              "status": dict(scans[lang]["status"]),
-                              "hint_empty": scans[lang]["hint_empty"]} for lang in LANGUAGES},
+        "scan_state": {lang: {k: (dict(v) if k == "status" else v) for k, v in scans[lang].items() if k != "cards"}
+                       for lang in LANGUAGES},
         "yield": alias_yield(concepts) | {"formula_status": {lang: dict(scans[lang]["status"]) for lang in LANGUAGES}},
         "egress_log": {"sent_chars": dict(egress_log), "calls": budget.calls, "chars": budget.chars,
-                       "cache_hits": budget.cache_hits},
+                       "cache_hits": budget.cache_hits, "failures": dict(failures)},
         "alias_recall_reference": alias_recall_reference(concepts),
     }
 
@@ -1954,6 +2126,9 @@ MAX_ERROR_EXAMPLES = 5
 
 def write_review(out_dir: Path) -> Path:
     items = _read_json(out_dir / "items.json")
+    # The opaque id -> key map is kept only here, beside the items.
+    items["ids"] = {opaque_id(key): key for key in sorted(item_keys(items))}
+    _write_json(out_dir / "items.json", items)
     page = render_review_html(review_page_data(items, seed=items["seed"]))
     target = out_dir / "review.html"
     target.write_text(page, encoding="utf-8")
@@ -1972,12 +2147,12 @@ def item_keys(items: Mapping[str, Any]) -> set[str]:
 
 
 def ingest_labels(out_dir: Path, labels_path: Path) -> tuple[int, int]:
-    """Merge an exported label file into ``labels.json``; returns (merged,
-    ignored-unknown). Labels for keys this run does not have are dropped."""
+    """Merge an exported label file (opaque ids) into ``labels.json`` (keys);
+    returns (merged, ignored-unknown). Ids this run does not have are dropped."""
     items = _read_json(out_dir / "items.json")
     incoming = parse_labels(_read_json(labels_path))
-    known = item_keys(items)
-    accepted = {k: v for k, v in incoming.items() if k in known}
+    ids = {opaque_id(key): key for key in item_keys(items)}
+    accepted = {ids[i]: v for i, v in incoming.items() if i in ids}
     store = out_dir / "labels.json"
     old = _read_json(store) if store.is_file() else {}
     _write_json(store, merge_labels(old, accepted))
@@ -2057,6 +2232,9 @@ def build_parser():
     extract.add_argument("--dry-run", action="store_true", help="print the call/char estimate only")
     extract.add_argument("--out", default=str(EN_SLICE_PATH))
     extract.add_argument("--formula-service", default="general")
+    extract.add_argument("--formula-workload", default=None)
+    extract.add_argument("--reverify", action="store_true",
+                         help="recompute hits, contexts and verification from the fixture; no model call")
     _budget_args(extract)
     extract.set_defaults(run=run_extract_en)
 
@@ -2067,6 +2245,8 @@ def build_parser():
     prepare.add_argument("--per-rule", type=int, default=DEFAULT_PER_RULE)
     prepare.add_argument("--max-formulas-per-language", type=int, default=DEFAULT_MAX_FORMULAS_PER_LANGUAGE)
     prepare.add_argument("--formula-service", default="general")
+    prepare.add_argument("--formula-workload", default=None,
+                         help="chat workload to send the formula call through (must route to --formula-service)")
     prepare.add_argument("--dry-run", action="store_true", help="print the host x pool x call-kind budget only")
     prepare.add_argument("--confirm-budget", action="store_true", help="actually send (after the budget is approved)")
     prepare.add_argument("--allow-local-content-egress", action="store_true",

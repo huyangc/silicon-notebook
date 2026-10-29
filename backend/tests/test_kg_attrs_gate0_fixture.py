@@ -76,3 +76,9 @@ def test_fixture_is_pool_a_only_and_self_contained():
     assert {(c["book"]) for c in _DATA["chapters"]} == {"cmos", "engram"}
     assert all(eid.startswith("el-en-") for eid in _DATA["elements"])
     assert len(_DATA["chapters"]) == 14
+
+
+def test_reverify_is_a_fixed_point():
+    # extract-en --reverify regenerates the rule-dependent fields without a
+    # model call; on an up-to-date fixture it changes nothing.
+    assert cal.reverify_slice(_DATA) == _DATA, _STALE

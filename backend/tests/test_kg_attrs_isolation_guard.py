@@ -87,6 +87,13 @@ def import_violations(rel: str, source: str) -> list[str]:
             for literal in _literal_args(node):
                 if "kg_attrs" in literal:
                     out.append(f"{rel}: dynamic import of {literal}")
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr":
+            if any(literal == "kg_attrs" for literal in _literal_args(node)):
+                out.append(f"{rel}: getattr(..., 'kg_attrs')")
+        elif isinstance(node, ast.Attribute) and node.attr == "kg_attrs":
+            # `from app import domain; domain.kg_attrs`, `app.domain.kg_attrs.x`:
+            # the module reached through an attribute chain, not the one spelling.
+            out.append(f"{rel}: attribute access .kg_attrs")
     return out
 
 
@@ -185,6 +192,10 @@ def test_whitelist_entries_still_name_a_real_call_site():
     ("app/services/x.py", "from app.eval import kg_attrs_calibration\n"),
     ("app/services/x.py", "import app.eval.kg_attrs_calibration\n"),
     ("app/services/x.py", "from app.eval.kg_attrs_calibration import main\n"),
+    ("app/services/x.py", "from app import domain\ndomain.kg_attrs.normalize_latex('a')\n"),
+    ("app/services/x.py", "import app\napp.domain.kg_attrs.normalize_latex('a')\n"),
+    ("app/services/x.py", "import app.domain\nf = app.domain.kg_attrs\n"),
+    ("app/services/x.py", "from app import domain\nm = getattr(domain, 'kg_attrs')\n"),
 ])
 def test_guard1_turns_red(rel, source):
     assert import_violations(rel, source)
