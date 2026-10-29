@@ -182,11 +182,58 @@ def test_recall_unsure_kept_pair_is_wrong_and_cards_count_once():
 
 
 def test_recall_verdict_needs_both_hundreds():
-    base = {"denominator_formulas": 100, "recall": 0.7}
+    base = {"denominator_formulas": 100, "recall": 0.7, "empty_checks_filled": 3, "empty_checks_drawn": 3}
     assert cal.recall_verdict(base, 100) == "pass"
     assert cal.recall_verdict(base, 99) == "insufficient"
     assert cal.recall_verdict({**base, "denominator_formulas": 99}, 100) == "insufficient"
     assert cal.recall_verdict({**base, "recall": 0.69}, 100) == "fail"
+
+
+def test_recall_is_insufficient_until_every_drawn_spot_check_is_filled():
+    cards = [{"key": f"c{i}", "pairs": [_pair(f"g{i}", "kept")]} for i in range(100)]
+    labels = {f"g{i}": {"verdict": "correct"} for i in range(100)} | {f"c{i}": {"missing": 0} for i in range(100)}
+    checks = [{"key": "e1"}, {"key": "e2"}]
+    labels["e1"] = {"missing": 0}
+    recall = cal.formula_recall(cards, checks, labels, hint_empty_scanned=50)
+    assert (recall["empty_checks_filled"], recall["empty_checks_drawn"]) == (1, 2)
+    # mutation: an unfilled check read as 0 missed -> "pass".
+    assert cal.recall_verdict(recall, 100) == "insufficient"
+    labels["e2"] = {"missing": 0}
+    assert cal.recall_verdict(cal.formula_recall(cards, checks, labels, hint_empty_scanned=50), 100) == "pass"
+
+
+def _formula_record(**over):
+    return {"service": "general", "model": "m", "fingerprint": "abcd", "workload": "w", **over}
+
+
+def test_fixture_replies_are_reused_only_for_the_measured_configuration():
+    fixture = {"params": {"max_chars": 1200, "pair_window": 120},
+               "models": {"formula": _formula_record()}}
+    assert cal.fixture_provenance_problems(fixture, max_chars=1200, pair_window=120, formula=_formula_record()) == []
+    for kwargs in ({"max_chars": 800, "pair_window": 120, "formula": _formula_record()},
+                   {"max_chars": 1200, "pair_window": 100, "formula": _formula_record()},
+                   {"max_chars": 1200, "pair_window": 120, "formula": _formula_record(fingerprint="ffff")},
+                   {"max_chars": 1200, "pair_window": 120, "formula": _formula_record(model="other")}):
+        assert cal.fixture_provenance_problems(fixture, **kwargs)
+
+
+def test_top_up_refuses_a_different_run_or_scan_order():
+    fixture = {"params": {"max_chars": 1200, "pair_window": 120}}
+    identity = cal.run_identity(seed=1, fixture=fixture, max_chars=1200, pair_window=120,
+                                formula=_formula_record(), egress=False)
+    lists = {"en": [_formula(0, "t"), _formula(1, "t")], "zh": []}
+    saved = {"identity": identity,
+             "scan_state": {lang: {"order": cal.scan_order_sha(fs)} for lang, fs in lists.items()}}
+    assert cal.resume_problems(saved, identity, lists) == []
+    other_seed = cal.run_identity(seed=2, fixture=fixture, max_chars=1200, pair_window=120,
+                                  formula=_formula_record(), egress=False)
+    assert cal.resume_problems(saved, other_seed, lists) == ["seed differs from the saved run"]
+    other_fixture = cal.run_identity(seed=1, fixture={**fixture, "x": 1}, max_chars=1200, pair_window=120,
+                                     formula=_formula_record(), egress=False)
+    assert cal.resume_problems(saved, other_fixture, lists) == ["fixture_sha differs from the saved run"]
+    reordered = {"en": list(reversed(lists["en"])), "zh": []}
+    assert cal.resume_problems(saved, identity, reordered) == ["the en scan order differs from the saved run"]
+    assert cal.resume_problems({}, identity, lists)                       # a saved run without identity
 
 
 def test_combine_verdicts():
@@ -391,15 +438,40 @@ class _FakeClient:
         return self.reply
 
 
-def test_budget_judges_before_sending_and_skips_cache_hits():
+def test_budget_books_before_sending_and_refunds_cache_hits():
     budget = cal.Budget(max_calls=2, max_chars=100)
-    budget.admit(60)
-    budget.charge(60, cache_hit=False)
-    budget.charge(60, cache_hit=True)
+    budget.reserve(60)
+    budget.reserve(30)
+    budget.refund(30)                                   # answered from the cache
     assert (budget.calls, budget.chars, budget.cache_hits) == (1, 60, 1)
     with pytest.raises(cal.BudgetExceeded):
-        budget.admit(41)
-    budget.admit(40)
+        budget.reserve(41)
+    budget.reserve(40)
+    assert (budget.calls, budget.chars) == (2, 100)
+
+
+def test_budget_is_a_hard_cap_under_parallel_senders():
+    import threading
+
+    budget = cal.Budget(max_calls=10, max_chars=10_000)
+    barrier = threading.Barrier(40)
+    admitted = []
+
+    def sender():
+        barrier.wait()
+        try:
+            budget.reserve(1)
+            admitted.append(1)
+        except cal.BudgetExceeded:
+            pass
+
+    threads = [threading.Thread(target=sender) for _ in range(40)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    # mutation: check-then-book outside one lock -> more than 10 get through.
+    assert len(admitted) == 10 and budget.calls == 10
 
 
 def test_call_formula_is_the_product_call():

@@ -331,6 +331,7 @@ def formula_recall(
         "denominator_formulas": denominator,
         "H": h, "G": g, "M": m, "M_hat": round(m_hat, 3),
         "empty_checks_filled": len(filled),
+        "empty_checks_drawn": len(checks),
         "recall": round(h / total, 4) if total else None,
         "recall_without_m_hat": round(h / raw_total, 4) if raw_total else None,
         "formula_hit_rate": round(with_hit / denominator, 4) if denominator else None,
@@ -338,10 +339,13 @@ def formula_recall(
 
 
 def recall_verdict(recall: Mapping[str, Any], kept_pairs_judged: int) -> str:
+    """``insufficient`` also while any drawn empty-pool spot check is still
+    unfilled: M_hat must not read a missing label as "nothing missed"."""
     if (
         recall["denominator_formulas"] < FORMULA_MIN_DENOMINATOR
         or kept_pairs_judged < FORMULA_MIN_KEPT_PAIRS
         or recall["recall"] is None
+        or recall["empty_checks_filled"] < recall["empty_checks_drawn"]
     ):
         return "insufficient"
     return "pass" if recall["recall"] >= FORMULA_RECALL_LINE else "fail"
@@ -984,8 +988,10 @@ class BudgetExceeded(RuntimeError):
 
 
 class Budget:
-    """Hard caps on calls actually sent, judged on the running total BEFORE a
-    send; a call answered from the response cache is not counted."""
+    """Hard caps on calls actually sent. ``reserve`` checks AND books the call
+    under one lock before it is sent, so parallel senders can never overshoot
+    together; a call answered from the response cache is handed back with
+    ``refund``."""
 
     def __init__(self, max_calls: int, max_chars: int) -> None:
         import threading
@@ -995,21 +1001,22 @@ class Budget:
         self.cache_hits = 0
         self._lock = threading.Lock()
 
-    def admit(self, chars: int) -> None:
+    def reserve(self, chars: int) -> None:
         with self._lock:
             if self.calls + 1 > self.max_calls or self.chars + chars > self.max_chars:
                 raise BudgetExceeded(
                     f"budget reached: {self.calls} calls / {self.chars} chars sent "
                     f"(caps {self.max_calls} / {self.max_chars})"
                 )
+            self.calls += 1
+            self.chars += chars
 
-    def charge(self, chars: int, *, cache_hit: bool) -> None:
+    def refund(self, chars: int) -> None:
+        """The reserved call was answered from the cache: nothing was sent."""
         with self._lock:
-            if cache_hit:
-                self.cache_hits += 1
-            else:
-                self.calls += 1
-                self.chars += chars
+            self.calls -= 1
+            self.chars -= chars
+            self.cache_hits += 1
 
 
 def messages_chars(messages: Sequence[Mapping[str, str]]) -> int:
@@ -1092,19 +1099,17 @@ def call_formula(client: Any, formula: str, segments: Sequence[Sequence[str]],
     Returns (raw reply, None) or (None, exception class name)."""
     messages = kg_attrs.formula_variables_messages(formula, [tuple(s) for s in segments])
     chars = messages_chars(messages)
-    budget.admit(chars)
+    budget.reserve(chars)
     stats: dict = {}
     try:
         raw = client.chat_json(
             messages, kg_attrs.FORMULA_VARIABLES_HINT, thinking_mode="disabled",
             response_validator=kg_attrs.formula_variables_reply_ok, call_stats=stats,
         )
-    except BudgetExceeded:
-        raise
-    except Exception as exc:  # recorded as status "failed", never retried here
-        budget.charge(chars, cache_hit=False)
+    except Exception as exc:  # recorded as status "failed" (still counted), never retried here
         return None, type(exc).__name__
-    budget.charge(chars, cache_hit=stats.get("status") == "cache_hit")
+    if stats.get("status") == "cache_hit":
+        budget.refund(chars)
     return raw, None
 
 
@@ -1860,6 +1865,12 @@ def run_prepare(args: Any) -> int:
         formula_host = _service_record(formula_service)["host"]
         judge_host = _host_of(judge.base_url)
         egress = args.allow_local_content_egress
+        formula_record = {**_service_record(formula_service), "workload": workload}
+        stale = fixture_provenance_problems(fixture, max_chars=max_chars, pair_window=pair_window,
+                                            formula=formula_record)
+        if stale:
+            raise SystemExit("en_slice.json was measured with another configuration; regenerate it with "
+                             "extract-en before reusing its replies: " + "; ".join(stale))
         a_concepts, a_formulas = pool_a(fixture)
         local_concepts, local_formulas = load_local_pools(conn)
         concepts = a_concepts + local_concepts
@@ -1896,15 +1907,21 @@ def run_prepare(args: Any) -> int:
                              f"--max-calls {args.max_calls} / --max-input-chars {args.max_input_chars}")
         if not egress:
             planned_lists = {lang: [f for f in fs if f["pool"] == "A"] for lang, fs in planned_lists.items()}
+        identity = run_identity(seed=args.seed, fixture=fixture, max_chars=max_chars, pair_window=pair_window,
+                                formula=formula_record, egress=egress)
+        if previous is not None:
+            mismatch = resume_problems(previous, identity, planned_lists)
+            if mismatch:
+                raise SystemExit("--top-up refuses to continue a different run: " + "; ".join(mismatch))
         print(f"[prepare] sending to: formula {formula_host}; judge {judge_host}")
         items = _execute_prepare(
             args, fixture, provider.chat(workload), judge, planned_lists, alias_items,
             concepts=concepts, previous=previous, max_chars=max_chars, pair_window=pair_window,
             hosts={"formula": formula_host, "judge": judge_host},
         )
+        items["identity"] = identity
         items["models"] = {"extract": fixture.get("models", {}).get("extract"),
-                           "formula": {**_service_record(formula_service), "workload": workload},
-                           "judge": judge.model or None}
+                           "formula": formula_record, "judge": judge.model or None}
         _write_json(out_dir / "items.json", items)
         print(f"[prepare] wrote {out_dir / 'items.json'}")
         if items.get("incomplete"):
@@ -1931,6 +1948,54 @@ def _scan_lists(a_formulas, local_formulas, *, seed: int, egress: bool) -> dict[
         formulas.sort(key=lambda f: f["ref"])
         random.Random(f"{seed}:{language}").shuffle(formulas)
     return lists
+
+
+def fixture_provenance_problems(fixture: Mapping[str, Any], *, max_chars: int, pair_window: int,
+                                formula: Mapping[str, Any]) -> list[str]:
+    """Why pool A's stored replies may NOT be reused: the slice was measured
+    with another context size, pair window or formula service, so a report
+    built on it would vouch for a configuration nobody measured."""
+    params = fixture.get("params", {})
+    recorded = (fixture.get("models") or {}).get("formula") or {}
+    problems = []
+    if params.get("max_chars") != max_chars:
+        problems.append(f"KG_ATTRS_CONTEXT_CHARS {max_chars} != slice {params.get('max_chars')}")
+    if params.get("pair_window") != pair_window:
+        problems.append(f"KG_ATTRS_PAIR_WINDOW {pair_window} != slice {params.get('pair_window')}")
+    for field in ("service", "model", "fingerprint"):
+        if recorded.get(field) != formula.get(field):
+            problems.append(f"formula {field} {formula.get(field)!r} != slice {recorded.get(field)!r}")
+    return problems
+
+
+def run_identity(*, seed: int, fixture: Mapping[str, Any], max_chars: int, pair_window: int,
+                 formula: Mapping[str, Any], egress: bool) -> dict:
+    """What a saved items.json must match before --top-up may continue it."""
+    return {
+        "seed": seed,
+        "rules_signature": kg_attrs.rules_signature(),
+        "fixture_sha": _sha(json.dumps(fixture, sort_keys=True, ensure_ascii=False)),
+        "params": {"max_chars": max_chars, "pair_window": pair_window},
+        "formula": {k: formula.get(k) for k in ("service", "model", "fingerprint", "workload")},
+        "egress": egress,
+    }
+
+
+def scan_order_sha(formulas: Sequence[Mapping[str, Any]]) -> str:
+    """Identity of a scan order: a saved position only means something in it."""
+    return _sha("\n".join(f["ref"] for f in formulas))
+
+
+def resume_problems(previous: Mapping[str, Any], identity: Mapping[str, Any],
+                    planned_lists: Mapping[str, Sequence[Mapping[str, Any]]]) -> list[str]:
+    problems = [
+        f"{field} differs from the saved run"
+        for field, value in identity.items() if previous.get("identity", {}).get(field) != value
+    ]
+    for language, state in (previous.get("scan_state") or {}).items():
+        if state.get("order") != scan_order_sha(planned_lists.get(language, [])):
+            problems.append(f"the {language} scan order differs from the saved run")
+    return problems
 
 
 def assign_blind(entries: Sequence[dict], *, seed: int) -> None:
@@ -1962,14 +2027,12 @@ def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_
     def send(kind: str, pool: str, host_key: str, messages, call) -> Any:
         guard(pool)
         chars = messages_chars(messages)
-        budget.admit(chars)
+        budget.reserve(chars)
         try:
             result = call()
         except Exception as exc:  # one failed judge call never ends the run
-            budget.charge(chars, cache_hit=False)
             failures[f"{kind}:{type(exc).__name__}"] += 1
             return None
-        budget.charge(chars, cache_hit=False)
         egress_log[f"{hosts[host_key]}|{pool}|{kind}"] += chars
         return result
 
@@ -2069,7 +2132,9 @@ def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_
         "formula_cards": cards,
         "empty_checks": empty_checks,
         "formula_scan": formula_scan,
-        "scan_state": {lang: {k: (dict(v) if k == "status" else v) for k, v in scans[lang].items() if k != "cards"}
+        "scan_state": {lang: {**{k: (dict(v) if k == "status" else v) for k, v in scans[lang].items()
+                                 if k != "cards"},
+                              "order": scan_order_sha(planned_lists.get(lang, []))}
                        for lang in LANGUAGES},
         "yield": alias_yield(concepts) | {"formula_status": {lang: dict(scans[lang]["status"]) for lang in LANGUAGES}},
         "egress_log": {"sent_chars": dict(egress_log), "calls": budget.calls, "chars": budget.chars,
