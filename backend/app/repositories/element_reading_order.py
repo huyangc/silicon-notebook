@@ -215,7 +215,21 @@ def id_order_for(probe_rows: Sequence[Any], *, id_collate: str = "") -> str:
     same plan, same cost (every parsed source of at most 9 999 elements,
     backfilled images included). When only ``created_at`` agrees, ``<digits>,
     id`` is the index order, read as such. Otherwise (several write instants,
-    e.g. a knowhow source) the expression is sorted on."""
+    e.g. a knowhow source) the expression is sorted on.
+
+    The probe and the reader are two statements, not one snapshot (SQLite
+    reads on the shared thread-local connection without a manual ``BEGIN``;
+    PostgreSQL runs READ COMMITTED). An element swap committing between them
+    can only matter if it changes the answer, and a swap always writes a new
+    ``created_at`` generation -- which every caller already checks before it
+    writes anything derived from the read: chunk building compare-and-sets
+    ``sources.chunked_at`` (nulled by the swap), the navigation pass stamps
+    against that same ``chunked_at``, the image backfill re-reads ``COUNT``
+    and ``MAX(created_at)`` in its write transaction, and a catalog apply
+    re-checks ``source_element_generation``. So a stale probe can at worst
+    order a read that is then thrown away; a read transaction (or REPEATABLE
+    READ) around the pair would buy nothing the callers do not already
+    enforce."""
     suffix = f" {id_collate}" if id_collate else ""
     rows = [(row["created_at"], row["digits"]) for row in probe_rows]
     if len(rows) < 2 or rows[0] == rows[1]:

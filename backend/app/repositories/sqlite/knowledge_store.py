@@ -25,7 +25,7 @@ from app.domain.knowledge_contracts import (
     NODE_CONTEXT_LEGACY_SIBLING_SCAN,
 )
 from app.models.common import Evidence
-from app.repositories.element_reading_order import reading_order_sql
+from app.repositories.element_reading_order import reading_order_key
 from app.repositories.lexical_query import sqlite_fts_match_expression
 from app.repositories.sqlite import source_ceiling
 from app.repositories.sqlite.database import SqliteDatabase
@@ -2204,21 +2204,31 @@ class KnowledgeStore:
         texts = {r["id"]: r["text"] for r in rows}
         if not with_ordinal:
             return texts, {}
+        # Document order of just these elements: their own (created_at,
+        # source_id, id), ranked in Python by the reading-order key -- the
+        # order the notebook-wide ``ORDER BY created_at, <digits>, id`` gave
+        # them, without sorting every element of the notebook. The ranks are
+        # relative to the elements asked for (0..n-1), not notebook positions;
+        # the one caller only sorts by them. Elements outside the notebook get
+        # no rank, as before.
         if owner_notebook_id is None:
             order_rows = db.execute(
-                "SELECT se.id FROM source_elements se JOIN sources s ON se.source_id=s.id "
-                "WHERE s.notebook_id=(SELECT notebook_id FROM sources WHERE id=("
-                "SELECT source_id FROM source_elements WHERE id=? LIMIT 1)) "
-                f"ORDER BY {reading_order_sql('se')}",
-                (ids[0],),
+                "SELECT se.id, se.source_id, se.created_at FROM source_elements se "
+                "JOIN sources s ON se.source_id=s.id "
+                f"WHERE se.id IN ({ph}) AND +s.notebook_id=(SELECT notebook_id FROM sources "
+                "WHERE id=(SELECT source_id FROM source_elements WHERE id=? LIMIT 1))",
+                (*ids, ids[0]),
             ).fetchall()
         else:
             order_rows = db.execute(
-                "SELECT se.id FROM source_elements se JOIN sources s ON se.source_id=s.id "
-                f"WHERE s.notebook_id=? ORDER BY {reading_order_sql('se')}",
-                (owner_notebook_id,),
+                "SELECT se.id, se.source_id, se.created_at FROM source_elements se "
+                "JOIN sources s ON se.source_id=s.id "
+                f"WHERE se.id IN ({ph}) AND +s.notebook_id=?",
+                (*ids, owner_notebook_id),
             ).fetchall()
-        ordinal = {r["id"]: i for i, r in enumerate(order_rows)}
+        ranked = sorted(order_rows, key=lambda r: reading_order_key(
+            r["source_id"], r["created_at"], r["id"]))
+        ordinal = {r["id"]: i for i, r in enumerate(ranked)}
         return texts, ordinal
     def _enrich_evidence(
         self, db, evidence, *, owner_notebook_id: Optional[str] = None,
