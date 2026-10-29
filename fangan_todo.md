@@ -169,13 +169,6 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
 
 ### 检索
 
-- [ ] **`find_sources` 相关度阈值校准（论文卡片特性 T10，已记入 `fangan_done.md` §66）**。
-      `FIND_SOURCES_STRONG_RELEVANCE` / `FIND_SOURCES_RELATED_RELEVANCE` 现在是保守的临时值（0.7 / 0.3），
-      靠 `semantic_recall_capped` 与「可能还有更多」提示兜底。校准脚本 `backend/app/eval/find_sources_calibrate.py`
-      已合入（`candidates` → `prelabel` → `sweep`）：需要用户指定真实论文笔记本与 6 个主题；`prelabel`
-      消耗聊天模型配额，不带 `--confirm` 只打印调用次数与模型，**必须在对话里征得用户明确同意后**才加；
-      用户核对标注后 `sweep` 把阈值写回 `app/core/config.py`，PR 描述贴曲线与所用嵌入模型。
-      更换嵌入模型后须重跑。另：6 题真模型端到端验收（人工核对表内数字都能在引用原文找到）随校准一起做。
 - [ ] **「中文问句检索英文语料首轮空」的三条次因（此前未登记）**。主因——冻结来源范围
       关掉 chunk 向量通道——已修（`docs/superpowers/specs/2026-09-07-scoped-chunk-vector-lane-design_zh.md`）；
       排查过程中另外过了三条，逐条登记如下：
