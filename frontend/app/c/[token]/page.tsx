@@ -86,6 +86,9 @@ const EVIDENCE_LABELS: Record<string, string> = {
   inferred: "推断",
 };
 
+/** 页面上唯一那张引用卡：哪一轮（号段按轮独立）、哪条引用、被点的标记位置。 */
+type PublicTurnCitePopover = PublicCitePopoverState & Readonly<{ turnIndex: number }>;
+
 type PublicTurnRenderState = Readonly<{
   token: string;
   turnIndex: number;
@@ -217,6 +220,10 @@ export default function PublicConversationPage() {
   const params = useParams<{ token: string }>();
   const token = String(params?.token || "");
   const [state, setState] = useState<LoadState>({ kind: "loading" });
+  // 整页同一时刻只有一张引用卡：在页面层记「哪一轮的哪条」。各轮各持一份时，键盘
+  // 用户 Tab 到另一轮的标记按 Enter（没有 pointerdown、也不滚动）会留下两张卡，
+  // 一次 Esc 还会被两张卡同时认领（codex #1044 R2）。
+  const [citePopover, setCitePopover] = useState<PublicTurnCitePopover | null>(null);
   usePrintExpandedFolds();
 
   useEffect(() => {
@@ -300,7 +307,15 @@ export default function PublicConversationPage() {
       )}
 
       {conversation.turns.map((turn, index) => (
-        <PublicTurnView key={index} turn={turn} index={index} token={token} />
+        <PublicTurnView
+          key={index}
+          turn={turn}
+          index={index}
+          token={token}
+          citePopover={citePopover?.turnIndex === index ? citePopover : null}
+          onOpenReference={(key, rect) => setCitePopover({ turnIndex: index, key, rect })}
+          onClosePopover={() => setCitePopover(null)}
+        />
       ))}
 
       <ChatTurnNav
@@ -321,14 +336,19 @@ function PublicTurnView({
   turn,
   index,
   token,
+  citePopover,
+  onOpenReference,
+  onClosePopover,
 }: {
   turn: PublicTurnT;
   index: number;
   token: string;
+  /** 页面那张引用卡恰好属于本轮时才有值。号段是**每轮独立**的，高亮与 DOM id
+   *  都按本轮索引隔离，避免跨轮 k1 撞车。 */
+  citePopover: PublicCitePopoverState | null;
+  onOpenReference: (key: string, rect: DOMRect) => void;
+  onClosePopover: () => void;
 }) {
-  // 正文标记点开的那条引用（浮层 + 标记高亮）。号段是**每轮独立**的，所以状态与
-  // DOM id 都按本轮索引隔离，避免跨轮 k1 撞车。
-  const [citePopover, setCitePopover] = useState<PublicCitePopoverState | null>(null);
   const selectedKey = citePopover?.key ?? null;
   const [previewImage, setPreviewImage] = useState<PublicImagePreview | null>(null);
   const previewReturnFocusRef = useRef<string | null>(null);
@@ -414,7 +434,7 @@ function PublicTurnView({
     if (target?.isConnected) target.focus({ preventScroll: true });
   }, [previewImage]);
 
-  const openReference = (key: string, rect: DOMRect) => setCitePopover({ key, rect });
+  const openReference = onOpenReference;
   const popoverReference = citePopover
     ? turn.references.find((reference) => reference.key === citePopover.key)
     : undefined;
@@ -554,7 +574,7 @@ function PublicTurnView({
           reference={popoverReference}
           displayLabel={citationRefs[citePopover.key]?.displayLabel || ""}
           anchorRect={citePopover.rect}
-          onClose={() => setCitePopover(null)}
+          onClose={onClosePopover}
         />
       )}
 

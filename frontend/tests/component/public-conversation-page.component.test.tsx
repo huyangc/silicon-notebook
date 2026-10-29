@@ -176,6 +176,23 @@ test("点正文引用在标记旁弹出与站内同一张引用卡，清单默�
   fireEvent.keyUp(window, { key: "Escape" });
 });
 
+test("整页只有一张引用卡：键盘从一轮的标记换到另一轮的标记，前一张收起", async () => {
+  const user = userEvent.setup();
+  render(<PublicConversationPage />);
+
+  const first = await screen.findByRole("button", { name: "[7]" });
+  first.focus();
+  await user.keyboard("{Enter}");
+  expect(await screen.findByRole("dialog")).toHaveTextContent("乙文");
+
+  // Tab/聚焦到第二轮的 [1] 再按 Enter：没有 pointerdown，也没有滚动。
+  screen.getAllByRole("button", { name: "[1]" })[1].focus();
+  await user.keyboard("{Enter}");
+  await waitFor(() => expect(screen.getByRole("dialog")).toHaveTextContent("丙文"));
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  expect(first).not.toHaveClass("active");
+});
+
 test("多轮问答右缘有提问导航圆点，点圆点跳到对应那一轮", async () => {
   const user = userEvent.setup();
   render(<PublicConversationPage />);
