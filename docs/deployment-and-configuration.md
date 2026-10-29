@@ -426,7 +426,7 @@ common lexical terms may scan global trigram matches before filtering by noteboo
 hit the statement timeout. See the monitored rollout and rollback procedure in
 [Operations](./operations.md#postgresql-notebook-aware-lexical-indexes).
 
-An already-populated PostgreSQL database should also get the accumulated hot-path fix indexes (batch 1's six groups / eight indexes, plus batch 2's payload-search GIN and checkup-H5 partial index, plus batch 3's one keyset-covering index, plus batch 4's three source-search GIN trigram indexes, plus batch 5's three delete-jobization FK/keyset indexes, plus batch 6's three generation-aware cluster replacements (batch 3 W2 PR-1), plus batch 7's paper-metadata covering index; batch 2's GIN ran about 1.5x the knowledge_objects table segment on a synthetic low-entropy benchmark (real payloads have richer trigrams and may run larger; measure after building) and is a registered write-amplification debt, reversible via DROP INDEX CONCURRENTLY)
+An already-populated PostgreSQL database should also get the accumulated hot-path fix indexes (batch 1's six groups / eight indexes, plus batch 2's payload-search GIN and checkup-H5 partial index, plus batch 3's one keyset-covering index, plus batch 4's three source-search GIN trigram indexes, plus batch 5's three delete-jobization FK/keyset indexes, plus batch 6's three generation-aware cluster replacements (batch 3 W2 PR-1), plus batch 7's paper-metadata covering index, plus batch 9's two source-element reading-order replacements; batch 2's GIN ran about 1.5x the knowledge_objects table segment on a synthetic low-entropy benchmark (real payloads have richer trigrams and may run larger; measure after building) and is a registered write-amplification debt, reversible via DROP INDEX CONCURRENTLY)
 across six query-family groups (`concept_clusters(notebook_id, canonical_id)`, its
 `lower(canonical_name)` companion, three reverse-FK covers on
 `extraction_runs`/`knowledge_source_fact_elements`/`memory_items`,
@@ -532,6 +532,33 @@ and is a ledger no-op). Nothing is retired. Rollback: `DROP INDEX CONCURRENTLY
 idx_source_paper_meta_source_nb;` (the readers then probe the heap). SQLite builds the same
 name over `(source_id, notebook_id, is_paper)` in v103, and its readers name it with
 `INDEXED BY`.
+
+**Batch 9 (migration 0086, SQLite v105)** puts a source's elements in reading order past
+9 999 elements (element ids are `el-<source>-NNNN`, four-digit zero padding, so their byte
+order stops being the document order at the 10 000th element). The readers now order by
+`created_at`, the number of digits of the element index, then `id`; two btrees with that
+expression key replace the two `(created_at, id)` indexes:
+`idx_source_elements_reading_order` on `source_elements(source_id, created_at, <digits>, id)`
+replaces `idx_source_elements_source_created`, and `idx_source_elements_type_reading_order`
+on `source_elements(source_id, element_type, created_at, <digits>, id)` replaces
+`idx_source_elements_source_type` (the expression is spelled out in the migration). Order of
+operations on a database with traffic, the same as batch 6: run
+`scripts/build_hotpath_indexes.py --apply` first (online `CREATE INDEX CONCURRENTLY` of the
+two successors; they are about the size of the indexes they replace, minutes on a
+multi-million-row `source_elements`), then retire the old two online, then migrate (0086
+validates the successors' shape and is a ledger no-op):
+
+```bash
+psql "$DATABASE_URL" -c 'DROP INDEX CONCURRENTLY IF EXISTS idx_source_elements_source_created;'
+psql "$DATABASE_URL" -c 'DROP INDEX CONCURRENTLY IF EXISTS idx_source_elements_source_type;'
+```
+
+Skipping the builder still works but builds both indexes inside the migration transaction,
+blocking writes to `source_elements` for the build. Rollback: rebuild the two old indexes
+`CONCURRENTLY` (definitions in 0003 / 0015) and roll back the release. SQLite builds and
+drops the same names in v105. Sources already past 9 999 elements were chunked, navigated
+and extracted in the old order; see
+[Operations](./operations.md#sources-past-9-999-elements-derived-data-built-out-of-order).
 
 If you intend to build scale indexes offline or off-host
 (`scripts/build_scale_index.py`, an independent process that runs *beside* the live
