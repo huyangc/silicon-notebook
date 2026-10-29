@@ -328,3 +328,100 @@ def test_local_output_dir_requires_a_git_ignored_path(tmp_path):
 def test_main_checkout_root_is_the_parent_of_the_common_git_dir(tmp_path):
     _git(tmp_path, "init", "-q")
     assert cal.main_checkout_root(tmp_path).resolve() == tmp_path.resolve()
+
+
+# --- extract-en plumbing (plan G0-T3) ---------------------------------------
+
+class _FakeClient:
+    def __init__(self, reply="", status="miss", error=None):
+        self.reply, self.status, self.error = reply, status, error
+        self.calls = []
+
+    def chat_json(self, messages, hint, **kwargs):
+        self.calls.append((messages, hint, kwargs))
+        if self.error:
+            raise self.error
+        kwargs["call_stats"]["status"] = self.status
+        return self.reply
+
+
+def test_budget_judges_before_sending_and_skips_cache_hits():
+    budget = cal.Budget(max_calls=2, max_chars=100)
+    budget.admit(60)
+    budget.charge(60, cache_hit=False)
+    budget.charge(60, cache_hit=True)
+    assert (budget.calls, budget.chars, budget.cache_hits) == (1, 60, 1)
+    with pytest.raises(cal.BudgetExceeded):
+        budget.admit(41)
+    budget.admit(40)
+
+
+def test_call_formula_is_the_product_call():
+    reply = '{"variables": []}'
+    client = _FakeClient(reply=reply, status="cache_hit")
+    budget = cal.Budget(10, 10_000)
+    assert cal.call_formula(client, "y = x", [["e1", "where x is t"]], budget) == (reply, None)
+    _messages, hint, kwargs = client.calls[0]
+    assert hint == '{"variables":[{"symbol":"","meaning":""}]}'
+    assert kwargs["thinking_mode"] == "disabled"
+    assert kwargs["response_validator"] is cal.kg_attrs.formula_variables_reply_ok
+    assert (budget.calls, budget.cache_hits) == (0, 1)
+    failing = _FakeClient(error=RuntimeError("boom"))
+    assert cal.call_formula(failing, "y", [["e", "t"]], budget) == (None, "RuntimeError")
+    assert budget.calls == 1
+    assert cal.verification_record("y", [["e", "t"]], None, pair_window=120) == {
+        "status": "failed", "kept": [], "rejected": []}
+
+
+class _Workload:
+    def __init__(self, wid, kind="chat"):
+        self.id, self.kind = wid, kind
+
+
+class _Service:
+    def __init__(self, sid):
+        self.id = sid
+
+
+class _Registry:
+    def __init__(self, bindings):
+        self.bindings = bindings
+
+    def workloads_for(self, service_id):
+        return tuple(_Workload(w) for w, s in self.bindings.items() if s == service_id)
+
+    def service_for(self, workload_id):
+        return _Service(self.bindings[workload_id])
+
+
+def test_formula_workload_routes_to_the_named_service():
+    registry = _Registry({"query_rewrite": "general", "kg_extract": "general", "x": "other"})
+    assert cal.formula_workload(registry, "general") == "kg_extract"
+    with pytest.raises(SystemExit):
+        cal.formula_workload(registry, "missing")
+
+
+class _El:
+    def __init__(self, eid, text):
+        self.id, self.text = eid, text
+
+
+def test_chapter_records_builds_concepts_and_formula_contexts():
+    elements = [_El("e0", "A Phase Locked Loop (PLL) locks."), _El("e1", "y = a x"),
+                _El("e2", "where a is the gain")]
+    objects = [
+        {"object_type": "concept", "payload": {"name": "Phase Locked Loop"},
+         "evidence": [{"element_id": "e0"}]},
+        {"object_type": "formula", "payload": {"name": "y = a x"}, "evidence": [{"element_id": "e1"}]},
+        {"object_type": "formula", "payload": {"name": "z"}, "evidence": [{"element_id": "e2"}]},
+        {"object_type": "claim", "payload": {"name": "c"}, "evidence": [{"element_id": "e0"}]},
+        {"object_type": "concept", "payload": {"name": "Unbound"}, "evidence": [{"element_id": "zz"}]},
+    ]
+    concepts, formulas, used = cal.chapter_records("b", "c", elements, objects, max_chars=12)
+    assert [(c["name"], c["hits"]) for c in concepts] == [
+        ("Phase Locked Loop", [{"rule": "R2", "text": "PLL", "element_id": "e0"}])]
+    assert formulas[0]["next_element_id"] == "e2" and formulas[1]["next_element_id"] is None
+    assert formulas[0]["segments"] == [["e1", "y = a x"], ["e2", "where"]]
+    assert formulas[0]["context"] == [["e1", 7], ["e2", 5]]
+    assert set(used) == {"e0", "e1", "e2"}
+    assert cal.slice_segments(formulas[0], used, max_chars=12) == formulas[0]["segments"]

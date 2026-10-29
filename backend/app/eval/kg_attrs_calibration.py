@@ -891,6 +891,354 @@ def _read_json(path: Path) -> Any:
 
 
 # ===========================================================================
+# Model plumbing shared by extract-en and prepare
+# ===========================================================================
+
+EN_SLICE_PATH = Path(__file__).resolve().parent / "kg_attrs_gate0" / "en_slice.json"
+# Pool A chapters: the repository's own test-case sources (spec §13.1).
+EN_BOOKS = (("cmos", "textbook"), ("engram", "academic_paper"))
+# Extraction windows are pinned (not adaptive) so the slice is reproducible.
+EXTRACT_WINDOW_N = 8000
+EXTRACT_WINDOW_M = 450
+# Rough fixed prompt size of one extraction pass, for the up-front estimate.
+EXTRACT_PROMPT_CHARS = 6000
+DEFAULT_MAX_CALLS = 4000
+DEFAULT_MAX_INPUT_CHARS = 20_000_000
+FINGERPRINT_PREFIX_CHARS = 16
+
+
+class BudgetExceeded(RuntimeError):
+    pass
+
+
+class Budget:
+    """Hard caps on calls actually sent, judged on the running total BEFORE a
+    send; a call answered from the response cache is not counted."""
+
+    def __init__(self, max_calls: int, max_chars: int) -> None:
+        import threading
+
+        self.max_calls, self.max_chars = max_calls, max_chars
+        self.calls = self.chars = 0
+        self.cache_hits = 0
+        self._lock = threading.Lock()
+
+    def admit(self, chars: int) -> None:
+        with self._lock:
+            if self.calls + 1 > self.max_calls or self.chars + chars > self.max_chars:
+                raise BudgetExceeded(
+                    f"budget reached: {self.calls} calls / {self.chars} chars sent "
+                    f"(caps {self.max_calls} / {self.max_chars})"
+                )
+
+    def charge(self, chars: int, *, cache_hit: bool) -> None:
+        with self._lock:
+            if cache_hit:
+                self.cache_hits += 1
+            else:
+                self.calls += 1
+                self.chars += chars
+
+
+def messages_chars(messages: Sequence[Mapping[str, str]]) -> int:
+    return sum(len(m.get("content", "")) for m in messages)
+
+
+def _tool_environment(root: Path) -> None:
+    """Point a tool process at the main checkout's configuration WITHOUT
+    letting it touch any database: DATABASE_URL goes to a throwaway SQLite
+    path nothing opens, events/LLM logs are off, and the relative model
+    config / response-cache paths of the main checkout are made absolute so a
+    worktree run reuses the same files. Must run before app.core.config is
+    imported."""
+    import os
+    import tempfile
+
+    os.environ.setdefault("SILICON_NOTEBOOK_ENV_FILE", str(root / ".env"))
+    scratch = tempfile.mkdtemp(prefix="kg_attrs_gate0_")
+    os.environ["DATABASE_URL"] = f"sqlite:///{scratch}/unused.db"
+    os.environ["SILICON_NOTEBOOK_STORAGE_DIR"] = f"{scratch}/storage"
+    os.environ["EVENT_LOG_ENABLED"] = "false"
+    os.environ["LLM_LOG_ENABLED"] = "false"
+    os.environ.setdefault("MODEL_BINDINGS_STRICT", "false")
+    dotenv: dict[str, str] = {}
+    env_file = Path(os.environ["SILICON_NOTEBOOK_ENV_FILE"])
+    if env_file.is_file():
+        from dotenv import dotenv_values
+
+        dotenv = {k: v for k, v in dotenv_values(env_file).items() if v is not None}
+    for key, default in (("MODEL_SERVICES_CONFIG", ""), ("LLM_CACHE_PATH", ".local/llm_cache_v2.db")):
+        value = os.environ.get(key) or dotenv.get(key) or default
+        if value and not Path(value).is_absolute():
+            os.environ[key] = str(root / value)
+
+
+def _open_models():
+    """(settings, provider) for a tool process; caller closes the provider."""
+    from app.core.config import Settings
+    from app.core.event_logging import EventLogger
+    from app.services.model_provider import RuntimeModelProvider
+
+    settings = Settings()
+    provider = RuntimeModelProvider(settings, EventLogger(settings, channel="events", per_user=True))
+    return settings, provider
+
+
+def _service_record(service: Any) -> dict:
+    from urllib.parse import urlparse
+
+    return {
+        "service": service.id,
+        "model": service.model,
+        "host": urlparse(service.base_url).hostname or "",
+        "fingerprint": service.fingerprint[:FINGERPRINT_PREFIX_CHARS],
+    }
+
+
+def formula_workload(registry: Any, service_id: str) -> str:
+    """A chat workload bound to ``service_id`` (first by id), asserted to route
+    there: the Gate 0 formula call must hit the service ``kg_attr_enrich``
+    will be bound to."""
+    candidates = sorted(w.id for w in registry.workloads_for(service_id) if w.kind == "chat")
+    if not candidates:
+        raise SystemExit(f"no chat workload is bound to model service {service_id!r}")
+    workload = candidates[0]
+    bound = registry.service_for(workload)
+    assert bound is not None and bound.id == service_id, (workload, bound)
+    return workload
+
+
+def call_formula(client: Any, formula: str, segments: Sequence[Sequence[str]],
+                 budget: Budget) -> tuple[str | None, str | None]:
+    """The product formula call (no thinking, shape validator => cached).
+    Returns (raw reply, None) or (None, exception class name)."""
+    messages = kg_attrs.formula_variables_messages(formula, [tuple(s) for s in segments])
+    chars = messages_chars(messages)
+    budget.admit(chars)
+    stats: dict = {}
+    try:
+        raw = client.chat_json(
+            messages, kg_attrs.FORMULA_VARIABLES_HINT, thinking_mode="disabled",
+            response_validator=kg_attrs.formula_variables_reply_ok, call_stats=stats,
+        )
+    except BudgetExceeded:
+        raise
+    except Exception as exc:  # recorded as status "failed", never retried here
+        budget.charge(chars, cache_hit=False)
+        return None, type(exc).__name__
+    budget.charge(chars, cache_hit=stats.get("status") == "cache_hit")
+    return raw, None
+
+
+def verification_record(formula: str, segments: Sequence[Sequence[str]], reply: str | None,
+                        *, pair_window: int) -> dict:
+    if reply is None:
+        return {"status": kg_attrs.FORMULA_STATUS_FAILED, "kept": [], "rejected": []}
+    result = kg_attrs.verify_formula_variables(
+        formula, [tuple(s) for s in segments], reply, pair_window=pair_window)
+    return {"status": result.status, "kept": list(result.kept), "rejected": list(result.rejected)}
+
+
+# ===========================================================================
+# extract-en: pool A through the product extraction chain (plan G0-T3)
+# ===========================================================================
+
+def en_chapters(repo_root: Path) -> list[tuple[str, str, str, Path]]:
+    """(book, chapter, doc_type, source.md) for the 14 English test-case chapters."""
+    out = []
+    for book, doc_type in EN_BOOKS:
+        for path in sorted((repo_root / "fangan" / "testcases" / book).glob("*/source.md")):
+            out.append((book, path.parent.name, doc_type, path))
+    return out
+
+
+def element_id_for(book: str, chapter: str, index: int) -> str:
+    return f"el-en-{book}-{chapter}-{index:05d}"
+
+
+def chapter_records(
+    book: str, chapter: str, elements: Sequence[Any], objects: Sequence[Mapping[str, Any]],
+    *, max_chars: int,
+) -> tuple[list[dict], list[dict], dict[str, str]]:
+    """Concept entries (with every-rule alias hits) and formula entries (with
+    their context, before the model call) for one chapter, plus the texts of
+    every element they reference. Pure: ``elements`` already carry ids."""
+    by_id = {el.id: (i, el.text) for i, el in enumerate(elements)}
+    used: dict[str, str] = {}
+    concepts, formulas = [], []
+    for obj in objects:
+        name = str((obj.get("payload") or {}).get("name") or "")
+        evidence = [e["element_id"] for e in obj.get("evidence", []) if e.get("element_id") in by_id]
+        if not name or not evidence:
+            continue
+        if obj["object_type"] == "concept":
+            items = [{"element_id": eid, "element_text": by_id[eid][1], "element_read": True}
+                     for eid in evidence]
+            hits = kg_attrs.trace_concept_aliases(name, items, exclude_names=(),
+                                                  rules=kg_attrs.ALIAS_RULES)
+            used.update({eid: by_id[eid][1] for eid in evidence})
+            concepts.append({"book": book, "chapter": chapter, "name": name,
+                             "evidence": evidence, "hits": hits})
+        elif obj["object_type"] == "formula":
+            first = evidence[0]
+            index = by_id[first][0]
+            following = [(elements[index + 1].id, elements[index + 1].text)] if index + 1 < len(elements) else []
+            segments = kg_attrs.build_formula_context(
+                (first, by_id[first][1]), following, max_chars=max_chars)
+            used[first] = by_id[first][1]
+            used.update(dict(following))
+            formulas.append({
+                "book": book, "chapter": chapter, "name": name, "element_id": first,
+                "next_element_id": following[0][0] if following else None,
+                "context": [[eid, len(text)] for eid, text in segments],
+                "segments": [list(s) for s in segments],
+            })
+    return concepts, formulas, used
+
+
+def slice_segments(entry: Mapping[str, Any], elements: Mapping[str, str], *, max_chars: int) -> list:
+    """Rebuild a pool-A formula's context from the fixture (drift guard)."""
+    first = (entry["element_id"], elements[entry["element_id"]])
+    nxt = entry.get("next_element_id")
+    following = [(nxt, elements[nxt])] if nxt else []
+    return [list(s) for s in kg_attrs.build_formula_context(first, following, max_chars=max_chars)]
+
+
+def _estimate_extraction(chapters, settings) -> tuple[int, int, list[dict]]:
+    from app.services import kg_ingest
+    from app.services.kg.filters import should_extract_window
+    from app.services.kg.windowing import windows_with_elements
+
+    passes = 1 + int(settings.kg_refine_enabled) + (
+        settings.kg_gleaning_rounds if settings.kg_gleaning_enabled else 0)
+    calls = chars = 0
+    rows = []
+    for book, chapter, doc_type, path in chapters:
+        raw = path.read_text(encoding="utf-8")
+        kg_doc_type = kg_ingest.DOC_TYPE_MAP.get(doc_type, "academic")
+        kept = [
+            sum(len(e.text) for e in els)
+            for w, els in windows_with_elements(raw, f"{chapter}.md", None,
+                                                EXTRACT_WINDOW_N, EXTRACT_WINDOW_M)
+            if els and should_extract_window(w.section_path, els, kg_doc_type)[0]
+        ]
+        calls += len(kept) * passes
+        chars += sum(size + EXTRACT_PROMPT_CHARS for size in kept) * passes
+        rows.append({"book": book, "chapter": chapter, "windows": len(kept), "chars": len(raw)})
+    return calls, chars, rows
+
+
+def run_extract_en(args: Any) -> int:
+    from datetime import date
+
+    root = main_checkout_root()
+    _tool_environment(root)
+    repo_root = Path(__file__).resolve().parents[3]
+    chapters = en_chapters(repo_root)
+    settings, provider = _open_models()
+    try:
+        est_calls, est_chars, rows = _estimate_extraction(chapters, settings)
+        print(f"[extract-en] {len(chapters)} chapters, extraction <= {est_calls} calls / "
+              f"{est_chars} chars before cache (windows n={EXTRACT_WINDOW_N} m={EXTRACT_WINDOW_M})")
+        for row in rows:
+            print(f"  {row['book']}/{row['chapter']}: {row['windows']} windows, {row['chars']} chars")
+        if args.dry_run:
+            return 0
+        budget = Budget(args.max_calls, args.max_input_chars)
+        if est_calls > args.max_calls or est_chars > args.max_input_chars:
+            raise SystemExit("extraction estimate exceeds --max-calls / --max-input-chars")
+        budget.calls, budget.chars = est_calls, est_chars
+        workload = formula_workload(provider.registry, args.formula_service)
+        extract_service = provider.registry.service_for("kg_extract")
+        formula_service = provider.registry.service_for(workload)
+        if extract_service is None or formula_service is None:
+            raise SystemExit("kg_extract or the formula service is not configured")
+        print(f"[extract-en] extraction -> {_service_record(extract_service)['host']}; "
+              f"formula ({workload}) -> {_service_record(formula_service)['host']}")
+        fixture = _extract_slice(chapters, settings, provider, workload, budget)
+        fixture.update({
+            "generated": date.today().isoformat(),
+            "models": {"extract": _service_record(extract_service),
+                       "formula": {**_service_record(formula_service), "workload": workload}},
+        })
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(fixture, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+                       encoding="utf-8")
+        print(f"[extract-en] wrote {out} ({len(fixture['concepts'])} concepts, "
+              f"{len(fixture['formulas'])} formulas); formula calls sent "
+              f"{budget.calls - est_calls}, cache hits {budget.cache_hits}")
+        return 0
+    finally:
+        provider.close()
+
+
+def _extract_slice(chapters, settings, provider, workload: str, budget: Budget) -> dict:
+    import concurrent.futures as cf
+
+    from app.services import kg_ingest, parsers
+
+    concepts: list[dict] = []
+    formulas: list[dict] = []
+    elements: dict[str, str] = {}
+    chapter_rows = []
+    gleaning = settings.kg_gleaning_rounds if settings.kg_gleaning_enabled else 0
+    for book, chapter, doc_type, path in chapters:
+        raw = path.read_text(encoding="utf-8")
+        source_id = f"src-en-{book}-{chapter}"
+        parsed = parsers.parse_markdown_text(source_id, raw)
+        for index, element in enumerate(parsed):
+            element.id = element_id_for(book, chapter, index)
+        kg_doc_type = kg_ingest.DOC_TYPE_MAP.get(doc_type, "academic")
+        graph = kg_ingest.extract_graph(
+            provider, raw, f"{chapter}.md", kg_doc_type,
+            n=EXTRACT_WINDOW_N, m=EXTRACT_WINDOW_M,
+            refine=settings.kg_refine_enabled, gleaning_rounds=gleaning,
+        )
+        objects, _relations = kg_ingest.build_records(graph, source_id, chapter, parsed)
+        chapter_concepts, chapter_formulas, used = chapter_records(
+            book, chapter, parsed, objects, max_chars=settings.kg_attrs_context_chars)
+        concepts += chapter_concepts
+        formulas += chapter_formulas
+        elements.update(used)
+        chapter_rows.append({
+            "book": book, "chapter": chapter, "doc_type": kg_doc_type,
+            "windows_total": graph.total_windows, "windows_failed": graph.failed_windows,
+            "concepts": len(chapter_concepts), "formulas": len(chapter_formulas),
+        })
+        print(f"  {book}/{chapter}: {graph.total_windows} windows "
+              f"({graph.failed_windows} failed), {len(chapter_concepts)} concepts, "
+              f"{len(chapter_formulas)} formulas", flush=True)
+    client = provider.chat(workload)
+
+    def one(entry: dict) -> None:
+        reply, error = call_formula(client, entry["name"], entry["segments"], budget)
+        entry["reply"], entry["error"] = reply, error
+        entry["verification"] = verification_record(
+            entry["name"], entry["segments"], reply, pair_window=settings.kg_attrs_pair_window)
+
+    with cf.ThreadPoolExecutor(max_workers=max(1, provider.parallelism(workload))) as pool:
+        for future in [pool.submit(one, entry) for entry in formulas]:
+            future.result()
+    for entry in formulas:
+        del entry["segments"]
+    return {
+        "format": 1,
+        "rules_signature": kg_attrs.rules_signature(),
+        "params": {
+            "max_chars": settings.kg_attrs_context_chars,
+            "pair_window": settings.kg_attrs_pair_window,
+            "window_n": EXTRACT_WINDOW_N, "window_m": EXTRACT_WINDOW_M,
+            "refine": bool(settings.kg_refine_enabled), "gleaning_rounds": gleaning,
+        },
+        "chapters": chapter_rows,
+        "elements": elements,
+        "concepts": concepts,
+        "formulas": formulas,
+    }
+
+
+# ===========================================================================
 # CLI
 # ===========================================================================
 
@@ -905,9 +1253,21 @@ def build_parser():
 
     parser = argparse.ArgumentParser(prog="kg_attrs_calibration", description=__doc__.split("\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("extract-en", "prepare", "render", "ingest", "report"):
+
+    extract = sub.add_parser("extract-en", help="build en_slice.json (pool A) with the product chain")
+    extract.add_argument("--dry-run", action="store_true", help="print the call/char estimate only")
+    extract.add_argument("--out", default=str(EN_SLICE_PATH))
+    extract.add_argument("--formula-service", default="general")
+    _budget_args(extract)
+    extract.set_defaults(run=run_extract_en)
+    for name in ("prepare", "render", "ingest", "report"):
         sub.add_parser(name).set_defaults(run=_not_yet(name))
     return parser
+
+
+def _budget_args(parser: Any) -> None:
+    parser.add_argument("--max-calls", type=int, default=DEFAULT_MAX_CALLS)
+    parser.add_argument("--max-input-chars", type=int, default=DEFAULT_MAX_INPUT_CHARS)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
