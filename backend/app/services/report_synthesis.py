@@ -225,10 +225,13 @@ def synthesis_evidence_payload(
             seen.add(evidence_id)
             legal.add(evidence_id)
             cards.append(card)
+        # Confirmed outline metadata is fixed user intent, not sampled evidence.
+        # The final request budget must reject an overflow rather than clip it.
+        title, scope = section.get("title"), section.get("scope")
         sections.append({
             "section_id": f"section-{index}",
-            "title": _text(section.get("title"), 200),
-            "scope": _text(section.get("scope"), 500),
+            "title": title if isinstance(title, str) else "",
+            "scope": scope if isinstance(scope, str) else "",
             "intent_ids": _strings(section.get("intent_ids"), 16, 80),
             "evidence": cards,
         })

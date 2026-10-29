@@ -26,6 +26,19 @@ CONTEXT_RECEIPT_KEY = "context_processing"
 CONTEXT_RECOVERY_INPUT_DIVISOR = 2
 
 
+def prompt_intent_contract(contract: dict | None) -> dict:
+    """Project research semantics without changing the durable execution contract.
+
+    Frozen source/library ceilings are enforced by retrieval, not by the model.
+    Processing and audit receipts describe execution rather than user intent.
+    Keep all other fields whole, including future semantic fields; a genuine
+    instruction overflow must still fail instead of silently losing intent.
+    This also accepts legacy section contracts containing execution metadata.
+    """
+    return {key: value for key, value in (contract or {}).items()
+            if key not in {"source_scope", "base_scope", CONTEXT_RECEIPT_KEY, "credibility"}}
+
+
 def record_report_context(function):
     @wraps(function)
     def recorded(*args, **kwargs):
@@ -453,6 +466,7 @@ def record_section_baseline(engine, result, *, notebook_id, section, question,
 def report_blueprint_call(engine, question, intent_contract, report_frame, evidence_sections):
     from app.services.prompts import REPORT_SYNTHESIS_SCHEMA_HINT, report_synthesis_prompt
 
+    intent_block = json.dumps(prompt_intent_contract(intent_contract), ensure_ascii=False)
     units = tuple(EvidenceUnit(
         f"{section['section_id']}:{card['evidence_id']}",
         json.dumps(card, ensure_ascii=False), group=section["section_id"],
@@ -478,7 +492,7 @@ def report_blueprint_call(engine, question, intent_contract, report_frame, evide
                         sections[group]["evidence"].append(card)
                         admitted.add(handle)
         return [{"role": "user", "content": report_synthesis_prompt(
-            question, json.dumps(intent_contract, ensure_ascii=False),
+            question, intent_block,
             json.dumps(report_frame or {}, ensure_ascii=False),
             json.dumps(payload, ensure_ascii=False),
             facet_ids=[row["id"] for row in (report_frame or {}).get("facets") or []
@@ -504,6 +518,37 @@ def report_blueprint_call(engine, question, intent_contract, report_frame, evide
     return raw, legal
 
 
+def _editor_blueprint_material(blueprint, section_count):
+    """Split generated synthesis into complete, ancestry-carrying audit units."""
+    blueprint = blueprint or {}
+    levels = {row["section_id"]: int(row.get("_context_level", 0))
+              for row in blueprint.get("sections", []) if row.get("section_id")}
+    shared_level = max(levels.values(), default=0)
+    indices = {f"section-{index + 1}": index for index in range(section_count)}
+    units, affected, bindings = [], {}, {}
+    for component, value in blueprint.items():
+        items = value if isinstance(value, list) else [value]
+        for index, item in enumerate(items):
+            row = item if isinstance(item, dict) else {}
+            owner = row.get("owner_section_id") or row.get("section_id")
+            handle = f"editor-blueprint:{component}:{index}"
+            affected[handle] = ({indices[owner]} if owner in indices else set(indices.values()))
+            bindings[handle] = {"component": component, **{
+                key: row[key] for key in ("id", "section_id", "owner_section_id", "term",
+                                         "evidence_keys", "counterevidence_keys", "claim_ids")
+                if key in row}}
+            units.append(EvidenceUnit(
+                handle, json.dumps({component: [item] if isinstance(value, list) else item},
+                                   ensure_ascii=False),
+                group=f"editor-section-{indices[owner]}" if owner in indices else "editor-shared",
+                kind=f"blueprint_{component}", level=levels.get(owner, shared_level), raw_text=True,
+                conditions=tuple(row.get("conditions") or []),
+                counterevidence=tuple(row.get("counterevidence") or []),
+                inference=row.get("type") == "inference", general=row.get("type") == "general",
+            ))
+    return tuple(units), affected, bindings
+
+
 def report_editor_call(engine, question, sections, frame, blueprint, intent_block):
     from app.services.prompts import REPORT_SUMMARY_SCHEMA_HINT, report_summary_prompt
     from app.services.report_synthesis import fair_editor_context
@@ -512,7 +557,7 @@ def report_editor_call(engine, question, sections, frame, blueprint, intent_bloc
     runtime.editor_limited_sections = set()
     coverage = {}
     full = fair_editor_context(sections, frame=frame, blueprint=blueprint, coverage=coverage)
-    units = tuple(EvidenceUnit(
+    chapter_units = tuple(EvidenceUnit(
         f"editor-section-{index}", json.dumps({
             "title": section.get("title"), "markdown": section.get("markdown"),
             "claims": section.get("claims"), "citation_audit": section.get("citation_audit"),
@@ -527,15 +572,25 @@ def report_editor_call(engine, question, sections, frame, blueprint, intent_bloc
         inference=any(claim.get("type") == "inference" for claim in section.get("claims") or []),
         general=any(claim.get("type") == "general" for claim in section.get("claims") or []),
     ) for index, section in enumerate(sections))
+    blueprint_units, affected, bindings = _editor_blueprint_material(blueprint, len(sections))
+    units = chapter_units + blueprint_units
+    affected.update({unit.handle: {index} for index, unit in enumerate(chapter_units)})
 
     def render(selected):
         legacy_complete = tuple(selected) == units and not coverage
-        block = full if legacy_complete else "\n".join(
-            _unit_text(unit) for unit in selected
-        )
-        # Frame and blueprint remain fixed audit contracts under compression.
-        if not legacy_complete:
-            block = json.dumps({"frame": frame, "blueprint": blueprint}, ensure_ascii=False) + "\n" + block
+        if legacy_complete:
+            block = full
+        else:
+            material = []
+            for unit in selected:
+                text = _unit_text(unit)
+                origins = [bindings[handle] for handle in unit.original_handles() if handle in bindings]
+                if origins and not unit.raw_text:
+                    text = json.dumps({"blueprint_bindings": origins}, ensure_ascii=False) + "\n" + text
+                material.append(text)
+            # Only the user-confirmed frame is fixed. Generated blueprint
+            # findings share the material budget with completed chapters.
+            block = json.dumps({"frame": frame}, ensure_ascii=False) + "\n" + "\n".join(material)
         return [{"role": "user", "content": report_summary_prompt(
             question, block, intent_block=intent_block,
         )}]
@@ -547,9 +602,7 @@ def report_editor_call(engine, question, sections, frame, blueprint, intent_bloc
         return prepared.chat_json()
     finally:
         limited = set(prepared.projection.omitted_handles) | set(prepared.projection.partial_handles)
-        runtime.editor_limited_sections = {
-            index for index, unit in enumerate(units) if unit.handle in limited
-        }
+        runtime.editor_limited_sections = {index for handle in limited for index in affected[handle]}
 
 
 def context_disclosure(engine):

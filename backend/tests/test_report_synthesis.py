@@ -76,6 +76,46 @@ def test_synthesis_payload_honors_a_small_caller_context_ceiling():
     assert legal == set()
 
 
+def test_synthesis_sends_complete_confirmed_title_and_scope_to_model():
+    from app.services.report_context_runtime import report_blueprint_call
+    from tests.test_report_context_runtime import Transport, engine
+
+    title = "已确认章节标题" * 40 + "标题末尾必须保留"
+    scope = "需要回答的工程条件与限制。" * 80 + "末尾限制：不得比较不同温度的测量结果。"
+    outline = [{"title": title, "scope": scope, "intent_ids": ["i1"]}]
+    result = SimpleNamespace(top_hits=[], elements=[], chunks=[
+        SimpleNamespace(chunk_id="e1", text="A measured finding.")])
+    payload, legal = synthesis_evidence_payload(outline, [result])
+    target = Transport({"central_answer": "A supported answer"})
+
+    report_blueprint_call(engine(target), "Confirmed question", {}, None, payload)
+
+    assert payload[0]["title"] == title
+    assert payload[0]["scope"] == scope
+    assert title in target.calls[0][-1]["content"]
+    assert scope in target.calls[0][-1]["content"]
+    assert legal == {"e1"}
+    assert outline[0]["title"] == title and outline[0]["scope"] == scope
+
+
+def test_oversized_confirmed_scope_fails_budget_instead_of_clipping():
+    from app.services.report_context import ReportContextOverflow
+    from app.services.report_context_runtime import report_blueprint_call
+    from tests.test_report_context_runtime import Transport, engine
+
+    target = Transport(maximum=20000)
+    scope = "A mandatory section constraint. " * 1000 + "Required final constraint."
+    payload, _ = synthesis_evidence_payload(
+        [{"title": "Confirmed section", "scope": scope}],
+        [SimpleNamespace(top_hits=[], elements=[], chunks=[])],
+    )
+
+    with pytest.raises(ReportContextOverflow):
+        report_blueprint_call(engine(target), "Confirmed question", {}, None, payload)
+
+    assert not target.calls
+
+
 def _blueprint():
     return {
         "central_answer": "Use orthogonal dimensions.",
