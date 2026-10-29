@@ -964,7 +964,7 @@ def test_ingest_merges_known_keys_only(tmp_path):
     assert cal.ingest_labels(tmp_path, exported) == (3, 2)
     exported.write_text(json.dumps({"labels": [{"key": oid("a1"), "verdict": "incorrect"}]}), encoding="utf-8")
     assert cal.ingest_labels(tmp_path, exported) == (1, 0)
-    stored = json.loads((tmp_path / "labels.json").read_text(encoding="utf-8"))
+    stored = json.loads(cal.run_labels_file(tmp_path, "r").read_text(encoding="utf-8"))
     assert stored == {"a1": {"verdict": "incorrect"}, "g1": {"verdict": "unsure"}, "c-en": {"missing": 2}}
     exported.write_text(json.dumps({"labels": [{"key": "a1", "verdict": "correct", "text": "x"}]}),
                         encoding="utf-8")
@@ -977,7 +977,7 @@ def test_report_json_carries_no_source_text_and_examples_stay_in_pool_a(tmp_path
     labels = {f"a{i}": {"verdict": "incorrect"} for i in range(8)}
     labels["g1"] = {"verdict": "incorrect"}
     labels["g2"] = {"verdict": "correct"}
-    (tmp_path / "labels.json").write_text(json.dumps(labels), encoding="utf-8")
+    cal.run_labels_file(tmp_path, "r").write_text(json.dumps(labels), encoding="utf-8")
     report = cal.write_report(tmp_path)
     assert _SECRET not in (tmp_path / "report.json").read_text(encoding="utf-8")
     assert report["alias"][0]["verdict"] == "fail"
@@ -999,3 +999,137 @@ def test_cli_wires_every_subcommand():
         "run_prepare", True, False, False)
     assert (args.max_calls, args.max_input_chars, args.per_rule) == (4000, 20_000_000, 100)
     assert parser.parse_args(["ingest", "--labels", "f.json"]).run.__name__ == "run_ingest"
+
+
+# --- follow-up: extract-en budget proxy, per-run labels, cumulative top-up targets ---
+
+class _ScriptedChat:
+    """Plays a script of attempts: each step says how many requests the
+    transport reports and whether the attempt raises."""
+
+    settings = "the client's settings"
+
+    def __init__(self, steps):
+        self.steps, self.kwargs = list(steps), []
+
+    def chat_json(self, messages, hint, **kwargs):
+        self.kwargs.append(dict(kwargs))
+        step = self.steps.pop(0)
+        kwargs["call_stats"].update({"attempts": step["sent"], "attempts_observed": True,
+                                     "status": step.get("status", "ok")})
+        if step.get("raise"):
+            raise TimeoutError("slow upstream")
+        return '{"nodes": [], "edges": []}'
+
+
+class _ScriptedProvider:
+    def __init__(self, chat):
+        self._chat, self.asked = chat, []
+
+    def chat(self, workload_id):
+        self.asked.append(workload_id)
+        return self._chat
+
+    def parallelism(self, workload_id):
+        return 4
+
+
+def test_extraction_proxy_books_every_real_request():
+    budget = cal.Budget(100, 1_000_000)
+    # attempt 1: one request, times out; attempt 2: json_schema rejected, the
+    # json_object fallback answers -> two requests. Real total: 3.
+    chat = _ScriptedChat([{"sent": 1, "raise": True}, {"sent": 2}])
+    models = cal.BudgetedModels(_ScriptedProvider(chat), budget, retries=2)
+    caller_stats = {}
+    raw = models.chat("kg_refine").chat_json([{"role": "user", "content": "x"}], "{}", call_stats=caller_stats)
+    assert raw == '{"nodes": [], "edges": []}'
+    # mutation: book one request per logical call (or keep the client's own retries).
+    assert (budget.calls, budget.cache_hits) == (3, 0)
+    assert all(k["max_retries"] == 0 for k in chat.kwargs)
+    assert caller_stats["attempts"] == 2                       # the caller's sink still filled
+    assert models.chat("kg_glean").settings == "the client's settings"   # extract reads settings
+    assert models.parallelism("kg_extract") == 4
+
+
+def test_extraction_proxy_cache_hits_and_exhausted_retries():
+    budget = cal.Budget(100, 1_000_000)
+    hit = cal.BudgetedModels(_ScriptedProvider(_ScriptedChat([{"sent": 0, "status": "cache_hit"}])),
+                             budget, retries=2)
+    hit.chat("kg_extract").chat_json([{"role": "user", "content": "x"}], "{}")
+    assert (budget.calls, budget.cache_hits) == (0, 1)
+    failing = _ScriptedChat([{"sent": 1, "raise": True}] * 3)
+    with pytest.raises(TimeoutError):
+        cal.BudgetedModels(_ScriptedProvider(failing), budget, retries=2).chat("kg_extract").chat_json(
+            [{"role": "user", "content": "x"}], "{}")
+    assert budget.calls == 3                                   # 1 + 2 retries, one request each
+
+
+def test_extraction_proxy_stops_at_the_cap_and_says_so():
+    budget = cal.Budget(2, 1_000_000)
+    chat = _ScriptedChat([{"sent": 1}])
+    with pytest.raises(cal.BudgetExceeded):
+        cal.BudgetedModels(_ScriptedProvider(chat), budget, retries=0).chat("kg_extract").chat_json(
+            [{"role": "user", "content": "x"}], "{}")
+    assert budget.exceeded and chat.kwargs == []               # refused before anything was sent
+
+
+def test_labels_belong_to_one_run(tmp_path):
+    items = _items()
+    items["run"] = "run-old"
+    items["formula_cards"][0]["pool"] = "A"
+    for alias in items["alias_items"]:
+        alias["pool"] = "A"
+    (tmp_path / "items.json").write_text(json.dumps(items), encoding="utf-8")
+    exported = tmp_path / "kg_attrs_labels.json"
+    exported.write_text(json.dumps({"labels": [{"key": cal.opaque_id(f"a{i}"), "verdict": "correct"}
+                                               for i in range(100)]}), encoding="utf-8")
+    cal.ingest_labels(tmp_path, exported)
+    assert cal.write_report(tmp_path)["alias"][0]["n"] == 100
+    # another model or fixture -> another identity -> another run: old labels unused
+    identity = cal.run_identity(seed=1, fixture={"params": {}}, max_chars=1200, pair_window=120,
+                                formula={"service": "general", "model": "m1", "fingerprint": "f"}, egress=False)
+    other = cal.run_identity(seed=1, fixture={"params": {}}, max_chars=1200, pair_window=120,
+                             formula={"service": "general", "model": "m2", "fingerprint": "f"}, egress=False)
+    assert cal.run_id(identity) != cal.run_id(other)
+    items["run"] = cal.run_id(other)
+    (tmp_path / "items.json").write_text(json.dumps(items), encoding="utf-8")
+    # mutation: one shared labels.json -> the new run reads 100 old verdicts.
+    assert cal.write_report(tmp_path)["alias"][0]["n"] == 0
+
+
+def test_card_label_key_includes_the_candidate_list():
+    base = cal.card_key([["e", "where a is g"]], "a+b")
+    one = cal.card_label_key(base, [{"group": "g1"}])
+    assert one == cal.card_label_key(base, [{"group": "g1"}])
+    assert one != cal.card_label_key(base, [{"group": "g1"}, {"group": "g2"}])
+
+
+def test_scan_targets_accumulate_over_top_ups_and_hold_on_resume():
+    base = {"pooled": cal.FORMULA_SCAN_TARGET_POOLED, "kept_pairs": cal.FORMULA_SCAN_TARGET_KEPT_PAIRS}
+    assert cal.scan_targets(None, top_up=False, interrupted=False, step=20) == base
+    once = cal.scan_targets({"targets": base}, top_up=True, interrupted=False, step=20)
+    twice = cal.scan_targets({"targets": once}, top_up=True, interrupted=False, step=20)
+    # mutation: raise the BASE targets by one step each time -> once == twice.
+    assert twice == {k: v + 40 for k, v in base.items()}
+    assert cal.scan_targets({"targets": twice}, top_up=True, interrupted=True, step=20) == twice
+
+
+def test_two_top_ups_scan_further(monkeypatch):
+    monkeypatch.setattr(cal, "FORMULA_SCAN_TARGET_POOLED", 1)
+    monkeypatch.setattr(cal, "FORMULA_SCAN_TARGET_KEPT_PAIRS", 0)
+    fixture = _fixture()
+    reply = '{"variables": [{"symbol": "a", "meaning": "the gain"}]}'
+    formulas = [{"pool": "A", "language": "en", "ref": f"A{i}", "name": "y = a x", "reply": reply,
+                 "reply_error": None, "segments": [[f"e{i}", "y = a x"], [f"n{i}", f"where a is the gain {i}"]]}
+                for i in range(6)]
+    lists = {"en": formulas, "zh": []}
+    hosts = {"formula": "f.host", "judge": "j.host"}
+    first = cal._execute_prepare(_prepare_args(), fixture, None, _Judge(), lists, [], concepts=[],
+                                 previous=None, max_chars=50, pair_window=120, hosts=hosts)
+    up1 = cal._execute_prepare(_prepare_args(top_up=True, top_up_formulas=1), fixture, None, _Judge(), lists, [],
+                               concepts=[], previous=json.loads(json.dumps(first)), max_chars=50,
+                               pair_window=120, hosts=hosts)
+    up2 = cal._execute_prepare(_prepare_args(top_up=True, top_up_formulas=1), fixture, None, _Judge(), lists, [],
+                               concepts=[], previous=json.loads(json.dumps(up1)), max_chars=50,
+                               pair_window=120, hosts=hosts)
+    assert [r["formula_scan"]["en"]["scanned"] for r in (first, up1, up2)] == [1, 2, 3]
