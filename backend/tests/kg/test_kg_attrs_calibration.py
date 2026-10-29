@@ -441,7 +441,8 @@ class _FakeClient:
         self.calls.append((messages, hint, kwargs))
         if self.error:
             raise self.error
-        kwargs["call_stats"]["status"] = self.status
+        kwargs["call_stats"].update({"status": self.status, "attempts_observed": True,
+                                     "attempts": 0 if self.status == "cache_hit" else 1})
         return self.reply
 
 
@@ -450,11 +451,20 @@ def test_budget_books_before_sending_and_refunds_cache_hits():
     budget.reserve(60)
     budget.reserve(30)
     budget.refund(30)                                   # answered from the cache
+    budget.note_cache_hit()
     assert (budget.calls, budget.chars, budget.cache_hits) == (1, 60, 1)
     with pytest.raises(cal.BudgetExceeded):
         budget.reserve(41)
     budget.reserve(40)
     assert (budget.calls, budget.chars) == (2, 100)
+
+
+def test_a_multi_request_booking_is_all_or_nothing():
+    budget = cal.Budget(max_calls=3, max_chars=1_000)
+    # mutation: book one request at a time -> 3 booked before the refusal.
+    with pytest.raises(cal.BudgetExceeded):
+        budget.reserve(10, cal.PRODUCT_REQUESTS_PER_ATTEMPT)
+    assert (budget.calls, budget.chars, budget.exceeded) == (0, 0, True)
 
 
 class _FlakyProduct:
@@ -1133,3 +1143,70 @@ def test_two_top_ups_scan_further(monkeypatch):
                                concepts=[], previous=json.loads(json.dumps(up1)), max_chars=50,
                                pair_window=120, hosts=hosts)
     assert [r["formula_scan"]["en"]["scanned"] for r in (first, up1, up2)] == [1, 2, 3]
+
+
+# --- follow-up 2: capability probe in the booking, a fresh run id per run --------
+
+def _proxy(steps, budget, **kwargs):
+    chat = _ScriptedChat(steps)
+    return chat, cal.BudgetedModels(_ScriptedProvider(chat), budget, retries=0).chat("kg_extract")
+
+
+def test_probe_and_three_format_fallbacks_are_four_requests():
+    budget = cal.Budget(100, 1_000_000)
+    _chat, client = _proxy([{"sent": 4}], budget)   # fresh runtime: probe, json_schema, json_object, plain
+    client.chat_json([{"role": "user", "content": "x"}], "{}")
+    # mutation: book three per attempt -> four sent but only three counted.
+    assert cal.PRODUCT_REQUESTS_PER_ATTEMPT == 4 and budget.calls == 4
+
+
+def test_a_cache_hit_still_pays_for_its_probe():
+    budget = cal.Budget(100, 1_000_000)
+    _chat, client = _proxy([{"sent": 1, "status": "cache_hit"}], budget)
+    client.chat_json([{"role": "user", "content": "x"}], "{}")
+    # mutation: a cache hit refunds everything -> the probe goes uncounted.
+    assert (budget.calls, budget.cache_hits) == (1, 1)
+    formula_budget = cal.Budget(100, 1_000_000)
+    probe_hit = _ScriptedChat([{"sent": 1, "status": "cache_hit"}])
+    cal.call_formula(probe_hit, "y", [["e", "where y is h"]], formula_budget)
+    assert (formula_budget.calls, formula_budget.cache_hits) == (1, 1)
+
+
+def test_three_left_is_not_enough_for_an_attempt():
+    budget = cal.Budget(3, 1_000_000)
+    chat, client = _proxy([{"sent": 1}], budget)
+    with pytest.raises(cal.BudgetExceeded):
+        client.chat_json([{"role": "user", "content": "x"}], "{}")
+    assert chat.kwargs == [] and budget.calls == 0       # nothing sent, nothing booked
+    # streaming: probe + three formats, each possibly rebuilt once = 7 requests
+    assert cal.STREAMED_REQUESTS_PER_ATTEMPT == 7
+    streamed_budget = cal.Budget(6, 1_000_000)
+    chat, client = _proxy([{"sent": 1}], streamed_budget)
+    with pytest.raises(cal.BudgetExceeded):                # streaming books the rebuilds too
+        client.chat_json([{"role": "user", "content": "x"}], "{}", cancel_event=object())
+    assert chat.kwargs == []
+
+
+def test_reset_mints_a_new_run_id_and_top_up_keeps_it(tmp_path):
+    fixture, concepts, lists, alias = _pool_a_inputs()
+    hosts = {"formula": "f.host", "judge": "j.host"}
+    identity = {"seed": 1, "same": "configuration"}
+    first = cal._execute_prepare(_prepare_args(), fixture, None, _Judge(), lists, [], concepts=concepts,
+                                 previous=None, max_chars=50, pair_window=120, hosts=hosts, identity=identity)
+    reset = cal._execute_prepare(_prepare_args(), fixture, None, _Judge(), lists, [], concepts=concepts,
+                                 previous=None, max_chars=50, pair_window=120, hosts=hosts, identity=identity)
+    topped = cal._execute_prepare(_prepare_args(top_up=True), fixture, None, _Judge(), lists, [],
+                                  concepts=concepts, previous=json.loads(json.dumps(first)), max_chars=50,
+                                  pair_window=120, hosts=hosts, identity=identity)
+    # mutation: run id = configuration hash only -> the reset run reuses it.
+    assert first["run"] != reset["run"]
+    assert first["run"].startswith(cal.run_id(identity)) and reset["run"].startswith(cal.run_id(identity))
+    assert topped["run"] == first["run"]
+    # labels of the first run stay invisible to the reset run
+    group = first["formula_cards"][0]["pairs"][0]["group"]
+    cal.run_labels_file(tmp_path, first["run"]).write_text(
+        json.dumps({group: {"verdict": "correct"}}), encoding="utf-8")
+    (tmp_path / "items.json").write_text(json.dumps(reset), encoding="utf-8")
+    assert cal.write_report(tmp_path)["formula_precision"][0]["n"] == 0
+    (tmp_path / "items.json").write_text(json.dumps(topped), encoding="utf-8")
+    assert cal.write_report(tmp_path)["formula_precision"][0]["n"] == 1
