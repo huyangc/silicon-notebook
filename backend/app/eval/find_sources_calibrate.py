@@ -500,6 +500,22 @@ def _client_model(client: Any) -> str:
     return str(getattr(client, "model", "") or "")
 
 
+# The thresholds belong to one embedding configuration: the label file records it.
+EMBEDDING_WORKLOAD = "retrieval_query_embedding"
+
+
+def _embedding_model(models: Any, workload_id: str) -> str:
+    """The model id serving ``workload_id``: the client's own ``model`` when it
+    has one, else the bound service's -- the scheduled embedder exposes no
+    ``model`` (unlike the chat client)."""
+    name = _client_model(models.embedding(workload_id))
+    if name:
+        return name
+    registry = getattr(models, "registry", None)
+    service = registry.service_for(workload_id) if registry is not None else None
+    return str(getattr(service, "model", "") or "")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="find_sources_calibrate", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -564,10 +580,9 @@ def main(
             out_path = require_outside_repo(args.out)
             topics = read_topics(args.topics)
             with open_repository(settings_factory()) as repo:
-                embedder = repo._runtime.models.embedding("retrieval_query_embedding")
                 data = build_candidates(
                     repo, args.notebook, topics, per_topic=args.per_topic,
-                    embedding_model=_client_model(embedder),
+                    embedding_model=_embedding_model(repo._runtime.models, EMBEDDING_WORKLOAD),
                 )
             write_labels(out_path, data)
             total = sum(len(topic["candidates"]) for topic in data["topics"])

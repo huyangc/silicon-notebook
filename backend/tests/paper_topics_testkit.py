@@ -70,6 +70,8 @@ def content_words(text: str) -> List[str]:
 class TopicEmbedder:
     """Deterministic bag-of-words vectors (``embed_texts`` / ``embed_query``)."""
 
+    model = "topic-bag-of-words"
+
     def __init__(self, dim: int = TOPIC_EMBED_DIM) -> None:
         self.dim = dim
 

@@ -629,14 +629,14 @@ Agent profile、opaque token、scope/allowlist/过期与撤销、公开 onboardi
 
 ## 66. 论文卡片、文档级检索与逐篇抽取（2026-10-28～29）
 
-**已交付，PR #1037（存储、服务、Agent 与合成）及随后的 MCP 与文档 PR；阈值校准（T10）未做，见[待办账本](fangan_todo.md)第二节「检索」。** 起因是用户常问「列出这个笔记本中所有与 X 相关的论文，包括主要技术指标和关键创新点」，旧路径只能靠 ≤20 个标题的名录和固定条数的段落检索，答得不全也不准。设计与实施计划见 `docs/superpowers/specs/2026-10-28-paper-cards-find-sources-design_zh.md` 与同目录 plans 下的 `2026-10-28-paper-cards-find-sources-plan_zh.md`。
+**已交付，PR #1037（存储、服务、Agent 与合成）、PR #1040（MCP 与文档）及随后的阈值校准 PR。** 起因是用户常问「列出这个笔记本中所有与 X 相关的论文，包括主要技术指标和关键创新点」，旧路径只能靠 ≤20 个标题的名录和固定条数的段落检索，答得不全也不准。设计与实施计划见 `docs/superpowers/specs/2026-10-28-paper-cards-find-sources-design_zh.md` 与同目录 plans 下的 `2026-10-28-paper-cards-find-sources-plan_zh.md`。
 
 - **文档级检索 `find_sources`。** 元数据腿（标题/摘要/论文标题/会议/关键词/作者）加语义腿，按来源天花板与参与库取数，分 strong/related 两档，附覆盖标志（`lexical_complete`、`semantic_recall_capped`、被跳过的库）；游标带元数据摘要，两页之间有论文元数据被抽取则旧游标失效。
 - **论文卡片。** `source_paper_cards`（SQLite v104 / PG 0085）缓存逐篇要点；懒生成、不回填、不跨环境同步；指标数值必须在所引原文里出现；有效性在读取时按内容基线与卡片版本判定；失败冷却 1 小时、连续 3 次后 24 小时。复用 `paper_metadata` 绑定，不新增 workload。
 - **逐篇抽取 `extract_from_sources`。** 临时字段、按字段取片段、含数字的值逐组接地，不缓存，适用于非论文。
 - **确定性论文表。** reflect 顶层 `answer_layout="paper_table"` 时，代码拼出覆盖说明、论文表与未展开清单，模型只写综述；证据号段 `k9001–k9999`。三个动作 id 与 `answer_layout` 成为保留名，同名的部署插件动作启动即被拒。
 - **MCP。** 工具总数 21 → 24：`find_sources`、`get_paper_cards`、`extract_from_sources`（均为 `read` 档，后两个会消耗模型配额，同一凭证主人至多 2 个并发，超出 `busy`）；响应用顶层去重的 `refs` 表适配 12KB 护栏；`list_sources` 增加 `authors`、`pub_year`、`venue`。
-- 当前合同见[产品/API][product]「论文检索、论文卡片与逐篇抽取」一节，部署开关与容量提示见[部署][deploy]。阈值（`FIND_SOURCES_STRONG_RELEVANCE` / `FIND_SOURCES_RELATED_RELEVANCE`）目前是保守的临时值。
+- 当前合同见[产品/API][product]「论文检索、论文卡片与逐篇抽取」一节，部署开关与容量提示见[部署][deploy]。阈值（`FIND_SOURCES_STRONG_RELEVANCE` / `FIND_SOURCES_RELATED_RELEVANCE`）2026-10-28 按 `text-embedding-v4` 校准为 0.74 / 0.44（真实论文笔记本 6 个主题 360 个候选，模型预标 + 人工核对，候选集内召回 0.904、强相关精度 0.842）；校准时发现该笔记本有十余个文件名与内容不符，预标以内容为准。
 
 ## 67. 笔记本单文件导出 / 跨部署导入（`.snbk`）（2026-10-22～29）
 

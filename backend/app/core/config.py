@@ -1130,13 +1130,14 @@ class Settings(BaseSettings):
     )
     # 分档阈值(融合 relevance,0..1,不是余弦):每篇最佳片段 ≥ 强相关线进 strong,
     # ≥ 相关线进 related;只在有语义信号的车道(baseline/ann)适用,FTS 降级车道按
-    # 元数据命中与命中数分档。**临时保守值**(偏高的强相关线、偏低的相关线),
-    # 由 ``find_sources_calibrate`` 在当前嵌入模型下校准后写死;换嵌入模型要重跑校准。
+    # 元数据命中与命中数分档。2026-10-28 由 ``find_sources_calibrate`` 校准:嵌入模型
+    # text-embedding-v4,一个 80 篇论文的真实笔记本、6 个主题共 360 个候选(模型预标 + 人工核对),
+    # 候选集内主题召回 0.904、强相关精度 0.842。换嵌入模型要重跑校准。
     find_sources_strong_relevance: float = Field(
-        0.7, ge=0.0, le=1.0, validation_alias="FIND_SOURCES_STRONG_RELEVANCE"
+        0.74, ge=0.0, le=1.0, validation_alias="FIND_SOURCES_STRONG_RELEVANCE"
     )
     find_sources_related_relevance: float = Field(
-        0.3, ge=0.0, le=1.0, validation_alias="FIND_SOURCES_RELATED_RELEVANCE"
+        0.44, ge=0.0, le=1.0, validation_alias="FIND_SOURCES_RELATED_RELEVANCE"
     )
 
     @model_validator(mode="after")

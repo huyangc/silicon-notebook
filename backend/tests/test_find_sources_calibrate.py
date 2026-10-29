@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.eval import find_sources_calibrate as calibrate
-from tests.paper_topics_testkit import load_labels, load_papers, sqlite_corpus
+from tests.paper_topics_testkit import TopicEmbedder, load_labels, load_papers, sqlite_corpus
 
 
 @pytest.fixture
@@ -85,6 +85,8 @@ def test_candidates_write_the_scored_sets_without_a_chat_model(corpus, tmp_path)
     path = _candidates(corpus, tmp_path)
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["version"] == calibrate.LABEL_FILE_VERSION
+    # The thresholds belong to one embedding configuration: it is recorded.
+    assert data["embedding_model"] == TopicEmbedder.model
     assert [topic["id"] for topic in data["topics"]] == sorted(load_labels())
     by_source = {source_id: key for key, source_id in keys.items()}
     for topic in data["topics"]:
@@ -98,6 +100,14 @@ def test_candidates_write_the_scored_sets_without_a_chat_model(corpus, tmp_path)
         strong = set(load_labels()[topic["id"]]["strong"])
         found = {by_source[c["source_id"]] for c in topic["candidates"]}
         assert strong <= found, (topic["id"], strong - found)
+
+
+def test_the_embedding_model_falls_back_to_the_bound_service():
+    """The scheduled embedder has no ``model`` (unlike the chat client): the
+    label file then records the service bound to the query-embedding workload."""
+    registry = SimpleNamespace(service_for=lambda workload: SimpleNamespace(model="text-embedding-v4"))
+    models = SimpleNamespace(embedding=lambda workload: SimpleNamespace(), registry=registry)
+    assert calibrate._embedding_model(models, calibrate.EMBEDDING_WORKLOAD) == "text-embedding-v4"
 
 
 def test_prelabel_without_confirm_sends_nothing(tmp_path):
