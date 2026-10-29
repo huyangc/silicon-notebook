@@ -38,7 +38,13 @@ FORMULA_NEXT_ELEMENT_ORDINAL_WINDOW = 64
 # near side, whatever the character counts ("where a is X, b is Y": X belongs
 # to a, not to the b that follows the comma). Values are post-NFKC, so the
 # full-width ， ； fold onto , ; here.
-PAIR_CLAUSE_BREAKS = frozenset(",;.。、")
+#
+# SEGMENT_SEPARATOR joins the context segments (one per source element) after
+# normalization. N(.) never leaves a newline behind, so the separator only
+# ever marks an element boundary, and it is a clause break: a symbol in the
+# next element is never "nearer" than one in the same sentence.
+SEGMENT_SEPARATOR = "\n"
+PAIR_CLAUSE_BREAKS = frozenset(",;.。、" + SEGMENT_SEPARATOR)
 
 # --- formula statuses (spec §7.3) ------------------------------------------
 FORMULA_STATUS_OK = "ok"

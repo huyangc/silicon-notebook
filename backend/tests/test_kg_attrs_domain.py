@@ -316,7 +316,7 @@ def test_swapped_pairs_are_rejected():
 
 
 def test_symbol_inside_a_word_is_not_an_occurrence():
-    result = _verify("y = a", ["y = a", "the bias term"], [("a", "the bias term")])
+    result = _verify("y = a", ["the bias term"], [("a", "the bias term")])
     assert _reasons(result) == {"a": "symbol_not_in_context"}
 
 
@@ -329,11 +329,23 @@ def test_too_far_boundary(gap, kept):
         assert _reasons(result) == {"z": "too_far"}
 
 
+def test_segments_keep_a_boundary_between_them():
+    # mutation: plain join -> "gainb" hides b; or offsets ignore the separator.
+    result = _verify("a+b", ["where a is gain", "b is bias"], [("a", "gain"), ("b", "bias")])
+    assert result.status == "ok"
+    assert result.kept == ({"symbol": "a", "meaning": "gain", "element_id": "el-0"},
+                           {"symbol": "b", "meaning": "bias", "element_id": "el-1"})
+    # a meaning ending its segment is credited to that segment, not the next
+    # (mutation: offsets that skip the separator drift one character per segment).
+    tail = _verify("a+b", ["a+b", "where a is g", "b is h"], [("a", "g")])
+    assert tail.kept == ({"symbol": "a", "meaning": "g", "element_id": "el-1"},)
+
+
 def test_reject_reasons_in_check_order():
     result = _verify("x = y", ["x = y", "where y is height"],
                      [("q", "height"), ("x", "width"), ("y", "height")])
     assert _reasons(result) == {"q": "symbol_not_in_formula", "x": "meaning_not_in_context"}
-    result = _verify("x = w", ["x = w", "here height"], [("w", "height")])
+    result = _verify("x = w", ["here height"], [("w", "height")])
     assert _reasons(result) == {"w": "symbol_not_in_context"}
 
 

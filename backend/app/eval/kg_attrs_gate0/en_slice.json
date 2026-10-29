@@ -5176,17 +5176,16 @@
     "kept": [
      {
       "element_id": "el-en-cmos-ch02_cmos_technology-00180",
+      "meaning": "the avalanche multiplication factor",
+      "symbol": "M"
+     },
+     {
+      "element_id": "el-en-cmos-ch02_cmos_technology-00180",
       "meaning": "an exponent which adjusts the sharpness of the “knee” of the curve shown in Fig. 2.2-4",
       "symbol": "n"
      }
     ],
-    "rejected": [
-     {
-      "meaning": "the avalanche multiplication factor",
-      "reason": "nearer_other_symbol",
-      "symbol": "M"
-     }
-    ],
+    "rejected": [],
     "status": "ok"
    }
   },
@@ -8434,15 +8433,15 @@
    "next_element_id": "el-en-cmos-ch03_device_modeling-00108",
    "reply": "{\"type\": \"json_object\", \"variables\": [{\"symbol\": \"PB\", \"meaning\": \"bulk junction potential\"}]}",
    "verification": {
-    "kept": [],
-    "rejected": [
+    "kept": [
      {
+      "element_id": "el-en-cmos-ch03_device_modeling-00108",
       "meaning": "bulk junction potential",
-      "reason": "symbol_not_in_context",
       "symbol": "PB"
      }
     ],
-    "status": "none_grounded"
+    "rejected": [],
+    "status": "ok"
    }
   },
   {
@@ -9266,15 +9265,15 @@
    "next_element_id": "el-en-cmos-ch03_device_modeling-00181",
    "reply": "{\"variables\":[{\"symbol\":\"g_m\",\"meaning\":\"small - signal transconductance from gate to channel (see Eq. (6) of Section 3.3)\"}]}",
    "verification": {
-    "kept": [
+    "kept": [],
+    "rejected": [
      {
-      "element_id": "el-en-cmos-ch03_device_modeling-00180",
       "meaning": "small - signal transconductance from gate to channel (see Eq. (6) of Section 3.3)",
+      "reason": "meaning_not_in_context",
       "symbol": "g_m"
      }
     ],
-    "rejected": [],
-    "status": "ok"
+    "status": "none_grounded"
    }
   },
   {
@@ -25286,5 +25285,5 @@
   "window_m": 450,
   "window_n": 8000
  },
- "rules_signature": "2e6f3650eb4462bfae19d6971894cc919502c54f86f2bde66497b666d74dda28"
+ "rules_signature": "578f402e080a42be90740be0f70ebeee97665ecb52a38a28ae1ad02379483da6"
 }

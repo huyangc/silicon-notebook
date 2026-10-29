@@ -223,8 +223,15 @@ def test_top_up_refuses_a_different_run_or_scan_order():
                                 formula=_formula_record(), egress=False)
     lists = {"en": [_formula(0, "t"), _formula(1, "t")], "zh": []}
     saved = {"identity": identity,
-             "scan_state": {lang: {"order": cal.scan_order_sha(fs)} for lang, fs in lists.items()}}
+             "scan_state": {lang: {"order": cal.scan_order_record(fs, len(fs))} for lang, fs in lists.items()}}
     assert cal.resume_problems(saved, identity, lists) == []
+    # a longer order that starts with the consumed prefix (a raised
+    # --max-formulas-per-language) continues; a changed prefix does not.
+    longer = {"en": lists["en"] + [_formula(2, "t")], "zh": []}
+    assert cal.resume_problems(saved, identity, longer) == []
+    changed = {"en": [_formula(0, "t"), _formula(5, "t"), _formula(1, "t")], "zh": []}
+    assert cal.resume_problems(saved, identity, changed) == ["the en scan order differs from the saved run"]
+    assert cal.resume_problems(saved, identity, {"en": lists["en"][:1], "zh": []})   # shorter than the prefix
     other_seed = cal.run_identity(seed=2, fixture=fixture, max_chars=1200, pair_window=120,
                                   formula=_formula_record(), egress=False)
     assert cal.resume_problems(saved, other_seed, lists) == ["seed differs from the saved run"]
@@ -450,6 +457,59 @@ def test_budget_books_before_sending_and_refunds_cache_hits():
     assert (budget.calls, budget.chars) == (2, 100)
 
 
+class _FlakyProduct:
+    """Times out once (one request observed), then answers (one request)."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def chat_json(self, messages, hint, **kwargs):
+        self.calls += 1
+        kwargs["call_stats"].update({"attempts": 1, "attempts_observed": True, "status": "ok"})
+        if self.calls == 1:
+            raise TimeoutError("slow upstream")
+        return '{"variables": []}'
+
+
+def test_product_retries_are_the_tools_and_each_request_is_booked():
+    budget = cal.Budget(100, 1_000_000)
+    client = _FlakyProduct()
+    reply, error = cal.call_formula(client, "y", [["e", "where y is h"]], budget)
+    assert (reply, error) == ('{"variables": []}', None)
+    # mutation: book one call per logical call -> 1 instead of 2.
+    assert (client.calls, budget.calls) == (2, 2)
+
+
+def test_judge_retries_are_the_tools_and_each_request_is_booked():
+    fixture, concepts, lists, alias = _pool_a_inputs()
+
+    class Timeouts(_Judge):
+        tries = 0
+
+        def chat_json(self, messages, hint, **kwargs):
+            Timeouts.tries += 1
+            if Timeouts.tries <= 2:
+                raise TimeoutError("slow upstream")
+            return super().chat_json(messages, hint, **kwargs)
+
+    items = cal._execute_prepare(_prepare_args(), fixture, None, Timeouts(), lists, [], concepts=concepts,
+                                 previous=None, max_chars=50, pair_window=120,
+                                 hosts={"formula": "f.host", "judge": "j.host"})
+    # draft: 2 timeouts + 1 answer; pair pre-label: 1 answer -> 4 booked requests
+    assert items["egress_log"]["calls"] == 4
+    assert items["egress_log"]["failures"] == {"draft:TimeoutError": 2}
+
+
+def test_unallowed_pools_are_dropped_before_the_scan_cap():
+    a = [{**_formula(i, "t", pool="A"), "ref": f"A{i}"} for i in range(5)]
+    local = [{**_formula(i, "t", pool="B"), "ref": f"B{i:04d}"} for i in range(2000)]
+    plan = cal.scan_plan(a, local, seed=1, egress=False, max_formulas=10)
+    # mutation: cap the all-pool order, then filter -> pool A mostly crowded out.
+    assert sorted(f["ref"] for f in plan["en"]) == [f"A{i}" for i in range(5)]
+    preview = cal.scan_plan(a, local, seed=1, egress=True, max_formulas=10)
+    assert len(preview["en"]) == 10
+
+
 def test_budget_is_a_hard_cap_under_parallel_senders():
     import threading
 
@@ -483,10 +543,13 @@ def test_call_formula_is_the_product_call():
     assert hint == '{"variables":[{"symbol":"","meaning":""}]}'
     assert kwargs["thinking_mode"] == "disabled"
     assert kwargs["response_validator"] is cal.kg_attrs.formula_variables_reply_ok
+    assert kwargs["max_retries"] == 0                          # the client never retries on its own
     assert (budget.calls, budget.cache_hits) == (0, 1)
     failing = _FakeClient(error=RuntimeError("boom"))
     assert cal.call_formula(failing, "y", [["e", "t"]], budget) == (None, "RuntimeError")
-    assert budget.calls == 1
+    # two tool attempts; no observed request count, so each keeps its full booking
+    assert len(failing.calls) == cal.FORMULA_ATTEMPTS
+    assert budget.calls == cal.FORMULA_ATTEMPTS * cal.PRODUCT_REQUESTS_PER_ATTEMPT
     assert cal.verification_record("y", [["e", "t"]], None, pair_window=120) == {
         "status": "failed", "kept": [], "rejected": []}
 
@@ -721,7 +784,8 @@ class _Judge:
     def __init__(self, fail_kinds=()):
         self.fail_kinds = fail_kinds
 
-    def chat_json(self, messages, hint):
+    def chat_json(self, messages, hint, **kwargs):
+        assert kwargs == {"retries": 1}                     # KGClient's own loop limited to one try
         kind = {cal.DRAFT_HINT: "draft", cal.ALIAS_PRELABEL_HINT: "alias", cal.PAIR_PRELABEL_HINT: "pair"}[hint]
         if kind in self.fail_kinds:
             raise RuntimeError("upstream")
@@ -751,7 +815,9 @@ def test_execute_prepare_records_failed_judge_calls_and_goes_on():
     assert items["incomplete"] is None
     assert items["alias_items"][0]["prelabel"] is None                    # failed -> None, retried on top-up
     assert items["formula_cards"][0]["pairs"][0]["prelabel"]["verdict"] == "correct"
-    assert items["egress_log"]["failures"] == {"draft:RuntimeError": 1, "alias_prelabel:RuntimeError": 1}
+    # each failed call was tried JUDGE_ATTEMPTS times, every try booked
+    assert items["egress_log"]["failures"] == {"draft:RuntimeError": cal.JUDGE_ATTEMPTS,
+                                               "alias_prelabel:RuntimeError": cal.JUDGE_ATTEMPTS}
     assert "fingerprint_full" not in json.dumps(items)
 
 
