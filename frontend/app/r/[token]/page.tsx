@@ -16,8 +16,9 @@
 //
 // 点正文引用标记与站内问答同一个交互：标记旁弹出同一张引用卡
 // （`PublicCitationPopover` → `CitationPopover`），不再把读者拽到页底。正文里的
-// 「参考文献」一节与站内同一个插件折叠（`rehypeReportReferencesFold`），页底的
-// 「引用出处」摘录清单同样默认收起、可展开。
+// 「参考文献」一节与站内同一个插件折叠（`rehypeReportReferencesFold`），默认收起、
+// 可展开。页底不再另列一份「引用出处」：它与正文的参考文献逐条重复，每条的摘录、
+// 位置与截断说明都已在引用卡上。
 
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
@@ -37,8 +38,6 @@ import { usePrintExpandedFolds } from "../../use-print-expanded-folds";
 import {
   fetchPublicReport,
   publicCitationRefs,
-  publicReferenceLocation,
-  publicReferenceNumber,
   type PublicCitationRefT,
   type PublicReportT,
 } from "../../public-report";
@@ -222,44 +221,12 @@ function PublicReportView({ report }: { report: PublicReportT }) {
         />
       )}
 
-      {report.references.length > 0 && (
-        <details className="public-report-references public-references-fold">
-          {/* 截断说明放在折叠头上：收起时也看得见，不让投影条数被读成完整清单。 */}
-          <summary>
-            引用出处 · {report.truncated_references
-              ? `引用过多，只展示前 ${report.references.length} 条`
-              : `${report.references.length} 条`}
-          </summary>
-          <p className="public-report-note">
-            正文里的编号对应下面的条目。分享副本只保留摘录，不能打开原始资料。
-          </p>
-          <ol>
-            {report.references.map((reference, index) => (
-              <li key={reference.key} id={`ref-${reference.key}`}>
-                <span className="public-report-refnum" aria-hidden="true">
-                  {publicReferenceNumber(reference, index)}
-                </span>
-                <div className="public-report-refbody">
-                  <strong>{reference.title || reference.file_name || "(未命名资料)"}</strong>
-                  {reference.title_truncated && (
-                    <small className="public-report-truncated">（标题过长，已截断）</small>
-                  )}
-                  {publicReferenceLocation(reference) && <span className="public-report-locus">{publicReferenceLocation(reference)}</span>}
-                  {reference.file_name && reference.file_name !== reference.title && (
-                    <small>原始文件：{reference.file_name}</small>
-                  )}
-                  {reference.file_name_truncated && (
-                    <small className="public-report-truncated">（原始文件名过长，已截断）</small>
-                  )}
-                  {reference.snippet && <blockquote>{reference.snippet}</blockquote>}
-                  {reference.snippet_truncated && (
-                    <small className="public-report-truncated">（摘录过长，已截断）</small>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ol>
-        </details>
+      {/* 投影只带前若干条引用时，超出的那些标记点不开（没有卡片可弹）。这句话必须
+          在页面上看得见——截断绝不静默。 */}
+      {report.truncated_references && (
+        <p className="public-report-note">
+          引用出处过多，分享副本只收录前 {report.references.length} 条，其余引用编号无法点开查看。
+        </p>
       )}
 
       <footer className="public-report-foot">
