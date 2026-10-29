@@ -414,14 +414,16 @@ def _copy_source_elements(
     element_row_new: dict,
     remapped_id: Callable[[str], str],
     refs: "_LenientRefs | _StrictRefs",
+    carried_ids: set,
 ) -> list[dict]:
     """Remap the snapshot's ``source_elements`` rows for a deep copy, in place.
 
     Pure in-memory rewrite — no statement is issued here;
     ``NotebookCopyWriter._copy_elements_and_chunks`` inserts the returned rows,
     inside ``copy_notebook``'s compensating try.
-    Fills ``element_map`` (old -> new element id) and ``element_row_new``
-    (old knowhow element id -> NEW knowhow row id) for the chunk loop."""
+    Fills ``element_map`` (old -> new element id), ``element_row_new``
+    (old knowhow element id -> NEW knowhow row id) for the chunk loop, and
+    ``carried_ids`` (every id ``copied_element_id`` gave, across batches)."""
     elements_out = []
     for data in rows:
         old_element_id = data["id"]
@@ -456,7 +458,14 @@ def _copy_source_elements(
             if new_element_id is None:
                 new_element_id = copied_element_id(
                     old_element_id, data["source_id"], source_map[data["source_id"]]
-                ) or remapped_id(old_element_id)
+                )
+                # Two old ids can carry onto one new id only when a source
+                # holds both ``el-<S>-~X`` and ``X`` (no writer makes that):
+                # the second gets a fresh id, never a duplicate key.
+                if new_element_id is None or new_element_id in carried_ids:
+                    new_element_id = remapped_id(old_element_id)
+                else:
+                    carried_ids.add(new_element_id)
                 element_map[old_element_id] = new_element_id
             data["id"] = new_element_id
             # An image element names its picture by notebook_assets id; the
@@ -713,6 +722,9 @@ class NotebookCopyRun:
     # knowhow chunk's id from ITS row (a chunk has no row_id column
     # of its own — only its element_ids[0] indirectly names one).
     element_row_new: dict = field(default_factory=dict)
+    # The new element ids carried over from old ones (``copied_element_id``),
+    # so a second old id carrying onto the same one is caught.
+    carried_element_ids: set = field(default_factory=set)
     # The remap maps every stored-JSON rewrite reads (``seams.remap_json_ids``),
     # built from the very same dict objects as the fields above — never a copy —
     # so every phase sees the entries the earlier phases have added.
@@ -1212,6 +1224,7 @@ class NotebookCopyWriter:
                 element_row_new=element_row_new,
                 remapped_id=remapped_id,
                 refs=self._refs,
+                carried_ids=run.carried_element_ids,
             )
             self._store.insert_copy_rows(
                 "source_elements", elements_out, chunk_size=chunk_size

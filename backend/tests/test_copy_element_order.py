@@ -69,6 +69,42 @@ def _suffixes(repo, notebook_id: str) -> dict[str, str]:
     return out
 
 
+def test_two_ids_carrying_onto_one_get_distinct_ids(repo):
+    """A source holding both ``el-<S>-~X`` and ``X`` (no writer makes one): both
+    would carry onto ``el-<new>-~X``. The copy succeeds, the second element gets
+    a fresh id, and every reference still names the element it named."""
+    source, foreign = "src-collide", "el-0abc"
+    carried = f"el-{source}-~{foreign}"
+    rows = [
+        cases.Row("notebooks", dict(cases.char_cases._notebook("nb-collide", cases.OWNER).values)),
+        cases.Row("sources", {**cases._source(source).values, "notebook_id": "nb-collide"}),
+        cases._element(source, f"el-{source}-0001", "paragraph", cases.INSTANTS[0]),
+        cases._element(source, carried, "paragraph", cases.INSTANTS[0]),
+        cases._element(source, foreign, "paragraph", cases.INSTANTS[0]),
+        cases.Row("chunks", {
+            "id": "chunk-collide", "notebook_id": "nb-collide", "source_id": source,
+            "text": "chunk collide", "section_path": "s",
+            "element_ids": [f"el-{source}-0001", carried, foreign],
+            "created_at": cases.INSTANTS[0],
+        }),
+    ]
+    with repo._runtime.database.write() as db:
+        for row in rows:
+            BACKEND.insert(db, row.table, dict(row.values))
+    copy_id = repo._runtime.sharing.copy_notebook("nb-collide", new_owner_id=cases.OWNER).id
+    twin = cases._sources(repo, copy_id)[f"title {source}"]
+    origin = cases._origins(repo, copy_id)
+    assert sorted(origin.values()) == sorted(
+        f"t:{i}" for i in (f"el-{source}-0001", carried, foreign))
+    by_origin = {text[2:]: element_id for element_id, text in origin.items()}
+    assert by_origin[f"el-{source}-0001"] == f"el-{twin}-0001"
+    assert by_origin[carried] == f"el-{twin}-~{foreign}"
+    assert by_origin[foreign] not in (by_origin[carried], f"el-{twin}-~{foreign}")
+    (chunk,) = cases._rows(repo, "SELECT element_ids FROM chunks WHERE notebook_id = ?", (copy_id,))
+    assert [origin[i][2:] for i in cases._json(chunk["element_ids"])] == [
+        f"el-{source}-0001", carried, foreign]
+
+
 def test_import_keeps_every_readers_element_order(repo, tmp_path, monkeypatch):
     cases.check_order_kept(repo, cases.export_and_import(repo, tmp_path, monkeypatch))
 

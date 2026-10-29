@@ -559,6 +559,9 @@ GROUP BY s.notebook_id, e.source_id
 HAVING COUNT(*) > 1;
 ```
 
+It also lists sources that no copy made but whose ids have an unusual form (development seed
+data, for example); check that a listed source came from a copy or an import before acting.
+
 What can be done today (either one, both done by users):
 
 - **The original still exists:** copy it, or export and import it, again; the new copy reads in
@@ -568,9 +571,10 @@ What can be done today (either one, both done by users):
   knowledge-graph extraction (model calls); images backfilled before need another
   `backfill-images` run for that source (`--source-id`).
 
-This release ships no maintenance command that rewrites existing ids in place: element ids are
-also named by citations in answer history, reports and share snapshots, and by the incremental
-sync change log, and rewriting those needs a separate decision (see `fangan_todo.md`).
+There is no maintenance command that rewrites existing ids in place, and none is planned
+(decided 2026-10-29): element ids are also named by citations in answer history, reports and
+share snapshots, and by the incremental sync change log, so an in-place rewrite would have to
+rewrite those too or leave their anchors dangling.
 
 ## Ownerless Memory sources
 

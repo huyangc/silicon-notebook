@@ -137,7 +137,13 @@ def copied_element_id(element_id: str, old_source_id: str, new_source_id: str) -
     The one pair this does not keep is a ``rest`` that starts with neither a
     digit nor the mark beside a foreign id in the same source: no writer makes
     both kinds in one source (parsing and backfill write ``el-<source>-<digits>
-    ...``; the other forms each fill a source of their own).
+    ...``; the other forms each fill a source of their own). In particular a
+    copied promotion source never receives new ``el-promo-...`` elements: a
+    later promotion into the copy writes a different source, ``src-promo-...``
+    derived from the copy's own notebook id, so the ``~`` form and
+    ``el-promo-`` never share a source. Should both ``el-<S>-~X`` and ``X``
+    still meet in one source they would carry onto one id; the writer catches
+    that and mints a fresh id for the second.
 
     The result is the id ingestion itself would give the element (``el-<source
     id>-NNNN``), so the copy's sources keep the cheap ``ORDER BY id`` path of
