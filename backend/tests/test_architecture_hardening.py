@@ -27,6 +27,7 @@ RAW_TRANSPORT_FILES = {
 OFFLINE_KG_TRANSPORT = "backend/app/services/kg/client.py"
 OFFLINE_KG_CALLERS = {
     "backend/app/eval/inference.py",
+    "backend/app/eval/kg_attrs_calibration.py",
     "backend/app/scripts/gen_recall_gold.py",
     "scripts/kg_goldgen.py",
     "scripts/kg_goldgen_all.py",
@@ -171,6 +172,7 @@ def test_offline_kg_transport_has_no_product_runtime_importers():
     assert importers == OFFLINE_KG_CALLERS
     assert prefixes == {
         "backend/app/eval/inference.py": {"EVAL_JUDGE_"},
+        "backend/app/eval/kg_attrs_calibration.py": {"EVAL_JUDGE_"},
         "backend/app/scripts/gen_recall_gold.py": {"GOLDGEN_"},
         "scripts/kg_goldgen.py": {"GOLDGEN_"},
         "scripts/kg_goldgen_all.py": {"GOLDGEN_"},

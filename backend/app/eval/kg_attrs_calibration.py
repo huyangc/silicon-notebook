@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Callable, Hashable, Iterable, Mapping, Sequence
 
 from app.domain import kg_attrs
+from app.domain.kg_attrs_contracts import FORMULA_NEXT_ELEMENT_ORDINAL_WINDOW
 
 # --- judging lines (plan §2.5) ----------------------------------------------
 
@@ -1239,6 +1240,712 @@ def _extract_slice(chapters, settings, provider, workload: str, budget: Budget) 
 
 
 # ===========================================================================
+# prepare: pools A/B/C, model calls, items.json (plan G0-T4, §2.3)
+# ===========================================================================
+
+POOLS = ("A", "B", "C")
+LOCAL_POOLS = ("B", "C")
+CJK_SHARE_ZH = 0.3
+FORMULA_SCAN_TARGET_POOLED = 140
+FORMULA_SCAN_TARGET_KEPT_PAIRS = 120
+DEFAULT_MAX_FORMULAS_PER_LANGUAGE = 900
+DEFAULT_PER_RULE = 100
+DEFAULT_SEED = 20261028
+MAX_PAIR_PRELABEL_CARDS = 300
+# Rough pairs per card for the dry-run estimate of the pair pre-label prompt.
+ESTIMATED_PAIRS_PER_CARD = 4
+_HINT_PATTERN = r"\bwhere\b|\bhere\b|其中|式中|为|表示"
+CALL_KINDS = ("formula", "draft", "alias_prelabel", "pair_prelabel")
+CALL_KIND_LABELS = {
+    "formula": "产品公式调用", "draft": "gold 草稿",
+    "alias_prelabel": "别名预标", "pair_prelabel": "公式配对预标",
+}
+DRAFT_HINT = '{"pairs":[{"symbol":"","meaning":""}]}'
+ALIAS_PRELABEL_HINT = '{"verdict":"correct|incorrect|unsure","reason":""}'
+PAIR_PRELABEL_HINT = '{"judgements":[{"i":0,"verdict":"correct|incorrect|unsure","reason":""}]}'
+_JUDGE_ENV_PREFIX = "EVAL_JUDGE_"
+
+
+def has_hint_word(segments: Sequence[Sequence[str]]) -> bool:
+    import re
+
+    text = "\n".join(t for _eid, t in segments)
+    return re.search(_HINT_PATTERN, text, re.IGNORECASE) is not None
+
+
+def cjk_share(cjk_chars: int, visible_chars: int) -> float:
+    return cjk_chars / visible_chars if visible_chars else 0.0
+
+
+def check_local_database_url(url: str) -> None:
+    """Only localhost / 127.0.0.1 / ::1 / a unix socket may be read."""
+    from psycopg.conninfo import conninfo_to_dict
+
+    info = conninfo_to_dict(url)
+    for field in ("host", "hostaddr"):
+        for host in filter(None, str(info.get(field) or "").split(",")):
+            if host.startswith("/") or host in ("localhost", "127.0.0.1", "::1"):
+                continue
+            raise SystemExit(f"--database-url must point at this machine (got host {host!r})")
+
+
+def read_only_connection(url: str):
+    """psycopg connection whose every statement runs read-only."""
+    import psycopg
+    from psycopg.rows import dict_row
+
+    check_local_database_url(url)
+    conn = psycopg.connect(url, autocommit=True, row_factory=dict_row)
+    conn.execute("SET default_transaction_read_only = on")
+    conn.execute("BEGIN READ ONLY")
+    return conn
+
+
+# --- pool A (fixture) -------------------------------------------------------
+
+def pool_a(fixture: Mapping[str, Any]) -> tuple[list[dict], list[dict]]:
+    """Concept candidates and formula entries of the English slice. Every
+    element there was read from its own source (``element_read=True``)."""
+    elements = fixture["elements"]
+    concepts = []
+    for c in fixture["concepts"]:
+        stratum = ("en_slice", f"{c['book']}/{c['chapter']}")
+        concepts.append({
+            "pool": "A", "language": "en", "stratum": stratum, "name": c["name"],
+            "hits": c["hits"],
+            "texts": {eid: elements[eid] for eid in c["evidence"]},
+        })
+    formulas = []
+    for f in fixture["formulas"]:
+        segments = slice_segments(f, elements, max_chars=fixture["params"]["max_chars"])
+        formulas.append({
+            "pool": "A", "language": "en", "ref": f"A:{f['book']}/{f['chapter']}:{f['element_id']}:{f['name']}",
+            "name": f["name"], "segments": segments, "reply": f.get("reply"),
+            "reply_error": f.get("error"),
+        })
+    return concepts, formulas
+
+
+# --- pools B / C (local database, read-only) -------------------------------
+
+_CJK_CLASS = r"[^㐀-䶿一-鿿豈-﫿]"
+
+
+def load_local_pools(conn) -> tuple[list[dict], list[dict]]:
+    """Concept candidates (alias hits of every rule) and formula refs from the
+    local database. Evidence is joined to elements of the object's OWN
+    notebook (B-11): a foreign element keeps only its stored quote and its
+    locator is cleared; a missing element keeps its quote. Either way the item
+    is ``element_read=False`` and R2-R4 skip it."""
+    languages = _source_languages(conn)
+    rows = conn.execute(
+        "SELECT id, notebook_id, object_type, payload->>'name' AS name, evidence "
+        "FROM knowledge_objects WHERE object_type IN ('concept', 'formula') "
+        "AND status <> 'deprecated' AND id NOT LIKE %s ORDER BY id",
+        (kg_attrs.KNOWHOW_OBJECT_ID_PREFIX + "%",),
+    ).fetchall()
+    concepts: list[dict] = []
+    formulas: list[dict] = []
+    for start in range(0, len(rows), 2000):
+        chunk = rows[start:start + 2000]
+        element_ids = {
+            e.get("element_id") for r in chunk for e in (r["evidence"] or [])
+            if isinstance(e, dict) and e.get("element_id")
+        }
+        found = _elements(conn, element_ids)
+        for row in chunk:
+            items = _evidence_items(row, found)
+            readable = [i for i in items if i["element_read"]]
+            source_id = found[readable[0]["element_id"]]["source_id"] if readable else None
+            language = languages.get(source_id) if source_id else None
+            if row["object_type"] == "concept" and row["name"]:
+                if language is None:
+                    continue
+                hits = kg_attrs.trace_concept_aliases(
+                    row["name"], items, exclude_names=(), rules=kg_attrs.ALIAS_RULES)
+                concepts.append({
+                    "pool": "B" if language == "en" else "C", "language": language,
+                    "stratum": (row["notebook_id"], source_id), "name": row["name"],
+                    "object_id": row["id"], "hits": hits,
+                    "texts": {i["element_id"]: i["element_text"] for i in items
+                              if i["element_read"] and any(h.get("element_id") == i["element_id"] for h in hits)},
+                })
+            elif row["object_type"] == "formula" and row["name"] and readable:
+                first = found[readable[0]["element_id"]]
+                formulas.append({
+                    "pool": "B" if language == "en" else "C", "language": language,
+                    "ref": f"{row['notebook_id']}:{row['id']}", "name": row["name"],
+                    "first": (first["id"], first["text"]), "source_id": first["source_id"],
+                    "ordinal": first["ordinal"],
+                })
+    return concepts, formulas
+
+
+def _source_languages(conn) -> dict[str, str]:
+    rows = conn.execute(
+        "SELECT s.id, "
+        "COALESCE(SUM(length(regexp_replace(se.text, %s, '', 'g'))), 0) AS cjk, "
+        "COALESCE(SUM(length(regexp_replace(se.text, '\\s', '', 'g'))), 0) AS visible "
+        "FROM sources s JOIN source_elements se ON se.source_id = s.id "
+        "WHERE s.memory_id IS NULL GROUP BY s.id",
+        (_CJK_CLASS,),
+    ).fetchall()
+    return {
+        r["id"]: "zh" if cjk_share(int(r["cjk"]), int(r["visible"])) >= CJK_SHARE_ZH else "en"
+        for r in rows
+    }
+
+
+def _elements(conn, element_ids: Iterable[str]) -> dict[str, dict]:
+    ids = sorted(element_ids)
+    found: dict[str, dict] = {}
+    for start in range(0, len(ids), 5000):
+        for row in conn.execute(
+            "SELECT se.id, se.source_id, se.text, se.ordinal, s.notebook_id "
+            "FROM source_elements se JOIN sources s ON s.id = se.source_id "
+            "WHERE se.id = ANY(%s)",
+            (ids[start:start + 5000],),
+        ).fetchall():
+            found[row["id"]] = row
+    return found
+
+
+def _evidence_items(row: Mapping[str, Any], found: Mapping[str, Mapping[str, Any]]) -> list[dict]:
+    items = []
+    for e in row["evidence"] or []:
+        if not isinstance(e, dict):
+            continue
+        element_id = e.get("element_id") or ""
+        element = found.get(element_id)
+        if element is not None and element["notebook_id"] == row["notebook_id"]:
+            items.append({"element_id": element_id, "element_text": element["text"], "element_read": True})
+        else:
+            foreign = element is not None
+            items.append({"element_id": "" if foreign else element_id,
+                          "element_text": e.get("quoted_span", ""), "element_read": False})
+    return items
+
+
+def next_element(conn, source_id: str, ordinal: int) -> tuple[str, str] | None:
+    row = conn.execute(
+        "SELECT n.id, n.text FROM source_elements n WHERE n.source_id = %s "
+        "AND n.ordinal > %s AND n.ordinal <= %s ORDER BY n.ordinal LIMIT 1",
+        (source_id, ordinal, ordinal + FORMULA_NEXT_ELEMENT_ORDINAL_WINDOW),
+    ).fetchone()
+    return (row["id"], row["text"]) if row else None
+
+
+# --- alias sampling ---------------------------------------------------------
+
+def alias_candidates(concepts: Sequence[Mapping[str, Any]], *, egress: bool) -> dict[str, list[dict]]:
+    """Per rule: one candidate per (concept, alias) hit, with the text window
+    the reviewer sees. Without egress, local pools still derive aliases (pure
+    local rules) but are never pre-labeled."""
+    out: dict[str, list[dict]] = {rule: [] for rule in kg_attrs.ALIAS_RULES}
+    for concept in concepts:
+        for hit in concept["hits"]:
+            element_id = hit.get("element_id")
+            text = concept["texts"].get(element_id, "") if element_id else ""
+            segments = [[element_id or "", _window_around(text, hit["text"]) if text else concept["name"]]]
+            out[hit["rule"]].append({
+                "key": align_key(text or concept["name"], concept["name"]) + "|" + hit["rule"] + "|" + hit["text"],
+                "rule": hit["rule"], "pool": concept["pool"], "language": concept["language"],
+                "stratum": list(concept["stratum"]), "name": concept["name"], "alias": hit["text"],
+                "element_id": element_id or "", "segments": segments,
+                "prelabel_allowed": concept["pool"] == "A" or egress,
+            })
+    return out
+
+
+def _window_around(text: str, needle: str, radius: int = 300) -> str:
+    at = text.find(needle)
+    if at < 0 or len(text) <= 2 * radius + len(needle):
+        return text[: 2 * radius + len(needle)]
+    lo = max(0, at - radius)
+    return text[lo: at + len(needle) + radius]
+
+
+def sample_aliases(candidates: Mapping[str, Sequence[dict]], *, per_rule: int, seed: int,
+                   existing: Sequence[dict] = ()) -> list[dict]:
+    """``per_rule`` per rule, stratified by (notebook, source); a top-up keeps
+    ``existing`` items and draws only the shortfall from the rest."""
+    out = list(existing)
+    have = Counter(item["rule"] for item in existing)
+    taken = {item["key"] for item in existing}
+    for rule in kg_attrs.ALIAS_RULES:
+        remaining = [c for c in candidates.get(rule, []) if c["key"] not in taken]
+        out += stratified_sample(remaining, max(0, per_rule - have[rule]),
+                                 stratum=lambda c: tuple(c["stratum"]), seed=seed)
+    return out
+
+
+# --- formula scanning -------------------------------------------------------
+
+def scan_formulas(
+    formulas: Sequence[dict],
+    *,
+    product: Callable[[dict], tuple[str | None, str | None]],
+    draft: Callable[[dict], list[dict] | None],
+    pair_window: int,
+    max_formulas: int,
+    target_pooled: int = FORMULA_SCAN_TARGET_POOLED,
+    target_kept_pairs: int = FORMULA_SCAN_TARGET_KEPT_PAIRS,
+    start: int = 0,
+    state: dict | None = None,
+) -> dict:
+    """Scan ``formulas`` (already in seeded random order) from ``start`` until
+    ``target_pooled`` formulas have a non-empty pool AND the product kept
+    ``target_kept_pairs`` pairs, or ``max_formulas`` are scanned, or the list
+    ends. ``product`` returns (raw reply, error); ``draft`` returns extra
+    candidate pairs (only asked when the pool is non-empty or a hint word is
+    present). Returns the cards, the hint-but-empty formulas, counters and the
+    resume position."""
+    state = state or {"cards": [], "hint_empty": [], "status": Counter(), "scanned": 0,
+                      "kept_pairs": 0, "pooled": 0}
+    position = start
+    while position < len(formulas) and state["scanned"] < max_formulas:
+        if state["pooled"] >= target_pooled and state["kept_pairs"] >= target_kept_pairs:
+            break
+        formula = formulas[position]
+        position += 1
+        state["scanned"] += 1
+        reply, error = product(formula)
+        record = verification_record(formula["name"], formula["segments"], reply, pair_window=pair_window)
+        state["status"][record["status"]] += 1
+        pairs = [{"symbol": k["symbol"], "meaning": k["meaning"], "origin": "kept"} for k in record["kept"]]
+        pairs += [{"symbol": r["symbol"], "meaning": r["meaning"], "origin": "rejected", "reason": r["reason"]}
+                  for r in record["rejected"]]
+        hint = has_hint_word(formula["segments"])
+        if pairs or hint:
+            for extra in draft(formula) or []:
+                pairs.append({"symbol": extra["symbol"], "meaning": extra["meaning"], "origin": "draft"})
+        pairs = _dedup_pool(formula["segments"], pairs)
+        if pairs:
+            state["pooled"] += 1
+            state["kept_pairs"] += sum(p["origin"] == "kept" for p in pairs)
+            state["cards"].append({
+                "key": card_key(formula["segments"], formula["name"]),
+                "language": formula["language"], "pool": formula["pool"], "ref": formula["ref"],
+                "formula": formula["name"], "segments": formula["segments"], "pairs": pairs,
+                "status": record["status"], "error": error,
+            })
+        elif hint:
+            state["hint_empty"].append({
+                "key": card_key(formula["segments"], formula["name"]) + "|empty",
+                "language": formula["language"], "pool": formula["pool"], "ref": formula["ref"],
+                "formula": formula["name"], "segments": formula["segments"],
+            })
+    state["position"] = position
+    return state
+
+
+def _dedup_pool(segments, pairs: list[dict]) -> list[dict]:
+    """One pool entry per candidate (product kept/rejected wins over draft)."""
+    seen: dict[str, dict] = {}
+    for pair in pairs:
+        group = pair_group_key(segments, pair["symbol"], pair["meaning"])
+        if group not in seen:
+            seen[group] = {**pair, "group": group}
+    return list(seen.values())
+
+
+def parse_draft_reply(raw: str | None) -> list[dict]:
+    try:
+        payload = json.loads(raw or "")
+    except ValueError:
+        return []
+    pairs = payload.get("pairs") if isinstance(payload, dict) else None
+    if not isinstance(pairs, list):
+        return []
+    return [
+        {"symbol": p["symbol"].strip(), "meaning": p["meaning"].strip()} for p in pairs
+        if isinstance(p, dict) and isinstance(p.get("symbol"), str) and isinstance(p.get("meaning"), str)
+        and p["symbol"].strip() and p["meaning"].strip()
+    ]
+
+
+def parse_verdict(raw: str | None) -> dict | None:
+    try:
+        payload = json.loads(raw or "")
+    except ValueError:
+        return None
+    if not isinstance(payload, dict) or payload.get("verdict") not in VERDICTS:
+        return None
+    return {"verdict": payload["verdict"], "reason": str(payload.get("reason") or "")[:200]}
+
+
+def parse_judgements(raw: str | None, size: int) -> list[dict | None]:
+    out: list[dict | None] = [None] * size
+    try:
+        payload = json.loads(raw or "")
+    except ValueError:
+        return out
+    for item in (payload.get("judgements") if isinstance(payload, dict) else None) or []:
+        if isinstance(item, dict) and type(item.get("i")) is int and 0 <= item["i"] < size \
+                and item.get("verdict") in VERDICTS:
+            out[item["i"]] = {"verdict": item["verdict"], "reason": str(item.get("reason") or "")[:200]}
+    return out
+
+
+# --- judge prompts (calibration only) --------------------------------------
+
+def draft_messages(formula: str, segments: Sequence[Sequence[str]]) -> list[dict]:
+    context = "\n\n".join(t for _eid, t in segments)
+    return [{"role": "user", "content": (
+        f"Formula (LaTeX):\n{formula}\n\nSource text:\n<<<\n{context}\n>>>\n\n"
+        "List EVERY symbol of the formula whose meaning this source text states, each with "
+        "the meaning copied verbatim from the text (original language, no translation, no "
+        "paraphrase). Include only meanings the text states. Return JSON only."
+    )}]
+
+
+def alias_prelabel_messages(item: Mapping[str, Any]) -> list[dict]:
+    context = "\n\n".join(t for _eid, t in item["segments"])
+    return [{"role": "user", "content": (
+        f"Concept name: {item['name']}\nCandidate alias: {item['alias']}\n\n"
+        f"Source text:\n<<<\n{context}\n>>>\n\n"
+        "Is the candidate another name (abbreviation, acronym or expansion) for exactly this "
+        "concept, according to the source text? verdict: correct, incorrect, or unsure; "
+        "reason: one short sentence. Return JSON only."
+    )}]
+
+
+def pair_prelabel_messages(card: Mapping[str, Any]) -> list[dict]:
+    context = "\n\n".join(t for _eid, t in card["segments"])
+    listing = "\n".join(f"{i}. {p['symbol']} = {p['meaning']}" for i, p in enumerate(card["pairs"]))
+    return [{"role": "user", "content": (
+        f"Formula (LaTeX):\n{card['formula']}\n\nSource text:\n<<<\n{context}\n>>>\n\n"
+        f"Candidate symbol meanings (index. symbol = meaning):\n{listing}\n\n"
+        "For each index, judge whether the source text states that this symbol of the formula "
+        "means exactly that. verdict: correct, incorrect, or unsure; reason: one short "
+        "sentence. Return JSON only."
+    )}]
+
+
+# --- budget table -----------------------------------------------------------
+
+def budget_table(rows: Iterable[Mapping[str, Any]]) -> list[dict]:
+    """Sum planned calls into "endpoint host x pool x call kind" rows."""
+    table: dict[tuple[str, str, str], dict] = {}
+    for row in rows:
+        key = (row["host"], row["pool"], row["kind"])
+        entry = table.setdefault(key, {"host": row["host"], "pool": row["pool"], "kind": row["kind"],
+                                       "calls": 0, "chars": 0,
+                                       "needs_egress": row["pool"] in LOCAL_POOLS})
+        entry["calls"] += 1
+        entry["chars"] += row["chars"]
+    return [table[k] for k in sorted(table)]
+
+
+def render_budget_table(table: Sequence[Mapping[str, Any]]) -> str:
+    lines = ["| 端点主机 | 池 | 调用类别 | 调用数(上限) | 输入字符数(上限) | 需要出站开关 |",
+             "|---|---|---|---|---|---|"]
+    for row in table:
+        lines.append(f"| {row['host']} | {row['pool']} | {CALL_KIND_LABELS[row['kind']]} | "
+                     f"{row['calls']} | {row['chars']} | {'是' if row['needs_egress'] else '否'} |")
+    lines.append(f"| 合计 | | | {sum(r['calls'] for r in table)} | {sum(r['chars'] for r in table)} | |")
+    return "\n".join(lines)
+
+
+def plan_calls(
+    alias_items: Sequence[dict], scan_lists: Mapping[str, Sequence[dict]], *,
+    formula_host: str, judge_host: str, max_formulas: int,
+) -> list[dict]:
+    """Upper-bound call plan for the dry run (before any reply is known):
+    every formula among the first ``max_formulas`` of each language's scan
+    order gets a product call (pool A replies come from the fixture) and a
+    draft call; at most ``MAX_PAIR_PRELABEL_CARDS`` cards get a pair
+    pre-label; every sampled alias gets one pre-label."""
+    rows = []
+    for item in alias_items:
+        rows.append({"host": judge_host, "pool": item["pool"], "kind": "alias_prelabel",
+                     "chars": messages_chars(alias_prelabel_messages(item)) + len(ALIAS_PRELABEL_HINT)})
+    card_budget = MAX_PAIR_PRELABEL_CARDS
+    for language in LANGUAGES:
+        for formula in list(scan_lists.get(language, []))[:max_formulas]:
+            segments = formula["segments"]
+            if formula["pool"] != "A":
+                rows.append({"host": formula_host, "pool": formula["pool"], "kind": "formula",
+                             "chars": messages_chars(kg_attrs.formula_variables_messages(
+                                 formula["name"], [tuple(s) for s in segments]))})
+            rows.append({"host": judge_host, "pool": formula["pool"], "kind": "draft",
+                         "chars": messages_chars(draft_messages(formula["name"], segments)) + len(DRAFT_HINT)})
+            if card_budget > 0:
+                card_budget -= 1
+                fake = {"formula": formula["name"], "segments": segments,
+                        "pairs": [{"symbol": "x", "meaning": "m" * 20}] * ESTIMATED_PAIRS_PER_CARD}
+                rows.append({"host": judge_host, "pool": formula["pool"], "kind": "pair_prelabel",
+                             "chars": messages_chars(pair_prelabel_messages(fake)) + len(PAIR_PRELABEL_HINT)})
+    return rows
+
+
+# --- prepare orchestration --------------------------------------------------
+
+def _judge_client():
+    from app.services.kg.client import make_client
+
+    client = make_client("EVAL_JUDGE_")
+    return client
+
+
+def _host_of(url: str) -> str:
+    from urllib.parse import urlparse
+
+    return urlparse(url or "").hostname or f"(未配置 {_JUDGE_ENV_PREFIX}OPENAI_COMPAT_BASE_URL)"
+
+
+def _materialize(formula: dict, conn, max_chars: int) -> dict:
+    """Pool B/C formula -> context segments (first element + next within 64)."""
+    if "segments" in formula:
+        return formula
+    following = []
+    nxt = next_element(conn, formula["source_id"], formula["ordinal"])
+    if nxt is not None:
+        following.append(nxt)
+    segments = kg_attrs.build_formula_context(formula["first"], following, max_chars=max_chars)
+    return {**formula, "segments": [list(s) for s in segments]}
+
+
+def run_prepare(args: Any) -> int:
+    import datetime
+
+    root = main_checkout_root()
+    _tool_environment(root)
+    check_local_database_url(args.database_url)
+    out_dir = local_output_dir(root)
+    fixture = _read_json(Path(args.fixture))
+    if fixture.get("rules_signature") != kg_attrs.rules_signature():
+        raise SystemExit("en_slice.json is stale for the current rules: regenerate it with extract-en first")
+    settings, provider = _open_models()
+    conn = read_only_connection(args.database_url)
+    try:
+        max_chars, pair_window = settings.kg_attrs_context_chars, settings.kg_attrs_pair_window
+        workload = formula_workload(provider.registry, args.formula_service)
+        formula_service = provider.registry.service_for(workload)
+        judge = _judge_client()
+        formula_host = _service_record(formula_service)["host"]
+        judge_host = _host_of(judge.base_url)
+        a_concepts, a_formulas = pool_a(fixture)
+        local_concepts, local_formulas = load_local_pools(conn)
+        concepts = a_concepts + local_concepts
+        candidates = alias_candidates(concepts, egress=args.allow_local_content_egress)
+        previous = _read_json(out_dir / "items.json") if args.top_up and (out_dir / "items.json").is_file() else None
+        alias_items = sample_aliases(candidates, per_rule=args.per_rule, seed=args.seed,
+                                     existing=(previous or {}).get("alias_items", []))
+        scan_lists = _scan_lists(a_formulas, local_formulas, seed=args.seed,
+                                 egress=args.allow_local_content_egress)
+        planned_lists = {
+            lang: [_materialize(f, conn, max_chars) for f in formulas[: args.max_formulas_per_language]]
+            for lang, formulas in scan_lists.items()
+        }
+        planned_aliases = [a for a in alias_items if a["prelabel_allowed"]]
+        table = budget_table(plan_calls(planned_aliases, planned_lists, formula_host=formula_host,
+                                        judge_host=judge_host, max_formulas=args.max_formulas_per_language))
+        print(render_budget_table(table))
+        print(f"[prepare] concepts A/B/C = {Counter(c['pool'] for c in concepts)}; "
+              f"formulas en/zh = {Counter(f['language'] for f in a_formulas + local_formulas)}; "
+              f"egress={'on' if args.allow_local_content_egress else 'off'}")
+        _write_json(out_dir / "prepare-budget.json", {"table": table, "egress": args.allow_local_content_egress,
+                                                      "generated": datetime.datetime.now().isoformat()})
+        if args.dry_run:
+            return 0
+        if not args.confirm_budget:
+            raise SystemExit("re-run with --confirm-budget after the budget above is approved")
+        if not judge.configured:
+            raise SystemExit(f"{_JUDGE_ENV_PREFIX}OPENAI_COMPAT_* is not configured: drafts and pre-labels need it")
+        print(f"[prepare] sending to: formula {formula_host}; judge {judge_host}")
+        items = _execute_prepare(
+            args, fixture, provider.chat(workload), judge, planned_lists, alias_items,
+            concepts=concepts, previous=previous, max_chars=max_chars, pair_window=pair_window,
+            hosts={"formula": formula_host, "judge": judge_host},
+        )
+        items["models"] = {"extract": fixture.get("models", {}).get("extract"),
+                           "formula": {**_service_record(formula_service), "workload": workload,
+                                       "fingerprint_full": formula_service.fingerprint},
+                           "judge": judge.model or None}
+        _write_json(out_dir / "items.json", items)
+        print(f"[prepare] wrote {out_dir / 'items.json'}")
+        return 0
+    finally:
+        try:
+            conn.execute("ROLLBACK")
+        finally:
+            conn.close()
+            provider.close()
+
+
+def _scan_lists(a_formulas, local_formulas, *, seed: int, egress: bool) -> dict[str, list[dict]]:
+    """Seeded random scan order per language. Without egress the local pools
+    are not scanned at all (no call may carry their text)."""
+    lists: dict[str, list[dict]] = {"en": list(a_formulas), "zh": []}
+    if egress:
+        lists["en"] += [f for f in local_formulas if f["language"] == "en"]
+        lists["zh"] += [f for f in local_formulas if f["language"] == "zh"]
+    for language, formulas in lists.items():
+        formulas.sort(key=lambda f: f["ref"])
+        random.Random(f"{seed}:{language}").shuffle(formulas)
+    return lists
+
+
+def _execute_prepare(args, fixture, product_client, judge, planned_lists, alias_items, *,
+                     concepts, previous, max_chars, pair_window, hosts) -> dict:
+    import datetime
+
+    budget = Budget(args.max_calls, args.max_input_chars)
+    egress_log: Counter = Counter()
+    egress = args.allow_local_content_egress
+
+    def send(kind: str, pool: str, host_key: str, messages, call) -> Any:
+        if pool in LOCAL_POOLS and not egress:
+            raise AssertionError("local pool text would leave the machine without the egress switch")
+        chars = messages_chars(messages)
+        budget.admit(chars)
+        result = call()
+        budget.charge(chars, cache_hit=False)
+        egress_log[f"{hosts[host_key]}|{pool}|{kind}"] += chars
+        return result
+
+    def product(formula: dict) -> tuple[str | None, str | None]:
+        if formula["pool"] == "A":
+            return formula.get("reply"), formula.get("reply_error")
+        before = budget.chars
+        reply, error = call_formula(product_client, formula["name"], formula["segments"], budget)
+        egress_log[f"{hosts['formula']}|{formula['pool']}|formula"] += budget.chars - before
+        return reply, error
+
+    def draft(formula: dict) -> list[dict] | None:
+        if not judge.configured:
+            return None
+        messages = draft_messages(formula["name"], formula["segments"])
+        return parse_draft_reply(send("draft", formula["pool"], "judge", messages,
+                                      lambda: judge.chat_json(messages, DRAFT_HINT)))
+
+    scan_state = (previous or {}).get("scan_state", {})
+    scans: dict[str, dict] = {}
+    for language in LANGUAGES:
+        formulas = planned_lists.get(language, [])
+        prior = scan_state.get(language)
+        state = None
+        if prior:
+            state = {"cards": [c for c in previous["formula_cards"] if c["language"] == language],
+                     "hint_empty": prior["hint_empty"], "status": Counter(prior["status"]),
+                     "scanned": prior["scanned"], "kept_pairs": prior["kept_pairs"], "pooled": prior["pooled"]}
+        boost = args.top_up_formulas if args.top_up else 0
+        scans[language] = scan_formulas(
+            formulas, product=product, draft=draft, pair_window=pair_window,
+            max_formulas=args.max_formulas_per_language,
+            target_pooled=FORMULA_SCAN_TARGET_POOLED + boost,
+            target_kept_pairs=FORMULA_SCAN_TARGET_KEPT_PAIRS + boost,
+            start=prior["position"] if prior else 0, state=state,
+        )
+    cards = [c for lang in LANGUAGES for c in scans[lang]["cards"]]
+    blind = blind_keys([c["key"] for c in cards], seed=args.seed) | blind_keys(
+        [a["key"] for a in alias_items], seed=args.seed)
+    for card in cards:
+        card["blind"] = card["key"] in blind
+    for item in alias_items:
+        item["blind"] = item["key"] in blind
+    if judge.configured:
+        for item in alias_items:
+            if item.get("prelabel") is None and item["prelabel_allowed"]:
+                messages = alias_prelabel_messages(item)
+                item["prelabel"] = parse_verdict(send(
+                    "alias_prelabel", item["pool"], "judge", messages,
+                    lambda m=messages: judge.chat_json(m, ALIAS_PRELABEL_HINT)))
+        labelled = 0
+        for card in cards:
+            if labelled >= MAX_PAIR_PRELABEL_CARDS:
+                break
+            if any("prelabel" in p for p in card["pairs"]):
+                labelled += 1
+                continue
+            messages = pair_prelabel_messages(card)
+            judgements = parse_judgements(send(
+                "pair_prelabel", card["pool"], "judge", messages,
+                lambda m=messages: judge.chat_json(m, PAIR_PRELABEL_HINT)), len(card["pairs"]))
+            for pair, verdict in zip(card["pairs"], judgements):
+                pair["prelabel"] = verdict
+            labelled += 1
+    empty_checks = []
+    for language in LANGUAGES:
+        pool = scans[language]["hint_empty"]
+        previous_checks = [c for c in (previous or {}).get("empty_checks", []) if c["language"] == language]
+        chosen_keys = {c["key"] for c in previous_checks}
+        fresh = [c for c in pool if c["key"] not in chosen_keys]
+        random.Random(f"{args.seed}:empty:{language}").shuffle(fresh)
+        empty_checks += previous_checks + fresh[: max(0, EMPTY_POOL_SPOT_CHECKS - len(previous_checks))]
+    formula_scan = {}
+    for language in LANGUAGES:
+        scan = scans[language]
+        formula_scan[language] = {
+            "scanned": scan["scanned"], "pooled": scan["pooled"], "kept_pairs": scan["kept_pairs"],
+            "hint_empty": len(scan["hint_empty"]), "status": dict(scan["status"]),
+            "untested": language == "zh" and not egress,
+        }
+    return {
+        "run": hashlib.sha256(f"{args.seed}:{kg_attrs.rules_signature()}".encode()).hexdigest()[:12],
+        "created": datetime.datetime.now().isoformat(timespec="seconds"),
+        "seed": args.seed,
+        "rules_signature": kg_attrs.rules_signature(),
+        "fixture_sha": _sha(json.dumps(fixture, sort_keys=True, ensure_ascii=False)),
+        "params": {"max_chars": max_chars, "pair_window": pair_window,
+                   "window_n": fixture["params"]["window_n"], "window_m": fixture["params"]["window_m"]},
+        "egress": egress,
+        "alias_items": alias_items,
+        "formula_cards": cards,
+        "empty_checks": empty_checks,
+        "formula_scan": formula_scan,
+        "scan_state": {lang: {"position": scans[lang]["position"], "scanned": scans[lang]["scanned"],
+                              "pooled": scans[lang]["pooled"], "kept_pairs": scans[lang]["kept_pairs"],
+                              "status": dict(scans[lang]["status"]),
+                              "hint_empty": scans[lang]["hint_empty"]} for lang in LANGUAGES},
+        "yield": alias_yield(concepts) | {"formula_status": {lang: dict(scans[lang]["status"]) for lang in LANGUAGES}},
+        "egress_log": {"sent_chars": dict(egress_log), "calls": budget.calls, "chars": budget.chars,
+                       "cache_hits": budget.cache_hits},
+        "alias_recall_reference": alias_recall_reference(concepts),
+    }
+
+
+def alias_yield(concepts: Sequence[Mapping[str, Any]]) -> dict:
+    """Aliases per 100 concepts, by rule and pool (spec §2.13 comparison)."""
+    totals = Counter(c["pool"] for c in concepts)
+    hits = Counter((h["rule"], c["pool"]) for c in concepts for h in c["hits"])
+    return {"concepts": dict(totals), "aliases_per_100_concepts": {
+        f"{rule}/{pool}": round(100 * hits[(rule, pool)] / totals[pool], 3)
+        for rule in kg_attrs.ALIAS_RULES for pool in POOLS if totals[pool]
+    }}
+
+
+def alias_recall_reference(concepts: Sequence[Mapping[str, Any]], repo_root: Path | None = None) -> dict:
+    """Report-only reference (plan §2.5): abbreviation-shaped aliases in the
+    test-case gold ``canonicalization.aliases`` and how many any pool-A rule hit."""
+    import re
+
+    import yaml
+
+    repo_root = repo_root or Path(__file__).resolve().parents[3]
+    shape = re.compile(r"^[A-Z][A-Za-z0-9-]{1,7}$")
+    gold: set[str] = set()
+    total = 0
+    for path in sorted((repo_root / "fangan" / "testcases").glob("*/*/gold.yaml")):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for entry in doc.get("canonicalization") or []:
+            for alias in entry.get("aliases") or []:
+                total += 1
+                if isinstance(alias, str) and shape.match(alias.strip()):
+                    gold.add(kg_attrs.norm_concept_name(alias))
+    by_rule = {rule: set() for rule in kg_attrs.ALIAS_RULES}
+    for concept in concepts:
+        if concept["pool"] != "A":
+            continue
+        for hit in concept["hits"]:
+            by_rule[hit["rule"]].add(kg_attrs.norm_concept_name(hit["text"]))
+    return {"gold_aliases": total, "abbreviation_shaped": len(gold),
+            "hit_by_rule": {rule: len(gold & found) for rule, found in by_rule.items()},
+            "hit_any_rule": len(gold & set().union(*by_rule.values()))}
+
+
+# ===========================================================================
 # CLI
 # ===========================================================================
 
@@ -1260,7 +1967,24 @@ def build_parser():
     extract.add_argument("--formula-service", default="general")
     _budget_args(extract)
     extract.set_defaults(run=run_extract_en)
-    for name in ("prepare", "render", "ingest", "report"):
+
+    prepare = sub.add_parser("prepare", help="sample pools A/B/C, call models, write items.json")
+    prepare.add_argument("--database-url", required=True, help="local PostgreSQL, opened read-only")
+    prepare.add_argument("--fixture", default=str(EN_SLICE_PATH))
+    prepare.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    prepare.add_argument("--per-rule", type=int, default=DEFAULT_PER_RULE)
+    prepare.add_argument("--max-formulas-per-language", type=int, default=DEFAULT_MAX_FORMULAS_PER_LANGUAGE)
+    prepare.add_argument("--formula-service", default="general")
+    prepare.add_argument("--dry-run", action="store_true", help="print the host x pool x call-kind budget only")
+    prepare.add_argument("--confirm-budget", action="store_true", help="actually send (after the budget is approved)")
+    prepare.add_argument("--allow-local-content-egress", action="store_true",
+                         help="let pool B/C (local library) text reach the configured endpoints")
+    prepare.add_argument("--top-up", action="store_true", help="keep items.json and draw only the shortfall")
+    prepare.add_argument("--top-up-formulas", type=int, default=20,
+                         help="with --top-up: raise both formula scan targets by this much")
+    _budget_args(prepare)
+    prepare.set_defaults(run=run_prepare)
+    for name in ("render", "ingest", "report"):
         sub.add_parser(name).set_defaults(run=_not_yet(name))
     return parser
 

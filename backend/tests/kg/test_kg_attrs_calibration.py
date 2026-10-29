@@ -425,3 +425,192 @@ def test_chapter_records_builds_concepts_and_formula_contexts():
     assert formulas[0]["context"] == [["e1", 7], ["e2", 5]]
     assert set(used) == {"e0", "e1", "e2"}
     assert cal.slice_segments(formulas[0], used, max_chars=12) == formulas[0]["segments"]
+
+
+# --- prepare: pools, scanning, budget (plan G0-T4) ---------------------------
+
+@pytest.mark.parametrize("url", [
+    "postgresql://127.0.0.1:5432/db",
+    "postgresql://localhost/db",
+    "postgresql://user@[::1]:5432/db",
+    "postgresql:///db",
+    "postgresql:///db?host=/tmp",
+    "host=localhost dbname=db",
+])
+def test_local_database_url_accepted(url):
+    cal.check_local_database_url(url)
+
+
+@pytest.mark.parametrize("url", [
+    "postgresql://db.example.org/db",
+    "postgresql://10.0.0.5:5432/db",
+    "postgresql://localhost,db.example.org/db",
+    "host=localhost hostaddr=10.0.0.5 dbname=db",
+])
+def test_remote_database_url_refused(url):
+    with pytest.raises(SystemExit):
+        cal.check_local_database_url(url)
+
+
+@pytest.mark.parametrize("text, hint", [
+    ("where g is the gain", True), ("Here, x denotes", True), ("somewhere else", False),
+    ("其中 g 为增益", True), ("式中各量", True), ("y 表示输出", True), ("no words", False),
+])
+def test_hint_words(text, hint):
+    assert cal.has_hint_word([["e", text]]) is hint
+
+
+def _fixture():
+    return {
+        "params": {"max_chars": 50, "pair_window": 120, "window_n": 8000, "window_m": 450},
+        "elements": {"el-en-a": "A Phase Locked Loop (PLL) here.", "el-en-b": "y = a x",
+                     "el-en-c": "where a is the gain"},
+        "concepts": [{"book": "cmos", "chapter": "ch01", "name": "Phase Locked Loop",
+                      "evidence": ["el-en-a"], "hits": [{"rule": "R2", "text": "PLL", "element_id": "el-en-a"}]}],
+        "formulas": [{"book": "cmos", "chapter": "ch01", "name": "y = a x", "element_id": "el-en-b",
+                      "next_element_id": "el-en-c", "reply": '{"variables": []}', "error": None}],
+    }
+
+
+def test_pool_a_reads_the_fixture():
+    concepts, formulas = cal.pool_a(_fixture())
+    assert concepts[0]["pool"] == "A" and concepts[0]["texts"] == {"el-en-a": "A Phase Locked Loop (PLL) here."}
+    assert formulas[0]["segments"] == [["el-en-b", "y = a x"], ["el-en-c", "where a is the gain"]]
+    assert formulas[0]["reply"] == '{"variables": []}'
+
+
+def _local_concept(pool, stratum, alias):
+    return {"pool": pool, "language": "zh" if pool == "C" else "en", "stratum": stratum, "name": "放大器",
+            "hits": [{"rule": "R4", "text": alias, "element_id": "e1"}], "texts": {"e1": f"放大器（{alias}）"}}
+
+
+def test_alias_candidates_mark_local_items_by_egress():
+    concepts = cal.pool_a(_fixture())[0] + [_local_concept("C", ("nb", "s"), "AMP")]
+    off = cal.alias_candidates(concepts, egress=False)
+    assert [c["prelabel_allowed"] for c in off["R2"]] == [True]
+    assert [c["prelabel_allowed"] for c in off["R4"]] == [False]
+    assert [c["prelabel_allowed"] for c in cal.alias_candidates(concepts, egress=True)["R4"]] == [True]
+    assert off["R4"][0]["segments"] == [["e1", "放大器（AMP）"]]
+
+
+def test_sample_aliases_top_up_keeps_existing_items():
+    concepts = [_local_concept("C", ("nb", f"s{i}"), f"A{chr(65 + i)}") for i in range(20)]
+    candidates = cal.alias_candidates(concepts, egress=True)
+    first = cal.sample_aliases(candidates, per_rule=5, seed=1)
+    assert len(first) == 5
+    more = cal.sample_aliases(candidates, per_rule=8, seed=1, existing=first)
+    assert more[:5] == first and len(more) == 8 and len({m["key"] for m in more}) == 8
+
+
+def _formula(i, text, language="en", pool="B"):
+    return {"pool": pool, "language": language, "ref": f"f{i}", "name": "y = a x",
+            "segments": [[f"e{i}", "y = a x"], [f"n{i}", text]]}
+
+
+def test_scan_formulas_pools_drafts_and_stops_at_targets():
+    good = '{"variables": [{"symbol": "a", "meaning": "the gain"}]}'
+    formulas = [_formula(i, "where a is the gain") for i in range(5)] + [_formula(9, "plain words")]
+    drafted = []
+
+    def product(formula):
+        return good, None
+
+    def draft(formula):
+        drafted.append(formula["ref"])
+        return [{"symbol": "a", "meaning": "the gain"}, {"symbol": "y", "meaning": "plain"}]
+
+    state = cal.scan_formulas(formulas, product=product, draft=draft, pair_window=120,
+                              max_formulas=100, target_pooled=2, target_kept_pairs=2)
+    assert state["scanned"] == 2 and state["position"] == 2
+    card = state["cards"][0]
+    # the draft's duplicate of the kept pair collapses into the product entry
+    assert [(p["symbol"], p["origin"]) for p in card["pairs"]] == [("a", "kept"), ("y", "draft")]
+    assert drafted == ["f0", "f1"]
+    resumed = cal.scan_formulas(formulas, product=product, draft=draft, pair_window=120,
+                                max_formulas=100, target_pooled=10, target_kept_pairs=10,
+                                start=state["position"], state=state)
+    assert resumed["scanned"] == 6 and resumed["pooled"] == 6
+
+
+def test_scan_formulas_records_hint_but_empty_and_skips_draft_without_hint():
+    empty = '{"variables": []}'
+    formulas = [_formula(0, "where nothing is said"), _formula(1, "plain words")]
+    drafted = []
+    state = cal.scan_formulas(
+        formulas, product=lambda f: (empty, None), draft=lambda f: drafted.append(f["ref"]) or [],
+        pair_window=120, max_formulas=100)
+    assert drafted == ["f0"]                           # hint word -> draft asked; no hint -> not
+    assert [c["ref"] for c in state["hint_empty"]] == ["f0"]
+    assert state["status"] == {"none_stated": 2} and state["cards"] == []
+    failed = cal.scan_formulas([_formula(0, "x")], product=lambda f: (None, "Timeout"),
+                               draft=lambda f: [], pair_window=120, max_formulas=1)
+    assert failed["status"] == {"failed": 1}
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ('{"pairs": [{"symbol": " a ", "meaning": "gain"}, {"symbol": "", "meaning": "x"}, {"symbol": 1}]}',
+     [{"symbol": "a", "meaning": "gain"}]),
+    ("nope", []), ('{"pairs": {}}', []), (None, []),
+])
+def test_parse_draft_reply(raw, expected):
+    assert cal.parse_draft_reply(raw) == expected
+
+
+def test_parse_verdict_and_judgements():
+    assert cal.parse_verdict('{"verdict": "unsure", "reason": "r"}') == {"verdict": "unsure", "reason": "r"}
+    assert cal.parse_verdict('{"verdict": "maybe"}') is None
+    raw = '{"judgements": [{"i": 1, "verdict": "correct", "reason": ""}, {"i": 5, "verdict": "correct"},' \
+          ' {"i": 0, "verdict": "bad"}]}'
+    assert cal.parse_judgements(raw, 2) == [None, {"verdict": "correct", "reason": ""}]
+
+
+def test_scan_lists_scan_local_pools_only_with_egress():
+    a = [_formula(0, "t", pool="A")]
+    local = [_formula(1, "t", pool="B"), _formula(2, "t", language="zh", pool="C")]
+    off = cal._scan_lists(a, local, seed=1, egress=False)
+    assert [f["ref"] for f in off["en"]] == ["f0"] and off["zh"] == []
+    on = cal._scan_lists(a, local, seed=1, egress=True)
+    assert sorted(f["ref"] for f in on["en"]) == ["f0", "f1"] and [f["ref"] for f in on["zh"]] == ["f2"]
+
+
+def test_plan_calls_and_budget_table_split_host_pool_kind():
+    alias = cal.alias_candidates([_local_concept("C", ("nb", "s"), "AMP")], egress=True)["R4"]
+    lists = {"en": [_formula(0, "t", pool="A"), _formula(1, "t", pool="B")],
+             "zh": [_formula(2, "t", language="zh", pool="C")]}
+    rows = cal.plan_calls(alias, lists, formula_host="api.model", judge_host="judge.host", max_formulas=900)
+    table = cal.budget_table(rows)
+    keys = {(r["host"], r["pool"], r["kind"]): r for r in table}
+    assert ("api.model", "A", "formula") not in keys            # pool A replies come from the fixture
+    assert keys[("api.model", "B", "formula")]["calls"] == 1
+    assert keys[("judge.host", "C", "alias_prelabel")]["needs_egress"] is True
+    assert keys[("judge.host", "A", "draft")]["needs_egress"] is False
+    assert all(r["chars"] > 0 for r in table)
+    rendered = cal.render_budget_table(table)
+    assert rendered.splitlines()[0].startswith("| 端点主机 | 池 | 调用类别")
+    assert f"| 合计 | | | {sum(r['calls'] for r in table)} |" in rendered
+
+
+def test_evidence_items_follow_b11():
+    found = {"own": {"id": "own", "notebook_id": "nb", "text": "full text", "source_id": "s"},
+             "far": {"id": "far", "notebook_id": "other", "text": "secret", "source_id": "t"}}
+    row = {"notebook_id": "nb", "evidence": [
+        {"element_id": "own", "quoted_span": "q1"}, {"element_id": "far", "quoted_span": "q2"},
+        {"element_id": "gone", "quoted_span": "q3"}, {"element_id": "", "quoted_span": "q4"}, "junk"]}
+    assert cal._evidence_items(row, found) == [
+        {"element_id": "own", "element_text": "full text", "element_read": True},
+        {"element_id": "", "element_text": "q2", "element_read": False},
+        {"element_id": "gone", "element_text": "q3", "element_read": False},
+        {"element_id": "", "element_text": "q4", "element_read": False},
+    ]
+
+
+def test_alias_recall_reference_counts_abbreviation_shaped_gold(tmp_path):
+    gold = tmp_path / "fangan" / "testcases" / "book" / "ch"
+    gold.mkdir(parents=True)
+    (gold / "gold.yaml").write_text(
+        "canonicalization:\n- canonical: x\n  aliases: [PLL, phase locked loop, VCO]\n", encoding="utf-8")
+    concepts = [{"pool": "A", "hits": [{"rule": "R2", "text": "PLL"}]},
+                {"pool": "B", "hits": [{"rule": "R2", "text": "VCO"}]}]
+    out = cal.alias_recall_reference(concepts, repo_root=tmp_path)
+    assert out == {"gold_aliases": 3, "abbreviation_shaped": 2,
+                   "hit_by_rule": {"R1": 0, "R2": 1, "R3": 0, "R4": 0}, "hit_any_rule": 1}
