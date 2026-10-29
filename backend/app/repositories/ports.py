@@ -1935,9 +1935,10 @@ class SourceStorePort(Protocol):
         distinct from ``source_elements_page``: that one is the source-detail
         window and pages by ``OFFSET``, which is O(n²) over a whole source.
         The cursor keeps every page an index range seek on
-        ``idx_source_elements_reading_order`` (a row-value comparison on
-        PostgreSQL; on SQLite, which does not range over an index expression,
-        the same comparison as disjoint ranges, ``after_cursor_sqls``).
+        ``idx_source_elements_reading_order``: on both backends a page past a
+        cursor is ``after_cursor_sqls``' head range (same created_at and
+        digits, later id, ordered by id) plus, only when that leaves the page
+        short, its tail statement for the other two ranges.
 
         ``after`` carries values THIS adapter returned earlier and is never
         reparsed or reformatted — the same contract (and the same reason) as

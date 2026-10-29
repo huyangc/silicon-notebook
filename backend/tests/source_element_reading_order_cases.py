@@ -244,6 +244,14 @@ def read_excerpt(repo, notebook_id: str, source_id: str) -> str:
     return row["excerpt"]
 
 
+def _ranks(probe: Sequence[str], order: Sequence[str]) -> dict[str, int]:
+    """Each probed id's rank among the probe, in ``order`` -- what the step
+    ordinal reader returns (relative ranks, see ``_element_texts``)."""
+    position = {element_id: index for index, element_id in enumerate(order)}
+    return {element_id: rank for rank, element_id in
+            enumerate(sorted(probe, key=position.__getitem__))}
+
+
 def _typed(order: Sequence[str], rows: Sequence[tuple], element_type: str) -> list[str]:
     types = {row[0]: row[2] for row in rows}
     return [element_id for element_id in order if types[element_id] == element_type]
@@ -283,16 +291,14 @@ def check_big_source_reads_in_numeric_order(repo, rows: dict[str, list[tuple]]) 
     assert read_preview(repo, BIG, len(expected)) == expected
     assert read_preview(repo, BIG, 10_005) == expected[:10_005]
     assert read_backfill_plan(repo, BIG) == expected
-    # Procedure steps sort by the notebook-wide document order: BIG (its
+    # Procedure steps rank by the notebook-wide document order: BIG (its
     # instant first) in reading order, then EXCERPT.
-    probe = [f"el-{BIG}-1135", f"el-{BIG}-10003", f"el-{BIG}-0002"]
-    excerpt_order = numeric_order(EXCERPT, EXCERPT_COUNT, ())
-    notebook_order = {element_id: index for index, element_id in
-                      enumerate(expected + excerpt_order)}
-    assert read_step_ordinals(repo, probe) == notebook_order
+    probe = [f"el-{EXCERPT}-0005", f"el-{BIG}-1135", f"el-{BIG}-10003", f"el-{BIG}-0002"]
+    notebook_order = expected + numeric_order(EXCERPT, EXCERPT_COUNT, ())
+    assert read_step_ordinals(repo, probe) == _ranks(probe, notebook_order)
     # The owner-scoped spelling (a promoted procedure's steps read inside
     # their own library) orders the same way.
-    assert read_step_ordinals(repo, probe, NOTEBOOK + "-big") == notebook_order
+    assert read_step_ordinals(repo, probe, NOTEBOOK + "-big") == _ranks(probe, notebook_order)
 
 
 def check_first_excerpt_is_the_first_nonblank_element(repo) -> None:
@@ -372,6 +378,6 @@ def check_small_sources_read_exactly_as_before(repo, rows: dict[str, list[tuple]
         assert read_backfill_plan(repo, source_id) == by_id, source_id
     notebook_rows = [row for source_rows in rows.values() for row in source_rows]
     notebook_order = legacy_order(notebook_rows, created_first=True)
-    probe = [rows[KNOWHOW][5][0], rows[SMALL][100][0], rows[PROMOTION][7][0]]
-    ordinal = read_step_ordinals(repo, probe)
-    assert ordinal == {element_id: index for index, element_id in enumerate(notebook_order)}
+    probe = [rows[KNOWHOW][5][0], rows[SMALL][100][0], rows[PROMOTION][7][0],
+             rows[KNOWHOW][7][0], rows[PROMOTION][2][0]]
+    assert read_step_ordinals(repo, probe) == _ranks(probe, notebook_order)
