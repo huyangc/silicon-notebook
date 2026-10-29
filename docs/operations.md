@@ -478,9 +478,9 @@ the document order, which breaks from the 10 000th element on: `...-10000` sorte
 `created_at`, then the number of digits of the index, then the id
 (`backend/app/repositories/element_reading_order.py`). Sources of at most 9 999 parsed elements,
 knowhow cells and promotion evidence read exactly as before. Deep copies and imported
-notebooks are a separate, pre-existing defect this change neither causes nor fixes: their
-element ids are minted at random, so any copied source of any size already reads out of
-order, before and after this release. Nothing is rewritten: the order is computed from the
+notebooks reading out of order is a separate, pre-existing defect, fixed separately: see
+[Deep copies and imports: element order](#deep-copies-and-imports-element-order). Nothing
+is rewritten: the order is computed from the
 id, so the source detail view, citations' containing pages, the document overview, typed
 listings (formulas, tables, images) and procedure-step order are right at once.
 
@@ -524,6 +524,53 @@ Rebuild each affected source:
   for that source (`--source-id`) after the rebuild.
 
 Sources below the boundary need nothing.
+
+## Deep copies and imports: element order
+
+A deep copy and a `.snbk` import keep each element's `created_at`, but used to mint every
+non-knowhow element a random `el-<uuid>`. Readers order by `created_at`, the number of digits
+of the index, then the id, and the digits term of such an id is always 0, so a copied source
+read in random id order within each instant -- out of order at any size: the source detail
+view, citations' containing pages, the document overview, typed listings, procedure-step
+order, and the element order any **later** re-chunking, re-extraction or image backfill of
+the copy reads. A chunk's own `element_ids` list kept its order, so retrieval was unaffected.
+
+Since this release a copy or import **carries** the original id's index over:
+`el-<old source id>-<suffix>` becomes `el-<new source id>-<suffix>` (`-NNNN`, indexes past
+four digits and the backfill's `-gMMM` kept as they are), and an id of any other form
+(promotion evidence `el-promo-<hash>`, the `el-<uuid>` of an earlier copy) becomes
+`el-<new source id>-~<old id>`; knowhow cells are still recomputed from the projection's
+formula. Every reader therefore orders the copy element for element as it orders the
+original, a copy of the copy too, and no id grows with each generation of copies
+(`copied_element_id` in `backend/app/repositories/element_reading_order.py`). Chunks, the
+evidence of knowledge objects and facts, fact elements and element vectors are rewritten
+through the same map as before and still name the same element.
+
+**Existing copies:** copies and imports made before this release **still read out of
+order**; this release does not rewrite them. To find such sources (both backends; reads every
+element row, so run it off-peak on a large deployment):
+
+```sql
+SELECT s.notebook_id, e.source_id, COUNT(*) AS minted_elements
+FROM source_elements e JOIN sources s ON s.id = e.source_id
+WHERE s.source_type NOT IN ('knowhow', 'promotion', 'memory')
+  AND substr(e.id,1,length(e.source_id)+4) <> ('el-'||e.source_id||'-')
+GROUP BY s.notebook_id, e.source_id
+HAVING COUNT(*) > 1;
+```
+
+What can be done today (either one, both done by users):
+
+- **The original still exists:** copy it, or export and import it, again; the new copy reads in
+  the original's order. Delete the old copy once it is no longer needed.
+- **The original is gone:** click **「重新解析」** (reparse) on the source in the copy. It mints the elements
+  from the document again (`el-<source id>-NNNN`) and rebuilds that source's chunks and
+  knowledge-graph extraction (model calls); images backfilled before need another
+  `backfill-images` run for that source (`--source-id`).
+
+This release ships no maintenance command that rewrites existing ids in place: element ids are
+also named by citations in answer history, reports and share snapshots, and by the incremental
+sync change log, and rewriting those needs a separate decision (see `fangan_todo.md`).
 
 ## Ownerless Memory sources
 

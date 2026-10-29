@@ -37,6 +37,7 @@ from typing import Callable, Iterable, Protocol
 from app.domain.indexing_pipeline import BUILTIN_INDEXING_PIPELINE_VERSION
 from app.domain.portable_rows import is_safe_relative_path
 from app.domain.repository import RepositoryCompatibilitySeams
+from app.repositories.element_reading_order import copied_element_id
 from app.repositories.ports import SharingStorePort
 from app.services.knowhow.ids import cell_chunk_id, element_id
 
@@ -447,9 +448,17 @@ def _copy_source_elements(
             data["metadata"] = json.dumps(metadata, ensure_ascii=False)
             data["id"] = new_element_id
         else:
-            data["id"] = element_map.setdefault(
-                old_element_id, remapped_id(old_element_id)
-            )
+            # Carried over (``copied_element_id``), not freshly minted: the
+            # copy keeps ``created_at``, so only an id that keeps the reading
+            # order key keeps the source's order -- a random ``el-<uuid>``
+            # read every copied source in random order.
+            new_element_id = element_map.get(old_element_id)
+            if new_element_id is None:
+                new_element_id = copied_element_id(
+                    old_element_id, data["source_id"], source_map[data["source_id"]]
+                ) or remapped_id(old_element_id)
+                element_map[old_element_id] = new_element_id
+            data["id"] = new_element_id
             # An image element names its picture by notebook_assets id; the
             # copy minted new asset ids above, so without this the copy's
             # images point into the ORIGINAL notebook (404 through the asset
