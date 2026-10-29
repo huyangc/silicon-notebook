@@ -294,6 +294,15 @@ REGISTRY = {
     ("api/mcp_tools/reports.py", "_reference_row", 'dict:"element_id"'): (
         "global-unreachable", _import_gate("api/mcp_tools/reports.py"),
         "MCP get_report projects a stored per-notebook deep report, never under a global run plan", 1),
+    # KG node attrs (spec 2026-10-28): an alias / formula-variable item names
+    # the viewer-readable evidence element it came from. Read-time detail
+    # exits only; the answer path never imports the module (isolation guard).
+    ("domain/kg_attrs.py", "trace_concept_aliases.keep", 'store:["element_id"]'): (
+        "global-unreachable", _import_gate("domain/kg_attrs.py"),
+        "detail-only alias derivation names its own evidence element", 1),
+    ("domain/kg_attrs.py", "verify_formula_variables", 'store:["element_id"]'): (
+        "global-unreachable", _import_gate("domain/kg_attrs.py"),
+        "on-demand formula variables name the context element the meaning came from", 1),
 }
 
 CLASSIFICATIONS = {

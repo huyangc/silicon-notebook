@@ -37,6 +37,8 @@ _APP = Path(__file__).resolve().parents[1] / "app"
 # (path under app/, literal hint, schema name or None for JSON-mode fallback,
 #  root fields that may never be null)
 _LITERAL_HINTS: tuple[tuple[str, str, str | None, tuple[str, ...]], ...] = (
+    ('domain/kg_attrs.py', '{"variables":[{"symbol":"","meaning":""}]}',
+     'model_response_bbd49601311b6a41', ('variables',)),
     ('eval/find_sources_calibrate.py', '{"label":"strong|related|unrelated","reason":""}',
      'model_response_2b3dd00f0b7dd0c1', ('label', 'reason')),
     ('eval/inference.py', '{"correctness":0,"inference_quality":0,"grounding_consistency":true,"fabricated_citation":false,"reason":""}',

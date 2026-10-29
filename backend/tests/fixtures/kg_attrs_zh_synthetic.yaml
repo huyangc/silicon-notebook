@@ -1,0 +1,80 @@
+# 中文合成夹具（手写、不含任何本机库原文或隐私）。
+# 用途：在仓库内覆盖英文切片测不到的中文写法——R4（CJK 名字后紧跟缩写）、
+# 全角括号、公式上下文里的「其中 / 式中 / 为 / 表示」。
+# 由 backend/tests/test_kg_attrs_domain.py 读取；规格
+# docs/superpowers/specs/2026-10-28-kg-node-attrs-design_zh.md §7.2、§7.3。
+aliases:
+  - id: r4_fullwidth
+    name: 压控振荡器
+    texts: ["压控振荡器（VCO）的输出频率随控制电压变化。"]
+    expect: [{rule: R4, text: VCO}]
+  - id: r4_halfwidth_space
+    name: 锁相环
+    texts: ["锁相环 (PLL) 由鉴相器、环路滤波器和压控振荡器组成。"]
+    expect: [{rule: R4, text: PLL}]
+  - id: r4_instance_label
+    name: 晶体管
+    texts: ["晶体管（M1）工作在饱和区，晶体管（Q5）截止。"]
+    expect: []
+  - id: r4_lowercase_token
+    name: 跨导
+    texts: ["跨导（gm）决定了小信号增益。"]
+    expect: []
+  - id: r4_too_long_token
+    name: 运算放大器
+    texts: ["运算放大器（OPAMPLIFIER）的增益很高。"]
+    expect: []
+  - id: r4_two_elements_dedup
+    name: 低噪声放大器
+    texts:
+      - "低噪声放大器（LNA）位于接收链路的最前端。"
+      - "设计低噪声放大器（LNA）时要兼顾噪声与匹配。"
+    expect: [{rule: R4, text: LNA}]
+  - id: r4_ascii_name_does_not_fire
+    name: Low Noise Amplifier
+    texts: ["Low Noise Amplifier（LNA）位于接收链路的最前端。"]
+    expect: [{rule: R2, text: LNA}]
+formulas:
+  - id: shizhong_three_symbols
+    formula: 'I_D = \frac{1}{2}\mu_n C_{ox}\frac{W}{L}(V_{GS}-V_{TH})^2'
+    segments:
+      - 'I_D = \frac{1}{2}\mu_n C_{ox}\frac{W}{L}(V_{GS}-V_{TH})^2'
+      - "式中，μ_n 为电子迁移率，C_ox 为单位面积栅氧电容，V_TH 为阈值电压。"
+    reply:
+      - {symbol: '\mu_n', meaning: 电子迁移率}
+      - {symbol: 'C_{ox}', meaning: 单位面积栅氧电容}
+      - {symbol: 'V_{TH}', meaning: 阈值电压}
+    status: ok
+    kept: ['\mu_n', 'C_{ox}', 'V_{TH}']
+    rejected: {}
+  - id: qizhong_swapped
+    formula: 'A_v = -g_m r_o'
+    segments:
+      - 'A_v = -g_m r_o'
+      - "其中 g_m 为跨导，r_o 为输出电阻。"
+    reply:
+      - {symbol: g_m, meaning: 输出电阻}
+      - {symbol: r_o, meaning: 跨导}
+    status: none_grounded
+    kept: []
+    rejected: {g_m: nearer_other_symbol, r_o: nearer_other_symbol}
+  - id: biaoshi_translated_meaning
+    formula: 'f = \frac{1}{2\pi R C}'
+    segments:
+      - 'f = \frac{1}{2\pi R C}'
+      - "这里 f 表示截止频率，R 和 C 分别是电阻和电容。"
+    reply:
+      - {symbol: f, meaning: 截止频率}
+      - {symbol: R, meaning: resistance}
+    status: ok
+    kept: [f]
+    rejected: {R: meaning_not_in_context}
+  - id: empty_reply
+    formula: 'P = V I'
+    segments:
+      - 'P = V I'
+      - "功率等于电压乘以电流。"
+    reply: []
+    status: none_stated
+    kept: []
+    rejected: {}
