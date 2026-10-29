@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import hashlib
 
+from app.domain.kg_attrs_contracts import KNOWHOW_OBJECT_ID_PREFIX
+
 
 def _h(*parts: str) -> str:
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
 
 
 def _cell_ko_id(table_id: str, column_name: str, val_key: str) -> str:
-    return f"ko-kh-{_h(table_id, column_name, val_key)[:32]}"
+    return f"{KNOWHOW_OBJECT_ID_PREFIX}{_h(table_id, column_name, val_key)[:32]}"
 
 
 def element_id(row_id: str, column_id: str) -> str:
