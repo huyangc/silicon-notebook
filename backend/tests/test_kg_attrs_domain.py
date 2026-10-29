@@ -198,7 +198,53 @@ def test_normalize_greek_both_ways_and_delimiters():
     assert kg_attrs.normalize_latex(r"$\alpha$") == kg_attrs.normalize_latex("α") == "α"
     assert kg_attrs.normalize_latex(r"\(\Omega\)") == kg_attrs.normalize_latex("Ω")
     assert kg_attrs.normalize_latex(r"\mu_{n}") == kg_attrs.normalize_latex("μ_n") == "μ_n"
-    assert kg_attrs.normalize_latex(r"\pitchfork") == "pitchfork"  # not \pi
+    assert kg_attrs.normalize_latex(r"\pitchfork x") == "x"  # a command, not \pi + "tchfork"
+
+
+def test_normalize_drops_command_names_and_reads_fractions():
+    # mutation: keep command names -> "sqrt" would let symbol "t" through.
+    assert kg_attrs.normalize_latex(r"\sqrt{2 I_D}") == "2 i_d"
+    assert "t" not in kg_attrs.normalize_latex(r"g_m = \sqrt{2 I_D \mu C_{ox}}")
+    assert kg_attrs.normalize_latex(r"a \cdot b\,c") == "a bc"
+    # mutation: no fraction rule -> "fracwl", and "W/L" is not in the formula.
+    assert kg_attrs.normalize_latex(r"\frac{W}{L}") == kg_attrs.normalize_latex("W/L") == "w/l"
+    assert kg_attrs.normalize_latex(r"\frac{1}{2\pi R C}") == "1/2πr c"
+    assert kg_attrs.normalize_latex(r"\dfrac{a}{\frac{b}{c}}") == "a/b/c"
+    # mutation: flat-brace wrapper regex -> nested braces break the unwrap.
+    assert kg_attrs.normalize_latex(r"\mathrm{V_{DD}}") == kg_attrs.normalize_latex("V_{DD}") == "v_dd"
+    assert kg_attrs.normalize_latex(r"\frac{W") == "w"                      # unbalanced: no crash
+
+
+def test_formula_symbols_match_through_the_new_normalization():
+    result = _verify(r"I_D = \frac{1}{2}\mu C \frac{W}{L} \sqrt{2 I_D}",
+                     [r"I_D = \frac{1}{2}\mu C \frac{W}{L}", "where W/L is the aspect ratio, t is time"],
+                     [("W/L", "the aspect ratio"), ("t", "time")])
+    assert [k["symbol"] for k in result.kept] == ["W/L"]
+    assert _reasons(result) == {"t": "symbol_not_in_formula"}
+
+
+def test_rivals_are_only_symbols_that_pass_checks_one_and_two():
+    # "b" is not in the formula, so it cannot out-compete "a" for "the bias".
+    result = _verify("y = a", ["y = a", "where a is the bias b"], [("a", "the bias"), ("b", "x")])
+    assert [k["symbol"] for k in result.kept] == ["a"]
+
+
+def test_signature_covers_every_cross_module_import():
+    import ast
+    tree = ast.parse(Path(kg_attrs.__file__).read_text(encoding="utf-8"))
+    covered = dict(kg_attrs.SIGNATURE_DEPENDENCIES)
+    imported = {}
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("app.domain."):
+            imported[node.module] = {a.name for a in node.names}
+        if isinstance(node, ast.ImportFrom) and node.module == "app.domain":
+            imported.update({f"app.domain.{a.name}": {"*"} for a in node.names})
+    # kg_attrs_contracts is dumped whole; every other dependency is listed by name.
+    for module, names in imported.items():
+        if module == "app.domain.kg_attrs_contracts":
+            continue
+        short = module.rsplit(".", 1)[-1]
+        assert short in covered and names <= set(covered[short]), (module, names)
 
 
 def test_normalize_fullwidth_and_whitespace():
