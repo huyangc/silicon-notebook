@@ -40,6 +40,7 @@ import { ReportShareConfirm } from "./report-share-confirm";
 import { ReportDocument } from "./report-document";
 import { CitationPopover } from "./citation-card";
 import { rehypeReportReferencesFold } from "./rehype-report-references-fold";
+import { usePrintExpandedFolds } from "./use-print-expanded-folds";
 import { useClientPagination } from "./use-client-pagination.ts";
 import {
   CITATION_IMAGE_SLOT_ATTRIBUTE,
@@ -308,6 +309,7 @@ export function ReportMarkdown({
   imagePreviewOpen?: boolean;
 }) {
   const [citePopover, setCitePopover] = useState<{ key: string; rect: DOMRect } | null>(null);
+  usePrintExpandedFolds();
   const selectedRefKey = citePopover?.key ?? null;
   const refsByKey = useMemo(
     () => referenceByAnchorKey(reportReferencesAsAnswerReferences(references)),

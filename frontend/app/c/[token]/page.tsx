@@ -41,6 +41,7 @@ import { normalizeMathMarkdown } from "../../math-markdown";
 import { ChatTurnNav, chatTurnDomId } from "../../chat-turn-nav";
 import { ImagePreviewModal } from "../../image-preview-modal";
 import { PublicCitationPopover, type PublicCitePopoverState } from "../../public-citation-popover";
+import { usePrintExpandedFolds } from "../../use-print-expanded-folds";
 import { claimEscapePress } from "../../use-root-modal-coordinator";
 import {
   CITATION_IMAGE_SLOT_ATTRIBUTE,
@@ -216,6 +217,7 @@ export default function PublicConversationPage() {
   const params = useParams<{ token: string }>();
   const token = String(params?.token || "");
   const [state, setState] = useState<LoadState>({ kind: "loading" });
+  usePrintExpandedFolds();
 
   useEffect(() => {
     let cancelled = false;
