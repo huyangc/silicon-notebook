@@ -420,6 +420,7 @@ export function ReportMarkdown({
           onClose={closeCitePopover}
           onPreviewImage={previewImage}
           imageCaptions
+          takeFocus
           dismissSuspended={imagePreviewOpen}
         />
       )}

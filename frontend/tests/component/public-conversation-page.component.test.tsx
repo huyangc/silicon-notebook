@@ -210,6 +210,47 @@ test("键盘打开引用卡时焦点进卡片（长摘录可用键盘滚动）�
   expect(chip).toHaveFocus();
 });
 
+test("同一条引用的另一个标记被按下时，焦点重新交进卡片，Esc 回到刚按下的那个", async () => {
+  const user = userEvent.setup();
+  mocks.fetchPublicConversation.mockResolvedValue({
+    ...CONVERSATION,
+    turns: [{ ...CONVERSATION.turns[0], answer_md: "甲[k1]，再提一次甲[k1]。", images: [] }],
+  });
+  render(<PublicConversationPage />);
+
+  const [firstChip, secondChip] = await screen.findAllByRole("button", { name: "[1]" });
+  firstChip.focus();
+  await user.keyboard("{Enter}");
+  expect(await screen.findByRole("dialog")).toHaveFocus();
+  secondChip.focus();
+  await user.keyboard("{Enter}");
+  await waitFor(() => expect(screen.getByRole("dialog")).toHaveFocus());
+
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  fireEvent.keyUp(window, { key: "Escape" });
+  expect(secondChip).toHaveFocus();
+});
+
+test("打开正文附图预览时收起引用卡，Esc 只关预览这一层", async () => {
+  const user = userEvent.setup();
+  render(<PublicConversationPage />);
+
+  const chip = await screen.findByRole("button", { name: "[7]" });
+  chip.focus();
+  await user.keyboard("{Enter}");
+  expect(await screen.findByRole("dialog", { name: "引用 [7]" })).toBeInTheDocument();
+
+  screen.getByRole("button", { name: "放大查看本段附图" }).focus();
+  await user.keyboard("{Enter}");
+  expect(screen.queryByRole("dialog", { name: "引用 [7]" })).toBeNull();
+  const preview = screen.getByRole("dialog", { name: "引用 [1] 图片预览" });
+
+  fireEvent.keyDown(within(preview).getByRole("button", { name: "关闭图片预览" }), { key: "Escape" });
+  expect(screen.queryByRole("dialog", { name: "引用 [1] 图片预览" })).toBeNull();
+  fireEvent.keyUp(window, { key: "Escape" });
+});
+
 test("多轮问答右缘有提问导航圆点，点圆点跳到对应那一轮", async () => {
   const user = userEvent.setup();
   render(<PublicConversationPage />);

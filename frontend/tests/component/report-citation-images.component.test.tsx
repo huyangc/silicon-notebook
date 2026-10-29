@@ -85,6 +85,20 @@ test("带 images 的引用详情渲染「本段附图」区与图注（notebookI
   expect(within(detail).getByText("图 1：时钟树收敛示意")).toBeInTheDocument();
 });
 
+test("报告引用卡打开时焦点进卡片，Esc 收起后回到标记", async () => {
+  const user = userEvent.setup();
+  renderBody("结论 [k1]。", referenceWithImage({ images: undefined }));
+
+  const chip = screen.getByRole("button", { name: "[1]" });
+  chip.focus();
+  await user.keyboard("{Enter}");
+  const card = detailCard();
+  expect(card).toHaveFocus();
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(chip).toHaveFocus();
+});
+
 test("无图注的附图仍渲染缩略图，但不渲染图注文字", async () => {
   const user = userEvent.setup();
   renderBody("结论 [k1]。", referenceWithImage({
