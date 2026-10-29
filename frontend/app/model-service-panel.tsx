@@ -86,14 +86,32 @@ function ModelServiceCard({
         <div><small>延迟</small><strong>{item.checked_at ? `${item.latency_ms}ms` : "—"}</strong></div>
       </div>
 
+      {isAdmin && item.kind === "chat" && (
+        <dl className="model-service-capacity" aria-label="模型容量">
+          <div>
+            <dt>上下文窗口</dt>
+            <dd>
+              <strong>{item.context_window_tokens?.toLocaleString("zh-CN") ?? "未配置"}</strong>
+              {item.context_window_tokens != null && <> <small>tokens</small></>}
+            </dd>
+          </div>
+          <div>
+            <dt>最大输出</dt>
+            <dd>
+              <strong>{item.max_output_tokens?.toLocaleString("zh-CN") ?? "未配置"}</strong>
+              {item.max_output_tokens != null && <> <small>tokens</small></>}
+            </dd>
+          </div>
+          {item.max_input_tokens != null && (
+            <div>
+              <dt>最大输入</dt>
+              <dd><strong>{item.max_input_tokens.toLocaleString("zh-CN")}</strong> <small>tokens</small></dd>
+            </div>
+          )}
+        </dl>
+      )}
+
       <div className="model-service-workloads">
-        {isAdmin && item.kind === "chat" && item.context_window_tokens != null && (
-          <p aria-label="模型容量">
-            上下文窗口 {item.context_window_tokens.toLocaleString("zh-CN")} tokens
-            {item.max_output_tokens != null && <> · 最大输出 {item.max_output_tokens.toLocaleString("zh-CN")} tokens</>}
-            {item.max_input_tokens != null && <> · 最大输入 {item.max_input_tokens.toLocaleString("zh-CN")} tokens</>}
-          </p>
-        )}
         <small>使用位置</small>
         <div>
           {item.workloads.length > 0
