@@ -318,8 +318,7 @@ test("the public page states the check in the past tense and marks the flagged r
   expect(screen.getByRole("button", { name: "[1] 未通过核对：资料已删除" })).toHaveClass("cite-chip-unverified");
   expect(screen.getByRole("button", { name: "[2]" }).className).toBe("cite-chip");
 
-  const referenceItems = () => within(screen.getByRole("region", { name: "引用出处" })).getAllByRole("listitem");
-  const items = referenceItems();
+  const items = within(container.querySelector<HTMLElement>(".public-references-fold")!).getAllByRole("listitem");
   expect(items).toHaveLength(2);
   expect(items[0]).toHaveTextContent("未通过核对：资料已删除");
   expect(items[0]).toHaveTextContent("甲摘录");
@@ -329,10 +328,14 @@ test("the public page states the check in the past tense and marks the flagged r
   expect(await screen.findByRole("img", { name: "乙图" })).toBeInTheDocument();
   expect(screen.queryByRole("img", { name: "甲图" })).toBeNull();
 
-  // 点带标记的标记:滚到清单里那一条(原因在那里),不是打开什么资料。await 之后
-  // 一律重新查询节点。
+  // 点带标记的标记:与站内同一张引用卡,原因行在卡上,没有任何「去原处看」的出口。
   fireEvent.click(screen.getByRole("button", { name: "[1] 未通过核对：资料已删除" }));
-  await waitFor(() => expect(referenceItems()[0]).toHaveClass("active"));
+  const card = await screen.findByRole("dialog");
+  expect(card).toHaveClass("cite-popover");
+  expect(card).toHaveTextContent("未通过核对：资料已删除");
+  expect(card).toHaveTextContent("甲摘录");
+  expect(within(card).queryAllByRole("link")).toHaveLength(0);
+  expect(within(card).queryByRole("button", { name: /查看原文|知识图谱/ })).toBeNull();
 });
 
 test("a public turn without a check summary has no notice and no marked references", async () => {

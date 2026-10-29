@@ -6,6 +6,10 @@
 // 它刻意不 import 主应用的**产品层**：没有 notebook 上下文、没有 session、没有引用
 // 跳转到原文。渲染的就是后端白名单投影里的多轮问答正文与引用出处。
 //
+// 阅读交互与站内问答一致：点正文引用标记在标记旁弹出同一张引用卡
+// （`PublicCitationPopover` → `CitationPopover`），每轮的引用清单默认折叠在回答下方；
+// 多轮时右缘是同一条提问导航圆点（`ChatTurnNav`，这里随窗口滚动）。
+//
 // 但**渲染管线**必须与站内共用，不能各写一份（红线「报告公开分享」逐条继承）：
 //   * `remarkCitations` 是 `[k]` / 【k】标记链接化的唯一实现；
 //   * `remarkGfmPlugin` 而非裸 `remarkGfm`——单个 `~`（`7~5nm`）不能被当删除线；
@@ -34,7 +38,9 @@ import { remarkAnswerInference } from "../../answer-inference";
 import { normalizeInferenceListMarkers } from "../../inference-list-markers";
 import { remarkGfmPlugin } from "../../markdown-gfm";
 import { normalizeMathMarkdown } from "../../math-markdown";
+import { ChatTurnNav, chatTurnDomId } from "../../chat-turn-nav";
 import { ImagePreviewModal } from "../../image-preview-modal";
+import { PublicCitationPopover, type PublicCitePopoverState } from "../../public-citation-popover";
 import { claimEscapePress } from "../../use-root-modal-coordinator";
 import {
   CITATION_IMAGE_SLOT_ATTRIBUTE,
@@ -88,7 +94,7 @@ type PublicTurnRenderState = Readonly<{
   verificationByKey: Readonly<Record<string, string>>;
   markdownCitationRefs: Record<string, PublicCitationRefT>;
   imagesByAlias: ReadonlyMap<string, PublicImageT>;
-  openReference: (key: string) => void;
+  openReference: (key: string, rect: DOMRect) => void;
   openImagePreview: (image: PublicImageT, referenceLabel: string, returnFocusKey: string | null) => void;
 }>;
 
@@ -103,8 +109,8 @@ function PublicMarkdownLink({ href, children }: { href?: string; children?: Reac
   if (href?.startsWith("cite:")) {
     const key = href.slice(5);
     if (state?.citationRefs[key]) {
-      // 回答生成时没通过核对的引用：弱化样式 + 原因进可访问名称。点开照旧滚到清单里
-      // 那一条，原因徽章就在那里。
+      // 回答生成时没通过核对的引用：弱化样式 + 原因进可访问名称。点开的引用卡上有
+      // 原因行。
       const verification = Object.hasOwn(state.verificationByKey, key) ? state.verificationByKey[key] : "";
       const markerName = verification
         ? verificationMarkerName(state.citationRefs[key].displayLabel, verification)
@@ -115,7 +121,7 @@ function PublicMarkdownLink({ href, children }: { href?: string; children?: Reac
           aria-label={markerName}
           title={markerName}
           className={`cite-chip${verification ? " cite-chip-unverified" : ""}${state.selectedKey === key ? " active" : ""}`}
-          onClick={() => state.openReference(key)}
+          onClick={(event) => state.openReference(key, event.currentTarget.getBoundingClientRect())}
         >
           {children}
         </button>
@@ -295,6 +301,12 @@ export default function PublicConversationPage() {
         <PublicTurnView key={index} turn={turn} index={index} token={token} />
       ))}
 
+      <ChatTurnNav
+        questions={conversation.turns.map((turn) => turn.question)}
+        flashSelector=".public-turn-question"
+        className="public-turn-nav"
+      />
+
       <footer className="public-report-foot">
         <p className="public-report-note">本页是只读分享副本，引用可核对但不可打开原始资料。</p>
       </footer>
@@ -312,9 +324,10 @@ function PublicTurnView({
   index: number;
   token: string;
 }) {
-  // 正文标记点开的那条引用：清单里高亮它。号段是**每轮独立**的，所以高亮态与
+  // 正文标记点开的那条引用（浮层 + 标记高亮）。号段是**每轮独立**的，所以状态与
   // DOM id 都按本轮索引隔离，避免跨轮 k1 撞车。
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [citePopover, setCitePopover] = useState<PublicCitePopoverState | null>(null);
+  const selectedKey = citePopover?.key ?? null;
   const [previewImage, setPreviewImage] = useState<PublicImagePreview | null>(null);
   const previewReturnFocusRef = useRef<string | null>(null);
   const citationRefs = useMemo(
@@ -399,14 +412,10 @@ function PublicTurnView({
     if (target?.isConnected) target.focus({ preventScroll: true });
   }, [previewImage]);
 
-  const openReference = (key: string) => {
-    setSelectedKey(key);
-    const target = document.getElementById(refDomId(key));
-    if (!target) return;
-    target.scrollIntoView({ behavior: "smooth", block: "center" });
-    // 只滚动不移焦，键盘/读屏用户点完仍停在正文那个按钮上。
-    target.focus({ preventScroll: true });
-  };
+  const openReference = (key: string, rect: DOMRect) => setCitePopover({ key, rect });
+  const popoverReference = citePopover
+    ? turn.references.find((reference) => reference.key === citePopover.key)
+    : undefined;
 
   // 选中引用、开关图片预览都会让本轮重渲染；正文没变时直接复用上一次的 ReactMarkdown
   // 元素，remark+KaTeX+rehype 解析不跟着重跑（O(正文) 的开销）。选中态与点击回调刻意
@@ -440,7 +449,7 @@ function PublicTurnView({
   const evidenceLabel = EVIDENCE_LABELS[turn.evidence_level];
 
   return (
-    <section className="public-turn">
+    <section className="public-turn" id={chatTurnDomId(index)}>
       <div className="public-turn-question">
         <span className="public-turn-role">提问</span>
         <div className="public-turn-qbody">
@@ -538,16 +547,25 @@ function PublicTurnView({
         </ImagePreviewModal>
       )}
 
+      {citePopover && popoverReference && (
+        <PublicCitationPopover
+          reference={popoverReference}
+          displayLabel={citationRefs[citePopover.key]?.displayLabel || ""}
+          anchorRect={citePopover.rect}
+          onClose={() => setCitePopover(null)}
+        />
+      )}
+
+      {/* 站内回答下方没有引用清单（引用看浮层）；这里保留一份**默认折叠**的清单，
+          只为正文没标到的条目与打印/存档时仍可核对，不再把每轮回答底下铺满引用。 */}
       {turn.references.length > 0 && (
-        <section className="public-report-references" aria-label="引用出处">
-          <h2>引用出处</h2>
+        <details className="public-report-references public-references-fold">
+          <summary>引用出处 · {turn.references.length} 条</summary>
           <ol>
             {turn.references.map((reference, refIndex) => (
               <li
                 key={reference.key || refIndex}
                 id={refDomId(reference.key)}
-                tabIndex={-1}
-                className={selectedKey === reference.key ? "active" : undefined}
               >
                 <span className="public-report-refnum" aria-hidden="true">
                   {publicConversationRefNumber(reference, refIndex)}
@@ -593,7 +611,7 @@ function PublicTurnView({
               引用出处过多，此处只展示前 {turn.references.length} 条。
             </p>
           )}
-        </section>
+        </details>
       )}
     </section>
   );

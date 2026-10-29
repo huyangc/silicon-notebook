@@ -13,8 +13,13 @@
 //   * 表格/代码块沿用 `.answer-table-wrap` / `.answer-code`，宽内容才会在自己的
 //     内容块里横向滚动，而不是把整页顶宽。
 // 这三样都是无 notebook 上下文的纯渲染件，复用它们不破坏这一页的隔离。
+//
+// 点正文引用标记与站内问答同一个交互：标记旁弹出同一张引用卡
+// （`PublicCitationPopover` → `CitationPopover`），不再把读者拽到页底。正文里的
+// 「参考文献」一节与站内同一个插件折叠（`rehypeReportReferencesFold`），页底的
+// 「引用出处」摘录清单同样默认收起、可展开。
 
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkMath from "remark-math";
@@ -26,13 +31,69 @@ import { remarkAnswerInference } from "../../answer-inference";
 import { normalizeInferenceListMarkers } from "../../inference-list-markers";
 import { remarkGfmPlugin } from "../../markdown-gfm";
 import { normalizeMathMarkdown } from "../../math-markdown";
+import { PublicCitationPopover, type PublicCitePopoverState } from "../../public-citation-popover";
+import { rehypeReportReferencesFold } from "../../rehype-report-references-fold";
 import {
   fetchPublicReport,
   publicCitationRefs,
   publicReferenceLocation,
   publicReferenceNumber,
+  type PublicCitationRefT,
   type PublicReportT,
 } from "../../public-report";
+
+type PublicReportRenderState = Readonly<{
+  citationRefs: Record<string, PublicCitationRefT>;
+  selectedKey: string | null;
+  openReference: (key: string, rect: DOMRect) => void;
+}>;
+
+// 渲染器是 React 组件*类型*，绝不能每次渲染重建：换型即整棵 markdown 子树卸载重挂，
+// 点一次引用（改选中态）就会让正文闪一下、被点的那颗标记也被换掉。会变的状态走
+// Context（与 `c/[token]/page.tsx`、`report-view.tsx` 同一做法）。
+const PublicReportRenderContext = createContext<PublicReportRenderState | null>(null);
+
+function PublicReportLink({ href, children }: { href?: string; children?: React.ReactNode }) {
+  const state = useContext(PublicReportRenderContext);
+  if (href?.startsWith("cite:")) {
+    const key = href.slice(5);
+    if (state?.citationRefs[key]) {
+      return (
+        <button
+          type="button"
+          className={`cite-chip${state.selectedKey === key ? " active" : ""}`}
+          onClick={(event) => state.openReference(key, event.currentTarget.getBoundingClientRect())}
+        >
+          {children}
+        </button>
+      );
+    }
+    return <span>{children}</span>;
+  }
+  return (
+    <a href={href} target="_blank" rel="noreferrer">
+      {children}
+    </a>
+  );
+}
+
+function PublicReportPre({ children }: { children?: React.ReactNode }) {
+  return <pre className="answer-code">{children}</pre>;
+}
+
+function PublicReportTable({ children }: { children?: React.ReactNode }) {
+  return (
+    <div className="answer-table-wrap">
+      <table className="answer-table">{children}</table>
+    </div>
+  );
+}
+
+const PUBLIC_REPORT_COMPONENTS = {
+  a: PublicReportLink,
+  pre: PublicReportPre,
+  table: PublicReportTable,
+} satisfies NonNullable<Parameters<typeof ReactMarkdown>[0]["components"]>;
 
 type LoadState =
   | { kind: "loading" }
@@ -44,13 +105,10 @@ export default function PublicReportPage() {
   const params = useParams<{ token: string }>();
   const token = String(params?.token || "");
   const [state, setState] = useState<LoadState>({ kind: "loading" });
-  // 正文标记点开的那条引用：清单里高亮它，方便读者核对完再回到正文。
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setState({ kind: "loading" });
-    setSelectedKey(null);
     fetchPublicReport(token)
       .then((report) => {
         if (cancelled) return;
@@ -86,51 +144,47 @@ export default function PublicReportPage() {
     );
   }
 
-  const { report } = state;
-  const citationRefs = publicCitationRefs(report.references);
-  const openReference = (key: string) => {
-    setSelectedKey(key);
-    const target = document.getElementById(`ref-${key}`);
-    if (!target) return;
-    target.scrollIntoView({ behavior: "smooth", block: "center" });
-    // 只滚动不移焦，键盘/读屏用户点完仍停在正文那个按钮上：视口走了，焦点没走，
-    // 摘录既不会被朗读也 Tab 不到。条目本身用 tabIndex={-1} 只接受程序化聚焦。
-    target.focus({ preventScroll: true });
-  };
-  const components = {
-    a({ href, children }: { href?: string; children?: React.ReactNode }) {
-      if (href?.startsWith("cite:")) {
-        const key = href.slice(5);
-        if (citationRefs[key]) {
-          return (
-            <button
-              type="button"
-              className={`cite-chip${selectedKey === key ? " active" : ""}`}
-              onClick={() => openReference(key)}
-            >
-              {children}
-            </button>
-          );
-        }
-        return <span>{children}</span>;
-      }
-      return (
-        <a href={href} target="_blank" rel="noreferrer">
-          {children}
-        </a>
-      );
-    },
-    pre({ children }: { children?: React.ReactNode }) {
-      return <pre className="answer-code">{children}</pre>;
-    },
-    table({ children }: { children?: React.ReactNode }) {
-      return (
-        <div className="answer-table-wrap">
-          <table className="answer-table">{children}</table>
-        </div>
-      );
-    },
-  } as Parameters<typeof ReactMarkdown>[0]["components"];
+  return <PublicReportView report={state.report} />;
+}
+
+/** 一份已取到的报告。拆成独立组件是为了能用 hooks 记住解析结果（见 markdownTree）。 */
+function PublicReportView({ report }: { report: PublicReportT }) {
+  // 正文标记点开的那条引用：标记旁弹出引用卡，标记本身高亮。换报告（换 token）时
+  // 本组件随加载态卸载，选中态自然清零。
+  const [citePopover, setCitePopover] = useState<PublicCitePopoverState | null>(null);
+  const selectedKey = citePopover?.key ?? null;
+  const citationRefs = useMemo(() => publicCitationRefs(report.references), [report.references]);
+  const popoverReference = citePopover
+    ? report.references.find((reference) => reference.key === citePopover.key)
+    : undefined;
+  const renderState = useMemo<PublicReportRenderState>(() => ({
+    citationRefs,
+    selectedKey,
+    openReference: (key, rect) => setCitePopover({ key, rect }),
+  }), [citationRefs, selectedKey]);
+
+  // 选中引用只换高亮与浮层；正文没变时复用上一次的 ReactMarkdown 元素，remark+KaTeX
+  // 解析不跟着重跑。选中态与点击回调经 Context 穿透被跳过的子树送达标记。
+  const markdownTree = useMemo(() => (
+    <ReactMarkdown
+      remarkPlugins={[
+        remarkGfmPlugin,
+        remarkMath,
+        [remarkCitations, citationRefs] as [typeof remarkCitations, typeof citationRefs],
+        remarkAnswerInference,
+      ]}
+      rehypePlugins={[rehypeKatex, rehypeReportReferencesFold]}
+      // 默认 urlTransform 会清掉 cite: 协议 → 引用编号丢失;放行 cite:,
+      // 其余仍走默认清洗(防 javascript: 等不安全协议)。
+      urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
+      components={PUBLIC_REPORT_COMPONENTS}
+    >
+      {/* 与已认证的报告视图同一套归一化：单行 $$…$$ 要当块级公式处理，
+          网关返回的转义 Markdown 层也要剥掉。少了它，同一份报告在分享页
+          和站内页会渲染成两个样子（长公式被当行内并裁掉）。 */}
+      {normalizeInferenceListMarkers(normalizeMathMarkdown(report.content_md))}
+    </ReactMarkdown>
+  ), [report.content_md, citationRefs]);
 
   return (
     <main className="public-report">
@@ -152,40 +206,29 @@ export default function PublicReportPage() {
       </header>
 
       <article className="report-markdown answer-markdown">
-        <ReactMarkdown
-          remarkPlugins={[
-            remarkGfmPlugin,
-            remarkMath,
-            [remarkCitations, citationRefs] as [typeof remarkCitations, typeof citationRefs],
-            remarkAnswerInference,
-          ]}
-          rehypePlugins={[rehypeKatex]}
-          // 默认 urlTransform 会清掉 cite: 协议 → 引用编号丢失;放行 cite:,
-          // 其余仍走默认清洗(防 javascript: 等不安全协议)。
-          urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
-          components={components}
-        >
-          {/* 与已认证的报告视图同一套归一化：单行 $$…$$ 要当块级公式处理，
-              网关返回的转义 Markdown 层也要剥掉。少了它，同一份报告在分享页
-              和站内页会渲染成两个样子（长公式被当行内并裁掉）。 */}
-          {normalizeInferenceListMarkers(normalizeMathMarkdown(report.content_md))}
-        </ReactMarkdown>
+        <PublicReportRenderContext.Provider value={renderState}>
+          {markdownTree}
+        </PublicReportRenderContext.Provider>
       </article>
 
+      {citePopover && popoverReference && (
+        <PublicCitationPopover
+          reference={popoverReference}
+          displayLabel={citationRefs[citePopover.key]?.displayLabel || ""}
+          anchorRect={citePopover.rect}
+          onClose={() => setCitePopover(null)}
+        />
+      )}
+
       {report.references.length > 0 && (
-        <section className="public-report-references" aria-label="引用出处">
-          <h2>引用出处</h2>
+        <details className="public-report-references public-references-fold">
+          <summary>引用出处 · {report.references.length} 条</summary>
           <p className="public-report-note">
             正文里的编号对应下面的条目。分享副本只保留摘录，不能打开原始资料。
           </p>
           <ol>
             {report.references.map((reference, index) => (
-              <li
-                key={reference.key}
-                id={`ref-${reference.key}`}
-                tabIndex={-1}
-                className={selectedKey === reference.key ? "active" : undefined}
-              >
+              <li key={reference.key} id={`ref-${reference.key}`}>
                 <span className="public-report-refnum" aria-hidden="true">
                   {publicReferenceNumber(reference, index)}
                 </span>
@@ -214,7 +257,7 @@ export default function PublicReportPage() {
               引用出处过多，此处只展示前 {report.references.length} 条。
             </p>
           )}
-        </section>
+        </details>
       )}
 
       <footer className="public-report-foot">

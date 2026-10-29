@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -45,7 +45,7 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
 });
 
-test("正文 [k] 标记渲染成可点编号，并跳到编号一致的引用出处", async () => {
+test("正文 [k] 标记渲染成可点编号，点开在标记旁弹出与站内同一张引用卡", async () => {
   const user = userEvent.setup();
   const { container } = render(<PublicReportPage />);
 
@@ -57,12 +57,65 @@ test("正文 [k] 标记渲染成可点编号，并跳到编号一致的引用出
   const entry = container.querySelector("#ref-k7");
   expect(entry).not.toBeNull();
   expect(entry!.querySelector(".public-report-refnum")!.textContent).toBe("7");
-  expect(entry).not.toHaveClass("active");
 
   await user.click(chip);
-  await waitFor(() => expect(container.querySelector("#ref-k7")).toHaveClass("active"));
-  // 只滚动不移焦时,键盘/读屏用户点完仍停在正文按钮上,摘录读不到也 Tab 不到。
-  expect(document.activeElement).toBe(container.querySelector("#ref-k7"));
+  const card = await screen.findByRole("dialog");
+  expect(card).toHaveClass("cite-popover");
+  expect(card.querySelector(".cite-detail-card")).not.toBeNull();
+  expect(card).toHaveTextContent("[7]");
+  expect(card).toHaveTextContent("乙文");
+  expect(card).toHaveTextContent("乙摘录");
+  expect(chip).toHaveClass("active");
+  // 不把读者拽到页底。
+  expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+
+  // 与站内同一套关闭：点卡片外。
+  await user.click(screen.getByText("LLM 有哪些架构？"));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+test("引用卡上显式披露截断，个人记忆读作「作者的个人记忆」", async () => {
+  const user = userEvent.setup();
+  mocks.fetchPublicReport.mockResolvedValue({
+    ...REPORT,
+    references: [
+      {
+        key: "k1", title: "我的笔记", file_name: "", location: "", snippet: "记忆摘录前缀",
+        is_memory: true, snippet_truncated: true,
+      },
+      REPORT.references[1],
+    ],
+  });
+  render(<PublicReportPage />);
+
+  await user.click(await screen.findByRole("button", { name: "[1]" }));
+  const card = await screen.findByRole("dialog");
+  expect(card).toHaveTextContent("我的笔记");
+  expect(card).toHaveTextContent("作者的个人记忆");
+  expect(card).toHaveTextContent("（摘录过长，已截断）");
+  expect(card).not.toHaveTextContent("（标题过长，已截断）");
+});
+
+test("正文的「参考文献」与页底的「引用出处」都默认收起、可展开", async () => {
+  const user = userEvent.setup();
+  mocks.fetchPublicReport.mockResolvedValue({
+    ...REPORT,
+    content_md: `${REPORT.content_md}\n\n## 参考文献\n\n- [k1] 甲文 · p. 2\n- [k7] 乙文\n\n## 局限\n\n证据有限。`,
+  });
+  const { container } = render(<PublicReportPage />);
+
+  const heading = await screen.findByRole("heading", { name: "参考文献" });
+  const bodyFold = heading.closest("details")!;
+  expect(bodyFold).toHaveClass("report-references-fold");
+  expect(bodyFold).not.toHaveAttribute("open");
+  expect(bodyFold).not.toHaveTextContent("证据有限");
+
+  const bottom = container.querySelector<HTMLDetailsElement>("details.public-references-fold")!;
+  expect(bottom).not.toHaveAttribute("open");
+  const summary = within(bottom).getByText("引用出处 · 2 条");
+  await user.click(summary);
+  expect(bottom).toHaveAttribute("open");
+  expect(within(bottom).getAllByRole("listitem")).toHaveLength(2);
 });
 
 test("宽表格与代码块走共用包装，才能在自己的内容块里横向滚动", async () => {
@@ -119,7 +172,7 @@ test("没被截断的引用不挂假提示", async () => {
   // 不带 `*_truncated`（旧后端也是这个形状），此时一个提示都不该出现。
   render(<PublicReportPage />);
 
-  await screen.findByText("引用出处");
+  await screen.findByText(/^引用出处 · /);
   expect(screen.queryByText("（标题过长，已截断）")).toBeNull();
   expect(screen.queryByText("（原始文件名过长，已截断）")).toBeNull();
   expect(screen.queryByText("（摘录过长，已截断）")).toBeNull();
@@ -140,7 +193,7 @@ test("个人记忆引用（后端的结构化布尔 is_memory）保留标题与�
   });
   const { container } = render(<PublicReportPage />);
 
-  await screen.findByText("引用出处");
+  await screen.findByText(/^引用出处 · /);
   const memory = container.querySelector("#ref-k1")!;
   expect(memory.querySelector("strong")!.textContent).toBe("我的笔记");
   expect(memory.querySelector("blockquote")!.textContent).toBe("记忆摘录");
@@ -160,7 +213,7 @@ test("只认结构化布尔：位置标签恰好叫 Memory 的普通文档引用
   });
   const { container } = render(<PublicReportPage />);
 
-  await screen.findByText("引用出处");
+  await screen.findByText(/^引用出处 · /);
   expect(container.querySelector("#ref-k1 .public-report-locus")!.textContent).toBe("Memory");
   expect(screen.queryByText("作者的个人记忆")).toBeNull();
 });

@@ -22,11 +22,33 @@ export { activeTurnFromTops, chatTurnDomId } from "./chat-turn-nav-model";
 type ChatTurnNavProps = {
   /** 当前会话里用户的每次提问，顺序与对话区一致（一轮一条，含进行中的那条）。 */
   questions: string[];
-  /** 对话滚动容器（chat-body）的 ref。 */
-  scrollRef: RefObject<HTMLDivElement | null>;
+  /** 对话滚动容器（chat-body）的 ref。不传 = 整页随窗口滚动（公开分享页）。 */
+  scrollRef?: RefObject<HTMLDivElement | null>;
   /** 当前会话标识；用于会话切换时强制重算高亮（比拼接问题文本更可靠）。 */
   sessionId?: string | null;
+  /** 跳转后闪一下的提问气泡，在轮次包裹元素内查找。 */
+  flashSelector?: string;
+  /** 附加在 nav 上的 class（公开分享页改为相对视口定位）。 */
+  className?: string;
 };
+
+/** 滚动视口的几何量：容器滚动用容器自己的，整页滚动用窗口的。 */
+function scrollMetrics(root: HTMLElement | null) {
+  if (root) {
+    return {
+      top: root.getBoundingClientRect().top,
+      scrollTop: root.scrollTop,
+      clientHeight: root.clientHeight,
+      scrollHeight: root.scrollHeight,
+    };
+  }
+  return {
+    top: 0,
+    scrollTop: window.scrollY,
+    clientHeight: window.innerHeight,
+    scrollHeight: document.documentElement.scrollHeight,
+  };
+}
 
 /** 浮出的提问卡：定位到聚焦刻度的中心。 */
 type Loupe = { i: number; top: number };
@@ -36,7 +58,13 @@ type Loupe = { i: number; top: number };
  * 越靠近指针的点越大（Dock 式鱼眼放大镜），正对指针的那条浮出提问卡；点击平滑滚动到
  * 对应轮次并高亮气泡；随阅读位置自动高亮当前轮。纯前端——数据取自内存里的对话轮次。
  */
-export function ChatTurnNav({ questions, scrollRef, sessionId = null }: ChatTurnNavProps) {
+export function ChatTurnNav({
+  questions,
+  scrollRef,
+  sessionId = null,
+  flashSelector = ".chat-user",
+  className = "",
+}: ChatTurnNavProps) {
   const count = questions.length;
   const [active, setActive] = useState(0);
   const [loupe, setLoupe] = useState<Loupe | null>(null);
@@ -55,14 +83,15 @@ export function ChatTurnNav({ questions, scrollRef, sessionId = null }: ChatTurn
   // --- 滚动跟随：高亮当前正在读的那一轮 ---
   const recompute = useCallback(() => {
     if (lockRef.current) return;
-    const root = scrollRef.current;
-    if (!root || count === 0) return;
+    const root = scrollRef ? scrollRef.current : null;
+    if ((scrollRef && !root) || count === 0) return;
+    const metrics = scrollMetrics(root);
     // 贴到底部时，最后一条提问即当前阅读位置——直接选它，规避短答案下触发线的误差。
-    if (root.scrollTop + root.clientHeight >= root.scrollHeight - 4) {
+    if (metrics.scrollTop + metrics.clientHeight >= metrics.scrollHeight - 4) {
       setActive(count - 1);
       return;
     }
-    const rootTop = root.getBoundingClientRect().top;
+    const rootTop = metrics.top;
     const tops: number[] = [];
     for (let i = 0; i < count; i++) {
       const el = document.getElementById(chatTurnDomId(i));
@@ -78,7 +107,7 @@ export function ChatTurnNav({ questions, scrollRef, sessionId = null }: ChatTurn
   }, [recompute]);
 
   useEffect(() => {
-    const root = scrollRef.current;
+    const root: HTMLElement | Window | null = scrollRef ? scrollRef.current : window;
     if (!root) return;
     let frame = 0;
     const onScroll = () => {
@@ -211,14 +240,14 @@ export function ChatTurnNav({ questions, scrollRef, sessionId = null }: ChatTurn
       recomputeRef.current();
     }, 700);
     el.scrollIntoView({ behavior: reduceRef.current ? "auto" : "smooth", block: "start" });
-    const bubble = el.querySelector(".chat-user");
+    const bubble = el.querySelector(flashSelector);
     if (bubble instanceof HTMLElement) {
       bubble.classList.remove("chat-user-flash");
       void bubble.offsetWidth; // 触发重排，让高亮动画可重复播放
       bubble.classList.add("chat-user-flash");
       window.setTimeout(() => bubble.classList.remove("chat-user-flash"), 1400);
     }
-  }, []);
+  }, [flashSelector]);
 
   useEffect(
     () => () => {
@@ -235,7 +264,7 @@ export function ChatTurnNav({ questions, scrollRef, sessionId = null }: ChatTurn
 
   return (
     <nav
-      className="chat-turn-nav"
+      className={className ? `chat-turn-nav ${className}` : "chat-turn-nav"}
       aria-label="本次会话的提问"
       ref={navRef}
       onPointerMove={onPointerMove}

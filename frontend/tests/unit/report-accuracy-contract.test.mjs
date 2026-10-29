@@ -11,9 +11,8 @@ test("deep report outline exposes frozen intent and objective evidence coverage"
   assert.match(visibleCopy, /确认后的研究问题/);
   assert.match(visibleCopy, /提交补充并开始规划/);
   assert.match(visibleCopy, /本节必须回答/);
-  assert.ok(jsxElements(reportView, "aside").some(
-    (element) => element.attributes["aria-label"] === "引用原文",
-  ));
+  // 正文引用点开的是与问答同一张引用卡（不再是页底的「引用原文」详情区）。
+  assert.equal(jsxElements(reportView, "CitationPopover").length, 1);
   assert.equal(formatReportCoverage({
     hits: 5, base_hits: 2, element_hits: 7, source_hits: 3,
   }), "原文 7 · 知识 5 · 公共库 2");

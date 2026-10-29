@@ -172,6 +172,8 @@ export function SelectedReferenceDetail({
   onOpenSource,
   onPreviewImage,
   importController,
+  notes,
+  imageCaptions = false,
 }: {
   reference: AnswerReference;
   /** 检索结果带图(T1/T2)：**active** notebook,没有就传 null。取图归属交给
@@ -207,6 +209,11 @@ export function SelectedReferenceDetail({
    *  不渲染（只读工作区）。状态住在 AnswerView 而不是这张卡片里——这张卡是会被
    *  反复开合的浮层，详见 import-row-state.tsx 顶部注释。 */
   importController?: ImportRowController;
+  /** 卡片末尾的补充说明行（公开分享页用它披露标题/摘录被截断）。缺省不渲染。 */
+  notes?: readonly string[];
+  /** 本段附图下显示图注。问答卡片里图注只作 alt（不重复成文字）；深度报告的引用
+   *  详情一直是「这一条引用挂了哪些图、图注可见」，改成浮层后保持原样。 */
+  imageCaptions?: boolean;
 }) {
   // 外部证据(`ask.reflect_action`,设计文档 §6.3)走 citation 回退列表时没有
   // anchor,也就没有 object_type——用 tier 把它补齐,「外部」这个类型标记两条路
@@ -424,6 +431,7 @@ export function SelectedReferenceDetail({
           原始文件：{sourceFileName}
         </small>
       )}
+      {notes?.map((note) => <small key={note} className="cite-detail-note">{note}</small>)}
       {/* 检索结果带图(T1/T2)：与上方引证内容(snippet/来源/原始文件)用独立区块 +
           分隔线区分——本段附图不是模型引用过的证据,只是证据片段附近的图,绝不能
           让它看起来像 snippet 的一部分。算出来的取图归属库为空(既没有 active、这条
@@ -454,6 +462,9 @@ export function SelectedReferenceDetail({
                       {thumbnail}
                     </button>
                   ) : thumbnail}
+                  {imageCaptions && image.caption && (
+                    <small className="cite-detail-image-caption">{image.caption}</small>
+                  )}
                 </li>
               );
             })}
@@ -478,6 +489,8 @@ export function CitationPopover({
   onOpenSource,
   onPreviewImage,
   importController,
+  notes,
+  imageCaptions,
   dismissSuspended = false,
 }: {
   reference: AnswerReference;
@@ -500,6 +513,10 @@ export function CitationPopover({
    *  ⚠ 它由 AnswerView 持有：这张浮层随点外部/滚动/Esc 卸载，状态住在里面的话
    *  「已导入」会在关掉浮层的一瞬间蒸发（详见 import-row-state.tsx 顶部）。 */
   importController?: ImportRowController;
+  /** 卡片末尾的补充说明行，原样透传给 SelectedReferenceDetail。 */
+  notes?: readonly string[];
+  /** 本段附图下显示图注，原样透传给 SelectedReferenceDetail。 */
+  imageCaptions?: boolean;
   /** Keep the thumbnail trigger mounted while its page-level preview is open,
    * so the modal coordinator can return focus to a live element. */
   dismissSuspended?: boolean;
@@ -578,6 +595,8 @@ export function CitationPopover({
         onOpenSource={onOpenSource}
         onPreviewImage={onPreviewImage}
         importController={importController}
+        notes={notes}
+        imageCaptions={imageCaptions}
       />
     </div>
   );
