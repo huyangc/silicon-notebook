@@ -48,7 +48,10 @@ def test_k_min_and_early_failure():
     (92, 8, 0.85, "pass"),
     (50, 0, 0.90, "insufficient"),
     (10, 5, 0.90, "fail"),          # failed early before reaching 100
-    (143, 7, 0.90, "pass"),         # n=150 needs 143
+    (121, 9, 0.85, "fail"),         # judged 130 with 9 wrong: same verdict as stopping at the 9th wrong
+    (0, 9, 0.85, "fail"),
+    (141, 9, 0.85, "fail"),         # early failure is final, more items never flip it
+    (147, 3, 0.90, "pass"),         # past n=100 within the early-failure allowance
 ])
 def test_precision_verdict(correct, wrong, line, verdict):
     assert cal.precision_verdict(correct, wrong, line) == verdict
@@ -71,8 +74,10 @@ def test_align_key_is_nfc_text_hash_plus_name_and_normalized_symbol():
 
 def test_pair_group_is_shared_across_objects_with_the_same_context():
     segments = [["e1", "x = y"], ["e2", "where y is height"]]
-    assert cal.pair_group_key(segments, "y", "height") == cal.pair_group_key(segments, "y ", " height")
-    assert cal.pair_group_key(segments, "y", "height") != cal.pair_group_key(segments[:1], "y", "height")
+    key = cal.pair_group_key(segments, "x = y", "y", "height")
+    assert key == cal.pair_group_key(segments, "x=y", "y ", " height")
+    assert key != cal.pair_group_key(segments[:1], "x = y", "y", "height")
+    assert key != cal.pair_group_key(segments, "x = z", "y", "height")      # N(formula) is part of it
     assert cal.card_key(segments, "x = y") != cal.card_key(segments, "x = z")
 
 
@@ -157,13 +162,23 @@ def test_formula_recall_pooled_estimate():
         "e1": {"missing": 1}, "e2": {"missing": 0},
     }
     out = cal.formula_recall(cards, checks, labels, hint_empty_scanned=10)
-    # counted cards c1, c2, c4: H=1, G=2, M=3; M_hat = mean(1,0)*10 = 5
-    assert (out["H"], out["G"], out["M"], out["M_hat"]) == (1, 2, 3, 5.0)
-    assert out["recall"] == round(1 / 10, 4)
-    assert out["recall_without_m_hat"] == round(1 / 5, 4)
+    # counted cards c1, c2, c4. H=1 (g1). G=3: g1, g2 correct plus the draft g3
+    # judged unsure, counted as a true pair the product missed. M=3; M_hat=5.
+    assert (out["H"], out["G"], out["M"], out["M_hat"]) == (1, 3, 3, 5.0)
+    assert out["recall"] == round(1 / 11, 4)
+    assert out["recall_without_m_hat"] == round(1 / 6, 4)
     assert out["denominator_formulas"] == 2                      # c4 has G=0 and M=0
     assert out["formula_hit_rate"] == 0.5
     assert out["empty_checks_filled"] == 2
+
+
+def test_recall_unsure_kept_pair_is_wrong_and_cards_count_once():
+    cards = [{"key": "c1", "pairs": [_pair("g1", "kept"), _pair("g2", "rejected")]},
+             {"key": "c1", "pairs": [_pair("g1", "kept"), _pair("g2", "rejected")]}]   # second notebook
+    labels = {"g1": {"verdict": "unsure"}, "g2": {"verdict": "unsure"}, "c1": {"missing": 0}}
+    out = cal.formula_recall(cards, [], labels, hint_empty_scanned=0)
+    # kept+unsure: not H, not G; rejected+unsure: in G. One card, not two.
+    assert (out["H"], out["G"], out["denominator_formulas"]) == (0, 1, 1)
 
 
 def test_recall_verdict_needs_both_hundreds():
@@ -306,6 +321,37 @@ def test_review_page_data_hides_marks_on_blind_cards_and_orders_blocks():
     alias_block = data["blocks"][0]
     assert (alias_block["k_min"], alias_block["max_wrong"]) == (96, 4)
     assert sorted(alias_block["order"]) == list(range(100)) and alias_block["order"] != list(range(100))
+    # formula blocks: no in-page stop hint (precision counts kept pairs only,
+    # which a blind card must not reveal); report carries the stop status.
+    formula_block = data["blocks"][4]
+    assert (formula_block["k_min"], formula_block["max_wrong"]) == (None, None)
+
+
+def test_review_page_carries_only_opaque_ids():
+    data = cal.review_page_data(_items(), seed=5)
+    ids = {c["key"] for c in data["cards"]} | {p["group"] for c in data["cards"] for p in c.get("pairs", [])}
+    assert all(re.fullmatch(r"[0-9a-f]{20}", i) for i in ids)
+    assert cal.opaque_id("a1") in ids and "a1" not in ids
+
+
+def test_blind_card_pairs_are_shuffled():
+    items = _items()
+    card = items["formula_cards"][0]
+    card["pairs"] = [{"group": f"g{i}", "symbol": f"s{i}", "meaning": "m", "origin": "kept" if i < 5 else "draft"}
+                     for i in range(10)]
+    plain = next(c for c in cal.review_page_data(items, seed=5)["cards"] if c["kind"] == "pairs")
+    card["blind"] = True
+    blind = next(c for c in cal.review_page_data(items, seed=5)["cards"] if c["kind"] == "pairs")
+    assert [p["symbol"] for p in plain["pairs"]] == [f"s{i}" for i in range(10)]
+    assert sorted(p["symbol"] for p in blind["pairs"]) == sorted(p["symbol"] for p in plain["pairs"])
+    assert [p["symbol"] for p in blind["pairs"]] != [p["symbol"] for p in plain["pairs"]]
+
+
+def test_report_stop_status_uses_the_verdict_rule():
+    assert cal.stop_hint(10, 9, 0.85) == "failed"
+    assert cal.stop_hint(121, 9, 0.85) == "failed"
+    assert cal.stop_hint(92, 8, 0.85) == "reached"
+    assert cal.stop_hint(50, 3, 0.85) == "continue"
 
 
 # --- output location --------------------------------------------------------
@@ -388,7 +434,8 @@ class _Registry:
         self.bindings = bindings
 
     def workloads_for(self, service_id):
-        return tuple(_Workload(w) for w, s in self.bindings.items() if s == service_id)
+        return tuple(_Workload(w, "embedding" if w.endswith("_embedding") else "chat")
+                     for w, s in self.bindings.items() if s == service_id)
 
     def service_for(self, workload_id):
         return _Service(self.bindings[workload_id])
@@ -399,6 +446,12 @@ def test_formula_workload_routes_to_the_named_service():
     assert cal.formula_workload(registry, "general") == "kg_extract"
     with pytest.raises(SystemExit):
         cal.formula_workload(registry, "missing")
+    assert cal.formula_workload(registry, "general", explicit="query_rewrite") == "query_rewrite"
+    with pytest.raises(SystemExit):
+        cal.formula_workload(registry, "general", explicit="x")      # bound elsewhere
+    embedding = _Registry({"kg_extract": "general", "chunk_embedding": "general"})
+    with pytest.raises(SystemExit):
+        cal.formula_workload(embedding, "general", explicit="chunk_embedding")   # not a chat workload
 
 
 class _El:
@@ -509,7 +562,7 @@ def _formula(i, text, language="en", pool="B"):
 
 def test_scan_formulas_pools_drafts_and_stops_at_targets():
     good = '{"variables": [{"symbol": "a", "meaning": "the gain"}]}'
-    formulas = [_formula(i, "where a is the gain") for i in range(5)] + [_formula(9, "plain words")]
+    formulas = [_formula(i, f"where a is the gain {i}") for i in range(5)] + [_formula(9, "plain words")]
     drafted = []
 
     def product(formula):
@@ -530,6 +583,124 @@ def test_scan_formulas_pools_drafts_and_stops_at_targets():
                                 max_formulas=100, target_pooled=10, target_kept_pairs=10,
                                 start=state["position"], state=state)
     assert resumed["scanned"] == 6 and resumed["pooled"] == 6
+
+
+def test_same_document_in_two_notebooks_is_one_item():
+    # pool B and pool C copies of one formula and context: one scan, one card.
+    copies = [_formula(0, "where a is the gain"), {**_formula(0, "where a is the gain"), "ref": "other-nb"}]
+    calls = []
+    state = cal.scan_formulas(copies, product=lambda f: calls.append(f["ref"]) or ('{"variables": []}', None),
+                              draft=lambda f: [{"symbol": "a", "meaning": "the gain"}],
+                              pair_window=120, max_formulas=100)
+    assert calls == ["f0"] and state["scanned"] == 1 and len(state["cards"]) == 1
+    # alias candidates: the same element text and concept in two notebooks, pool A preferred
+    twin = [_local_concept("B", ("nb1", "s"), "AMP"), _local_concept("C", ("nb2", "s"), "AMP")]
+    a_copy = {**_local_concept("C", ("en_slice", "x"), "AMP"), "pool": "A"}
+    out = cal.alias_candidates(twin + [a_copy], egress=False)["R4"]
+    assert len(out) == 1 and out[0]["pool"] == "A"
+    report = cal.build_report({"alias_items": out + out, "formula_cards": [], "empty_checks": [],
+                               "formula_scan": {}}, {out[0]["key"]: {"verdict": "correct"}})
+    assert report["alias"][3]["n"] == 1                      # counted once
+
+
+def test_budget_stop_keeps_the_scan_position():
+    formulas = [_formula(i, f"where a is the gain {i}") for i in range(4)]
+    state = {"cards": [], "hint_empty": [], "status": cal.Counter(), "scanned": 0, "kept_pairs": 0, "pooled": 0}
+
+    def product(formula):
+        if formula["ref"] == "f2":
+            raise cal.BudgetExceeded("cap")
+        return '{"variables": [{"symbol": "a", "meaning": "the gain"}]}', None
+
+    with pytest.raises(cal.BudgetExceeded):
+        cal.scan_formulas(formulas, product=product, draft=lambda f: [], pair_window=120,
+                          max_formulas=100, target_pooled=99, state=state)
+    assert (state["scanned"], state["position"], len(state["cards"])) == (2, 2, 2)
+
+
+def test_assign_blind_keeps_existing_marks_and_samples_new_items_only():
+    old = [{"key": f"o{i}", "blind": i == 0} for i in range(10)]
+    new = [{"key": f"n{i}"} for i in range(20)]
+    cal.assign_blind(old + new, seed=1)
+    assert [e["blind"] for e in old] == [True] + [False] * 9
+    assert sum(e["blind"] for e in new) == 2
+
+
+class _Info:
+    def __init__(self, host, hostaddr=""):
+        self.host, self.hostaddr = host, hostaddr
+
+
+@pytest.mark.parametrize("host, hostaddr, ok", [
+    ("127.0.0.1", "", True), ("/tmp", "", True), ("db.example.org", "", False), ("localhost", "10.0.0.5", False)])
+def test_connection_host_is_rechecked_after_connect(host, hostaddr, ok):
+    conn = type("C", (), {"info": _Info(host, hostaddr)})()
+    if ok:
+        cal.assert_local_connection(conn)
+    else:
+        with pytest.raises(SystemExit):
+            cal.assert_local_connection(conn)
+
+
+class _Judge:
+    configured = True
+    model = "judge-model"
+
+    def __init__(self, fail_kinds=()):
+        self.fail_kinds = fail_kinds
+
+    def chat_json(self, messages, hint):
+        kind = {cal.DRAFT_HINT: "draft", cal.ALIAS_PRELABEL_HINT: "alias", cal.PAIR_PRELABEL_HINT: "pair"}[hint]
+        if kind in self.fail_kinds:
+            raise RuntimeError("upstream")
+        return {"draft": '{"pairs": []}', "alias": '{"verdict": "correct", "reason": ""}',
+                "pair": '{"judgements": [{"i": 0, "verdict": "correct", "reason": ""}]}'}[kind]
+
+
+def _prepare_args(**over):
+    base = dict(max_calls=1000, max_input_chars=10_000_000, allow_local_content_egress=False, top_up=False,
+                top_up_formulas=20, max_formulas_per_language=900, seed=1)
+    return type("A", (), {**base, **over})()
+
+
+def _pool_a_inputs():
+    fixture = _fixture()
+    fixture["formulas"][0]["reply"] = '{"variables": [{"symbol": "a", "meaning": "the gain"}]}'
+    concepts, formulas = cal.pool_a(fixture)
+    alias = cal.sample_aliases(cal.alias_candidates(concepts, egress=False), per_rule=5, seed=1)
+    return fixture, concepts, {"en": formulas, "zh": []}, alias
+
+
+def test_execute_prepare_records_failed_judge_calls_and_goes_on():
+    fixture, concepts, lists, alias = _pool_a_inputs()
+    items = cal._execute_prepare(_prepare_args(), fixture, None, _Judge(fail_kinds=("alias", "draft")),
+                                 lists, alias, concepts=concepts, previous=None, max_chars=50,
+                                 pair_window=120, hosts={"formula": "f.host", "judge": "j.host"})
+    assert items["incomplete"] is None
+    assert items["alias_items"][0]["prelabel"] is None                    # failed -> None, retried on top-up
+    assert items["formula_cards"][0]["pairs"][0]["prelabel"]["verdict"] == "correct"
+    assert items["egress_log"]["failures"] == {"draft:RuntimeError": 1, "alias_prelabel:RuntimeError": 1}
+    assert "fingerprint_full" not in json.dumps(items)
+
+
+def test_execute_prepare_saves_finished_work_at_the_budget_cap():
+    fixture, concepts, lists, alias = _pool_a_inputs()
+    items = cal._execute_prepare(_prepare_args(max_calls=1), fixture, None, _Judge(), lists, alias,
+                                 concepts=concepts, previous=None, max_chars=50, pair_window=120,
+                                 hosts={"formula": "f.host", "judge": "j.host"})
+    assert items["incomplete"] and len(items["formula_cards"]) == 1          # draft sent, then cap
+    assert items["scan_state"]["en"]["position"] == 1
+
+
+def test_execute_prepare_refuses_local_text_without_egress():
+    fixture, concepts, lists, alias = _pool_a_inputs()
+    lists["en"][0]["pool"] = "B"
+    product = _FakeClient(reply='{"variables": []}')
+    with pytest.raises(AssertionError):
+        cal._execute_prepare(_prepare_args(), fixture, product, _Judge(), lists, [], concepts=concepts,
+                             previous=None, max_chars=50, pair_window=120,
+                             hosts={"formula": "f.host", "judge": "j.host"})
+    assert product.calls == []                     # the product call itself is refused, not only drafts
 
 
 def test_scan_formulas_records_hint_but_empty_and_skips_draft_without_hint():
@@ -640,16 +811,20 @@ def test_write_review_renders_the_items(tmp_path):
     tags.feed(page)
     data = json.loads(tags.data["kg-data"])
     assert data["run"] == "r" and len(data["cards"]) == 101
+    stored = json.loads((tmp_path / "items.json").read_text(encoding="utf-8"))
+    assert stored["ids"][cal.opaque_id("a1")] == "a1"                  # the id -> key map stays local
 
 
 def test_ingest_merges_known_keys_only(tmp_path):
     _run_dir(tmp_path)
     exported = tmp_path / "kg_attrs_labels.json"
+    oid = cal.opaque_id
     exported.write_text(json.dumps({"labels": [
-        {"key": "a1", "verdict": "correct"}, {"key": "g1", "verdict": "unsure"},
-        {"key": "c-en", "missing": 2}, {"key": "nope", "verdict": "correct"}]}), encoding="utf-8")
-    assert cal.ingest_labels(tmp_path, exported) == (3, 1)
-    exported.write_text(json.dumps({"labels": [{"key": "a1", "verdict": "incorrect"}]}), encoding="utf-8")
+        {"key": oid("a1"), "verdict": "correct"}, {"key": oid("g1"), "verdict": "unsure"},
+        {"key": oid("c-en"), "missing": 2}, {"key": oid("nope"), "verdict": "correct"},
+        {"key": "a2", "verdict": "correct"}]}), encoding="utf-8")       # a raw key is not an id
+    assert cal.ingest_labels(tmp_path, exported) == (3, 2)
+    exported.write_text(json.dumps({"labels": [{"key": oid("a1"), "verdict": "incorrect"}]}), encoding="utf-8")
     assert cal.ingest_labels(tmp_path, exported) == (1, 0)
     stored = json.loads((tmp_path / "labels.json").read_text(encoding="utf-8"))
     assert stored == {"a1": {"verdict": "incorrect"}, "g1": {"verdict": "unsure"}, "c-en": {"missing": 2}}
