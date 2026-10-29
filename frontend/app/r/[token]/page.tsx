@@ -33,6 +33,7 @@ import { remarkGfmPlugin } from "../../markdown-gfm";
 import { normalizeMathMarkdown } from "../../math-markdown";
 import { PublicCitationPopover, type PublicCitePopoverState } from "../../public-citation-popover";
 import { rehypeReportReferencesFold } from "../../rehype-report-references-fold";
+import { usePrintExpandedFolds } from "../../use-print-expanded-folds";
 import {
   fetchPublicReport,
   publicCitationRefs,
@@ -105,6 +106,7 @@ export default function PublicReportPage() {
   const params = useParams<{ token: string }>();
   const token = String(params?.token || "");
   const [state, setState] = useState<LoadState>({ kind: "loading" });
+  usePrintExpandedFolds();
 
   useEffect(() => {
     let cancelled = false;

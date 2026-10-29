@@ -118,6 +118,25 @@ test("正文的「参考文献」与页底的「引用出处」都默认收起�
   expect(within(bottom).getAllByRole("listitem")).toHaveLength(2);
 });
 
+test("打印时展开所有收起的引用折叠，打印后只收回打印前收起的那些", async () => {
+  mocks.fetchPublicReport.mockResolvedValue({
+    ...REPORT,
+    content_md: `${REPORT.content_md}\n\n## 参考文献\n\n- [k1] 甲文`,
+  });
+  const { container } = render(<PublicReportPage />);
+  const bodyFold = (await screen.findByRole("heading", { name: "参考文献" })).closest("details")!;
+  const bottom = container.querySelector<HTMLDetailsElement>("details.public-references-fold")!;
+  bottom.open = true; // 读者自己点开的
+
+  window.dispatchEvent(new Event("beforeprint"));
+  expect(bodyFold.open).toBe(true);
+  expect(bottom.open).toBe(true);
+
+  window.dispatchEvent(new Event("afterprint"));
+  expect(bodyFold.open).toBe(false);
+  expect(bottom.open).toBe(true);
+});
+
 test("宽表格与代码块走共用包装，才能在自己的内容块里横向滚动", async () => {
   const { container } = render(<PublicReportPage />);
 

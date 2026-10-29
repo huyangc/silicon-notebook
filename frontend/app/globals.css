@@ -14372,6 +14372,19 @@ button.tag:hover {
   .public-report-references li {
     break-inside: avoid;
   }
+
+  /* 默认收起的引用折叠打印时必须展开(use-print-expanded-folds.ts 在 beforeprint
+     里把它们打开;这条是不触发该事件的打印路径上的兜底)。分享页的提问导航圆点不进
+     纸面。 */
+  details.report-references-fold::details-content,
+  details.public-references-fold::details-content {
+    content-visibility: visible;
+    display: contents;
+  }
+
+  .public-turn-nav {
+    display: none;
+  }
 }
 
 /* ── 群组管理（群组知识共享 P1-T4 / P2）────────────────────────────────────────

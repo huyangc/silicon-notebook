@@ -77,6 +77,10 @@ import { appSourceModules, findFunction, parseModule, parseText } from "../../te
 const NOT_A_VIEW_OWNER = new Map([
   ["use-floating-window.ts", "拖动窗口几何状态，不持有 notebook/actor 视图"],
   [
+    "use-print-expanded-folds.ts",
+    "打印前后开合引用折叠的 window 事件监听,返回 void:没有 notebook/actor 视图,也没有返回字段可判",
+  ],
+  [
     "use-dialog-focus.ts",
     "浮层面板的焦点/Tab 陷阱/Escape 约定,返回 void:没有 notebook/actor 视图,也没有返回字段可判",
   ],
