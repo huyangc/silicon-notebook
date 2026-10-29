@@ -520,8 +520,9 @@ export function CitationPopover({
   imageCaptions?: boolean;
   /** 打开（及换一条引用）时把焦点移进卡片，Esc 收起时交还给打开前的那个标记。公开
    *  分享页用：那里的卡片上没有任何可聚焦的控件，不移焦的话键盘用户滚不动被限高
-   *  裁掉的长摘录（此前点标记会把焦点移到页底清单那一条，这是它的等价物）。点卡片
-   *  外收起时不抢回焦点——那一下点的地方才是用户要去的。 */
+   *  裁掉的长摘录（此前点标记会把焦点移到页底清单那一条，这是它的等价物）。深度报告
+   *  同理。每次打开都重新交接（同一条引用在正文里出现多次时，Esc 回到刚按下的那个
+   *  标记）。点卡片外收起时不抢回焦点——那一下点的地方才是用户要去的。 */
   takeFocus?: boolean;
   /** Keep the thumbnail trigger mounted while its page-level preview is open,
    * so the modal coordinator can return focus to a live element. */
@@ -534,7 +535,9 @@ export function CitationPopover({
     const active = document.activeElement;
     if (active instanceof HTMLElement && !ref.current?.contains(active)) returnFocusRef.current = active;
     ref.current?.focus({ preventScroll: true });
-  }, [takeFocus, reference.id]);
+    // anchorRect 是每次点标记时新量的一份：以它为「这一次打开」的身份，而不是
+    // reference.id——同一条引用的另一个标记被按下时 id 不变，焦点与回落目标却得换。
+  }, [takeFocus, anchorRect]);
   const [pos, setPos] = useState<{ top: number; left: number }>(
     () => ({ top: anchorRect.bottom + 6, left: anchorRect.left })
   );

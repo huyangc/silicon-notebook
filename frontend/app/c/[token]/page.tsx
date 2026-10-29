@@ -419,6 +419,9 @@ function PublicTurnView({
     setPreviewImage(at >= 0 ? { items, index: at } : { items: [{ image, referenceLabel }], index: 0 });
   };
   const openImagePreview = (image: PublicImageT, referenceLabel: string, returnFocusKey: string | null) => {
+    // 引用卡在 window 捕获期认领 Esc：预览盖在它上面时还开着的话，Esc 会先关掉底下
+    // 那张卡（焦点也被交还到预览背后）。最上层先关——打开预览就收起引用卡。
+    onClosePopover();
     previewReturnFocusRef.current = returnFocusKey;
     openPreview(image, referenceLabel);
   };
