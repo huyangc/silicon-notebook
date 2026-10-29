@@ -251,6 +251,18 @@ test("打开正文附图预览时收起引用卡，Esc 只关预览这一层", a
   fireEvent.keyUp(window, { key: "Escape" });
 });
 
+test("某轮引用出处被截断时，收起的折叠头上就写明只展示前 N 条", async () => {
+  mocks.fetchPublicConversation.mockResolvedValue({
+    ...CONVERSATION,
+    turns: [{ ...CONVERSATION.turns[0], truncated_references: true }],
+  });
+  render(<PublicConversationPage />);
+
+  const summary = await screen.findByText("引用出处 · 引用过多，只展示前 2 条");
+  expect(summary.tagName).toBe("SUMMARY");
+  expect(summary.closest("details")).not.toHaveAttribute("open");
+});
+
 test("多轮问答右缘有提问导航圆点，点圆点跳到对应那一轮", async () => {
   const user = userEvent.setup();
   render(<PublicConversationPage />);

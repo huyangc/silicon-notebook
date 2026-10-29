@@ -224,7 +224,12 @@ function PublicReportView({ report }: { report: PublicReportT }) {
 
       {report.references.length > 0 && (
         <details className="public-report-references public-references-fold">
-          <summary>引用出处 · {report.references.length} 条</summary>
+          {/* 截断说明放在折叠头上：收起时也看得见，不让投影条数被读成完整清单。 */}
+          <summary>
+            引用出处 · {report.truncated_references
+              ? `引用过多，只展示前 ${report.references.length} 条`
+              : `${report.references.length} 条`}
+          </summary>
           <p className="public-report-note">
             正文里的编号对应下面的条目。分享副本只保留摘录，不能打开原始资料。
           </p>
@@ -254,11 +259,6 @@ function PublicReportView({ report }: { report: PublicReportT }) {
               </li>
             ))}
           </ol>
-          {report.truncated_references && (
-            <p className="public-report-note">
-              引用出处过多，此处只展示前 {report.references.length} 条。
-            </p>
-          )}
         </details>
       )}
 
