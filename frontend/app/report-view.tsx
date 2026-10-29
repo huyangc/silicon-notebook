@@ -20,8 +20,6 @@ import { remarkAnswerInference } from "./answer-inference";
 import {
   computeSourceTierCounts, referenceByAnchorKey, type AnswerReference,
 } from "./answer-formatting";
-import { API_BASE } from "./api-config";
-import { AuthedImage } from "./authed-image";
 import { useCopyResult, type CopyResult } from "./copy-result";
 import { EffortPicker, type EffortOption } from "./effort-picker";
 import {
@@ -40,6 +38,8 @@ import { quotedPhraseHint } from "./query-syntax";
 import { ReportScopeHint, type ReportScopeHintProps } from "./report-scope-hint";
 import { ReportShareConfirm } from "./report-share-confirm";
 import { ReportDocument } from "./report-document";
+import { CitationPopover } from "./citation-card";
+import { rehypeReportReferencesFold } from "./rehype-report-references-fold";
 import { useClientPagination } from "./use-client-pagination.ts";
 import {
   CITATION_IMAGE_SLOT_ATTRIBUTE,
@@ -49,7 +49,6 @@ import {
   type CitationImageOrder,
   type CitationImageSlotItem,
 } from "./rehype-citation-images";
-import { sourceImageAssetUrl } from "./source-image";
 import { isAdvanced, type UiMode } from "./ui-mode.ts";
 import { WaitingWishCarousel } from "./waiting-wish-carousel";
 import {
@@ -165,7 +164,8 @@ export async function copyReportContent(text: string): Promise<void> {
 // ReportMarkdown:复用 answer-markdown.tsx 的引用基建。
 // 正文里的 [k\d+] 现为全局按来源去重编号,后端保证每个内联 marker 都有对应
 // reference;由 references 构造 refsByKey → remarkCitations 把 [k] 转成可点击
-// cite-chip,点击高亮并滚动到「参考文献」段(h2 覆盖挂 id=report-references)。
+// cite-chip,点击在标记旁弹出与问答**同一张**引用卡(CitationPopover)。正文末尾的
+// 「参考文献」一节默认折叠(rehypeReportReferencesFold),h2 照旧挂 id=report-references。
 // ---------------------------------------------------------------------------
 
 /**
@@ -204,7 +204,7 @@ function reportReferencesAsAnswerReferences(
 type ReportMarkdownRenderState = Readonly<{
   refsByKey: Record<string, AnswerReference>;
   selectedRefKey: string | null;
-  onSelectReference: (key: string) => void;
+  onSelectReference: (key: string, rect: DOMRect) => void;
   renderCitationImages: (items: readonly CitationImageSlotItem[]) => React.ReactNode;
 }>;
 
@@ -219,7 +219,7 @@ function ReportMarkdownLink({ href, children }: { href?: string; children?: Reac
         <button
           type="button"
           className={`cite-chip${state.selectedRefKey === key ? " active" : ""}`}
-          onClick={() => state.onSelectReference(key)}
+          onClick={(event) => state.onSelectReference(key, event.currentTarget.getBoundingClientRect())}
         >
           {children}
         </button>
@@ -276,12 +276,14 @@ const REPORT_MARKDOWN_COMPONENTS = {
 // 默认参数必须是模块级常量：写成 `references = []` 会让省略这个 prop 的调用方每次
 // 渲染拿到一个新数组，下面按引用比较的 useMemo 永远失效（同 answer-markdown.tsx）。
 const NO_REPORT_REFERENCES: ReportDetailT["references"] = [];
+const NO_NOTEBOOK_NAMES: Record<string, string> = {};
 
 export function ReportMarkdown({
   markdown,
   references = NO_REPORT_REFERENCES,
   notebookId = "",
   onPreviewImage,
+  imagePreviewOpen = false,
 }: {
   markdown: string;
   references?: ReportDetailT["references"];
@@ -299,13 +301,19 @@ export function ReportMarkdown({
    * 整本画册（按正文顺序）而不是单张，左右切换因此能走遍整份报告。
    */
   onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
+  /**
+   * 页面级图片预览此刻是否开着。引用卡上的缩略图打开预览时，卡片要保持挂载
+   * （关预览后焦点回到缩略图），并把 Esc 让给预览——与问答侧同一个开关。
+   */
+  imagePreviewOpen?: boolean;
 }) {
-  const [selectedRefKey, setSelectedRefKey] = useState<string | null>(null);
+  const [citePopover, setCitePopover] = useState<{ key: string; rect: DOMRect } | null>(null);
+  const selectedRefKey = citePopover?.key ?? null;
   const refsByKey = useMemo(
     () => referenceByAnchorKey(reportReferencesAsAnswerReferences(references)),
     [references],
   );
-  const selectedReference = selectedRefKey ? refsByKey[selectedRefKey]?.anchor : undefined;
+  const popoverReference = citePopover ? refsByKey[citePopover.key] : undefined;
   // 引用 key 与正文标记同一个命名空间：后端在写 content_md 之前已经把每节的局部
   // 标记全局重编号成 `kN`，`references[i].key` 就是正文里写的那个 N（report_engine
   // 的 `_sub`/`ref_pos`）。所以这里按 key 建映射即可，不需要按节偏移再算一次。
@@ -338,6 +346,7 @@ export function ReportMarkdown({
     [onPreviewImage, citationImageOrder, refsByKey, notebookId],
   );
   const previewImage = onPreviewImage ? previewImageCallback : undefined;
+  const closeCitePopover = useCallback(() => setCitePopover(null), []);
   const renderCitationImages = useCallback(
     (items: readonly CitationImageSlotItem[]) => {
       if (!notebookId) return null;
@@ -367,6 +376,7 @@ export function ReportMarkdown({
         [rehypeCitationImages, imageIdsByCitationKey, citationImageOrder] as [
           typeof rehypeCitationImages, CitationImageIdsByKey, CitationImageOrder,
         ],
+        rehypeReportReferencesFold,
       ]}
       // 默认 urlTransform 会清掉 cite: 协议 → 徽章 href 丢失;放行 cite:,
       // 其余仍走默认清洗(防 javascript: 等不安全协议)。
@@ -385,12 +395,7 @@ export function ReportMarkdown({
     () => ({
       refsByKey,
       selectedRefKey,
-      onSelectReference: (key: string) => {
-        setSelectedRefKey(key);
-        document
-          .getElementById("report-references")
-          ?.scrollIntoView({ behavior: "smooth", block: "start" });
-      },
+      onSelectReference: (key: string, rect: DOMRect) => setCitePopover({ key, rect }),
       renderCitationImages,
     }),
     [refsByKey, selectedRefKey, renderCitationImages],
@@ -400,52 +405,21 @@ export function ReportMarkdown({
       <ReportMarkdownRenderContext.Provider value={renderContextValue}>
         {markdownTree}
       </ReportMarkdownRenderContext.Provider>
-      {selectedReference && (
-        <aside className="report-reference-detail" aria-label="引用原文">
-          <strong>{selectedReference.source_title || selectedReference.label}</strong>
-          {selectedReference.location_label && <span>{selectedReference.location_label}</span>}
-          {selectedReference.source_file_name
-            && selectedReference.source_file_name !== selectedReference.source_title && (
-              <small title={selectedReference.source_file_name}>
-                原始文件：{selectedReference.source_file_name}
-              </small>
-            )}
-          {selectedReference.snippet && <blockquote>{selectedReference.snippet}</blockquote>}
-          {/* 本段附图（T6）：与上方引证内容（snippet/来源/原始文件）用独立区块 +
-              顶部分隔线区分——不是模型引用过的证据，只是证据片段附近的图，
-              与 answer-panel.tsx SelectedReferenceDetail 同一视觉语义、同一套
-              .cite-detail-images CSS（该 class 不 scope 在 .cite-popover
-              下）。缺字段（旧报告/无图引用）或没有 notebookId（无资产代理端点
-              可用，同 T2 的既有防御式惯例）时整体不渲染，AuthedImage 保持
-              懒加载。这里刻意**不**接 onOpenSource 跳转（对比 answer-panel.tsx
-              第 922 行 Ask 侧图片可点击跳转来源）：本组件没有这个 prop——报告
-              侧引用详情区本就没有"打开来源"的交互面，与 Ask 侧的不对称是 v1
-              范围内的刻意决定，不是遗漏。
-              二期（正文内联引用图片）保留本区块不动，与 Ask 侧的「正文图片区 +
-              引用浮层缩略图」同构：正文那份是**按资产全篇去重**的（同一张图只在
-              第一次被引用处出现一次），而这里是「这一条引用挂了哪些图」的完整
-              清单，两者回答的不是同一个问题。 */}
-          {(selectedReference.images?.length ?? 0) > 0 && notebookId && (
-            <div className="cite-detail-images">
-              <span className="cite-detail-images-label">本段附图</span>
-              <ul className="cite-detail-image-list">
-                {selectedReference.images!.map((image) => {
-                  const imageUrl = sourceImageAssetUrl(API_BASE, notebookId, image.asset_id);
-                  return (
-                    <li key={image.element_id} className="cite-detail-image-item">
-                      {imageUrl
-                        ? <AuthedImage url={imageUrl} alt={image.caption || "附图"} />
-                        : <p className="tool-hint">图片不可用</p>}
-                      {image.caption && (
-                        <small className="cite-detail-image-caption">{image.caption}</small>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          )}
-        </aside>
+      {/* 引用卡与问答同一个组件。信息与此前页底的「引用原文」详情一致：来源标题、
+          位置、原始文件、摘录、本段附图（图注可见——报告详情一直如此，见
+          imageCaptions）。报告侧没有「查看原文」「知识图谱」的交互面，所以不传那些
+          回调，卡片上也就不出那些按钮（v1 范围内的刻意决定，不是遗漏）。 */}
+      {citePopover && popoverReference && (
+        <CitationPopover
+          reference={popoverReference}
+          notebookId={notebookId || null}
+          notebookNames={NO_NOTEBOOK_NAMES}
+          anchorRect={citePopover.rect}
+          onClose={closeCitePopover}
+          onPreviewImage={previewImage}
+          imageCaptions
+          dismissSuspended={imagePreviewOpen}
+        />
       )}
     </div>
   );
@@ -1412,6 +1386,8 @@ export interface ReportsPanelProps {
    * 只是不可点击放大。
    */
   onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
+  /** 那一格预览此刻是否开着（引用卡据此让出 Esc、保持缩略图挂载）。 */
+  imagePreviewOpen?: boolean;
   /**
    * 「就此追问」的承接方（page.tsx）：取报告生成时的检索范围、切到问答页签、开新会话并挂上
    * 这份报告。只对已完成的报告出现；不传时不渲染按钮。返回的 promise 在打开结束后落定，
@@ -1500,6 +1476,7 @@ export function ReportsPanel({
   maxSubqueriesPerSection = DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
   uiMode = "advanced",
   onPreviewImage,
+  imagePreviewOpen = false,
   onFollowUp,
 }: ReportsPanelProps) {
   const {
@@ -1851,6 +1828,7 @@ export function ReportsPanel({
               references={active.references}
               notebookId={notebookId}
               onPreviewImage={onPreviewImage}
+              imagePreviewOpen={imagePreviewOpen}
             />
           </ReportDocument>
         ) : (

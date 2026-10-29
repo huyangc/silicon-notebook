@@ -6519,6 +6519,7 @@ export default function Home() {
                     // 两个面同一时刻只有一个可见（chatMode 二选一），预览请求的形状与
                     // 资产 URL 也逐字相同，没有理由为报告另开一格不受协调器管辖的弹窗。
                     onPreviewImage={openAnswerImagePreview}
+                    imagePreviewOpen={rootModals.view("answer-image-preview").open}
                     onFollowUp={followUpReport}
                   />
                 )}

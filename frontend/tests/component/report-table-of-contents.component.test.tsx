@@ -30,6 +30,28 @@ test("目录使用最终正文的标题与顺序，不使用生成前的大纲",
   expect(screen.getByRole("heading", { name: "参考文献" })).toHaveAttribute("id", "report-references");
 });
 
+test("正文末尾的「参考文献」一节默认收起、可展开，目录跳过去时自动展开", async () => {
+  const user = userEvent.setup();
+  const markdown = "## 结论\n\n主流是 Transformer。\n\n## 参考文献\n\n- 甲文 · p. 2\n- 乙文 · p. 5\n\n> 引证分布：2 处\n\n## 局限\n\n证据有限。";
+  const { container } = render(documentView(markdown));
+
+  const heading = screen.getByRole("heading", { name: "参考文献" });
+  heading.scrollIntoView = vi.fn();
+  const fold = heading.closest("details");
+  expect(fold).toHaveClass("report-references-fold");
+  expect(fold).not.toHaveAttribute("open");
+  // 标题在 summary 里：收起时仍可见；清单与引证分布都收进去，后面的「局限」不收。
+  expect(heading.closest("summary")?.parentElement).toBe(fold);
+  expect(fold).toHaveTextContent("甲文 · p. 2");
+  expect(fold).toHaveTextContent("引证分布");
+  expect(fold).not.toHaveTextContent("证据有限");
+  expect(container.querySelectorAll("details")).toHaveLength(1);
+
+  await user.click(within(screen.getByRole("navigation", { name: "报告目录" })).getByRole("button", { name: "参考文献" }));
+  expect(fold).toHaveAttribute("open");
+  expect(heading).toHaveFocus();
+});
+
 test("同名标题分别跳转到对应的正文位置，并移动键盘焦点", async () => {
   const user = userEvent.setup();
   render(documentView("## 相同标题\n\n第一节\n\n### 子节\n\n## 相同标题\n\n第二节"));

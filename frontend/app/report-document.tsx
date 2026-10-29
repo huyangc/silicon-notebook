@@ -45,6 +45,10 @@ export function ReportDocument({ markdown, children }: { markdown: string; child
                   className="report-contents-link"
                   aria-current={selectedHeading === heading.element ? "location" : undefined}
                   onClick={() => {
+                    // 标题住在折叠节（参考文献）的 summary 里时，跳过去顺手展开它：
+                    // 从目录点「参考文献」就是要看那份清单。
+                    const fold = heading.element.closest("summary")?.parentElement;
+                    if (fold instanceof HTMLDetailsElement) fold.open = true;
                     const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
                     heading.element.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
                     heading.element.tabIndex = -1;

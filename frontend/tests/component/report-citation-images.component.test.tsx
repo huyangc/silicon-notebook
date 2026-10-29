@@ -1,6 +1,6 @@
 // 深度报告的引用图片。两期各占一半:
 //
-// * T6(一期):ReportMarkdown 的引用详情区渲染 reference.images(后端
+// * T6(一期):ReportMarkdown 的引用卡(与问答同一张浮层)渲染 reference.images(后端
 //   `EvidenceContextService.attach_reference_images` 装配)——「本段附图」区块;
 // * 二期:正文接上 Ask 的同一条内联图片管线(`rehypeCitationImages` 块级落位 +
 //   跨引用按资产去重 + `InlineCitationImages` 渲染 + 页内放大预览)。
@@ -66,7 +66,8 @@ function renderBody(
   );
 }
 
-const detailCard = () => screen.getByRole("complementary", { name: "引用原文" });
+// 引用详情 = 与问答同一张引用浮层(.cite-popover,role=dialog)。
+const detailCard = () => screen.getByRole("dialog");
 
 // ---------------------------------------------------------------------------
 // T6:引用详情区的「本段附图」
@@ -354,7 +355,7 @@ test("切换到另一份报告时不保留上一份报告选中的引用详情�
 
   await screen.findByRole("img", { name: "图 1：时钟树收敛示意" });
   await user.click(screen.getByRole("button", { name: "[1]" }));
-  expect(screen.getByRole("complementary", { name: "引用原文" })).toBeInTheDocument();
+  expect(screen.getByRole("dialog")).toHaveClass("cite-popover");
   await waitFor(() => expect(fetchInternalAssetBlob).toHaveBeenCalledTimes(2));
 
   vi.mocked(fetchInternalAssetBlob).mockClear();
@@ -367,7 +368,7 @@ test("切换到另一份报告时不保留上一份报告选中的引用详情�
   );
 
   await screen.findByRole("img", { name: "图 2：另一张附图" });
-  expect(screen.queryByRole("complementary", { name: "引用原文" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   expect(fetchInternalAssetBlob).toHaveBeenCalledTimes(1);
 });
 

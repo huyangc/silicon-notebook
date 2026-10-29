@@ -146,6 +146,61 @@ test("正文 [k] 标记编号取自 key 的序号，且每轮号段互相隔离"
   expect(t1k1!.querySelector(".public-report-refnum")!.textContent).toBe("1");
 });
 
+test("点正文引用在标记旁弹出与站内同一张引用卡，清单默认折叠", async () => {
+  const user = userEvent.setup();
+  const { container } = render(<PublicConversationPage />);
+
+  const chip = await screen.findByRole("button", { name: "[7]" });
+  // 每轮的引用清单折叠在回答下方，不再铺满整屏。
+  const lists = container.querySelectorAll("details.public-references-fold");
+  expect(lists).toHaveLength(2);
+  lists.forEach((list) => expect(list).not.toHaveAttribute("open"));
+  expect(lists[0].querySelector("summary")).toHaveTextContent("引用出处 · 2 条");
+
+  await user.click(chip);
+  const card = await screen.findByRole("dialog");
+  expect(card).toHaveClass("cite-popover");
+  expect(card).toHaveTextContent("[7]");
+  expect(card).toHaveTextContent("乙文");
+  expect(card).toHaveTextContent("乙摘录");
+  expect(within(card).queryAllByRole("link")).toHaveLength(0);
+  expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+
+  // 第二轮自己的号段：它的 [1] 是丙文，不是第一轮的甲文。
+  await user.click(screen.getAllByRole("button", { name: "[1]" })[1]);
+  await waitFor(() => expect(screen.getByRole("dialog")).toHaveTextContent("丙文"));
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+
+  fireEvent.keyDown(window, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  fireEvent.keyUp(window, { key: "Escape" });
+});
+
+test("多轮问答右缘有提问导航圆点，点圆点跳到对应那一轮", async () => {
+  const user = userEvent.setup();
+  render(<PublicConversationPage />);
+
+  const nav = await screen.findByRole("navigation", { name: "本次会话的提问" });
+  const dots = within(nav).getAllByRole("button");
+  expect(dots).toHaveLength(3);
+  expect(dots[1]).toHaveAccessibleName("它们的区别是什么？");
+
+  await user.click(dots[1]);
+  const scroll = vi.mocked(Element.prototype.scrollIntoView);
+  expect(scroll).toHaveBeenCalled();
+  expect(scroll.mock.contexts.at(-1)).toBe(document.getElementById("chat-turn-1"));
+  expect(document.getElementById("chat-turn-1")).toHaveTextContent("它们的区别是什么？");
+  expect(dots[1]).toHaveAttribute("aria-current", "true");
+});
+
+test("只有一轮的分享没有提问导航", async () => {
+  mocks.fetchPublicConversation.mockResolvedValue({ ...CONVERSATION, turns: [CONVERSATION.turns[0]] });
+  render(<PublicConversationPage />);
+
+  await screen.findByText("LLM 有哪些架构？");
+  expect(screen.queryByRole("navigation", { name: "本次会话的提问" })).toBeNull();
+});
+
 test("宽表格与代码块走共用包装，才能在自己的内容块里横向滚动", async () => {
   const { container } = render(<PublicConversationPage />);
 
@@ -398,7 +453,7 @@ test("个人记忆引用（后端的结构化布尔 is_memory）保留标题与�
   });
   const { container } = render(<PublicConversationPage />);
 
-  await screen.findByText("引用出处");
+  await screen.findByText("LLM 有哪些架构？");
   const memory = container.querySelector("#ref-t0-k1");
   expect(memory).not.toBeNull();
   expect(memory!.querySelector("strong")!.textContent).toBe("我的笔记");
@@ -420,7 +475,7 @@ test("只认结构化布尔：位置标签恰好叫 Memory 的普通文档引用
   });
   const { container } = render(<PublicConversationPage />);
 
-  await screen.findByText("引用出处");
+  await screen.findByText("LLM 有哪些架构？");
   expect(container.querySelector("#ref-t0-k1 .public-report-locus")!.textContent).toBe("Memory");
   expect(screen.queryByText("作者的个人记忆")).toBeNull();
 });

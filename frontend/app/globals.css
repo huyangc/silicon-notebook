@@ -3012,6 +3012,62 @@ button.chat-session-card {
   font-size: 21px;
 }
 
+/* 正文末尾的「参考文献」一节默认收起(rehype-report-references-fold.ts):引用改成
+   在标记旁弹卡片后,整节平铺只会把读者往下推。h2 住在 summary 里,收起时标题照旧是
+   一条带分隔线的章节标题,左侧小三角提示可展开;展开后与普通一节同样的竖向节奏。 */
+.report-references-fold {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.report-references-fold > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.report-references-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.report-references-fold > summary::before {
+  content: "";
+  flex: none;
+  width: 0;
+  height: 0;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 7px solid #8a95a6;
+  transform: translateY(-2px);
+  transition: transform 0.15s ease;
+}
+
+.report-references-fold[open] > summary::before {
+  transform: translateY(-2px) rotate(90deg);
+}
+
+.report-references-fold > summary > h2 {
+  flex: 1;
+  min-width: 0;
+}
+
+.report-references-fold > summary:hover > h2 {
+  color: var(--blue);
+}
+
+.report-references-fold > summary:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .report-references-fold > summary::before { transition: none; }
+}
+
 .report-markdown h3 {
   font-size: 19px;
 }
@@ -3040,36 +3096,6 @@ button.chat-session-card {
   padding: 2px 14px;
   border-left: 3px solid #c9d4e6;
   color: #4f5663;
-}
-
-.report-reference-detail {
-  margin-top: 6px;
-  padding: 12px 14px;
-  border: 1px solid #dce3ed;
-  border-radius: 10px;
-  background: #f8fafc;
-  display: grid;
-  gap: 6px;
-}
-
-.report-reference-detail > span {
-  color: #6b7280;
-  font-size: 12px;
-}
-
-.report-reference-detail > small {
-  color: #6b7280;
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.report-reference-detail blockquote {
-  padding-left: 10px;
-  border-left-color: #7c8da8;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 
 .report-markdown hr {
@@ -8376,6 +8402,10 @@ button.tag:hover {
 .cite-detail-card small {
   color: #6b7686;
   font-size: 12px;
+}
+
+.cite-detail-card .cite-detail-note {
+  color: #8a5a00;
 }
 
 .cite-detail-card .cite-source-file {
@@ -13968,13 +13998,6 @@ button.tag:hover {
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--panel);
-  /* 正文编号跳过来时别贴着视口顶边。 */
-  scroll-margin: 24px 0;
-}
-
-.public-report-references li.active {
-  border-color: #111827;
-  box-shadow: 0 0 0 3px rgba(31, 94, 255, 0.13);
 }
 
 .public-report-refnum {
@@ -14111,6 +14134,47 @@ button.tag:hover {
   grid-template-columns: auto minmax(0, 1fr);
   gap: 10px;
   align-items: start;
+  /* 提问导航跳过来时闪的那圈 box-shadow(.chat-user-flash)要有圆角可依。 */
+  border-radius: 12px;
+}
+
+/* 提问导航圆点跳到某一轮时别贴着视口顶边。 */
+.public-conversation .public-turn {
+  scroll-margin-top: 20px;
+}
+
+/* 分享页的提问导航:同一个 ChatTurnNav,只是随窗口滚动——导轨钉在视口右缘,
+   而不是站内对话区那一行网格(那套 absolute + grid-row 定位在这里没有网格可贴)。
+   窄屏隐藏沿用 .chat-turn-nav 的既有媒体查询。 */
+.public-turn-nav.chat-turn-nav {
+  position: fixed;
+  grid-row: auto;
+  top: 0;
+  bottom: 0;
+  right: 10px;
+}
+
+/* 分享页的引用出处清单默认折叠(会话每轮一份、报告页底一份):引用看正文标记旁
+   的浮层(与站内一致),这里只是备查。 */
+.public-references-fold {
+  gap: 0;
+  padding-top: 14px;
+}
+
+.public-references-fold[open] {
+  gap: 12px;
+}
+
+.public-references-fold > summary {
+  width: fit-content;
+  cursor: pointer;
+  color: #5e6a79;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.public-references-fold > summary:hover {
+  color: #2c3a4d;
 }
 
 .public-turn-role {
