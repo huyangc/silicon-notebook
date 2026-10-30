@@ -18,6 +18,39 @@ function readingPath(headings: ReportHeading[], index: number): Set<number> {
   return path;
 }
 
+function scrollingAncestors(element: HTMLElement): HTMLElement[] {
+  const ancestors: HTMLElement[] = [];
+  for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+    if (/(auto|scroll|hidden|clip)/.test(getComputedStyle(parent).overflowY)) ancestors.push(parent);
+  }
+  return ancestors;
+}
+
+function readingBounds(containers: HTMLElement[]) {
+  let top = 0;
+  let bottom = window.innerHeight;
+  for (const container of containers) {
+    const rect = container.getBoundingClientRect();
+    top = Math.max(top, rect.top);
+    bottom = Math.min(bottom, rect.bottom);
+  }
+  return { top, bottom };
+}
+
+function keepCurrentVisible(nav: HTMLElement) {
+  const active = nav.querySelector<HTMLElement>('[aria-current="location"]');
+  if (!active) return;
+  const viewport = readingBounds(scrollingAncestors(nav));
+  const bounds = nav.getBoundingClientRect();
+  const top = Math.max(viewport.top, bounds.top);
+  const bottom = Math.min(viewport.bottom, bounds.bottom);
+  if (bottom <= top) return;
+  const item = active.getBoundingClientRect();
+  // Scroll only the contents, never the report or its surrounding panels.
+  if (item.top < top) nav.scrollTop += item.top - top;
+  else if (item.bottom > bottom) nav.scrollTop += item.bottom - bottom;
+}
+
 /** Read the rendered Markdown so fences, inline formatting and duplicate titles
  * follow the very same structure the reader sees, without parsing it twice. */
 export function ReportDocument({ markdown, children }: { markdown: string; children: ReactNode }) {
@@ -60,18 +93,20 @@ export function ReportDocument({ markdown, children }: { markdown: string; child
     if (!body || !headings.length) return;
     let frame: number | null = null;
     let current: HTMLHeadingElement | null = null;
-    const scrollContainers: HTMLElement[] = [];
-    for (let parent = body.parentElement; parent; parent = parent.parentElement) {
-      if (/(auto|scroll|hidden|clip)/.test(getComputedStyle(parent).overflowY)) scrollContainers.push(parent);
-    }
+    const scrollContainers = scrollingAncestors(body);
     const update = () => {
       frame = null;
-      let top = 0;
-      let bottom = window.innerHeight;
-      for (const container of scrollContainers) {
-        const rect = container.getBoundingClientRect();
-        top = Math.max(top, rect.top);
-        bottom = Math.min(bottom, rect.bottom);
+      const { top, bottom } = readingBounds(scrollContainers);
+      const nav = contentsRef.current;
+      if (nav && bottom > top) {
+        const bounds = nav.getBoundingClientRect();
+        if (bounds.top < bottom && bounds.bottom > top) {
+          const height = `${bottom - Math.max(top, bounds.top)}px`;
+          if (nav.style.getPropertyValue("--report-contents-available-height") !== height) {
+            nav.style.setProperty("--report-contents-available-height", height);
+            keepCurrentVisible(nav);
+          }
+        }
       }
       const rect = body.getBoundingClientRect();
       if (bottom <= top || rect.bottom <= top || rect.top >= bottom) return;
@@ -108,13 +143,7 @@ export function ReportDocument({ markdown, children }: { markdown: string; child
 
   useEffect(() => {
     const nav = contentsRef.current;
-    const active = nav?.querySelector<HTMLElement>('[aria-current="location"]');
-    if (!nav || !active) return;
-    const bounds = nav.getBoundingClientRect();
-    const item = active.getBoundingClientRect();
-    // Scroll only the contents, never the report or its surrounding panels.
-    if (item.top < bounds.top) nav.scrollTop += item.top - bounds.top;
-    else if (item.bottom > bounds.bottom) nav.scrollTop += item.bottom - bounds.bottom;
+    if (nav) keepCurrentVisible(nav);
   }, [selectedHeading, expanded]);
 
   let visibleCurrent = headings.findIndex((heading) => heading.element === selectedHeading);

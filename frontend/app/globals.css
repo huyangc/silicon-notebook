@@ -2718,7 +2718,7 @@ button.chat-session-card {
 .report-contents {
   position: sticky;
   top: 16px;
-  max-height: calc(100dvh - 48px);
+  max-height: min(calc(100dvh - 48px), var(--report-contents-available-height, 100dvh));
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 12px 8px;
@@ -2819,7 +2819,7 @@ button.chat-session-card {
 
   .report-contents {
     position: static;
-    max-height: 220px;
+    max-height: min(220px, var(--report-contents-available-height, 220px));
   }
 }
 
