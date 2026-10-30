@@ -130,12 +130,15 @@ export function ReportDocument({ markdown, children }: { markdown: string; child
     // Capture also sees scrolling inside the notebook workspace's own panels.
     window.addEventListener("scroll", schedule, true);
     window.addEventListener("resize", schedule);
+    // Native folds above the report move headings without resizing the body.
+    window.addEventListener("toggle", schedule, true);
     const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(schedule) : null;
     observer?.observe(body);
     scrollContainers.forEach((container) => observer?.observe(container));
     return () => {
       window.removeEventListener("scroll", schedule, true);
       window.removeEventListener("resize", schedule);
+      window.removeEventListener("toggle", schedule, true);
       observer?.disconnect();
       if (frame !== null) window.cancelAnimationFrame(frame);
     };
