@@ -144,7 +144,7 @@ export function ReportDocument({ markdown, children }: { markdown: string; child
   useEffect(() => {
     const nav = contentsRef.current;
     if (nav) keepCurrentVisible(nav);
-  }, [selectedHeading, expanded]);
+  }, [selectedHeading]);
 
   let visibleCurrent = headings.findIndex((heading) => heading.element === selectedHeading);
   if (visibleCurrent >= 0) {
