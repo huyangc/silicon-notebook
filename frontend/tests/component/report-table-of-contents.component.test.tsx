@@ -235,3 +235,30 @@ test("目录只在面板裁剪后的可见区域内滚动当前项，缩小面�
   await waitFor(() => expect(contents.scrollTop).toBe(180));
   expect(screen.getByRole("region", { name: "阅读区域" }).scrollTop).toBe(0);
 });
+
+test("展开正文上方的资料基础后，无需滚动也会重新定位当前阅读章节", async () => {
+  const user = userEvent.setup();
+  let shift = 0;
+  const rect = (top: number, bottom: number) => ({ top, bottom, height: bottom - top, left: 0, right: 600, width: 600, x: 0, y: top, toJSON() {} });
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    if (this.getAttribute("aria-label") === "阅读区域") return rect(100, 500);
+    if (this.tagName === "H2") {
+      const top = (this.textContent === "乙章" ? 250 : 150) + shift;
+      return rect(top, top + 25);
+    }
+    return rect(shift, 1500 + shift);
+  });
+  vi.spyOn(HTMLElement.prototype, "getClientRects").mockReturnValue([rect(0, 25)] as unknown as DOMRectList);
+  render(<section aria-label="阅读区域" style={{ overflowY: "auto" }}>
+    <details><summary>资料基础</summary><p>资料统计</p></details>
+    {documentView("## 甲章\n\n## 乙章")}
+  </section>);
+  const contents = screen.getByRole("navigation", { name: "报告目录" });
+  expect(within(contents).getByRole("button", { name: "乙章" })).toHaveAttribute("aria-current", "location");
+  shift = 200;
+  await user.click(screen.getByText("资料基础"));
+  await waitFor(() => expect(within(contents).getByRole("button", { name: "甲章" })).toHaveAttribute("aria-current", "location"));
+  shift = 0;
+  await user.click(screen.getByText("资料基础"));
+  await waitFor(() => expect(within(contents).getByRole("button", { name: "乙章" })).toHaveAttribute("aria-current", "location"));
+});
