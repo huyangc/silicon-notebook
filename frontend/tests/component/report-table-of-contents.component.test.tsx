@@ -195,3 +195,35 @@ test("跟踪滚动容器可见中心，展开当前路径且手动收起持续�
   await waitFor(() => expect(within(contents).getByRole("button", { name: "甲节" })).toHaveAttribute("aria-current", "location"));
   expect(within(contents).queryByRole("button", { name: "乙节" })).not.toBeInTheDocument();
 });
+
+test("目录只在面板裁剪后的可见区域内滚动当前项，缩小面板后也保持可见", async () => {
+  let panelBottom = 500;
+  const rect = (top: number, bottom: number) => ({ top, bottom, height: bottom - top, left: 0, right: 600, width: 600, x: 0, y: top, toJSON() {} });
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    if (this.getAttribute("aria-label") === "阅读区域") return rect(100, panelBottom);
+    if (this.getAttribute("aria-label") === "报告目录") return rect(100, 900);
+    if (this.tagName === "BUTTON" && this.textContent === "乙章") {
+      const offset = this.closest("nav")?.scrollTop || 0;
+      return rect(550 - offset, 580 - offset);
+    }
+    if (this.tagName === "H2") return rect(this.textContent === "乙章" ? 250 : 150, 275);
+    return rect(0, 1500);
+  });
+  vi.spyOn(HTMLElement.prototype, "getClientRects").mockReturnValue([rect(0, 25)] as unknown as DOMRectList);
+  render(<section aria-label="阅读区域" style={{ overflowY: "auto" }}>
+    {documentView("## 甲章\n\n## 乙章")}
+  </section>);
+  const contents = screen.getByRole("navigation", { name: "报告目录" });
+  expect(within(contents).getByRole("button", { name: "乙章" })).toHaveAttribute("aria-current", "location");
+  expect(contents.scrollTop).toBe(80);
+  // Scrolling the contents by hand must not immediately snap back to the current item.
+  contents.scrollTop = 20;
+  fireEvent.scroll(contents);
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+  expect(contents.scrollTop).toBe(20);
+
+  panelBottom = 400;
+  fireEvent(window, new Event("resize"));
+  await waitFor(() => expect(contents.scrollTop).toBe(180));
+  expect(screen.getByRole("region", { name: "阅读区域" }).scrollTop).toBe(0);
+});
