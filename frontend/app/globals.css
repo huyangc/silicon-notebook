@@ -2808,10 +2808,6 @@ button.chat-session-card {
   color: #3730a3;
 }
 
-.report-document-body :is(h1, h2, h3, h4, h5, h6) {
-  scroll-margin-top: 24px;
-}
-
 @container (max-width: 680px) {
   .report-document.has-contents {
     grid-template-columns: minmax(0, 1fr);
