@@ -52,6 +52,9 @@ fi
 # shellcheck source=scripts/autotune.sh
 source "$ROOT_DIR/scripts/autotune.sh"
 
+# Match prod.sh: resolve both ports after loading the repo-root .env.
+BACKEND_PORT="${PORT:-8000}"
+FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 launcher_check_grace_seconds
 
 if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
@@ -76,7 +79,7 @@ cd "$ROOT_DIR/backend"
 launcher_fork_mark BACKEND_PID
 ( export PYTHONPATH="$INHERITED_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"
   exec "$PYTHON_BIN" "$ROOT_DIR/scripts/python_env.py" -m uvicorn app.main:app \
-  --host "${BACKEND_HOST:-127.0.0.1}" --port 8000 ) &
+  --host "${BACKEND_HOST:-127.0.0.1}" --port "$BACKEND_PORT" ) &
 BACKEND_PID=$!
 launcher_fork_done
 
@@ -112,7 +115,7 @@ if [[ "$sync_status" != "0" ]]; then
 fi
 
 launcher_fork_mark FRONTEND_PID
-( exec "$ROOT_DIR/frontend/node_modules/.bin/next" dev ) &
+( exec "$ROOT_DIR/frontend/node_modules/.bin/next" dev -p "$FRONTEND_PORT" ) &
 FRONTEND_PID=$!
 launcher_fork_done
 

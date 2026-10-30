@@ -137,9 +137,15 @@ python scripts/migrate_legacy_model_env.py --env .env \
 
 ### `dev.sh` —— 前后端一起跑(前台开发)
 ```bash
-scripts/dev.sh                # 同时起 backend(:8000)+ frontend(:3000),Ctrl+C 一起停
+scripts/dev.sh                # 默认 backend(:8000)+ frontend(:3000),Ctrl+C 一起停
 ```
 全栈本地开发用。前台运行、看实时日志、退出即清理两个进程。需先在 `frontend/` 跑过 `npm install`。
+与 `npm run start` 一样读取根 `.env` 的 `PORT`（后端，默认 `8000`）和
+`FRONTEND_PORT`（前端，默认 `3000`），未设置或为空时使用默认值；根 `.env` 中的
+赋值覆盖继承环境变量，未赋值的变量可由进程环境提供。修改后端端口时，使用 `/api`
+同源反代还需同步修改 `BACKEND_PROXY_TARGET`；浏览器直连时同步修改
+`NEXT_PUBLIC_API_BASE_URL` 和允许的前端 CORS 来源。示例见
+[部署与配置](../docs/deployment-and-configuration_zh.md#3--运行)。先停止旧进程，修改后重新启动。
 启动前端前先同步 UI 插件(原 `predev` 钩子,失败则不启动前端、停掉后端并以其退出码退出)。
 退出(Ctrl+C / TERM / HUP,退出码 130 / 143 / 129)与 `prod.sh` 共用 `launcher_cleanup.sh`:先同时给 uvicorn 和
 `next dev` 发 SIGTERM,最多等 `START_CLEANUP_GRACE_SECONDS`(默认 10 秒),仍未退出的发 SIGKILL;

@@ -239,9 +239,31 @@ injecting real environment variables keep working). Set `ALLOW_NO_ENV_FILE=1` to
 check for env-var-only deployments.
 
 ```bash
-# Development — backend (reload-friendly) and frontend together
+# Development — backend and frontend together; Ctrl+C stops both
 npm run dev
 ```
+
+`npm run dev` and `npm run start` share the same port settings: `PORT` in the
+root `.env` controls the backend (default `8000`), and `FRONTEND_PORT` controls
+the frontend (default `3000`). Unset or empty values use the defaults. Both
+launchers load the root `.env` first; assignments there override inherited
+environment variables, while variables not assigned there can come from the
+process environment. For example, a same-host deployment can use this root `.env`:
+
+```dotenv
+PORT=8100
+FRONTEND_PORT=3100
+NEXT_PUBLIC_API_BASE_URL=/api
+BACKEND_PROXY_TARGET=http://127.0.0.1:8100
+```
+
+`BACKEND_PROXY_TARGET` does not follow `PORT` automatically; update it alongside
+the backend port when using the same-origin proxy. If the browser connects to an
+absolute `NEXT_PUBLIC_API_BASE_URL` instead, update that URL's port and allow the
+new frontend origin in the backend's `SILICON_NOTEBOOK_CORS_ORIGINS`.
+Stop the old processes before editing the configuration, then start them again.
+Restarting development mode is sufficient; in production, changing the proxy
+target or public API base requires a frontend rebuild (do not set `SKIP_BUILD=1`).
 
 ```bash
 # Production — builds the frontend, then serves both (single backend worker)
