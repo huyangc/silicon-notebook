@@ -68,7 +68,8 @@ test("只有终审失败的材料回执也显示摘要与审校未完成", () =>
   expect(screen.getByLabelText("报告材料处理回执")).toHaveTextContent("摘要与审校：未完成");
 });
 
-test("资料基础披露完整性限制，并兼容缺失 profile 的旧报告", () => {
+test("资料基础默认收起，展开后披露完整性限制，并兼容缺失 profile 的旧报告", async () => {
+  const user = userEvent.setup();
   const { rerender } = render(<ReportCorpusBasis report={detail()} />);
   expect(screen.queryByLabelText("资料基础")).toBeNull();
 
@@ -91,12 +92,18 @@ test("资料基础披露完整性限制，并兼容缺失 profile 的旧报告",
   );
 
   expect(screen.getByLabelText("资料基础")).toHaveTextContent("84 份资料");
+  const summary = screen.getByText("资料基础").closest("summary")!;
+  expect(summary).toBeVisible();
+  expect(screen.getByText("保守识别重复至少 7 份")).not.toBeVisible();
+  await user.click(summary);
   expect(screen.queryByText(/可区分资料/)).toBeNull();
   expect(screen.getByText("保守识别重复至少 7 份")).toBeVisible();
   expect(screen.getByText("论文 60 · 报告 24")).toBeVisible();
   expect(screen.getByText("2025 50 · 年份未知 34")).toBeVisible();
   expect(screen.getByText("本报告按相关性检索生成，未做完整枚举。")).toBeVisible();
   expect(screen.getByText(/资料识别信息完整度 60%/)).toBeVisible();
+  await user.click(summary);
+  expect(screen.getByText("保守识别重复至少 7 份")).not.toBeVisible();
 });
 
 
@@ -127,7 +134,8 @@ test("限定资料范围与统计失败在资料基础里读起来不是同一�
 });
 
 
-test("资料基础点明引用到的参考库资料，按来源去重而非按锚点", () => {
+test("资料基础点明引用到的参考库资料，按来源去重而非按锚点", async () => {
+  const user = userEvent.setup();
   const { rerender } = render(
     <ReportCorpusBasis report={detail({
       understanding: { corpus_profile: { total_sources: 4 } },
@@ -141,6 +149,7 @@ test("资料基础点明引用到的参考库资料，按来源去重而非按�
   );
 
   expect(screen.getByLabelText("资料基础")).toHaveTextContent("4 份资料");
+  await user.click(screen.getByText("资料基础").closest("summary")!);
   expect(screen.getByText("另引用了 2 份参考库资料，未计入上述统计。")).toBeVisible();
 
   // 参考库知识证据可以没有 source_id，后端用 family_key 兜底，前端必须同口径。
