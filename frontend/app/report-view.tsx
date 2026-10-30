@@ -939,53 +939,57 @@ export function ReportCorpusBasis({ report }: { report: ReportDetailT }) {
     ?? measured?.duplicate_inflation;
   return (
     <section className="report-corpus-basis" aria-label="资料基础">
-      <div className="report-corpus-basis-head">
-        <h3>资料基础</h3>
-        {typeof measured?.total_sources === "number" && (
-          <span>{measured.total_sources} 份资料</span>
-        )}
-      </div>
-      {unavailableCopy && (
-        <p className="report-corpus-basis-unavailable">{unavailableCopy}</p>
-      )}
-      {baseSources > 0 && (
-        <p className="report-corpus-basis-unavailable">
-          {measured
-            ? `另引用了 ${baseSources} 份参考库资料，未计入上述统计。`
-            /* 没有统计时不能说「未计入上述统计」——旧报告的卡片上方是空的，
-               那句话会指向一段并不存在的内容。 */
-            : `本报告引用了 ${baseSources} 份参考库资料。`}
-        </p>
-      )}
-      {measured && (
-        <div className="report-corpus-basis-facts">
-          {typeof (measured.independent_documents ?? measured.independent_families) === "number" && (
-            <span>可区分资料 {measured.independent_documents ?? measured.independent_families}</span>
+      <details key={report.id}>
+        <summary className="report-corpus-basis-head">
+          <h3>资料基础</h3>
+          {typeof measured?.total_sources === "number" && (
+            <span>{measured.total_sources} 份资料</span>
           )}
-          {typeof (measured.displayed_sources ?? measured.representative_count) === "number" && typeof measured.total_sources === "number" && (
-            <span>代表资料 {measured.displayed_sources ?? measured.representative_count}/{measured.total_sources}</span>
+        </summary>
+        <div className="report-corpus-basis-content">
+          {unavailableCopy && (
+            <p className="report-corpus-basis-unavailable">{unavailableCopy}</p>
           )}
-          {typeof measured.identity_uncertain_sources === "number" && measured.identity_uncertain_sources > 0 && (
-            <span>另有 {measured.identity_uncertain_sources} 份资料无法可靠合并</span>
+          {baseSources > 0 && (
+            <p className="report-corpus-basis-unavailable">
+              {measured
+                ? `另引用了 ${baseSources} 份参考库资料，未计入上述统计。`
+                /* 没有统计时不能说「未计入上述统计」——旧报告的卡片上方是空的，
+                   那句话会指向一段并不存在的内容。 */
+                : `本报告引用了 ${baseSources} 份参考库资料。`}
+            </p>
           )}
-          {typeof duplicateLowerBound === "number" && duplicateLowerBound > 0 && (
-            <span>保守识别重复至少 {duplicateLowerBound} 份</span>
+          {measured && (
+            <div className="report-corpus-basis-facts">
+              {typeof (measured.independent_documents ?? measured.independent_families) === "number" && (
+                <span>可区分资料 {measured.independent_documents ?? measured.independent_families}</span>
+              )}
+              {typeof (measured.displayed_sources ?? measured.representative_count) === "number" && typeof measured.total_sources === "number" && (
+                <span>代表资料 {measured.displayed_sources ?? measured.representative_count}/{measured.total_sources}</span>
+              )}
+              {typeof measured.identity_uncertain_sources === "number" && measured.identity_uncertain_sources > 0 && (
+                <span>另有 {measured.identity_uncertain_sources} 份资料无法可靠合并</span>
+              )}
+              {typeof duplicateLowerBound === "number" && duplicateLowerBound > 0 && (
+                <span>保守识别重复至少 {duplicateLowerBound} 份</span>
+              )}
+              {percent(measured.metadata_coverage) && (
+                <span>资料识别信息完整度 {percent(measured.metadata_coverage)}</span>
+              )}
+            </div>
           )}
-          {percent(measured.metadata_coverage) && (
-            <span>资料识别信息完整度 {percent(measured.metadata_coverage)}</span>
+          {(typeText || yearText) && (
+            <dl className="report-corpus-basis-distributions">
+              {typeText && <><dt>资料类型</dt><dd>{typeText}</dd></>}
+              {yearText && <><dt>时间分布</dt><dd>{yearText}{typeof measured?.unknown_year === "number" ? ` · 年份未知 ${measured.unknown_year}` : ""}</dd></>}
+            </dl>
           )}
+          {representativeTitles.length > 0 && (
+            <p className="report-corpus-basis-representatives">代表资料：{representativeTitles.join("；")}</p>
+          )}
+          {disclosure && <p className="report-corpus-basis-disclosure">{disclosure}</p>}
         </div>
-      )}
-      {(typeText || yearText) && (
-        <dl className="report-corpus-basis-distributions">
-          {typeText && <><dt>资料类型</dt><dd>{typeText}</dd></>}
-          {yearText && <><dt>时间分布</dt><dd>{yearText}{typeof measured?.unknown_year === "number" ? ` · 年份未知 ${measured.unknown_year}` : ""}</dd></>}
-        </dl>
-      )}
-      {representativeTitles.length > 0 && (
-        <p className="report-corpus-basis-representatives">代表资料：{representativeTitles.join("；")}</p>
-      )}
-      {disclosure && <p className="report-corpus-basis-disclosure">{disclosure}</p>}
+      </details>
     </section>
   );
 }

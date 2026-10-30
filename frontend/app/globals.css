@@ -2740,7 +2740,54 @@ button.chat-session-card {
   padding: 0;
 }
 
+.report-contents ol ol {
+  margin-inline-start: 12px;
+  border-inline-start: 1px solid var(--line);
+}
+
+.report-contents-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 0 8px 8px;
+  font-size: 12px;
+}
+
+.report-contents-current {
+  margin: 0 8px 8px;
+  color: #596579;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.report-contents-row {
+  display: flex;
+  align-items: start;
+}
+
+.report-contents-toggle,
+.report-contents-toggle-spacer {
+  flex: 0 0 22px;
+}
+
+.report-contents-toggle {
+  border: 0;
+  border-radius: 6px;
+  padding: 7px 0;
+  background: transparent;
+  color: #596579;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.report-contents-toggle:hover {
+  background: #eef2ff;
+}
+
 .report-contents-link {
+  min-width: 0;
   width: 100%;
   border: 0;
   border-radius: 6px;
@@ -3899,9 +3946,35 @@ button.chat-session-card {
   align-items: baseline;
   justify-content: space-between;
   gap: 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.report-corpus-basis-head::-webkit-details-marker {
+  display: none;
+}
+
+.report-corpus-basis-head::before {
+  content: "▸";
+  color: #596579;
+}
+
+details[open] > .report-corpus-basis-head::before {
+  content: "▾";
+}
+
+.report-corpus-basis-head:active {
+  opacity: 0.7;
+}
+
+.report-corpus-basis-content {
+  display: grid;
+  gap: 8px;
+  padding-top: 8px;
 }
 
 .report-corpus-basis h3 {
+  flex: 1;
   margin: 0;
   color: #2c3a4d;
   font-size: 14px;
