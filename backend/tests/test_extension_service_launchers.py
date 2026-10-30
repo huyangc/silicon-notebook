@@ -226,6 +226,43 @@ def kill_group(process):
         pass
 
 
+@pytest.mark.parametrize("dotenv,inherited,backend_port,frontend_port", [
+    ("", {}, "8000", "3000"),
+    ("PORT=\nFRONTEND_PORT=\n", {}, "8000", "3000"),
+    ("PORT=8100\n", {}, "8100", "3000"),
+    ("FRONTEND_PORT=3100\n", {}, "8000", "3100"),
+    ("PORT=8100\nFRONTEND_PORT=3100\n", {}, "8100", "3100"),
+    ("", {"PORT": "8200", "FRONTEND_PORT": "3200"}, "8200", "3200"),
+    ("PORT=8100\nFRONTEND_PORT=3100\n",
+     {"PORT": "8200", "FRONTEND_PORT": "3200"}, "8100", "3100"),
+], ids=["defaults", "empty", "backend-only", "frontend-only", "dotenv", "environment", "dotenv-wins"])
+def test_dev_launcher_passes_configured_ports_to_both_servers(
+    launcher, dotenv, inherited, backend_port, frontend_port,
+):
+    root, env = launcher
+    (root / ".env").write_text(dotenv)
+    # Capture the real launcher's arguments, then delegate to the existing fakes.
+    # No server binds a host port, and the pid handshake follows the argv write.
+    python = root / "fake-bin/python"
+    shutil.copy2(python, python.with_name("python-delegate"))
+    executable(python, '''#!/bin/bash
+if [[ "${1:-}" == */python_env.py ]]; then
+  printf '%s\\n' "$@" > "$FAKE_ROOT/backend.argv"
+fi
+exec "$FAKE_ROOT/fake-bin/python-delegate" "$@"
+''')
+    executable(root / "frontend/node_modules/.bin/next", '''#!/bin/bash
+printf '%s\\n' "$@" > "$FAKE_ROOT/frontend.argv"
+exec /bin/bash "$FAKE_ROOT/fake_child.sh" frontend
+''')
+    with dev_launcher(root, env, **inherited):
+        assert (root / "backend.argv").read_text().splitlines() == [
+            str(root / "scripts/python_env.py"), "-m", "uvicorn", "app.main:app",
+            "--host", "127.0.0.1", "--port", backend_port,
+        ]
+        assert (root / "frontend.argv").read_text().splitlines() == ["dev", "-p", frontend_port]
+
+
 def published_pid(root, name):
     return int((root / f"{name}.pid").read_text())
 
@@ -355,7 +392,7 @@ def test_dev_launcher_runs_every_hook_that_npm_run_dev_would_run():
         assert hook not in frontend
     dev_sh = (ROOT / "scripts/dev.sh").read_text(encoding="utf-8")
     assert "( exec node scripts/sync-ui-plugins.mjs ) &" in dev_sh
-    assert '( exec "$ROOT_DIR/frontend/node_modules/.bin/next" dev ) &' in dev_sh
+    assert '( exec "$ROOT_DIR/frontend/node_modules/.bin/next" dev -p "$FRONTEND_PORT" ) &' in dev_sh
 
 
 def test_dev_launcher_returns_the_failed_childs_status_and_stops_the_other(launcher):

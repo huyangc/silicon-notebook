@@ -194,9 +194,27 @@ SILICON_NOTEBOOK_CORS_ORIGINS=http://<frontend-host>:3000
 `ALLOW_NO_ENV_FILE=1` 显式跳过。
 
 ```bash
-# 开发 —— 前后端一起(后端支持 reload)
+# 开发 —— 前后端一起，Ctrl+C 停止
 npm run dev
 ```
+
+`npm run dev` 与 `npm run start` 使用相同的端口配置：根 `.env` 中的 `PORT`
+控制后端（默认 `8000`），`FRONTEND_PORT` 控制前端（默认 `3000`）；未设置或为空
+时使用默认值。两者都先加载根 `.env`，其中的赋值会覆盖同名的继承环境变量；
+`.env` 未赋值的变量可由进程环境提供。例如，同机部署可在根 `.env` 中设置：
+
+```dotenv
+PORT=8100
+FRONTEND_PORT=3100
+NEXT_PUBLIC_API_BASE_URL=/api
+BACKEND_PROXY_TARGET=http://127.0.0.1:8100
+```
+
+`BACKEND_PROXY_TARGET` 不会随 `PORT` 自动变化，使用同源反代时必须同步修改。
+若使用浏览器直连后端的绝对 `NEXT_PUBLIC_API_BASE_URL`，则同步修改该 URL 的端口，
+并在后端的 `SILICON_NOTEBOOK_CORS_ORIGINS` 中允许新的前端来源。
+改配置前先停止旧进程，再重新启动；开发模式重新启动即可，生产模式修改代理目标
+或公开 API 基址后必须重新构建前端（不要设置 `SKIP_BUILD=1`）。
 
 ```bash
 # 生产 —— 先 build 前端,再同时提供两个服务(后端单进程)
