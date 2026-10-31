@@ -5,23 +5,24 @@ import { useLayoutEffect, useRef, useState } from "react";
 /** 收起来源栏时会话栏从这颗按钮展开,恢复来源栏时缩回它——页面上同一时刻只有其中一个。 */
 const HISTORY_TOGGLE_SELECTOR = ".chat-session-toggle";
 const MORPH_MS = 280;
+const COLLAPSE_MS = 560;
 const MORPH_EASING = "cubic-bezier(0.2, 0.8, 0.2, 1)";
 
 export type MorphRect = { left: number; top: number; width: number; height: number };
 
-function rectOf(element: Element | null | undefined): MorphRect | null {
+export function rectOf(element: Element | null | undefined): MorphRect | null {
   if (!element) return null;
   const { left, top, width, height } = element.getBoundingClientRect();
   return width > 0 && height > 0 ? { left, top, width, height } : null;
 }
 
-function canAnimate(element: Element | null): element is HTMLElement {
+export function canAnimate(element: Element | null): element is HTMLElement {
   if (!element || typeof (element as HTMLElement).animate !== "function") return false;
   return !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
 }
 
 /** 把 `from` 矩形摆到 `to` 矩形上的 transform(变换原点在左上角)。 */
-function placeOver(from: MorphRect, to: MorphRect): string {
+export function placeOver(from: MorphRect, to: MorphRect): string {
   return `translate(${to.left - from.left}px, ${to.top - from.top}px) scale(${to.width / from.width}, ${to.height / from.height})`;
 }
 
@@ -82,21 +83,28 @@ export function useSessionSidebarMorph(sessionSidebar: boolean) {
     const morph = shadow.animate(
       [
         { transform: "none", opacity: 1 },
-        { transform: placeOver(ghost, to), opacity: 0.15 },
+        { transform: placeOver(ghost, to), opacity: 0.75 },
       ],
-      { duration: MORPH_MS, easing: MORPH_EASING, fill: "forwards" },
+      { duration: COLLAPSE_MS, easing: "cubic-bezier(0.4, 0, 0.2, 1)", fill: "forwards" },
     );
     morph.onfinish = () => {
       setGhost(null);
       if (toggle && typeof toggle.animate === "function") {
         toggle.animate(
-          [{ transform: "scale(1)" }, { transform: "scale(1.08)" }, { transform: "scale(1)" }],
-          { duration: 220, easing: "ease-out" },
+          [
+            { transform: "scale(1)", boxShadow: "0 0 0 0 rgba(15, 109, 122, 0.35)" },
+            { transform: "scale(1.12)", boxShadow: "0 0 0 8px rgba(15, 109, 122, 0.12)", offset: 0.4 },
+            { transform: "scale(1)", boxShadow: "0 0 0 12px rgba(15, 109, 122, 0)" },
+          ],
+          { duration: 420, easing: "ease-out" },
         );
       }
     };
-    return () => morph.cancel();
+    return () => { morph.onfinish = null; morph.cancel(); };
   }, [ghost]);
+
+  // Rapidly toggling back must not leave an old shadow flying over the new sidebar.
+  useLayoutEffect(() => { if (sessionSidebar) setGhost(null); }, [sessionSidebar]);
 
   return { sidebarRef, ghostRef, ghost, capture };
 }
