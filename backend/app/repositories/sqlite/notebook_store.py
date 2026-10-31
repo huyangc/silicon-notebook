@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import nullcontext
 from typing import Callable, List, Literal, Sequence
 
 from app.core.activity_time import activity_retention_window
@@ -264,13 +265,15 @@ class NotebookStore:
                     (notebook_id, base_id, now, created_by),
                 )
 
-    def create_row(self, payload: NotebookCreate, created_by: str) -> str:
+    def create_row(
+        self, payload: NotebookCreate, created_by: str, *, db=None
+    ) -> str:
         """Track title and description ownership independently at creation."""
         notebook_id = self.new_id("nb")
         now = self.now()
         purpose = (payload.purpose or "").strip()
         purpose_auto = 0 if purpose else 1
-        with self.database.write() as db:
+        with nullcontext(db) if db is not None else self.database.write() as db:
             db.execute(
                 """
                 INSERT INTO notebooks

@@ -388,6 +388,7 @@ const CALL_CAPABILITY_LABELS: Readonly<Record<string, string>> = {
   "memory:propose": "提交记忆",
   "knowhow:code": "写表格公式",
   "sources:write": "添加资料",
+  "notebooks:create": "新建笔记本",
   "sources:delete": "删除资料",
   "maintenance:execute": "整理这个库",
   "agent_profile:read": "读这个库的理解",

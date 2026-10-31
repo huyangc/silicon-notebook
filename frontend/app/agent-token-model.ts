@@ -24,7 +24,7 @@ export const AGENT_SCOPE_OPTIONS = [
   {
     value: "manage",
     label: "管理",
-    description: "添加、重新解析来源，触发图谱与索引构建",
+    description: "新建笔记本并自动授权给当前凭证，添加、重新解析来源，触发图谱与索引构建",
     ownerOnly: true,
   },
   {

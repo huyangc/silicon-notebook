@@ -747,7 +747,7 @@ PostgreSQL KG 词法 producer 在同一召回词项和额度下选择 SQL 路径
 
 ### 3.4 Memory 与 Agent MCP
 
-`app.api.mcp_server` 只拥有唯一 FastMCP/SSE transport、Bearer middleware 与 session manager；`app.api.mcp_tool_host` 是唯一 FastMCP tool registration exit。它从 `app.api.mcp_tools` 十一个显式 registrar 捕获精确 21-tool core 目录，`mcp_server.PUBLIC_TOOLS` 就是这份活目录（`CORE_TOOLS` 是同名别名），文档/smoke 守卫全部由它派生，不存在第二份手抄。core handler 的 schema/validation/auth/I/O 顺序不变，统一 live token/档位/allowlist/membership 复核、owner-only 写策略、一次 progress wrapper 与 output budget；异常只映射稳定公开码。注册与 listing 零 repository/model I/O。原先「追加 startup-frozen、显式信任的进程内 `agent.tool_provider` contributor descriptor」那一半零消费者，已整体移除。
+`app.api.mcp_server` 只拥有唯一 FastMCP/SSE transport、Bearer middleware 与 session manager；`app.api.mcp_tool_host` 是唯一 FastMCP tool registration exit。它从 `app.api.mcp_tools` 十一个显式 registrar 捕获精确 25-tool core 目录，`mcp_server.PUBLIC_TOOLS` 就是这份活目录（`CORE_TOOLS` 是同名别名），文档/smoke 守卫全部由它派生，不存在第二份手抄。core handler 的 schema/validation/auth/I/O 顺序不变，统一 live token/档位/allowlist/membership 复核、owner-only 写策略、一次 progress wrapper 与 output budget；异常只映射稳定公开码。注册与 listing 零 repository/model I/O。原先「追加 startup-frozen、显式信任的进程内 `agent.tool_provider` contributor descriptor」那一半零消费者，已整体移除。
 
 Ask 回答先生成不落库的 preview，用户编辑确认后写入 owner-private confirmed Memory；LLM 不可用时
 使用确定性 preview。外部 Agent 通过 `propose_memory` 只能写 candidate；同一用户、同一 notebook
@@ -779,6 +779,12 @@ evidence，不提供原始 revision/provenance 浏览。批准前会重新校验
 显式清空它——重传用户的字节无法把它洗成 Agent 可删的来源；该列缺失时投影默认 false，闸门
 fail closed。`list_sources`（含 `source_id` 单条状态）/`get_notebook`（含构建状态）/`read_reference` 是只读，停在
 `read` 档与成员可读口径。
+
+`create_notebook` 是 token 级的 `manage` 能力（`notebooks:create`），不走已有笔记本的选库闸。
+MemoryService 在 MemoryStore 持有的写事务内复核 token/profile/账号/档位，调用 NotebookStore
+复用该连接创建笔记本及初始图谱状态，再只追加当前 token 的白名单；失败整体回滚。
+SQLite 写事务串行化权限变更，PostgreSQL 锁住 profile/token/账号行。默认库与既有权限不变，
+owner 固定为 token 主人；后续工具仍逐次走原有授权，不向同 profile 其他 token 扩权。
 
 ### 3.5 KG 与索引维护
 

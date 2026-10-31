@@ -60,6 +60,7 @@ Use a notebook the account can read. To test formal context retrieval, that note
 | Read your own Q&A history (questions asked in the browser or by an Agent; single-notebook and cross-notebook conversations; `list_conversations`, `get_conversation`) and deep reports (`list_reports`, `get_report`) | `read` (读取) |
 | Ask one notebook, or 2-8 notebooks at once, and re-read the result (`ask`, `get_ask`; including retrieval-only `output="evidence"`) | `ask` (问答; does not need `read`) |
 | Propose candidate Memory (`propose_memory`), write knowhow code attachments (`put_knowhow_cell_code`), append to the Agent's own observation log (`add_observation`; the UI calls it 「使用线索」) | `contribute` (提交) |
+| Create a personal notebook and authorize the calling token (`create_notebook`) | `manage` (管理; new notebook belongs to the token owner) |
 | Add a source (text, file or PDF URL; `add_source`), re-parse one (`reparse_source`), trigger a knowledge-graph or retrieval-index build (`build`) | `manage` (管理; only on notebooks you own) |
 | Delete a source **the Agent itself added** (`delete_source`) | `delete` (删除; only on notebooks you own; `manage` does not imply it) |
 
@@ -81,6 +82,14 @@ never becomes evidence and is never cited.
 
 `list_notebooks` requires no tier at all — a live token and the allowlisted notebooks its owner can
 still read are the whole check, and each row already carries its counts — so every session can start even with a minimal token.
+
+With `manage`, call `create_notebook(name="Research", purpose="Optional purpose")`.
+Creation and adding the new notebook to this token's allowlist commit together.
+Use the returned `notebook_id` explicitly in `add_source`, `build` and other tools.
+The default notebook and permission tiers stay unchanged; reading still needs `read`,
+and other tokens (even of the same profile) receive no grant. The notebook is also visible
+in its owner's browser. Each call creates a new notebook; if a response is lost, inspect
+`list_notebooks` before retrying. Token issue/edit prerequisites stay unchanged.
 
 A tool refused for a missing tier names that tier in its error (for example
 「此凭证缺少「读取」权限，请在 Agent 接入页为它勾选后重试」) instead of returning only a notebook id.

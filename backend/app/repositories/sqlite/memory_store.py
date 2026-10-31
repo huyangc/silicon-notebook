@@ -405,6 +405,31 @@ class MemoryStore:
         result["notebook_ids"] = sorted(_json_list(result.pop("notebook_ids_json")))
         return result
 
+    def create_agent_notebook(
+        self, token_id: str,
+        authorize: Callable[[Mapping[str, Any] | None], None],
+        create: Callable[[Any, str], str],
+    ) -> str:
+        # BEGIN IMMEDIATE serializes creation with revocation and access edits.
+        # Append one grant; never replace the existing access configuration.
+        with self.database.write() as db:
+            self.database.begin_guarded_write(db)
+            row = db.execute(
+                "SELECT t.agent_profile_id,t.scopes_json,t.expires_at,t.revoked_at,"
+                "p.owner_id,p.status AS profile_status,u.status AS owner_status "
+                "FROM agent_access_tokens t JOIN agent_profiles p "
+                "ON p.id=t.agent_profile_id JOIN users u ON u.id=p.owner_id "
+                "WHERE t.id=?", (token_id,),
+            ).fetchone()
+            authority = dict(row) if row is not None else None
+            authorize(authority)
+            notebook_id = create(db, authority["owner_id"])
+            db.execute(
+                "INSERT INTO agent_token_notebooks (token_id,notebook_id) VALUES (?,?)",
+                (token_id, notebook_id),
+            )
+        return notebook_id
+
     def touch_agent_token(
         self, token_id: str, used_at: str, touch_before: str
     ) -> None:

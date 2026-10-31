@@ -74,6 +74,12 @@ curl -s http://127.0.0.1:8000/api/ready
 
 本 SOP 的完整 Memory 示例选择：`read` 与 `contribute`。不需要问答就不要勾选 `ask`。
 
+有 `manage` 时可调用 `create_notebook(name="研究资料", purpose="可选用途")`。
+新建个人笔记本与追加到当前 token 白名单在同一事务提交，新库归 token 主人所有，网页端也可见。
+后续 `add_source`、`build` 等工具显式传入返回的 `notebook_id`。默认笔记本与权限档位保持不变，
+读取仍需 `read`，同 profile 的其他 token 也不会自动获得授权。每次调用都会新建一本；响应丢失时
+先查 `list_notebooks` 再决定是否重试。签发/编辑 token 的前置要求不变。
+
 写入平面只有两档——`manage` 与 `delete`——不确实需要归档文档或跑构建就不要授予：`manage`
 改变笔记本内容与分析开销，`delete` 不可逆。两档都只对 token 所有者**拥有**的笔记本生效：白名单里
 一个自己拥有的笔记本都没有时，签发和修改都会拒绝勾选它们（页面上这两档会变灰并说明原因）；

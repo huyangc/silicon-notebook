@@ -8,7 +8,7 @@ import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
+from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence, cast
 
 from app.core.event_logging import EventLogger
 from app.domain.agent_tools import (
@@ -44,6 +44,7 @@ from app.repositories.identity_errors import (
     AgentTokenInactiveError,
     AgentTokenSecretUnavailableError,
 )
+from app.repositories.agent_notebooks import AgentNotebookStore
 from app.repositories.ports import (
     AskStateStorePort,
     DeleteWindowClosedError,
@@ -617,9 +618,9 @@ class MemoryService:
         for notebook_id in clean_notebooks:
             if not self.notebooks.user_can_read_notebook(notebook_id, owner_id):
                 raise PermissionError(notebook_id)
-        # ``manage`` / ``delete`` only ever act on a notebook the owner owns
-        # (``_writable_notebook``); a token whose allowlist names none could
-        # never use them, so refuse the combination instead of issuing it.
+        # Preserve the issue/edit requirement for ``manage`` / ``delete``:
+        # their existing-notebook writes need ownership. Creating an owned
+        # notebook with ``manage`` does not relax this issuance prerequisite.
         if AGENT_OWNER_ONLY_TIERS.intersection(clean_scopes) and not any(
             self.notebooks.user_can_access_notebook(notebook_id, owner_id)
             for notebook_id in clean_notebooks
@@ -808,6 +809,34 @@ class MemoryService:
             notebook_ids=list(row["notebook_ids"]),
             token_id=token_id,
             allow_answer_links=bool(row.get("allow_answer_links")),
+        )
+
+    def create_agent_notebook(
+        self, principal: AgentPrincipal, create: Callable[[Any, str], str]
+    ) -> str:
+        """A new notebook needs token-wide authority, not an existing grant.
+
+        The store locks and reads authority, invokes the row writer, and appends
+        the grant in one transaction. The writer must use the supplied connection.
+        """
+        tier = capability_tier("notebooks:create")
+
+        def authorize(row: Mapping[str, Any] | None) -> None:
+            if (
+                row is None
+                or row["owner_id"] != principal.owner_id
+                or row["agent_profile_id"] != principal.profile_id
+                or row["revoked_at"] is not None
+                or _is_expired(row["expires_at"], _utc_now())
+                or row["profile_status"] != "active"
+                or row["owner_status"] != "active"
+            ):
+                raise AgentAccessDenied("inactive")
+            if tier not in json.loads(row["scopes_json"] or "[]"):
+                raise AgentAccessDenied("scope_missing", tier=tier)
+
+        return cast(AgentNotebookStore, self.store).create_agent_notebook(
+            principal.token_id, authorize, create
         )
 
     def require_agent_access(

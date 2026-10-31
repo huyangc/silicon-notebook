@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Callable, Literal, Sequence
 
 from app.core.activity_time import activity_retention_window
@@ -259,11 +260,13 @@ class NotebookStore:
                 ],
             )
 
-    def create_row(self, payload: NotebookCreate, created_by: str) -> str:
+    def create_row(
+        self, payload: NotebookCreate, created_by: str, *, db=None
+    ) -> str:
         notebook_id = self.new_id("nb")
         purpose = (payload.purpose or "").strip()
         now = self.now()
-        with self.database.write() as connection:
+        with nullcontext(db) if db is not None else self.database.write() as connection:
             connection.execute(
                 "INSERT INTO notebooks"
                 "(id,name,purpose,primary_domain,status,created_by,created_at,updated_at,"
