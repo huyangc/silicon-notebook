@@ -291,6 +291,8 @@ import { SourceDetailWindow } from "./source-detail-window";
 import { useWorkspaceExtensions } from "./use-workspace-extensions";
 import { useMediaQuery } from "./use-media-query.ts";
 import { useSessionSidebarMorph } from "./use-session-sidebar-morph.ts";
+import { useSourceSidebar } from "./use-source-sidebar";
+import { SourceSidebarHint } from "./source-sidebar-hint";
 import { createOwnedWorkspaceExtensionActions } from "../features/extension-sdk/actions";
 import { WorkspaceExtensionOutlet } from "../features/extension-sdk/host";
 import { WORKSPACE_UI_CONTRIBUTIONS } from "../features/extension-sdk/workspace-registry";
@@ -2271,11 +2273,18 @@ export default function Home() {
   const wideWorkspace = useMediaQuery("(min-width: 761px)");
   const sessionSidebar = chatMode === "ask" && sourcesCollapsed && wideWorkspace;
   const sessionSidebarMorph = useSessionSidebarMorph(sessionSidebar);
+  const sourceSidebar = useSourceSidebar({
+    active: wideWorkspace && Boolean(currentNotebookId),
+    collapsed: sourcesCollapsed,
+    ownerKey: `${currentUser?.id ?? ""}:${currentNotebookId ?? ""}`,
+    onCollapse: () => setSourcesCollapsedWithMorph(true),
+  });
   // 来源栏的两个开关都先记下动画起点再切换,会话栏才能从「历史」按钮长出来、再缩回去。
   const sourcesCollapsedRef = useRef(sourcesCollapsed);
   sourcesCollapsedRef.current = sourcesCollapsed;
   function setSourcesCollapsedWithMorph(collapsed: boolean) {
     sessionSidebarMorph.capture();
+    if (collapsed) sourceSidebar.captureCollapse();
     sourceLibrary.setSourcesCollapsed(collapsed);
   }
   // 「英文双引号 = 整体检索」的即时回执。识别规则有边界(太短、引号太密都不算),
@@ -5856,8 +5865,9 @@ export default function Home() {
             </div>
           </section>
 
-          <section className={`workspace-grid${sourcesCollapsed ? " sources-collapsed" : ""}${sessionSidebar ? " has-session-sidebar" : ""}`}>
-            <aside className="workspace-panel sources-panel">
+          <section className={`workspace-grid${sourcesCollapsed ? " sources-collapsed" : ""}${sessionSidebar ? " has-session-sidebar" : ""}${sourceSidebar.dragging ? " sources-resizing" : ""}`} style={sourceSidebar.style}>
+            <aside className="workspace-panel sources-panel" ref={sourceSidebar.panelRef} inert={sourcesCollapsed && wideWorkspace || undefined}>
+              {wideWorkspace && !sourcesCollapsed && <div className="sources-resize-handle" {...sourceSidebar.resizeProps} />}
               <div className="workspace-panel-header">
                 <h2>Source Stack</h2>
                 <div className="sources-header-right">
@@ -5873,6 +5883,12 @@ export default function Home() {
                   </button>
                 </div>
               </div>
+              {currentUser && <SourceSidebarHint
+                key={currentUser.id}
+                userId={currentUser.id}
+                active={wideWorkspace && !sourcesCollapsed && !sourceSidebar.dragging}
+                onCollapse={() => setSourcesCollapsedWithMorph(true)}
+              />}
               <div className="workspace-panel-body sources-body">
                 {/* 镜像库的标注(跨环境增量同步 §5)。它是**说明**不是错误:这本库的材料
                     由源环境维护,目标端的写入口(添加来源/重解析/删除……)已经由
@@ -6201,12 +6217,14 @@ export default function Home() {
               </div>
             </aside>
 
+            {sourceSidebar.ghost && <div ref={sourceSidebar.ghostRef} className="source-sidebar-ghost" aria-hidden="true" style={sourceSidebar.ghost}><strong>来源</strong></div>}
+
             {sessionSidebar && (
               <aside className="workspace-panel ask-session-sidebar" aria-label="历史会话" ref={sessionSidebarMorph.sidebarRef}>
                 <div className="ask-session-sidebar-head">
                   <button
                     type="button"
-                    className="sources-collapse-handle"
+                    className="sources-collapse-handle sources-restore-button"
                     aria-label="展开来源栏"
                     title="展开来源栏"
                     onClick={() => setSourcesCollapsedWithMorph(false)}
@@ -6247,10 +6265,10 @@ export default function Home() {
             {sourcesCollapsed && !sessionSidebar && (
               <button
                 type="button"
-                className="sources-reveal-rail"
+                className="sources-reveal-rail sources-restore-button"
                 aria-label="展开来源栏"
                 title="展开来源栏"
-                onClick={() => sourceLibrary.setSourcesCollapsed(false)}
+                onClick={() => setSourcesCollapsedWithMorph(false)}
               >
                 <PanelLeftOpen size={18} />
               </button>

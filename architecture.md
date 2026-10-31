@@ -391,6 +391,7 @@ Legacy 的 `prompts.reflect_prompt` 在原 user 消息内先输出固定指令�
 `frontend/app/page.tsx` 是 collection/workspace 编排器，不再是所有模型与面板实现的唯一所有者：
 
 - `workspace-model.ts` 保存共享 API/视图类型与常量。
+- `use-source-sidebar.ts` 只拥有来源栏的临时拖动宽度、指针捕获与收起动画；持久收起状态仍由 `use-source-library.ts` 拥有，壳层组合来源栏与历史会话的切换。`source-sidebar-hint.tsx` 拥有按用户记忆的一次性发现提示，不发网络请求。
 - `notebook-question-suggestions.tsx` 仅在问答欢迎态读取模型问题建议，立即保留
   模板并隔离用户/笔记本/工作区代次；`useSourceLibrary.contentRevision` 提供与
   搜索、分页无关的内容刷新信号。生成建议不拥有 Ask 草稿或会话状态。

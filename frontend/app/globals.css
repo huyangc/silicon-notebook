@@ -1276,8 +1276,9 @@ button.copy-result-failed:hover:not(:disabled) {
 }
 
 .workspace-grid {
+  --sources-default-width: max(270px, 25%);
   display: grid;
-  grid-template-columns: minmax(270px, 25%) minmax(0, 1fr);
+  grid-template-columns: min(var(--sources-width, var(--sources-default-width)), var(--sources-default-width)) minmax(0, 1fr);
   gap: 18px;
   padding: 18px 24px 24px;
   height: calc(100vh - 72px);
@@ -1513,6 +1514,30 @@ button.copy-result-failed:hover:not(:disabled) {
 .sources-panel {
   grid-template-rows: 64px 1fr;
   position: relative;
+  min-width: 0;
+}
+
+.sources-panel > .workspace-panel-header,
+.sources-body { min-width: 240px; }
+.workspace-grid.sources-resizing { transition: none; cursor: col-resize; user-select: none; }
+.sources-resize-handle { position: absolute; inset: 0 0 0 auto; width: 10px; z-index: 11; cursor: col-resize; touch-action: none; }
+.sources-resize-handle::after { content: ""; position: absolute; inset: 12px 2px; border-radius: 4px; background: transparent; transition: background 120ms ease; }
+.sources-resize-handle:hover::after,
+.sources-resize-handle:focus-visible::after,
+.sources-resizing .sources-resize-handle::after { background: color-mix(in srgb, var(--ink) 28%, transparent); }
+.sources-resize-handle:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; }
+
+/* 一次性提示贴在收起按钮下方，与全局问答的提示使用相同的卡片语汇。 */
+.source-sidebar-hint { position: absolute; top: 58px; right: 12px; z-index: 12; width: calc(100% - 24px); max-width: 280px; display: grid; gap: 10px; padding: 14px 16px 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--ink); box-shadow: 0 10px 32px color-mix(in srgb, var(--ink) 16%, transparent); animation: source-sidebar-hint-in 240ms ease both; }
+.source-sidebar-hint::before { content: ""; position: absolute; right: 16px; top: -6px; width: 10px; height: 10px; border-top: 1px solid var(--line); border-left: 1px solid var(--line); background: var(--panel); transform: rotate(45deg); }
+.source-sidebar-hint p { margin: 0; font-size: 13px; line-height: 1.55; color: var(--muted); }
+.source-sidebar-hint strong { display: block; margin-bottom: 2px; font-size: 14px; color: var(--ink); }
+.source-sidebar-hint-dismiss { justify-self: end; padding: 5px 12px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--ink); font-size: 12px; cursor: pointer; }
+.source-sidebar-hint-dismiss:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+@keyframes source-sidebar-hint-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .source-sidebar-hint { animation: none; }
+  .workspace-grid { transition: none; }
 }
 
 .sources-body {
@@ -1710,7 +1735,8 @@ button.copy-result-failed:hover:not(:disabled) {
   padding: 4px 0;
 }
 /* 会话栏缩回「历史」按钮时的影子(位置/大小由 use-session-sidebar-morph 写在行内)。 */
-.ask-session-sidebar-ghost {
+.ask-session-sidebar-ghost,
+.source-sidebar-ghost {
   position: fixed;
   overflow: hidden;
   z-index: 30;
@@ -10670,7 +10696,7 @@ button.tag:hover {
   }
 
   .workspace-grid {
-    grid-template-columns: 280px minmax(0, 1fr);
+    --sources-default-width: 280px;
   }
 
   .workspace-toolbar {
