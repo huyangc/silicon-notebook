@@ -18,7 +18,12 @@ from typing import Any, Callable, Literal
 from app.core.config import Settings
 from app.core.model_context import ModelContextExceeded, is_context_error, service_context_budget
 from app.core.ask_context import _ASK_MODEL_ERRORS
-from app.core.llm import CALL_STATS_KWARG, JsonSchemaCapability, OpenAICompatibleClient
+from app.core.llm import (
+    CALL_STATS_KWARG,
+    JsonSchemaCapability,
+    OpenAICompatibleClient,
+    strip_json_fences,
+)
 from app.core.llm_logging import (
     current_interaction_support_id,
     interaction_support_scope,
@@ -624,18 +629,20 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
             else ({} if raw_supports_stats else None)
         )
         forward_stats = stats_sink is not None and raw_supports_stats
+        schema_fallback = False
 
         def raw_chat_json(*args, **kwargs) -> str:
-            nonlocal raw_response, rejection_reason
+            nonlocal raw_response, schema_fallback
             try:
                 return runtime.raw.chat_json(*args, **kwargs)
             except StructuredModelResponseError as exc:
+                # Schema negotiation is a wire optimization, not a second
+                # domain acceptance policy. Feed the original reply through
+                # the very same parser/shape walk as JSON and text modes.
+                # The transport has already excluded it from the strict cache.
                 raw_response = exc.content
-                rejection_reason = exc.reason
-                raise MalformedModelResponse(
-                    reason=exc.reason,
-                    finish_reason=str((stats_sink or {}).get("finish_reason") or ""),
-                ) from exc
+                schema_fallback = True
+                return strip_json_fences(exc.content)
 
         def invoke() -> str:
             nonlocal raw_response, rejection_reason
@@ -666,7 +673,8 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                 # keeps its current signature (see ``forward_stats``).
                 **({CALL_STATS_KWARG: stats_sink} if forward_stats else {}),
             )
-            raw_response = content if isinstance(content, str) else str(content)
+            if not schema_fallback:
+                raw_response = content if isinstance(content, str) else str(content)
             repair_mode = (
                 self.settings.model_json_repair_mode
                 if self._workload.id in _JSON_REPAIR_WORKLOADS
@@ -729,6 +737,10 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                 # the model writes shows up in events.jsonl without costing
                 # the caller its reply.
                 self._emit_json_shape_event(list(shape.deviations))
+            if schema_fallback:
+                self._emit_json_repair_event(status="fallback", reason="schema_mismatch")
+                if forward_stats:
+                    stats_sink["status"] = "ok"
             return shape.content
 
         call = self._submit(runtime, invoke, cancel_event=cancel_event)
@@ -1387,13 +1399,14 @@ class RuntimeModelProvider:
             capability = self._json_schema_capabilities.setdefault(
                 identity, JsonSchemaCapability(),
             )
-        def observe_json_schema(status: str, reason: str) -> None:
+        def observe_json_schema(status: str, reason: str, schema_name: str) -> None:
             # Capability diagnostics carry only a closed vocabulary and safe
             # service metadata, never the probe or an upstream exception.
             if status not in {"supported", "unsupported", "unverified"}:
                 return
             if reason not in {
                 "schema_enforced", "schema_ignored", "schema_rejected", "probe_error",
+                "schema_not_enforced",
             }:
                 return
             try:
@@ -1403,6 +1416,7 @@ class RuntimeModelProvider:
                     "reason": reason,
                     "service_id": safe_model_metadata_id(service.id),
                     "model": safe_model_label(service.model),
+                    **({"schema_name": schema_name} if schema_name else {}),
                 })
             except Exception:
                 pass

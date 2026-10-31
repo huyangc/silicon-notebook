@@ -1484,7 +1484,10 @@ Excel 专业分析由部署项 `SPREADSHEET_ANALYSIS_ENABLED` 总控；摄取护
 回退合同统一见[模型 JSON 恢复](./product-and-api_zh.md#模型-json-恢复与流保活)。无需模型名称
 白名单或新增工种绑定。不支持、忽略参数或未验证的接口保留普通 JSON；确认支持的服务在
 既有提示能够无损表达时使用正式 schema。仅修改容量或显示名称会复用观察结果，接口/模型/
-凭据身份变化或进程重启后重新观察。这是高级预算，不加入入门 `.env.example`。
+凭据身份变化或进程重启后重新观察。完整业务回复不遵守 schema 时，按格式累计连续失败，
+达到 `MODEL_JSON_SCHEMA_FAILURE_THRESHOLD` 后，该身份下的该格式保持普通 JSON，不再探测。
+所有业务传输模式均经过共享 JSON 兜底与领域校验，恢复现有回复不增加模型请求。
+阈值的默认值和护栏由上面的产品/API 合同拥有。这些高级配置不加入入门 `.env.example`。
 
 同源 `/api/*` rewrite 存在有限的代理 idle timeout，因此 Ask 每 5 秒发送一条不含业务内容的
 空白 NDJSON 心跳并返回禁缓冲 header；ingress 不应缓冲 `application/x-ndjson`。这只能处理

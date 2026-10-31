@@ -1881,7 +1881,13 @@ No model-name allowlist or additional workload binding is needed. Unsupported,
 ignored or unverified endpoints keep ordinary JSON; supported services use formal
 schemas where the hint can be represented without losing valid fields. Capacity
 or label changes reuse the observation; changed endpoint/model/credential identity
-or process restart observes again. This advanced budget is not in `.env.example`.
+or process restart observes again. Completed schema violations are counted per
+format under `MODEL_JSON_SCHEMA_FAILURE_THRESHOLD`; reaching the threshold keeps
+that format in ordinary JSON without another probe for the current identity.
+Every business wire mode uses the shared JSON fallback and domain validation;
+recovering the existing reply sends no extra model request. Threshold defaults
+and rails live in the linked product/API contract. These advanced settings are
+not in `.env.example`.
 
 The same-origin `/api/*` rewrite has a finite proxy idle timeout. Ask therefore sends a
 content-free blank NDJSON heartbeat every 5 seconds and returns anti-buffering headers;

@@ -34,7 +34,7 @@ _ENUM_EXAMPLE = re.compile(r"[^\s|<>]+(?:\|[^\s|<>]+)+\Z")
 
 
 class StructuredModelResponseError(ValueError):
-    """A rejected reply; raw content is only for private artifact capture."""
+    """Wire-schema mismatch; raw content is for shared parsing/private capture."""
 
     reason = "invalid_type"
 
