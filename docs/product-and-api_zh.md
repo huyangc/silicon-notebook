@@ -1486,7 +1486,7 @@ Agent profile 并签发 token。
 Token 有过期时间、默认 notebook、notebook allowlist，并只授予所需的权限档位——存储与对外 API
 只有五档：`read`（读取：来源/知识/Knowhow、主人本人的 confirmed 与 candidate 个人记忆、库理解、
 引用原文、来源与构建状态，以及主人本人的问答记录——单库与全局会话——和深度报告）、`ask`（问答：笔记本问答与全局问答，不依赖 `read`）、`contribute`
-（提交：记忆候选、Knowhow 代码附件、观察记录）、`manage`（管理：添加/重新解析来源、触发图谱与
+（提交：记忆候选、Knowhow 代码附件、观察记录）、`manage`（管理：新建个人笔记本并自动授权给当前 token、添加/重新解析来源、触发图谱与
 检索索引构建；仅对 owner 拥有的笔记本生效）、`delete`（删除：只删 Agent 自己添加的来源；仅对
 owner 拥有的笔记本生效）。代码内部仍按细粒度能力（`knowledge:read`、`sources:write` 等）请求
 权限、调用记录仍记能力名，一张映射表把能力归到档位；请求旧能力串或未知值签发一律 422
@@ -1536,7 +1536,7 @@ Authorization 的 Agent 知道解法；工具清单从部署实例的冻结目�
 *idle* 超时——一次调用在若干秒内既没给出响应、也没发过任何 progress 通知就被中断——别的
 客户端则是每次调用一个固定上限。`reasoning` 档的 `ask` 动辄跑几分钟（理解、规划、联邦
 检索、反思循环、答案合成），部署的插件引擎可能更久，所以没有心跳时客户端会放弃一次服务端仍在正常
-执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 24 个 core 工具的阻塞主体一律
+执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 25 个 core 工具的阻塞主体一律
 跑在同一道心跳下，**每 5 秒**一拍，内容只有工具名与已耗墙钟秒数——绝不带问题原文、笔记本或
 来源名称，与观测事件同一条口径。不需要它的场合是免费的：客户端没有在请求 `_meta` 里带
 `progressToken` 时该通知是 no-op，而第一拍要等满一个间隔，所以毫秒级返回的工具（绝大多数）
@@ -1595,13 +1595,14 @@ token 的默认笔记本（`list_notebooks` 用 `is_default` 标出）。每个�
 重跑原读取的全部鉴权。报错统一为 `[<code>] <中文说明>`，code 取值 `token_inactive`、`scope_missing`、
 `notebook_not_allowed`、`notebook_unreadable`、`owner_only`、`forbidden`、`not_found`、`invalid_argument`、`busy`、
 `mirrored`、`unavailable`、`internal`。`ValueError` 只有在文本以中文开头（或属于已知校验器形状并被译成中文）
-时才作为 `invalid_argument` 带出原文；其他意外错误一律是 `internal`，文本从不回显。默认 core 的二十四个工具如下；
-`mcp_server.PUBLIC_TOOLS` 就是下面这 24 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
+时才作为 `invalid_argument` 带出原文；其他意外错误一律是 `internal`，文本从不回显。默认 core 的二十五个工具如下；
+`mcp_server.PUBLIC_TOOLS` 就是下面这 25 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
 是同一份清单：
 
 | 分组 | 工具 | Scope |
 | --- | --- | --- |
 | 发现 | `list_notebooks` | 无需档位 |
+| 新建笔记本 | `create_notebook` | `manage`（新库归 token 主人所有） |
 | 笔记本概况（计数、构建状态、库理解） | `get_notebook` | `read` |
 | 搜索与点查 | `search`、`read_reference` | `read` |
 | 问答（同步；单库或 2–8 库） | `ask`、`get_ask` | `ask` |
@@ -1616,9 +1617,9 @@ token 的默认笔记本（`list_notebooks` 用 `is_default` 标出）。每个�
 | Knowhow 代码写入 | `put_knowhow_cell_code` | `contribute` |
 
 实际部署以 server-local frozen catalog 作为 discovery 与 onboarding 的权威清单：它精确等于上表
-24 个工具，由十一个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
+25 个工具，由十一个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
 手抄。每次调用都重新检查 live token/档位/allowlist/成员权，`manage` 与 `delete` 两档都强制经过 owner-only
-notebook 闸。缺档时工具报错是写明缺哪一档的中文文案（例：「此凭证缺少「读取」权限，请在 Agent 接入页为它勾选后重试」），
+notebook 闸（针对已有笔记本的写入）；新建则检查 token 级权限，并把新库归给 token 主人。缺档时工具报错是写明缺哪一档的中文文案（例：「此凭证缺少「读取」权限，请在 Agent 接入页为它勾选后重试」），
 不再只给笔记本 id；token 失效、笔记本不在白名单、主人已无权读该笔记本也各有一句可读文案。结果在构造时就被复制进有界形状——深度不超过 5 层，逐字段/map/list 施加上限——超大容器不会
 先被完整构造出来才裁剪。这份有界拷贝随后被逐步、可见地压缩（先缩最长字符串，再丢 map 条目，
 再丢 list 条目，最后才动标识符），直到总量落进 12,000 UTF-8 bytes 预算内；每一刀都记进
@@ -1635,6 +1636,17 @@ audit。只有拷贝真的缩无可缩时才整次拒绝，不会返回被静默
 
 `list_notebooks` **不需要任何档位**：判据只有 token 存活，并只列出白名单内主人仍有读权限的笔记本。
 因此无论 token 权限收得多窄，session 都能正常发现自己的笔记本。
+
+`create_notebook(name, purpose="")` 需要 `manage`（能力 `notebooks:create`）。名称必填且不得全为空白，
+名称与用途均去掉首尾空白。新建的是 token 主人拥有的个人笔记本，只追加到当前 token 的白名单。
+创建笔记本、初始化图谱状态与追加授权在同一事务提交，持写锁实时复核 token 是否撤销/过期、
+profile/账号状态和权限档位；不依赖旧默认笔记本的读权。原有授权、默认笔记本、档位、过期时间与
+回答链接开关不变；同 profile 的其他 token 也不会自动获得授权。返回 `notebook_id`、`name`、`purpose`、
+`tier="personal"`、`access="owner"`、`is_default=false` 和通用预算回执。
+后续 `add_source`、`build` 等工具显式传入新 id，仍按原档位鉴权；单有 `manage` 不会获得
+`read`、`ask`、`contribute` 或 `delete`。网页端主人也能看到新库。每次调用都会新建一本；
+响应丢失时先查 `list_notebooks` 再决定是否重试。签发/编辑 token 的要求不变，仍需默认笔记本、
+白名单，且管理/删除要求其中至少一本归主人所有。
 
 服务端会在数据调用时重新检查档位、allowlist、token 状态和 notebook 权限；返回文本是
 不可信 evidence，不是可执行的 Agent 指令。

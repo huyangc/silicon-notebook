@@ -43,14 +43,16 @@ AGENT_CAPABILITY_TIER = MappingProxyType(
         "knowhow:code": "contribute",
         "agent_observation:write": "contribute",
         "sources:write": "manage",
+        "notebooks:create": "manage",
         "maintenance:execute": "manage",
         "sources:delete": "delete",
     }
 )
 
 #: Tiers that only ever act on a notebook the token's owner owns. The owner-only
-#: gate itself is ``mcp_tools._shared._writable_notebook``; issuing/editing a
-#: token with one of these tiers requires at least one owned notebook in the
+#: existing-notebook gate is ``mcp_tools._shared._writable_notebook``; creation
+#: assigns the new notebook to the token owner. Issuing/editing a
+#: token with one of these tiers still requires at least one owned notebook in the
 #: allowlist (``MemoryService._validate_agent_access``).
 AGENT_OWNER_ONLY_TIERS = frozenset({"manage", "delete"})
 

@@ -464,6 +464,38 @@ class MemoryStore:
             ]
         return result
 
+    def create_agent_notebook(
+        self, token_id: str,
+        authorize: Callable[[Mapping[str, Any] | None], None],
+        create: Callable[[Any, str], str],
+    ) -> str:
+        with self.database.write() as db:
+            # Profile first: profile deletion locks it before revoking tokens.
+            db.execute(
+                "SELECT p.id FROM agent_profiles p JOIN agent_access_tokens t "
+                "ON t.agent_profile_id=p.id WHERE t.id=%s FOR UPDATE OF p",
+                (token_id,),
+            ).fetchone()
+            row = db.execute(
+                "SELECT t.agent_profile_id,t.scopes_json,t.expires_at,t.revoked_at,"
+                "p.owner_id,p.status AS profile_status,u.status AS owner_status "
+                "FROM agent_access_tokens t JOIN agent_profiles p "
+                "ON p.id=t.agent_profile_id JOIN users u ON u.id=p.owner_id "
+                "WHERE t.id=%s FOR UPDATE OF t FOR SHARE OF u", (token_id,),
+            ).fetchone()
+            authority = dict(row) if row is not None else None
+            if authority is not None:
+                authority["scopes_json"] = json.dumps(json_value(authority["scopes_json"], []))
+                for field in ("expires_at", "revoked_at"):
+                    authority[field] = iso_timestamp(authority[field], empty="") or None
+            authorize(authority)
+            notebook_id = create(db, authority["owner_id"])
+            db.execute(
+                "INSERT INTO agent_token_notebooks (token_id,notebook_id) VALUES (%s,%s)",
+                (token_id, notebook_id),
+            )
+        return notebook_id
+
     def touch_agent_token(
         self, token_id: str, used_at: str, touch_before: str
     ) -> None:

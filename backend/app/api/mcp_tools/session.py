@@ -7,6 +7,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from app.core.config import get_settings
 from app.domain.notebook_build_status import kg_build_view
+from app.models.notebooks import NotebookCreate
 from app.services.agent_profile_block import AGENT_PROFILE_VALUE_MAX_CHARS
 from app.services.agent_profile_job import BASE_CHAIN_OWNER
 from app.services.reasoning_retrieval import profile_wiring_active
@@ -17,6 +18,7 @@ from ._shared import (
     _budget_response,
     _live_principal,
     _owner_request_context,
+    _record_agent_call,
     _run_with_progress,
     _selected_notebook,
 )
@@ -26,6 +28,41 @@ from .profiles import _profile_projection
 def register_session_tools(
     server: FastMCP, repository_provider: Callable[[], Any]
 ) -> None:
+    @server.tool(
+        description=(
+            "Create a personal notebook owned by this token's owner and add it "
+            "to this token's allowlist atomically. Requires manage. name must be "
+            "nonblank; purpose is optional. Returns notebook_id for subsequent "
+            "tools. The default notebook and permission tiers stay unchanged; "
+            "other tokens receive no access. Each call creates a new notebook."
+        ),
+        tier="manage",
+    )
+    async def create_notebook(
+        ctx: Context, name: str, purpose: str = ""
+    ) -> dict[str, Any]:
+        if not name.strip():
+            raise AgentToolError("invalid_argument", "笔记本名称不能为空，请填写名称")
+        repo = repository_provider()
+
+        def create() -> dict[str, Any]:
+            principal = _live_principal(repo)
+            payload = NotebookCreate(name=name.strip(), purpose=purpose.strip())
+            notebook_id = repo._runtime.memory_service.create_agent_notebook(
+                principal,
+                lambda db, owner_id: repo._runtime.notebook_store.create_row(
+                    payload, owner_id, db=db
+                ),
+            )
+            _record_agent_call(repo, principal, notebook_id, "notebooks:create")
+            return _budget_response({
+                "notebook_id": notebook_id, "name": payload.name,
+                "purpose": payload.purpose, "tier": "personal",
+                "access": "owner", "is_default": False,
+            })
+
+        return await _run_with_progress(ctx, create, label="create_notebook")
+
     @server.tool(
         description=(
             "List live notebooks in this Agent token's allowlist (is_default "

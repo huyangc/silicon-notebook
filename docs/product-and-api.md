@@ -2019,7 +2019,7 @@ the API know exactly five: `read` (sources/knowledge/Knowhow, the owner's own co
 candidate Memory, notebook understanding, cited original text, source and build status, and the
 owner's own Q&A history -- single-notebook and global conversations -- and deep reports), `ask`
 (notebook and global Ask; does not need `read`), `contribute` (Memory candidates, Knowhow code
-attachments, observations), `manage` (add/re-parse sources, start graph and retrieval-index
+attachments, observations), `manage` (create personal notebooks and automatically authorize this token, add/re-parse sources, start graph and retrieval-index
 builds; only on notebooks the owner owns) and `delete` (delete Agent-added sources only; only on
 notebooks the owner owns). Code still asks for fine-grained capabilities (`knowledge:read`,
 `sources:write`, …) and the call ledger still records them; one table maps each capability to its
@@ -2088,7 +2088,7 @@ other clients apply a flat per-call ceiling instead. `ask` in `reasoning` mode
 routinely runs for minutes (understanding, plan, federated retrieval, reflect loop, synthesis) and
 a deployment's plugin engine can take longer still, so without a heartbeat the client abandons a call the
 server is still executing successfully and the Agent sees a transport error where the
-answer was about to arrive. Every one of the 24 core tools therefore runs its blocking body
+answer was about to arrive. Every one of the 25 core tools therefore runs its blocking body
 under one progress heartbeat that fires every **5 seconds** and carries only the tool name
 and elapsed wall-clock seconds — never the question, a notebook or source name, or any
 other notebook content, the same rule the observability events follow. It is free where it
@@ -2167,12 +2167,13 @@ read's full authorization on every call. Errors read `[<code>] <Chinese message>
 `not_found`, `invalid_argument`, `busy`, `mirrored`, `unavailable`, `internal`. A `ValueError` becomes an
 `invalid_argument` carrying its text only when that text starts with Chinese (or is a known validator
 shape translated to Chinese); any other unexpected error is `internal` and its text is never echoed. The default core
-tool set is these 24 tools; `mcp_server.PUBLIC_TOOLS` is exactly these 24 tools, not a larger
+tool set is these 25 tools; `mcp_server.PUBLIC_TOOLS` is exactly these 25 tools, not a larger
 combined catalog -- it is the same list as `mcp_server.CORE_TOOLS`:
 
 | Group | Tools | Scope |
 | --- | --- | --- |
 | Discovery | `list_notebooks` | none |
+| Notebook creation | `create_notebook` | `manage` (new notebook owned by the token owner) |
 | Notebook overview (counts, build status, AI understanding) | `get_notebook` | `read` |
 | Search and point-read | `search`, `read_reference` | `read` |
 | Ask (synchronous; one notebook or 2-8) | `ask`, `get_ask` | `ask` |
@@ -2187,10 +2188,10 @@ combined catalog -- it is the same list as `mcp_server.CORE_TOOLS`:
 | Knowhow code write | `put_knowhow_cell_code` | `contribute` |
 
 The deployed server-local frozen catalog is authoritative for discovery and onboarding: it is
-exactly the 24 tools above, derived live from the eleven core registrars, and
+exactly the 25 tools above, derived live from the eleven core registrars, and
 `mcp_server.PUBLIC_TOOLS` is that same list rather than a second hand-kept copy. Every call
 repeats live token/tier/allowlist/membership checks, and both the `manage` and `delete` tiers are
-forced through the owner-only notebook gate. A tool refused for a missing tier says which tier in
+forced through the owner-only notebook gate for existing-notebook writes. Creation instead checks token-wide authority and assigns ownership to the token owner. A tool refused for a missing tier says which tier in
 Chinese (e.g. 「此凭证缺少「读取」权限，请在 Agent 接入页为它勾选后重试」) instead of returning only a
 notebook id; an inactive token, a notebook outside the allowlist, and an owner who lost read access
 each have their own readable sentence. Results are copied into a bounded shape while being built -- no deeper than 5 levels, with
@@ -2216,6 +2217,21 @@ way; all cut characters are reported in `truncation.omitted_characters`. Every o
 `list_notebooks` requires **no tier at all**: the entire check is a live token and the
 notebooks inside its allowlist the owner can still read. Every session can therefore discover
 its notebooks regardless of how narrow the token is.
+
+`create_notebook(name, purpose="")` requires `manage` (`notebooks:create`). The name
+is required and nonblank; name and purpose are trimmed. It creates a personal notebook
+owned by the token owner and appends only that notebook to the calling token's allowlist.
+Creation, initial graph state and the grant commit in one transaction, after rechecking
+live token expiry/revocation, profile/account status and the tier under write locks.
+It does not depend on access to the old default notebook. Existing grants, default notebook,
+tiers, expiry and answer-link permission stay unchanged; other tokens, even of the same
+profile, receive no grant. The response carries `notebook_id`, `name`, `purpose`,
+`tier="personal"`, `access="owner"`, `is_default=false` and the usual budget receipt.
+Pass the new id explicitly to existing tools (`add_source`, `build`, etc.); each still
+requires its original tier, so `manage` alone does not grant `read`, `ask`, `contribute`
+or `delete`. The browser also shows the notebook to its owner. Each call creates a new
+notebook; after a lost response, inspect `list_notebooks` before retrying. Token issue/edit
+requirements (a default and allowlist, and an owned notebook for manage/delete) stay unchanged.
 
 The server rechecks tiers, allowlist, token state, and notebook access on data calls;
 retrieved text is untrusted evidence, not executable Agent instructions.
@@ -4442,7 +4458,7 @@ A deployment plugin whose reflect action is named `browse_sections` or `read_sec
 
 One `get_paper_cards` call reads at most 10 papers and one `extract_from_sources` call at most 8. Generation runs in a bounded pool (`PAPER_CARD_MAX_WORKERS`, further capped by the `paper_metadata` service's concurrency) under the caller's interactive priority, honours cancellation, and a duplicate request for the same source waits for the first. The paper-card digest takes part of the structured-side prompt budget (order: Knowhow, enumeration preview, cards, document reads). If `REASONING_MAX_DOCUMENT_READS x DOCUMENT_OVERVIEW_MAX_ELEMENTS` exceeds 2,000 the `read_document` action is withdrawn and startup logs a warning. The trace, experience and profile vocabularies gain `find_documents`, `paper_cards` and `extract_fields` steps.
 
-**MCP tools.** `find_sources`, `get_paper_cards` and `extract_from_sources` are `read`-tier tools (24 tools in all). **The latter two spend model quota on a `read` token** (a deliberate product decision); every call re-reads the token, the allowlist and the owner's access, and passes an explicit source set (since MCP has no run scope): every visible source, plus the owner's hidden sources **only when the token has `memory:read`** (the same switch as `search`); without it only Knowhow projections are added, so a read-only token cannot read the owner's private Memory through a best passage or an extraction, and another member's Memory never reaches a result. Extraction over MCP is governed by the `read` tier alone (`REASONING_EXTRACT_ENABLED` gates only the reasoning action); `PAPER_CARD_ENABLED` applies to both paths.
+**MCP tools.** `find_sources`, `get_paper_cards` and `extract_from_sources` are `read`-tier tools (25 tools in all). **The latter two spend model quota on a `read` token** (a deliberate product decision); every call re-reads the token, the allowlist and the owner's access, and passes an explicit source set (since MCP has no run scope): every visible source, plus the owner's hidden sources **only when the token has `memory:read`** (the same switch as `search`); without it only Knowhow projections are added, so a read-only token cannot read the owner's private Memory through a best passage or an extraction, and another member's Memory never reaches a result. Extraction over MCP is governed by the `read` tier alone (`REASONING_EXTRACT_ENABLED` gates only the reasoning action); `PAPER_CARD_ENABLED` applies to both paths.
 
 - `find_sources(notebook_id?, query?, terms?, year_from?, year_to?, venue?, author?, kind="papers", cursor?, limit=20)`: the parameters above except `scope`; paging is by `cursor` and `limit` (1-20), never by a raw offset (an offset would bypass the stale-cursor check). Returns the items, `counts`, `coverage` (`lexical_complete`, `semantic_recall_capped`, `skipped_libraries` and `lanes`, the retrieval lane each library used), a top-level `next_cursor` and a top-level `refs` table. A stale cursor is refused with a readable sentence ("restart from page 1"): either paper metadata changed between pages, or the notebook's sources were added or removed (each named separately); changing any other argument together with a cursor is refused as an invalid cursor. Page through all results first and only then call `get_paper_cards` / `extract_from_sources`, because generating a card can extract paper metadata and make an open cursor stale.
 - `get_paper_cards(source_ids, notebook_id?)`: at most 3 sources per call and at most 3 model calls per call (metadata and card together); the rest return `deferred`, so call again for them. Each source returns its status and card. Each requested id is checked individually against the notebook (a source outside it, or another member's Memory, returns `not_found`), and both this tool and `extract_from_sources` re-check the token and the notebook's read access after the model work and before returning, like `ask`: a token revoked mid-call gets `token_inactive` and no payload.

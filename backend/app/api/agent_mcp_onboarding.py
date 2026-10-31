@@ -88,6 +88,12 @@ If the current client uses a different MCP configuration format, create one Stre
 
 {tools}
 
+## Creating a notebook
+
+- With `manage`, call `create_notebook(name="...", purpose="...")` to create a personal notebook owned by the token's owner. `name` is required and nonblank; `purpose` is optional.
+- Creation and adding the new notebook to this token's allowlist commit together. Other tokens receive no grant. The default notebook and permission tiers stay unchanged: pass the returned `notebook_id` to subsequent tools such as `add_source` and `build`; reading still requires `read`.
+- Every call creates a new notebook. If a response is lost, check `list_notebooks` before retrying to avoid creating a duplicate.
+
 ## Asking questions
 
 - A call to `ask` answers in the same call (it can take minutes; configure a generous client read timeout). Omit `notebooks` to ask the token's default notebook, pass one id for that notebook, or 2-8 ids for one answer across them; more than 8 is refused. Pass `["*"]` to ask every authorized notebook you can still read (a global answer; refused if more than 8, and not combinable with other ids).
