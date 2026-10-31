@@ -3,6 +3,7 @@ import { useState } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { useSourceSidebar } from "../../app/use-source-sidebar";
 import { SourceSidebarHint, sourceSidebarHintKey } from "../../app/source-sidebar-hint";
+import { useSessionSidebarMorph } from "../../app/use-session-sidebar-morph";
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -151,5 +152,49 @@ test("减少动态效果时来源栏直接收起，不调用动画或留下影�
   expect(screen.getByRole("button", { name: "还原" })).toBeInTheDocument();
   expect(screen.queryByTestId("source-ghost")).toBeNull();
   expect(animate).not.toHaveBeenCalled();
+  delete (Element.prototype as Partial<Element>).animate;
+});
+
+test("来源栏和会话栏同时形变时，来源影子仍落在还原按钮的最终位置", () => {
+  let historyAnimating = false;
+  const frames: { target: Element; keyframes: Keyframe[] }[] = [];
+  vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false })));
+  Element.prototype.animate = vi.fn(function (this: Element, keyframes: Keyframe[]) {
+    if (this.getAttribute("aria-label") === "历史会话") historyAnimating = true;
+    frames.push({ target: this, keyframes });
+    return { cancel: vi.fn(), onfinish: null } as unknown as Animation;
+  }) as unknown as Element["animate"];
+  const sourceRect = { left: 24, top: 90, width: 300, height: 700 };
+  const restoreRect = { left: 38, top: 102, width: 32, height: 32 };
+  function Integrated() {
+    const [collapsed, setCollapsed] = useState(false);
+    const history = useSessionSidebarMorph(collapsed);
+    const source = useSourceSidebar({ active: true, collapsed, ownerKey: "one", onCollapse: collapse, restoreTargetRef: history.restoreTargetRef });
+    function collapse() { history.capture(); source.captureCollapse(); setCollapsed(true); }
+    return <>
+      {!collapsed ? <>
+        <aside ref={(element) => {
+          source.panelRef.current = element;
+          if (element) element.getBoundingClientRect = () => sourceRect as DOMRect;
+        }}><button onClick={collapse}>收起来源</button></aside>
+        <button className="chat-session-toggle" ref={(element) => {
+          if (element) element.getBoundingClientRect = () => ({ left: 900, top: 90, width: 80, height: 34 }) as DOMRect;
+        }}>历史</button>
+      </> : <aside aria-label="历史会话" ref={(element) => {
+        history.sidebarRef.current = element;
+        if (element) element.getBoundingClientRect = () => ({ ...sourceRect, width: 248 }) as DOMRect;
+      }}><button className="sources-restore-button" ref={(element) => {
+        if (element) element.getBoundingClientRect = () => (historyAnimating
+          ? { left: 905, top: 90, width: 10, height: 2 }
+          : restoreRect) as DOMRect;
+      }}>展开来源栏</button></aside>}
+      {source.ghost && <div data-testid="source-ghost" ref={source.ghostRef} />}
+    </>;
+  }
+  render(<Integrated />);
+  fireEvent.click(screen.getByRole("button", { name: "收起来源" }));
+  expect(historyAnimating).toBe(true);
+  const flight = frames.find((frame) => frame.target === screen.getByTestId("source-ghost"))!;
+  expect(flight.keyframes[1].transform).toBe(`translate(14px, 12px) scale(${32 / 300}, ${32 / 700})`);
   delete (Element.prototype as Partial<Element>).animate;
 });

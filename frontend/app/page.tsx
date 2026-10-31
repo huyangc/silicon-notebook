@@ -2277,6 +2277,7 @@ export default function Home() {
     active: wideWorkspace && Boolean(currentNotebookId),
     collapsed: sourcesCollapsed,
     ownerKey: `${currentUser?.id ?? ""}:${currentNotebookId ?? ""}`,
+    restoreTargetRef: sessionSidebarMorph.restoreTargetRef,
     onCollapse: () => setSourcesCollapsedWithMorph(true),
   });
   // 来源栏的两个开关都先记下动画起点再切换,会话栏才能从「历史」按钮长出来、再缩回去。

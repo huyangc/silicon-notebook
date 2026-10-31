@@ -1,14 +1,15 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { canAnimate, placeOver, rectOf, type MorphRect } from "./use-session-sidebar-morph";
 
 // UI geometry, shared by pointer and keyboard collapse. Restore always returns to the CSS default.
 const COLLAPSE_EDGE_PX = 64;
 const KEYBOARD_STEP_PX = 24;
 
-export function useSourceSidebar({ active, collapsed, ownerKey, onCollapse }: {
+export function useSourceSidebar({ active, collapsed, ownerKey, onCollapse, restoreTargetRef }: {
   active: boolean; collapsed: boolean; ownerKey: string; onCollapse: () => void;
+  restoreTargetRef?: RefObject<MorphRect | null>;
 }) {
   const panelRef = useRef<HTMLElement | null>(null);
   const ghostRef = useRef<HTMLDivElement | null>(null);
@@ -65,7 +66,7 @@ export function useSourceSidebar({ active, collapsed, ownerKey, onCollapse }: {
     const shadow = ghostRef.current;
     const target = document.querySelector(".sources-restore-button");
     // The non-Ask rail has a full-height hit area; land on its visible icon.
-    const to = rectOf(target?.matches(".sources-reveal-rail") ? target.querySelector("svg") : target);
+    const to = restoreTargetRef?.current ?? rectOf(target?.matches(".sources-reveal-rail") ? target.querySelector("svg") : target);
     if (!to || !canAnimate(shadow)) { setGhost(null); return; }
     const animation = shadow.animate([
       { transform: "none", opacity: 0.9 },
@@ -73,7 +74,7 @@ export function useSourceSidebar({ active, collapsed, ownerKey, onCollapse }: {
     ], { duration: 360, easing: "cubic-bezier(0.4, 0, 0.2, 1)", fill: "forwards" });
     animation.onfinish = () => setGhost(null);
     return () => { animation.onfinish = null; animation.cancel(); };
-  }, [ghost]);
+  }, [ghost, restoreTargetRef]);
 
   function shrink(next: number) {
     if (next <= COLLAPSE_EDGE_PX) { onCollapse(); return; }

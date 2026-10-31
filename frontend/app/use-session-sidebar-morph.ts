@@ -38,6 +38,7 @@ export function placeOver(from: MorphRect, to: MorphRect): string {
  */
 export function useSessionSidebarMorph(sessionSidebar: boolean) {
   const sidebarRef = useRef<HTMLElement | null>(null);
+  const restoreTargetRef = useRef<MorphRect | null>(null);
   const ghostRef = useRef<HTMLDivElement | null>(null);
   const fromRef = useRef<MorphRect | null>(null);
   const shownRef = useRef(sessionSidebar);
@@ -52,6 +53,11 @@ export function useSessionSidebarMorph(sessionSidebar: boolean) {
   useLayoutEffect(() => {
     if (shownRef.current === sessionSidebar) return;
     shownRef.current = sessionSidebar;
+    // Snapshot the destination before animating its parent: DOM rects read later
+    // include the temporary transform from the old top-right history button.
+    restoreTargetRef.current = sessionSidebar
+      ? rectOf(sidebarRef.current?.querySelector(".sources-restore-button"))
+      : null;
     const from = fromRef.current;
     fromRef.current = null;
     if (!from) return;
@@ -106,5 +112,5 @@ export function useSessionSidebarMorph(sessionSidebar: boolean) {
   // Rapidly toggling back must not leave an old shadow flying over the new sidebar.
   useLayoutEffect(() => { if (sessionSidebar) setGhost(null); }, [sessionSidebar]);
 
-  return { sidebarRef, ghostRef, ghost, capture };
+  return { sidebarRef, restoreTargetRef, ghostRef, ghost, capture };
 }
