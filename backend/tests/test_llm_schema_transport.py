@@ -370,6 +370,45 @@ def test_strict_truncation_preserves_finish_reason_and_billed_usage(tmp_path):
     assert stats["attempts"] == 2
 
 
+def test_completed_schema_failures_downgrade_only_that_format_without_caching(tmp_path):
+    sdk, cache = SDK(), Cache()
+    result = client(tmp_path, sdk, cache=cache)
+    events = []
+    result._json_schema_observer = lambda *event: events.append(event)
+    sdk.business_response = response({"answer": "usable partial answer"})
+    for _ in range(result.settings.model_json_schema_failure_threshold):
+        with pytest.raises(StructuredModelResponseError):
+            call(result, response_validator=lambda _: True)
+    assert cache.writes == []
+    assert json.loads(call(result, response_validator=lambda _: True)) == {"answer": "usable partial answer"}
+    assert sdk.calls[-1]["response_format"]["type"] == "json_object"
+    assert len(cache.writes) == 1
+    sdk.business_response = None
+    result.chat_json([], '{"query":""}', bypass_cache=True)
+    assert sdk.calls[-1]["response_format"]["type"] == "json_schema"
+    assert probe_count(sdk) == 1
+    assert [event[:2] for event in events] == [
+        ("supported", "schema_enforced"), ("unsupported", "schema_not_enforced"),
+    ]
+
+
+def test_live_schema_success_resets_consecutive_failures(tmp_path):
+    sdk = SDK()
+    result = client(tmp_path, sdk)
+    sdk.business_response = response({"answer": "missing grounded"})
+    with pytest.raises(StructuredModelResponseError):
+        call(result, bypass_cache=True)
+    sdk.business_response = None
+    call(result, bypass_cache=True)
+    sdk.business_response = response({"answer": "missing grounded"})
+    for _ in range(result.settings.model_json_schema_failure_threshold):
+        with pytest.raises(StructuredModelResponseError):
+            call(result, bypass_cache=True)
+    call(result, bypass_cache=True)
+    assert sdk.calls[-1]["response_format"]["type"] == "json_object"
+    assert probe_count(sdk) == 1
+
+
 @pytest.mark.parametrize("raw", [
     '[{"answer":"valid","grounded":true}]',
     'prose {"answer":"valid","grounded":true} prose',
@@ -391,3 +430,11 @@ def test_probe_timeout_has_validated_deployment_rails(timeout):
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None, model_json_schema_probe_timeout_seconds=timeout)
+
+
+@pytest.mark.parametrize("threshold", [0, 101, "bad", 1.5])
+def test_schema_failure_threshold_has_validated_deployment_rails(threshold):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, model_json_schema_failure_threshold=threshold)

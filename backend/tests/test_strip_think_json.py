@@ -7,6 +7,8 @@ Regression for: _answer_mix's `json.loads(raw)` raising JSONDecodeError on
 """
 import json
 
+import pytest
+
 from app.core.llm import strip_json_fences
 from app.services.kg.json_utils import safe_json
 
@@ -42,8 +44,57 @@ def test_strip_json_fences_plain_json_unchanged():
     assert json.loads(strip_json_fences('{"a": 1}')) == {"a": 1}
 
 
-def test_strip_json_fences_trailing_text_trimmed():
-    assert json.loads(strip_json_fences('{"a": 1}\n\nThat is my answer.')) == {"a": 1}
+def test_strip_json_fences_preserves_think_tags_inside_json_values():
+    raw = '{"answer":"Keep <think>literal source text</think> exactly"}'
+    assert strip_json_fences(raw) == raw
+
+
+def test_strip_json_fences_preserves_conflicting_unfinished_tail():
+    raw = '{"answer":"first","grounded":false}\n{"answer":"different unfinished'
+    assert strip_json_fences(raw) == raw
+
+
+def test_strip_json_fences_does_not_unwrap_a_root_array():
+    raw = '[{"answer":"nested answer"}]'
+    assert strip_json_fences(raw) == raw
+
+
+@pytest.mark.parametrize("raw", [
+    'reply:\n[{"answer":"nested answer"}',
+    'reply:\n[{"answer":"nested answer"}]',
+])
+def test_strip_json_fences_preserves_structural_prefix_after_prose(raw):
+    assert strip_json_fences(raw) == raw
+
+
+def test_strip_json_fences_does_not_adopt_an_object_from_unfinished_reasoning():
+    raw = '<think>private unfinished reasoning {"answer":"not a final answer"}'
+    assert strip_json_fences(raw) == raw
+
+
+@pytest.mark.parametrize("tail", ["true", "fals", "nul", "17", "NaN", "Infinity"])
+def test_strip_json_fences_preserves_complete_or_partial_json_literal_tail(tail):
+    raw = '{"answer":"first"}\n' + tail
+    assert strip_json_fences(raw) == raw
+
+
+@pytest.mark.parametrize("prefix", ["true", "false", "null", "42", "-1", "NaN", "Infinity"])
+@pytest.mark.parametrize("wrapper", ["%s ", "reply: %s "])
+def test_strip_json_fences_preserves_scalar_prefix_instead_of_promoting_later_object(prefix, wrapper):
+    raw = (wrapper % prefix) + '{"answer":"nested answer"}'
+    assert strip_json_fences(raw) == raw
+
+
+@pytest.mark.parametrize("prose", [
+    "That is my answer.", "the answer is above.",
+    "final answer follows above.", "no further details.",
+])
+def test_strip_json_fences_trailing_text_trimmed(prose):
+    assert json.loads(strip_json_fences('{"a": 1}\n\n' + prose)) == {"a": 1}
+
+
+def test_strip_json_fences_accepts_prose_with_a_source_count():
+    assert json.loads(strip_json_fences('Results from 2 sources:\n{"a": 1}')) == {"a": 1}
 
 
 def test_safe_json_strips_think():

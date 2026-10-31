@@ -52,7 +52,7 @@ BASELINE_CEILING = {
     "B017": {"count": 12, "files": 7},
     "B018": {"count": 2, "files": 2},
     "B039": {"count": 1, "files": 1},
-    "F401": {"count": 237, "files": 103},
+    "F401": {"count": 236, "files": 103},
     "F402": {"count": 2, "files": 1},
     "F403": {"count": 1, "files": 1},
     "F811": {"count": 402, "files": 38},

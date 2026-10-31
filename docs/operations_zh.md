@@ -969,6 +969,13 @@ SQLite 上把条件换成 `scopes_json = '[]'`。结果不为 0 时，这些 tok
 - `ask_report_followup`（字段 `notebook_id`、`receipt_status` ∈ `read|skipped`、`reason_code`、`references`、`restored`、`gone`、`over_budget`、`sections_total`、`sections_read`、`summary_truncated`）：挂了深度报告的每一轮问答（含仅检索输出）在保存时按最终回执记一条，只有计数与原因码，不含报告题目、正文或问题。字段叫 `receipt_status` 而不是 `status`，因为事件日志把 `status` 读作严重程度。`ask_report_followup_failed`（`notebook_id`、`error_type`、`status="failed"`）：读报告行、引用归属、参与集或复原时出错，这一轮按「不读报告」继续（回执 `read_failed`），只记异常类名。产品行为见[就深度报告追问](./product-and-api_zh.md#就深度报告追问关联报告)。
 - `llm.jsonl` — 每次大模型调用：chat（prompt/响应/token/耗时，按 `LLM_LOG_MAX_CHARS` 截断）、embedding（仅摘要，不存原始向量）、以及 deterministic fallback 容易让人忽略的错误。
 
+Schema 协商中的传输层 `StructuredModelResponseError` 可能已被共享业务 JSON 边界恢复。
+判断是否丢失回复前，用安全 `support_id` 对照 `model_json_repair`（`status: "fallback"`、
+`reason: "schema_mismatch"`）及调度调用的最终结果。连续不合规会记
+`model_json_schema_capability`（`status: "unsupported"`、`reason: "schema_not_enforced"`、
+生成的 `schema_name`）；仅该格式在当前模型身份下保持普通 JSON，不再探测。阈值与生命周期见
+[模型 JSON 恢复](./product-and-api_zh.md#模型-json-恢复与流保活)。这些事件不含回复或提示词正文。
+
 浏览器 DevTools console 会镜像请求为 `[api] 方法 /路径 -> 状态 N毫秒 (request_id)`——查询串只记键、值记成 `*`，上面那些带内容的路径段同样记成占位符（请求的 `logPath`，见 `frontend/app/api-client.ts`）；轮询期间 UI 显示当前阶段/已用时长，失败时点名是哪个来源。来源的 `error_message` 由后端写成 Python 异常字符串，因此进 console 而不上屏。
 
 错误信息按受众分流。用户看到的一律是中文：前端把 HTTP 状态码映射成人话（「没有权限进行这个操作」「没找到，可能已被删除」），裸状态码和后端异常原文都不会出现在界面上。**除非后端明确声明「这句是写给用户的」，否则一概不原样展示**——API 会给这类响应打上 `X-User-Message` 头，只有它们才透传（如「用户名已被占用」，比泛化文案更具体）。其余一律泛化，**包括恰好是中文的后端文本**：像「解析失败：不支持的文件类型」这种串，同样可能是一条原始异常，光看内容分不出来。5xx 无论有没有标记都泛化，避免内部错误外泄。压根没产生 HTTP 响应的失败（断连、后端没起来、藏在流式事件、后台任务记录、失败的报告、来源解析失败里的错误串）走同一条规则，不会把原文直接印出来。

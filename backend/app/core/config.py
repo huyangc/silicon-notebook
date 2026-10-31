@@ -243,6 +243,10 @@ class Settings(BaseSettings):
         30, ge=1, le=300,
         validation_alias="MODEL_JSON_SCHEMA_PROBE_TIMEOUT_SECONDS",
     )
+    model_json_schema_failure_threshold: int = Field(
+        2, ge=1, le=100,
+        validation_alias="MODEL_JSON_SCHEMA_FAILURE_THRESHOLD",
+    )
     # Extra attempts on transient connection/timeout errors (total = 1 + this).
     # We drive retries ourselves with the SDK's max_retries pinned to 0.
     openai_compat_max_retries: int = Field(

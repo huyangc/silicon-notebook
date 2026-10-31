@@ -116,7 +116,7 @@
     "I001": 1
   },
   "backend/app/core/llm.py": {
-    "F401": 2,
+    "F401": 1,
     "I001": 1
   },
   "backend/app/core/llm_logging.py": {

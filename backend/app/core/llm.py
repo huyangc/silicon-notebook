@@ -38,6 +38,7 @@ class JsonSchemaCapability:
     status: Optional[str] = None
     lock: Any = field(default_factory=threading.Lock, repr=False)
     rejected_formats: set[str] = field(default_factory=set)
+    consecutive_failures: dict[str, int] = field(default_factory=dict)
 
 
 def llm_status_code(exc: Exception) -> int | None:
@@ -166,22 +167,55 @@ _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 # Reasoning models (e.g. MiniMax-M2.7) emit a chain-of-thought block before the
 # JSON, inline in `content`, even under response_format=json_object.
 _THINK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+# Standalone scalar tokens may be another JSON root, even after a prose label.
+_JSON_SCALAR_TOKEN_RE = re.compile(
+    r"(?<!\w)(?:true|false|null|NaN|-?Infinity|"
+    r"-?[0-9]+(?:\.[0-9]*)?(?:[eE][+-]?[0-9]+)?)(?!\w)",
+)
 
 
 def strip_json_fences(text: str) -> str:
-    """Normalize a model's JSON reply so json.loads won't choke:
-    strip <think>...</think> chain-of-thought, drop ```json ... ``` fences, and
-    fall back to the outermost {...} if anything still leads the JSON."""
+    """Remove reply envelopes without altering JSON values or conflicting tails."""
     cleaned = (text or "").strip()
-    cleaned = _THINK_RE.sub("", cleaned).strip()
+    # Only leading blocks are reasoning envelopes. A matching tag inside a
+    # JSON string is source content and must survive byte-for-byte.
+    while match := _THINK_RE.match(cleaned):
+        cleaned = cleaned[match.end():].lstrip()
+    if cleaned.lower().startswith("<think>"):
+        return cleaned
     if cleaned.startswith("```"):
         cleaned = _FENCE_RE.sub("", cleaned).strip()
-    # Trim anything outside the outermost JSON object (leading prose, trailing
-    # remarks). Reply schemas here are all objects, so locking onto {...} is safe.
-    i, j = cleaned.find("{"), cleaned.rfind("}")
-    if i != -1 and j > i:
-        cleaned = cleaned[i:j + 1]
-    return cleaned
+    if cleaned.startswith(("[", '"')):
+        return cleaned
+    start = cleaned.find("{")
+    if start < 0:
+        return cleaned
+    # A prose envelope may precede the actual JSON root. Do not drop an
+    # array/string opener and promote its nested object when it was truncated.
+    prefix = cleaned[:start]
+    scalar_prefix = prefix.rsplit(":", 1)[-1].strip()
+    if any(char in '[]"' for char in prefix) or _JSON_SCALAR_TOKEN_RE.fullmatch(scalar_prefix):
+        return cleaned
+    candidate = cleaned[start:]
+    try:
+        _, end = json.JSONDecoder().raw_decode(candidate)
+    except (ValueError, RecursionError):
+        return candidate
+    tail = candidate[end:]
+    # Stray closers, repeated objects, extra fields and unfinished JSON must
+    # reach the shared conservative parser, never disappear through rfind('}').
+    if any(char in "{}[],:\"'`" for char in tail):
+        return candidate
+    stripped_tail = tail.lstrip()
+    if stripped_tail and (
+        stripped_tail[0] in "-0123456789"
+        or _JSON_SCALAR_TOKEN_RE.match(stripped_tail)
+        or any(literal.startswith(stripped_tail) for literal in (
+            "true", "false", "null", "NaN", "Infinity",
+        ))
+    ):
+        return candidate
+    return candidate[:end]
 
 
 def _response_validator_allows(
@@ -363,7 +397,7 @@ class OpenAICompatibleClient:
                  max_connections: Optional[int] = None,
                  top_p_override: Optional[float] = None,
                  enable_json_schema_probe: bool = False,
-                 json_schema_observer: Optional[Callable[[str, str], None]] = None,
+                 json_schema_observer: Optional[Callable[[str, str, str], None]] = None,
                  json_schema_capability: Optional[JsonSchemaCapability] = None,
                  context_budget: Optional[ContextBudget] = None,
                  cache: Optional[CacheBackend] = None):
@@ -756,7 +790,36 @@ class OpenAICompatibleClient:
         })
         if self._json_schema_observer is not None:
             try:
-                self._json_schema_observer(status, reason)
+                self._json_schema_observer(status, reason, "")
+            except Exception:
+                pass
+
+    def _observe_schema_response(
+        self, response_format: Dict[str, Any], valid: bool,
+        finish_reason: Optional[str],
+    ) -> None:
+        # Truncation/content filtering is not schema enforcement evidence. Only
+        # live business completions count; cached successes cannot heal a bad
+        # endpoint. The shared lock also makes downgrade monotonic for already
+        # in-flight requests and across capacity/label runtime replacements.
+        if finish_reason not in (None, "", "stop"):
+            return
+        name = response_format["json_schema"]["name"]
+        with self._json_schema_probe_lock:
+            if name in self._json_schema_rejected_formats:
+                return
+            failures = self._json_schema_state.consecutive_failures
+            if valid:
+                failures.pop(name, None)
+                return
+            failures[name] = failures.get(name, 0) + 1
+            if failures[name] < self.settings.model_json_schema_failure_threshold:
+                return
+            failures.pop(name, None)
+            self._json_schema_rejected_formats.add(name)
+        if self._json_schema_observer is not None:
+            try:
+                self._json_schema_observer("unsupported", "schema_not_enforced", name)
             except Exception:
                 pass
 
@@ -1084,9 +1147,12 @@ class OpenAICompatibleClient:
             # empty string everywhere downstream, and llm.jsonl cannot tell a
             # token-budget truncation from a model that returned nothing.
             record["finish_reason"] = finish_reason or ""
-            if response_format is not None and not validate_structured_response(
+            schema_valid = response_format is None or validate_structured_response(
                 content, response_format,
-            ):
+            )
+            if response_format is not None:
+                self._observe_schema_response(response_format, schema_valid, finish_reason)
+            if not schema_valid:
                 if usage:
                     record["usage"] = usage
                 _record_call_stats(
