@@ -254,11 +254,20 @@ def test_claude_entrypoint_stays_claude_specific_and_routes_shared_contracts():
         "AGENTS.md",
         "docs/development.md",
         ".claude/hooks/require-subagent-model.py",
-        "codex exec review --base <base>",
-        "gh pr checks <PR号>",
-        "gh pr merge <PR号> --rebase",
     ):
         assert phrase in text
+    targets = _markdown_link_targets(text, text)
+    assert "docs/development_zh.md#pr-评审与合入" in targets
+    assert "docs/development_zh.md#claude-code-pr-操作" in targets
+    for owner in DEVELOPMENT_DOCS:
+        _assert_contract(owner, (
+            "codex exec review --base <base>",
+            "~/.claude/hooks/codex-pr-review.sh verify",
+            "gh pr checks",
+            "gh pr merge",
+            "--rebase",
+            "headRefOid",
+        ))
 
 
 def test_development_docs_require_guard_mutation_verification():

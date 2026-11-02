@@ -6,6 +6,34 @@ This document owns contributor guardrails, schema/migration authoring, verificat
 workflow, and documentation maintenance. [AGENTS.md](../AGENTS.md) is the short agent
 entry point; [architecture.md](../architecture.md) owns runtime architecture.
 
+## Task context
+
+Start with the row matching the change, then follow only the references needed to
+resolve its contract. Read one language initially; when a contract changes, update
+and check both language versions together. These routes locate the owners; they
+are not an additional copy of their rules.
+
+| Task | Read the owning sections |
+| --- | --- |
+| Scope, delegation, handoff | [Development Workflow](#development-workflow), [Delegation and review](#delegation-and-review) |
+| Test selection and completion | [Verification](#verification), [Test architecture](#test-architecture) |
+| Frontend behavior or copy | [Frontend guardrails](#frontend-implementation-guardrails), [frontend ownership](../architecture.md#24-前端边界), [UI vocabulary](./ui-vocabulary.md) |
+| Repository, SQL, schema | [Dependencies and ownership](#dependencies-authority-and-state-ownership), [id binding](#binding-id-lists-in-sql), [migration authoring](#schema-and-migration-authoring), [repository composition](../architecture.md#22-repository-组合与兼容-facade) |
+| Ask or retrieval | [Ask data flow](../architecture.md#32-ask-与-detached-job), [retrieval contract](./product-and-api.md#retrieval-modes-ask) |
+| Memory or Agent MCP | [Memory ownership](../architecture.md#34-memory-与-agent-mcp), [Memory/API contract](./product-and-api.md#memory-and-agent-mcp), [client onboarding](./agent-mcp-memory-sop.md#4-configure-the-mcp-client) |
+| Deployment or operations | Match the changed setting or command in [deployment](./deployment-and-configuration.md) or [operations](./operations.md); use their heading outline before reading a section |
+| Deployment extensions | [Dependency boundaries](#dependencies-authority-and-state-ownership), [extension scope](./deployment-extensions-sop.md#1-scope-and-trust-model), then the matching authoring or installation step |
+| Documentation | [Documentation Maintenance](#documentation-maintenance), then the changed surface's owner from [AGENTS.md](../AGENTS.md#current-sources-of-truth) |
+| Authorized PR delivery | [PR review and merge](#pr-review-and-merge); Claude Code also reads [its commands](#claude-code-pr-commands) |
+
+For discovery, use `rg --files` and symbol searches in the owning code/test
+directories; read the relevant function, component, or section before expanding
+to callers. Search current references explicitly. Include `docs/superpowers/`
+only to investigate history or follow a current owner's reference. For an
+unmapped product area, list headings with `rg -n '^#{1,4} ' <owning-document>`
+and read the relevant complete section; an output limit is not evidence that
+the omitted contract is irrelevant.
+
 ## Numeric limits and truncation
 
 Production code must not hide result-changing literal slices or limits at a
@@ -522,6 +550,16 @@ Run:
 ```bash
 bash scripts/check.sh
 ```
+
+Agents should use `bash scripts/check.sh --summary` for the same G1 gate with
+less console output. It reports each lane's actual exit code, elapsed time,
+runner-reported test counts (or `unavailable`), and full log path. Failure output
+is an explicitly bounded tail, not the complete diagnostic record. Complete raw
+logs and lane status files remain under a unique `.local/check-logs/run.XXXXXX/`
+directory, including on failure or interruption; inspect the reported log for
+diagnostics and remove old run directories when no longer needed. Without
+`--summary`, output remains unchanged. `--lane` selects focused checks only;
+it does not satisfy the complete G1 gate. See [script usage](../scripts/README.md#agent-验证摘要).
 
 The verification gates are tiered:
 
@@ -1279,9 +1317,26 @@ Identify the requested outcome and authorized scope before acting. Review and de
 - Points that need a product ruling are settled before work starts, never bypassed by "doing half first".
 - A subagent must not register an in-scope gap as deferred on its own; it reports the gap on discovery and fills it.
 
-For approved multi-step implementation plans, use subagent-driven development by default: assign each task to a fresh implementation subagent and require task-scoped specification and code-quality review before moving on. Small tasks, research, design, status, and review-only work do not require subagents. Delegate only bounded work with clear file/task ownership, acceptance criteria, and explicit verification responsibility. Independent tasks may run concurrently when their ownership does not conflict; do not split a small task merely to use more agents. Review delegated results against acceptance criteria and specific concerns instead of repeating the entire task.
+### Delegation and review
 
-Run focused checks while editing and the required standard gate before claiming implementation complete. Once both pass, stop verification unless subsequent edits, failures, or a specific unresolved risk justify another run. This stopping rule does not waive required verification lanes or the PR review and CI checks below. Do not add tests that merely mirror implementation details. Read-only review inspects the diff and the submitter's verification evidence; it does not mutate the tree or rerun the full gate unless explicitly requested.
+Keep routine implementation, focused search, and verification with one agent,
+including multi-step work whose steps share context. Delegate independent modules
+when parallel work earns its extra context cost. Each assignment names its scope,
+file ownership, acceptance criteria, relevant canonical sections, and verification
+responsibility. Closely related steps share one acceptance boundary instead of
+starting a new implementation and two reviewers for every small step.
+
+Use independent specification and code-quality review at a complete acceptance
+boundary for authorization, schema/data migration, concurrency/shared state, or
+cross-module contract changes, and when the user requests it. Modular-extension
+PRs retain the two independent subagent reviews required above. Review the
+integrated result across delegated boundaries; accept evidence and investigate
+specific concerns instead of repeating each task. Independent assignments may run
+concurrently with non-conflicting ownership; use at most four concurrent delegates
+by default, and more than twenty requires explicit user authorization. Small
+tasks, research, design, status, and read-only reviews do not require subagents.
+
+Run focused checks while editing and the required standard gate before claiming implementation complete. Once both pass, stop verification unless subsequent edits, failures, or a specific unresolved risk justify another run. This stopping rule does not waive required verification lanes or the PR review and CI checks below. Do not add tests that merely mirror implementation details. Read-only review inspects the diff and the submitter's verification evidence; it does not mutate the tree or rerun the full gate unless explicitly requested. Check that commands, results, and reviewed changes correspond; report missing evidence. Rerun a focused command only for an explicit request or a specific unresolved risk, stating what it resolves.
 
 Keep handoffs concise and outcome-first: report changes, checks run, checks that could not run, and remaining limitations without repeating the execution history. For reviews, state the reviewed revision and scope; tie each finding to a concrete trigger, impact, and code location, and distinguish verified behavior, static reasoning, and architectural debt.
 
@@ -1291,7 +1346,63 @@ Claude Code auto-loads `CLAUDE.md`. Its hardest Claude-specific rule is that **s
 
 A change that users need to know about, or need to act on, adds one `release-notes/<slug>.md` in the same PR: a front matter with `level` (`change` / `feature` / `fix` / `internal`), `audience` (`all` / `admin`) and a one-line Chinese `title`, plus an optional one- or two-sentence body, written for ordinary users in the [UI vocabulary](./ui-vocabulary.md). Only `change` and `feature` reach the post-upgrade dialog; `fix` is counted there and `internal` appears only on the update-history page. One feature gets one note: a follow-up PR extends a note that has not shipped instead of adding another. Internal-only changes (refactors, tests, documentation) add none. A backend guard parses every real note and enforces the length limits registered in [System update notice](./product-and-api.md#system-update-notice). The authoring rules live in [`release-notes/README.md`](../release-notes/README.md); `scripts/check_ui_vocabulary.py` scans these notes like any other user-facing copy.
 
-A pull request must be reviewed by codex before it is merged, and **every round's raw output is posted verbatim to the PR** — rounds that raise nothing included, rounds run by hand included — alongside the trigger, the exact command, the head SHA, and the exit code with output size, so a reader can confirm the run happened and was not paraphrased away. A round counts as successful only when the exit code is zero **and** the output is non-empty: a review killed by SIGTERM also exits zero, and trusting the exit code alone posts an empty comment that reads as a pass. P0/P1 findings block: verify them, fix what holds up, and re-review until the verdict is non-blocking — stop for a human decision only when the finding does not hold up (then follow the rejection rule below) or when the fix itself needs a human call; P2/P3 do not block and may be declined with a stated reason; output whose priority tags cannot be parsed blocks conservatively instead of defaulting to a pass. A finding may be rejected on the merits — codex reviews the diff and does not always know the runtime facts — but a rejection must carry its reasoning and evidence on the PR, a comment recording the trade-off in the code, and a regression test pinning the behavior that was kept. Merging does not require a fresh approval on every PR: once the review is non-blocking **and** CI is fully green, merge with `--rebase`. Never merge while findings block or the review output cannot be parsed — fix and re-review first — and never merge when CI is not green or the user has said they will merge it themselves. CI counts as green only when `gh pr checks` reports every check as `pass` — `mergeStateStatus: CLEAN` means nothing is blocking the merge, not that the checks ran green. Before merging, confirm on the PR itself that a review for the PR's **remote** head (`headRefOid`, never local `git rev-parse HEAD` — a stale local checkout matches an older review while the merge takes the unreviewed remote head) has been posted: review automation that silently never fired looks exactly like one that passed, and neither the agent's report nor the hook's local state is evidence — only the comment on the PR is. The review automation itself is a per-developer Claude Code hook rather than a repository artifact, so a fresh clone will not have it; the rule stands regardless, and `CLAUDE.md` documents the manual command.
+### PR review and merge
+
+These rules apply when the user has authorized PR delivery; local editing alone
+does not authorize remote mutations.
+
+- A pull request must be reviewed by codex before it is merged, and **every round's
+  raw output is posted verbatim to the PR**, including empty-finding and manual
+  rounds, with trigger, exact command, remote head SHA, exit code, and output size.
+  A round succeeds only with zero exit code **and** non-empty output: a review
+  killed by SIGTERM can exit zero. An empty `base..HEAD` diff is a hard failure;
+  check the worktree and base branch.
+- P0/P1 findings block: verify, fix what holds up, and re-review until non-blocking.
+  Stop for a human decision only when a finding does not hold up or a fix needs
+  judgment outside the authorized scope. P2/P3 may be declined with a stated
+  reason. Unparseable priorities block conservatively.
+- Rejecting a finding requires reasons and evidence on the PR, a code comment
+  recording the trade-off, and a regression test pinning the retained behavior.
+- Within authorized delivery, merging does not require a fresh approval on every
+  PR: once review is non-blocking **and** CI is fully green, merge with `--rebase`.
+  Never merge with blocking findings, unparseable review output, non-green CI, or
+  when the user says they will merge it themselves. CI is green only when
+  `gh pr checks` reports every check as `pass`; `mergeStateStatus: CLEAN` is not
+  verification evidence. Disclose existing local failures with baseline evidence.
+- Before merging, confirm on the PR itself that a review for its **remote**
+  `headRefOid` has been posted, not just the local `git rev-parse HEAD`. Neither
+  the agent's report nor hook-local state replaces that comment. After any new
+  commit, review the new remote head and post the output if automation did not.
+- Stacked PRs use their own base branch, not a hardcoded `master`. Confirm merge
+  by `gh pr view --json state` returning `MERGED`, not SHA ancestry after rebase.
+
+### Claude Code PR commands
+
+The automation is the developer-local `~/.claude/hooks/codex-pr-review.sh`, not a
+repository artifact. A fresh clone may lack it; the review policy still applies.
+Without the hook, run the review manually and post the evidence specified above:
+
+```bash
+codex exec review --base <base> --ephemeral \
+  -c 'model_reasoning_effort=medium' -c 'notify=[]' -o <out>
+```
+
+`review --base` and a custom prompt are mutually exclusive. Review inspects the
+diff and verification evidence; the implementer owns the full gate and frontend
+build. If installed, the hook exposes these manual operations:
+
+```bash
+~/.claude/hooks/codex-pr-review.sh set-state <PR-number> <waived|awaiting_fix|passed>
+~/.claude/hooks/codex-pr-review.sh show-state <PR-number>
+~/.claude/hooks/codex-pr-review.sh run <PR-number> manual
+~/.claude/hooks/codex-pr-review.sh verify <PR-number>
+```
+
+`verify` checks PR comments against the remote `headRefOid`; it cannot substitute
+local state or a stale local HEAD. After non-blocking review, all
+`gh pr checks <PR-number>` entries must be `pass` and `verify` must succeed before
+`gh pr merge <PR-number> --rebase`. If the user will merge, hand back the PR link
+and status instead.
 
 ### Test architecture
 

@@ -1,12 +1,12 @@
 ---
 name: code-quality-review
-description: 任务级**代码质量与回归风险**评审：正确性、边界、并发、性能开销、架构边界、可维护性。与 spec-review 互补——那个问「做对了要求的事吗」，这个问「这段代码本身站得住吗」。在每个实现任务完成后、推进下一个任务前跑。
+description: 在高风险变更或用户要求独立评审时，检查一个完整验收边界的正确性、并发、性能与架构风险。调用条件见 docs/development.md 的 Delegation and review。
 model: opus
 color: magenta
 tools: Read, Grep, Glob, Bash, WebFetch
 ---
 
-你对刚完成的一个实现任务做**代码质量与回归风险**评审。只读，不改任何文件。
+你对一个完整验收边界的改动做**代码质量与回归风险**评审。只读，不改任何文件。
 
 ## 查什么
 

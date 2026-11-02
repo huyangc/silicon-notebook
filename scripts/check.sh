@@ -27,8 +27,10 @@ declare -a LANES=(contracts backend frontend)
 # backend parts explicitly, then runs the other two together with
 # `--lane contracts --lane frontend`.
 declare -a SELECTED_LANES=()
+SUMMARY=0
 while (( $# )); do
   case "$1" in
+    --summary) SUMMARY=1; shift ;;
     --lane)
       if (( $# < 2 )) || [[ " ${LANES[*]} " != *" $2 "* ]]; then
         printf 'Expected one of [%s] after --lane\n' "${LANES[*]}" >&2
@@ -50,7 +52,12 @@ if (( ${#SELECTED_LANES[@]} )); then
   LANES=("${RUN_LANES[@]}")
 fi
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/silicon-check.XXXXXX")"
+if (( SUMMARY )); then
+  mkdir -p "$ROOT_DIR/.local/check-logs"
+  TMP_DIR="$(mktemp -d "$ROOT_DIR/.local/check-logs/run.XXXXXX")"
+else
+  TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/silicon-check.XXXXXX")"
+fi
 GATE_START_SECONDS=$SECONDS
 GATE_STARTED_AT="$(date +%s)"
 declare -a PIDS=()
@@ -61,10 +68,27 @@ cleanup() {
   for pid in "${PIDS[@]:-}"; do
     kill -TERM -- "-$pid" 2>/dev/null || true
   done
-  for pid in "${PIDS[@]:-}"; do
-    wait "$pid" 2>/dev/null || true
+  for index in "${!PIDS[@]}"; do
+    local lane_status=0
+    wait "${PIDS[$index]}" 2>/dev/null || lane_status=$?
+    if [[ ! -f "$TMP_DIR/${LANES[$index]}.exit" ]]; then
+      printf '%s\n' "$lane_status" > "$TMP_DIR/${LANES[$index]}.exit"
+    fi
   done
-  rm -rf "$TMP_DIR"
+  if (( SUMMARY )); then
+    local summary_args=()
+    for lane in "${LANES[@]}"; do
+      summary_args+=(--lane "$lane")
+    done
+    if ! "$PYTHON_BIN" "$ROOT_DIR/scripts/check_output_summary.py" \
+      --log-dir "$TMP_DIR" --wall "$((SECONDS - GATE_START_SECONDS))" \
+      --gate-exit "$status" "${summary_args[@]}"; then
+      printf 'Summary unavailable; full logs: %s\n' "$TMP_DIR" >&2
+      if (( status == 0 )); then status=1; fi
+    fi
+  else
+    rm -rf "$TMP_DIR"
+  fi
   exit "$status"
 }
 
@@ -94,10 +118,17 @@ done
 
 status=0
 for index in "${!LANES[@]}"; do
-  if ! wait "${PIDS[$index]}"; then
+  lane_status=0
+  wait "${PIDS[$index]}" || lane_status=$?
+  printf '%s\n' "$lane_status" > "$TMP_DIR/${LANES[$index]}.exit"
+  if (( lane_status )); then
     status=1
   fi
 done
+
+if (( SUMMARY )); then
+  exit "$status"
+fi
 
 for lane in "${LANES[@]}"; do
   printf "\n===== %s =====\n" "$lane"

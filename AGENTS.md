@@ -1,10 +1,7 @@
 # Agent Development Instructions
 
-This file is the short operating entry point for coding agents in this repository. It
-contains repository-wide working rules and routes agents to the current source of truth.
-It must stay concise: product narratives, endpoint contracts, component state machines,
-environment-variable catalogs, numeric rail tables, migration procedures, and incident
-history belong in the owning documents below, not here.
+This entry point routes agents to current contracts. Keep feature behavior, implementation
+details, numeric rails, and incident history in the owning references below.
 
 ## Start Every Task
 
@@ -13,11 +10,12 @@ history belong in the owning documents below, not here.
 2. Confirm that write work is happening in an isolated linked worktree and branch. If the
    current directory is already such a worktree, continue there. Read-only investigation
    does not require a new worktree.
-3. Identify the owning document from the routing table and read the relevant section before
-   changing behavior. Historical files under `docs/superpowers/` explain past decisions but
-   are not the current contract unless a live document explicitly points to them.
-4. Use `rg` / `rg --files` for discovery. Prefer focused edits and focused tests before the
-   full verification gate.
+3. Use [task routes](docs/development.md#task-context) (or the
+   [Chinese pair](docs/development_zh.md#任务上下文)) to read the owning sections before
+   changing behavior. Read one language initially; synchronize both when editing a pair.
+4. Use `rg` / `rg --files` within the relevant code and current references first. Read
+   `docs/superpowers/` only for history or an explicit live reference. Prefer focused edits
+   and focused tests before the full verification gate.
 5. Before running `npm install` in a worktree, inspect `frontend/node_modules` with
    `ls -l frontend/node_modules`. If it is a symlink into the main checkout, do not write
    through the shared dependency tree; copy it or install in the correct checkout when an
@@ -35,9 +33,9 @@ history belong in the owning documents below, not here.
   work while awaiting the answer.
 - Existing authorization remains valid within its stated scope. Do not request the same
   approval again.
-- Follow the delegation workflow in `docs/development.md`. Small tasks and read-only
-  reviews do not require subagents; delegated work must have bounded scope, clear
-  ownership, and explicit verification responsibility.
+- Use [delegation](docs/development.md#delegation-and-review) for independent work or
+  risk-based review; routine work stays with one agent. Define ownership, acceptance
+  criteria, and verification responsibility before delegating.
 
 ## Current Sources of Truth
 
@@ -161,15 +159,16 @@ carrier they name; neither entry point is a second product or architecture sourc
 Run focused tests while editing, then run the standard gate before claiming completion:
 
 ```bash
-bash scripts/check.sh
+bash scripts/check.sh --summary
 ```
 
 The project commonly uses:
 
 ```bash
-PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
+PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh --summary
 ```
 
+Summary mode runs the same gate and retains full logs; use the reported path for diagnostics.
 Use `scripts/check_extended.sh` for the documented extended lane and
 `scripts/check_postgres.sh` only with the explicit PostgreSQL test environment described in
 `docs/development*.md`. Missing frontend dependencies are a failure, not permission to skip the
