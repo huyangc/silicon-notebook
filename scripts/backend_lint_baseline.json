@@ -1664,9 +1664,6 @@
   "backend/tests/test_check_frontend_lane.py": {
     "I001": 1
   },
-  "backend/tests/test_check_script_contract.py": {
-    "I001": 1
-  },
   "backend/tests/test_checkup_service.py": {
     "I001": 2
   },

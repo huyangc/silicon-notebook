@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -40,12 +40,16 @@ def _written_lane_pids(pid_dir: Path) -> list[int]:
     return pids
 
 
-def test_check_script_termination_reaps_lane_descendants(tmp_path):
+@pytest.mark.parametrize("summary", [False, True])
+def test_check_script_termination_reaps_lane_descendants(tmp_path, summary):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     check = scripts / "check.sh"
     check.write_bytes((ROOT / "scripts" / "check.sh").read_bytes())
     check.chmod(0o755)
+    (scripts / "check_output_summary.py").write_bytes(
+        (ROOT / "scripts" / "check_output_summary.py").read_bytes()
+    )
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
     # pid 文件**故意**分两步写:先创建空文件,握手后再落内容。真实 lane 用的
@@ -69,7 +73,7 @@ wait "$child"
         path.chmod(0o755)
 
     process = subprocess.Popen(
-        [str(check)],
+        [str(check), *(["--summary"] if summary else [])],
         cwd=tmp_path,
         env={
             **os.environ,
@@ -110,6 +114,14 @@ wait "$child"
 
         process.terminate()
         assert process.wait(timeout=5) == 143
+        if summary:
+            directories = list((tmp_path / ".local" / "check-logs").iterdir())
+            assert len(directories) == 1
+            assert {p.name for p in directories[0].glob("*.log")} == {
+                "backend.log", "contracts.log", "frontend.log"
+            }
+            for lane in ("backend", "contracts", "frontend"):
+                assert (directories[0] / f"{lane}.exit").read_text().strip() != "0"
 
         deadline = time.monotonic() + 3
         remaining = set(child_pids)
@@ -131,3 +143,77 @@ wait "$child"
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+@pytest.fixture
+def fake_gate(tmp_path):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in ("check.sh", "check_output_summary.py", "check_timing_summary.py"):
+        (scripts / name).write_bytes((ROOT / "scripts" / name).read_bytes())
+    for lane in ("contracts", "backend", "frontend"):
+        path = scripts / f"check_{lane}.sh"
+        path.write_text(
+            '#!/usr/bin/env bash\n'
+            'echo "detail $CHECK_LANE_NAME"\n'
+            'printf "%s=2\\n" "$CHECK_LANE_NAME" > "$CHECK_TIMING_FILE"\n'
+            'if [[ "$CHECK_LANE_NAME" == backend ]]; then\n'
+            '  echo "================== 3 passed in 0.01s =================="\n'
+            'fi\n'
+            'if [[ "$CHECK_LANE_NAME" == "${FAIL_LANE:-}" ]]; then\n'
+            '  echo "AssertionError: important failure"\n'
+            '  exit 7\n'
+            'fi\n',
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+
+    def run(*args, **env):
+        return subprocess.run(
+            ["bash", str(scripts / "check.sh"), *args],
+            env={**os.environ, "PYTHON_BIN": sys.executable, **env},
+            cwd=tmp_path, capture_output=True, text=True, timeout=15,
+        )
+
+    return tmp_path, run
+
+
+def test_summary_keeps_all_lanes_and_raw_logs_but_hides_success_details(fake_gate):
+    root, run = fake_gate
+    result = run("--summary")
+    assert result.returncode == 0, result.stderr
+    for lane in ("contracts", "backend", "frontend"):
+        assert f"{lane}: exit=0; elapsed=2s" in result.stdout
+    assert "3 passed in 0.01s" in result.stdout
+    assert "tests (runner-reported): unavailable" in result.stdout
+    assert "detail " not in result.stdout
+    directories = list((root / ".local" / "check-logs").iterdir())
+    assert len(directories) == 1
+    for lane in ("contracts", "backend", "frontend"):
+        log = directories[0] / f"{lane}.log"
+        assert f"detail {lane}\n" in log.read_text()
+        assert str(log) in result.stdout
+
+
+def test_summary_preserves_failure_and_lane_selection(fake_gate):
+    root, run = fake_gate
+    result = run("--lane", "frontend", "--summary", FAIL_LANE="frontend")
+    assert result.returncode == 1
+    assert "frontend: exit=7" in result.stdout
+    assert "AssertionError: important failure" in result.stdout
+    assert "failure excerpt" in result.stdout
+    assert "contracts:" not in result.stdout
+    assert "backend:" not in result.stdout
+    directory, = (root / ".local" / "check-logs").iterdir()
+    assert not (directory / "backend.log").exists()
+
+
+def test_default_still_prints_full_output_and_rejects_bad_arguments(fake_gate):
+    _, run = fake_gate
+    result = run("--lane", "backend")
+    assert result.returncode == 0
+    assert "detail backend" in result.stdout
+    for args in (("--summary", "--lane"), ("--summary", "--lane", "bogus"), ("--bogus",)):
+        result = run(*args)
+        assert result.returncode == 2
+        assert "detail " not in result.stdout

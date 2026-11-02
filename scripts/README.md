@@ -3,6 +3,26 @@
 仓库运维 / 开发 / 评测脚本。**除非特别说明,都在仓库根目录运行**,Python 用装好
 `backend/requirements.txt`(带哈希的运行依赖锁;跑测试再加 `backend/requirements-dev.txt`)依赖的解释器(激活对应环境,或用 `PYTHON_BIN=...` 覆盖脚本默认)。
 
+## Agent 验证摘要
+
+```bash
+# 同一个完整 G1 门，仅减少控制台输出：
+PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh --summary
+# 编辑期间只跑指定 lane；不能代替完整 G1：
+bash scripts/check.sh --summary --lane contracts --lane frontend
+```
+
+不加 `--summary` 时保留原有详细输出。摘要显示每个 lane 的实际退出码、耗时、
+测试运行器报告的计数（无法识别时明确标为 `unavailable`）及完整日志路径；不同
+运行器或多次测试的计数分别展示，不猜测一个合计数。失败显示最后 80 行、最多
+16,000 字符的摘录，完整诊断以日志为准。lane 失败时整个门失败，中断仍以 130/143
+退出并清理后代进程；摘要生成失败也会报错并给出原始日志目录。
+
+`--summary` 的原始日志、退出码和耗时文件保留在 gitignored 的
+`.local/check-logs/run.XXXXXX/` 唯一目录中，包括失败和中断的运行；诊断时按摘要给出的
+路径读取，需要保留证据时保留该目录，不再需要后手动清理。PR 评审原始输出的留存
+要求仍由[开发流程](../docs/development_zh.md#pr-评审与合入)负责。
+
 ## 统一 CLI 入口
 
 推荐从统一目录选择命令，不再为日常操作手动拼 `PYTHONPATH=backend`：

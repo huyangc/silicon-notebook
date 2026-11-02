@@ -53,7 +53,9 @@ TARGET = ROOT / "CLAUDE.md"
 # 这里只留一句加去处。
 # 3,499 → 3,571：明确共享开发规则的权威文档与载体边界，适用于后续所有任务；
 # 执行、验证停止条件及交付细则仍由 docs/development.md / _zh.md 拥有。
-BASELINE_CHARS = 3_571
+# 3,571 → 1,515：共享工作区红线归 AGENTS.md，委托与 PR 操作归配对开发文档；
+# 常驻只保留 Claude 模型选择、角色和按需入口。
+BASELINE_CHARS = 1_515
 BASELINE_LINE_CHARS = 79
 
 _GREW_ADVICE = """
