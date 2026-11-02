@@ -569,7 +569,7 @@ def test_the_offset_moves_every_namespace_in_one_assembly(repo):
     llm = _CaptureAnswerLLM()
     service = _ask_service(repo, llm)
     offset = OUTLINE_SECTION_KEY_STRIDE
-    _answer, _grounded, anchors, counts = service._answer_reasoning(
+    _answer, _grounded, anchors, counts = service._response_drafting._answer_reasoning(
         notebook.id, "问题", [], [_element("e1")],
         chunks=[_chunk("c1")], sectioned=True, key_offset=offset,
         section_title="第二节", section_index=2, section_total=2,
@@ -590,12 +590,12 @@ def test_section_mode_skips_evidence_refinement(repo):
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     llm = _CaptureAnswerLLM()
     service = _ask_service(repo, llm)
-    service._answer_reasoning(
+    service._response_drafting._answer_reasoning(
         notebook.id, "问题", [], [_element("e1")], sectioned=True,
         section_title="第一节", section_index=1, section_total=2,
     )
     assert "精炼结果" not in llm.prompts[0]
-    service._answer_reasoning(notebook.id, "问题", [], [_element("e1")])
+    service._response_drafting._answer_reasoning(notebook.id, "问题", [], [_element("e1")])
     assert "精炼结果" in llm.prompts[1], "单次合成仍然精炼"
 
 
@@ -603,8 +603,8 @@ def test_the_section_directive_only_appears_in_section_mode(repo):
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     llm = _CaptureAnswerLLM()
     service = _ask_service(repo, llm)
-    service._answer_reasoning(notebook.id, "问题", [], [_element("e1")])
-    service._answer_reasoning(
+    service._response_drafting._answer_reasoning(notebook.id, "问题", [], [_element("e1")])
+    service._response_drafting._answer_reasoning(
         notebook.id, "问题", [], [_element("e1")], sectioned=True,
         section_title="本节标题", section_index=1, section_total=3,
     )
@@ -625,14 +625,14 @@ def test_the_mode_switch_is_the_flag_not_the_title(repo):
     llm = _CaptureAnswerLLM()
     service = _ask_service(repo, llm)
     # 只给标题、不开 flag:仍然是单次合成(发精炼、不发节级指令)。
-    service._answer_reasoning(
+    service._response_drafting._answer_reasoning(
         notebook.id, "问题", [], [_element("e1")],
         section_title="看起来像一节", section_index=1, section_total=2,
     )
     assert "ONE section" not in llm.prompts[0]
     assert "精炼结果" in llm.prompts[0]
     # 只开 flag、标题缺席(防御性形状):节级指令照发,精炼照跳。
-    service._answer_reasoning(
+    service._response_drafting._answer_reasoning(
         notebook.id, "问题", [], [_element("e1")], sectioned=True,
         section_index=1, section_total=2,
     )

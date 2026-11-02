@@ -40,8 +40,11 @@ action/helper methods — a new loop method has to be placed deliberately.
 ``self.enumeration_active()``: pairs that look interchangeable, and that the
 split had to keep apart verbatim.
 
+Capability implementations and their explicit live views are checked alongside
+the coordinator, so moving an action cannot bypass authority checks.
+
 Known blind spots (not checked; none occurs today): ``state.f = ...``
-rebinding done by a module-level helper or another class, through
+rebinding done by an unrelated module-level helper or another class, through
 ``setattr``, or under a parameter not named ``state`` is not seen by the
 rebinding analysis; an alias taken between ``_new_run_state`` and the first
 round of a field the first round later rebinds would go stale unreported.
@@ -60,6 +63,27 @@ SOURCE = (
 )
 STATE_CLASS = "_ReasoningRunState"
 OWNER_CLASS = "ReasoningRetriever"
+CAPABILITY_OWNERS = {
+    "reasoning_paper_actions.py": "ReasoningPaperActions",
+    "reasoning_section_navigation.py": "ReasoningSectionNavigation",
+}
+CAPABILITY_METHODS = {
+    "ReasoningPaperActions": frozenset({
+        "_paper_tools_spent", "_paper_budget_left", "_paper_allowed",
+        "_paper_has_results", "_paper_skip", "_paper_tool_failed",
+        "_paper_tools_ledger", "_resolved_paper_sources", "_action_find_sources",
+        "_action_get_paper_cards", "_action_extract_from_sources",
+    }),
+    "ReasoningSectionNavigation": frozenset({
+        "_section_evidence_sources", "_section_source_rows", "_resolve_section_source",
+        "_section_outline_for", "_section_similarities", "_section_similarities_parallel",
+        "_take_section_hint_detail", "_section_hint_block", "_section_hints_text",
+        "_section_skip", "_section_actions_offered", "_section_spent",
+        "_section_read_left", "_section_listing_note", "_section_failed",
+        "_action_browse_sections", "_replay_section_listing", "_deliver_section_listing",
+        "_resolve_section_address", "_ambiguous_section_skip", "_action_read_section",
+    }),
+}
 #: methods holding the reflect loop and its close
 GUARDED = (
     "run", "_run_reflect_loop", "_reflect_round_ledger_notes",
@@ -79,6 +103,9 @@ GUARDED = (
     "_ambiguous_section_skip", "_section_evidence_sources",
     # paper tools: the per-round helpers the loop, the ledger and the kwargs call
     "_note_reflect_decision", "_paper_tools_spent", "_paper_tools_ledger",
+    "_action_find_sources", "_action_get_paper_cards", "_action_extract_from_sources",
+    "_paper_allowed", "_paper_has_results", "_paper_skip", "_paper_tool_failed",
+    "_resolved_paper_sources", "_paper_budget_left",
 )
 #: ``run`` parameters that are frozen inputs (state keeps an identical copy);
 #: exempt in ``run`` only
@@ -93,10 +120,6 @@ EXEMPT_STATE_METHODS = frozenset({
     "_action_search_chunks", "_action_read_document", "_external_evidence_room",
     "_plugin_action_kwargs", "_add_plugin_reflect_context", "_action_plugin",
     "_admit_external_evidence", "_action_expand_community", "_run_enumeration",
-    # paper tools: the three executors and their helpers
-    "_action_find_sources", "_action_get_paper_cards", "_action_extract_from_sources",
-    "_paper_allowed", "_paper_has_results", "_paper_skip", "_paper_tool_failed",
-    "_resolved_paper_sources", "_paper_budget_left",
 })
 #: methods allowed to (re)build state containers: they finish before the loop
 FIRST_ROUND_PREFIXES = ("_first_round_", "_run_first_round", "_new_run_state")
@@ -109,6 +132,17 @@ Violation = Tuple[str, str, str]
 def _class(tree: ast.Module, name: str) -> ast.ClassDef:
     return next(node for node in tree.body
                 if isinstance(node, ast.ClassDef) and node.name == name)
+
+
+def _state_owner(tree: ast.Module) -> ast.ClassDef:
+    """Analyze coordinator and actual capability implementations as one authority.
+
+    Legacy delegates remain covered, but cannot stand in for the moved bodies.
+    """
+    owner = _class(tree, OWNER_CLASS)
+    for name in CAPABILITY_OWNERS.values():
+        owner.body.extend(_class(tree, name).body)
+    return owner
 
 
 def _state_fields(tree: ast.Module) -> dict:
@@ -214,7 +248,7 @@ def _takes_run_state(method: ast.FunctionDef) -> bool:
 
 def unplaced_state_methods(source: str, guarded=GUARDED) -> List[str]:
     """State-taking methods that are neither guarded, first-round nor exempt."""
-    owner = _class(ast.parse(source), OWNER_CLASS)
+    owner = _state_owner(ast.parse(source))
     return sorted(
         method.name for method in owner.body
         if isinstance(method, ast.FunctionDef) and _takes_run_state(method)
@@ -228,7 +262,7 @@ def violations(source: str, guarded=GUARDED) -> List[Violation]:
     """``(method, name, rule)`` for every breach of the two rules."""
     tree = ast.parse(source)
     fields = _state_fields(tree)
-    owner = _class(tree, OWNER_CLASS)
+    owner = _state_owner(tree)
     aliasable = _aliasable(fields, _rebound_in_loop(owner))
     found: List[Violation] = []
     for method in owner.body:
@@ -269,7 +303,10 @@ def _binds_own_field(method: ast.FunctionDef, name: ast.Name) -> bool:
 
 @pytest.fixture(scope="module")
 def source() -> str:
-    return SOURCE.read_text(encoding="utf-8")
+    return "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (SOURCE, *(SOURCE.with_name(name) for name in CAPABILITY_OWNERS))
+    )
 
 
 def test_the_loop_reads_and_writes_run_state_only_through_state(source):
@@ -277,9 +314,134 @@ def test_the_loop_reads_and_writes_run_state_only_through_state(source):
 
 
 def test_every_guarded_method_exists(source):
-    owner = _class(ast.parse(source), OWNER_CLASS)
+    owner = _state_owner(ast.parse(source))
     names = {node.name for node in owner.body if isinstance(node, ast.FunctionDef)}
     assert set(GUARDED) <= names
+
+
+def missing_capability_methods(source: str) -> set:
+    tree = ast.parse(source)
+    return {
+        (owner, name)
+        for owner, expected in CAPABILITY_METHODS.items()
+        for name in expected - {
+            node.name for node in _class(tree, owner).body
+            if isinstance(node, ast.FunctionDef)
+        }
+    }
+
+
+def test_capability_implementations_are_guarded_at_their_actual_owner(source):
+    assert missing_capability_methods(source) == set()
+
+
+@pytest.mark.parametrize("relocate", [False, True], ids=["delete", "relocate"])
+@pytest.mark.parametrize(
+    ("owner", "method"),
+    [("ReasoningPaperActions", "_action_get_paper_cards"),
+     ("ReasoningSectionNavigation", "_action_read_section")],
+)
+def test_a_legacy_delegate_cannot_hide_deleted_or_relocated_implementation(
+    source, owner, method, relocate,
+):
+    tree = ast.parse(source)
+    implementation = _class(tree, owner)
+    moved = next(node for node in implementation.body
+                 if isinstance(node, ast.FunctionDef) and node.name == method)
+    implementation.body.remove(moved)
+    if relocate:
+        _class(tree, OWNER_CLASS).body.append(moved)
+    assert (owner, method) in missing_capability_methods(ast.unparse(tree))
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "expected"),
+    [("state.find_sources_calls += 1", "find_sources_calls += 1",
+      ("_action_find_sources", "find_sources_calls", "bare-state-field")),
+     ("state.section_listing_turn = state.steps", "section_listing_turn = state.steps",
+      ("_deliver_section_listing", "section_listing_turn", "bare-state-field")),
+     ("taken = dict(state.section_hint_detail)",
+      "taken = state.section_hint_detail",
+      ("_take_section_hint_detail", "section_hint_detail", "stale-prone-alias"))],
+)
+def test_moved_implementations_keep_scalar_and_rebound_container_guards(
+    source, before, after, expected,
+):
+    assert source.count(before) == 1
+    assert expected in violations(source.replace(before, after))
+
+
+def test_capability_views_read_and_write_the_unique_live_run_authority():
+    from types import SimpleNamespace
+
+    from app.services.reasoning_retrieval import _PaperRunView, _SectionRunView
+
+    state = SimpleNamespace(
+        paper_card_reads=0, paper_cards={}, section_reads=0,
+        section_hint_detail={}, chunks=[], steps=1, max_steps=3,
+    )
+    paper, section = _PaperRunView(state), _SectionRunView(state)
+    paper.paper_card_reads += 1
+    section.section_reads += 1
+    assert (state.paper_card_reads, state.section_reads) == (1, 1)
+    state.paper_card_reads, state.section_reads = 5, 7
+    state.steps, state.max_steps = 2, 4
+    assert (paper.paper_card_reads, section.section_reads) == (5, 7)
+    assert (section.steps, section.max_steps) == (2, 4)
+    assert paper.paper_cards is state.paper_cards
+    assert section.chunks is state.chunks
+    old_detail = state.section_hint_detail
+    section.section_hint_detail = {"entries": 2}
+    assert section.section_hint_detail is state.section_hint_detail
+    assert state.section_hint_detail is not old_detail
+    for view in (paper, section):
+        with pytest.raises(AttributeError):
+            _ = view.max_outline_updates
+
+
+def view_authority_violations(source: str) -> set:
+    """A view can forward named fields, but cannot cache or redirect authority."""
+    tree = ast.parse(source)
+    found = set()
+    for view_name in ("PaperRunView", "SectionRunView"):
+        protocol = _class(tree, view_name)
+        expected = {node.target.id for node in protocol.body
+                    if isinstance(node, ast.AnnAssign)}
+        adapter = _class(tree, "_" + view_name)
+        getters = {}
+        for method in adapter.body:
+            if not isinstance(method, ast.FunctionDef):
+                continue
+            if method.name == "__init__":
+                body = method.body
+                valid = len(body) == 1 and ast.unparse(body[0]) == "self._state = state"
+            elif any(isinstance(d, ast.Name) and d.id == "property"
+                     for d in method.decorator_list):
+                getters[method.name] = method
+                valid = (len(method.body) == 1 and isinstance(method.body[0], ast.Return)
+                         and ast.unparse(method.body[0].value) == "self._state." + method.name)
+            else:
+                valid = (len(method.body) == 1
+                         and ast.unparse(method.body[0]) == "self._state." + method.name + " = value")
+            if not valid:
+                found.add((view_name, method.name))
+        found.update((view_name, field) for field in expected ^ getters.keys())
+    return found
+
+
+def test_every_capability_view_field_forwards_the_same_authority(source):
+    assert view_authority_violations(source) == set()
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "expected"),
+    [("return self._state.paper_card_reads", "return 0", ("PaperRunView", "paper_card_reads")),
+     ("self._state.section_reads = value", "self._state.section_browses = value",
+      ("SectionRunView", "section_reads"))],
+)
+def test_a_view_cannot_snapshot_or_redirect_a_budget(source, before, after, expected):
+    assert source.count(before) == 1
+    assert expected in view_authority_violations(source.replace(before, after))
 
 
 @pytest.mark.parametrize(
@@ -417,12 +579,16 @@ PINNED_READS = {
     # tier through ``limits=state.enum_limits``.
     ("_paper_tools_spent", "state.enum_limits"): 1,
     ("_paper_tools_ledger", "state.enum_limits"): 1,
+    ("_paper_budget_left", "state.enum_limits"): 4,
+    ("_action_find_sources", "state.enum_limits"): 1,
+    ("_action_get_paper_cards", "state.enum_limits"): 3,
+    ("_action_extract_from_sources", "state.enum_limits"): 2,
 }
 
 
 def pinned_reads(source: str) -> dict:
     """``(method, read) -> count`` over the guarded methods."""
-    owner = _class(ast.parse(source), OWNER_CLASS)
+    owner = _state_owner(ast.parse(source))
     found: dict = {}
     for method in owner.body:
         if not isinstance(method, ast.FunctionDef) or method.name not in GUARDED:

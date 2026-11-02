@@ -334,13 +334,13 @@ def test_knowhow_content_does_not_count_against_the_roster_and_sample_half(repo)
     structured_block = f"{knowhow}\n\n{roster}"
     outcome = _sampled_outcome(body_chars=2000)
 
-    block, dropped = service._assemble_document_read_block(
+    block, dropped = service._response_drafting._assemble_document_read_block(
         [outcome], structured_block, dict(structured_map), {},
         _AnswerClient(), 30000, len(knowhow))
     assert dropped is False and "k7001" in block
 
     # 不带 knowhow 长度(裸的一半)时同一份内容会被挡下——钉住这个参数是承重的。
-    block2, dropped2 = service._assemble_document_read_block(
+    block2, dropped2 = service._response_drafting._assemble_document_read_block(
         [outcome], structured_block, dict(structured_map), {},
         _AnswerClient(), 30000)
     assert dropped2 is True and block2 == structured_block
@@ -358,14 +358,14 @@ def test_a_knowhow_block_that_nearly_fills_the_partition_still_drops_the_sample_
     knowhow = "K" * 29000
     outcome = _sampled_outcome(body_chars=2000)
 
-    block, dropped = service._assemble_document_read_block(
+    block, dropped = service._response_drafting._assemble_document_read_block(
         [outcome], knowhow, dict(structured_map), {},
         _AnswerClient(), 30000, len(knowhow))
     assert dropped is True and block == knowhow
 
     # 分区确实留得下(knowhow 小)时照常装进——夹的是分区容量,不是一刀切。
     small = "K" * 1000
-    block2, dropped2 = service._assemble_document_read_block(
+    block2, dropped2 = service._response_drafting._assemble_document_read_block(
         [outcome], small, dict(structured_map), {},
         _AnswerClient(), 30000, len(small))
     assert dropped2 is False and "k7001" in block2
@@ -398,7 +398,7 @@ def test_the_sampled_block_is_dropped_whole_when_it_would_eat_half_the_budget(re
     structured_map = {"k5001": {"object_type": "source", "object_id": "s1"}}
     citations: dict = {}
 
-    block, dropped = service._assemble_document_read_block(
+    block, dropped = service._response_drafting._assemble_document_read_block(
         [_sampled_outcome()], "", structured_map, citations,
         _AnswerClient(), 100)
 
@@ -416,7 +416,7 @@ def test_a_block_inside_the_sub_budget_binds_evidence_and_citations(repo):  # no
     structured_map = {"k5001": {"object_type": "source", "object_id": "s1"}}
     citations: dict = {}
 
-    block, dropped = service._assemble_document_read_block(
+    block, dropped = service._response_drafting._assemble_document_read_block(
         [_sampled_outcome()], "", structured_map, citations,
         _AnswerClient(), 100_000)
 
@@ -445,7 +445,7 @@ def test_a_thorough_read_still_fits_the_synthesis_partition(repo, effort):  # no
     service = repo._runtime.ask_service()
     structured_map: dict = {}
 
-    block, dropped = service._assemble_document_read_block(
+    block, dropped = service._response_drafting._assemble_document_read_block(
         result.document_reads, "", structured_map, {}, _AnswerClient(),
         chunk_context_chars)
 
@@ -475,7 +475,7 @@ def test_a_rendering_failure_leaves_no_half_state_and_is_logged(repo, monkeypatc
     monkeypatch.setattr(service.event_log.logger, "warning",
                         lambda *a, **k: warnings.append(a))
 
-    block, dropped = service._assemble_document_read_block(
+    block, dropped = service._response_drafting._assemble_document_read_block(
         [_sampled_outcome()], "seed", structured_map, citations,
         _AnswerClient(), 100_000)
 

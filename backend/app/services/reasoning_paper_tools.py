@@ -11,8 +11,9 @@ This module holds what has no I/O: the action ids and enums, the run-local
 handle book (``p1``, ``p2`` ... issued by ``find_sources``), argument parsing
 off the reflect payload, source-token resolution against the run ceiling, the
 per-run outcome records handed to synthesis on ``ReasoningResult``, and the
-ledger text fed back to the next reflect turn.  The executors live on
-``ReasoningRetriever`` (they read and write the run state).
+ledger text fed back to the next reflect turn. The executors live in
+``reasoning_paper_actions``; their narrow live view reads and writes the unique
+run state owned by ``ReasoningRetriever``.
 
 Every argument is a string, a string enum or a list of strings -- never a
 boolean (``reasoning_actions`` discipline).  A source token is a handle this

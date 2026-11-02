@@ -245,7 +245,7 @@ def test_answer_reasoning_mixes_chunks_as_citable(repo):
             return json.dumps({"answer": "跨文档证据 [k1].", "grounded": True})
     bind_chat_client(repo, "ask_answer", _Echo())
 
-    answer, grounded, anchors, _counts = repo._runtime.ask_component._answer_reasoning(
+    answer, grounded, anchors, _counts = repo._runtime.ask_component._response_drafting._answer_reasoning(
         nb.id, "对比 MoE", hits, [], chunks=chunks)
     assert anchors and anchors[0].object_type == "chunk"   # k1 = chunk 段一等引用
 
@@ -261,7 +261,7 @@ def test_answer_reasoning_empty_chunks_unchanged(repo):
             return json.dumps({"answer": "KG 证据 [k1].", "grounded": True})
     bind_chat_client(repo, "ask_answer", _Echo())
 
-    answer, grounded, anchors, _counts = repo._runtime.ask_component._answer_reasoning(nb.id, "MoE", hits, [], chunks=None)
+    answer, grounded, anchors, _counts = repo._runtime.ask_component._response_drafting._answer_reasoning(nb.id, "MoE", hits, [], chunks=None)
     assert anchors and anchors[0].object_type == "concept"  # k1 = KG 锚(旧行为)
 
 
@@ -286,7 +286,7 @@ def test_answer_reasoning_makes_direct_source_element_citable(repo):
     llm = _Echo()
     bind_chat_client(repo, "ask_answer", llm)
     repo.settings.kg_query_refine_enabled = False
-    answer, grounded, anchors, _counts = repo._runtime.ask_component._answer_reasoning(
+    answer, grounded, anchors, _counts = repo._runtime.ask_component._response_drafting._answer_reasoning(
         nb.id, "如何路由", [], [element], chunks=None,
     )
     assert "[Direct source elements]" in llm.prompt
@@ -322,13 +322,13 @@ def test_answer_reasoning_final_evidence_respects_combined_hard_budget(
     bind_chat_client(repo, "ask_answer", llm)
     repo.settings.kg_query_refine_enabled = False
     monkeypatch.setattr(
-        "app.services.ask_service.answer_prompt",
+        "app.services.response_drafting.answer_prompt",
         # **_section 吞掉按节合成新增的 section_title/index/total(单次合成下它们
         # 恒为缺省值);本用例量的是证据块字节数,与 prompt 外壳无关。
         lambda _question, context, _history, **_section: context,
     )
 
-    repo._runtime.ask_service()._answer_reasoning(
+    repo._runtime.ask_service()._response_drafting._answer_reasoning(
         nb.id, "budget", hits, [element], chunks=chunks,
         structured_block="S" * 100,
         chunk_context_chars=120,
@@ -365,13 +365,13 @@ def test_answer_reasoning_orders_equal_relevance_chunks_by_insertion(repo, monke
 
     ask = repo._runtime.ask_service()
     captured: dict = {}
-    real = ask._chunk_answer_context
+    real = ask._response_drafting._chunk_answer_context
 
     def _spy(ordered, **kwargs):
         captured["ids"] = [chunk.chunk_id for chunk in ordered]
         return real(ordered, **kwargs)
 
-    monkeypatch.setattr(ask, "_chunk_answer_context", _spy)
+    monkeypatch.setattr(ask._response_drafting, "_chunk_answer_context", _spy)
 
     class _Stub:
         configured = True
@@ -381,7 +381,7 @@ def test_answer_reasoning_orders_equal_relevance_chunks_by_insertion(repo, monke
 
     bind_chat_client(repo, "ask_answer", _Stub())
     repo.settings.kg_query_refine_enabled = False
-    ask._answer_reasoning(nb.id, "set_db 命令是怎样的", [], [], chunks=chunks)
+    ask._response_drafting._answer_reasoning(nb.id, "set_db 命令是怎样的", [], [], chunks=chunks)
 
     assert captured["ids"] == [
         "zzz-main", "mmm-args", "aaa-examples", "kkk-unrelated"]
@@ -434,7 +434,7 @@ def test_answer_reasoning_admits_top_elements_by_relevance_desc(repo, monkeypatc
     bind_chat_client(repo, "ask_answer", _Echo())
     repo.settings.kg_query_refine_enabled = False
 
-    ask._answer_reasoning(nb.id, "q", [], elements, "", chunks=None, element_items=3)
+    ask._response_drafting._answer_reasoning(nb.id, "q", [], elements, "", chunks=None, element_items=3)
 
     got_ids = [e.element_id for e in captured["elements"]]
     assert got_ids == ["el-a", "el-b", "el-e"]   # top-3 by score desc, tie-break element_id
@@ -480,7 +480,7 @@ def test_answer_reasoning_backfills_body_after_duplicate_running_headers(repo, m
     bind_chat_client(repo, "ask_answer", _Echo())
     repo.settings.kg_query_refine_enabled = False
 
-    ask._answer_reasoning(nb.id, "贡献", [], elements, "", element_items=2)
+    ask._response_drafting._answer_reasoning(nb.id, "贡献", [], elements, "", element_items=2)
 
     assert captured["ids"] == ["header-0", "abstract"]
 
@@ -568,7 +568,7 @@ def test_answer_reasoning_reports_actual_included_counts(repo):
     repo.settings.kg_query_refine_enabled = False
 
     ask = repo._runtime.ask_service()
-    answer, grounded, anchors, counts = ask._answer_reasoning(
+    answer, grounded, anchors, counts = ask._response_drafting._answer_reasoning(
         nb.id, "对比 MoE", hits, elements, "",
         chunks=chunks, chains=chains, memory_hits=memory_hits, element_items=2,
     )
@@ -588,7 +588,7 @@ def test_answer_reasoning_reports_actual_included_counts(repo):
                        relevance=0.9 - i * 0.1)
         for i in range(6)
     ]
-    _, _, _, narrow_counts = ask._answer_reasoning(
+    _, _, _, narrow_counts = ask._response_drafting._answer_reasoning(
         nb.id, "q2", [], [], "", chunks=narrow_chunks, chunk_context_chars=30,
     )
     assert narrow_counts["included_chunks"] == 2
@@ -604,14 +604,14 @@ def test_ask_reasoning_wires_effort_element_items_into_answer_reasoning(repo, mo
     一次真实 ask_reasoning,monkeypatch _answer_reasoning 捕获调用 kwargs。"""
     nb = _seed_two_doc_moe(repo)
     ask = repo._runtime.ask_service()
-    real_answer_reasoning = ask._answer_reasoning
+    real_answer_reasoning = ask._response_drafting._answer_reasoning
     captured: dict = {}
 
     def _capture(*args, **kwargs):
         captured["element_items"] = kwargs.get("element_items")
         return real_answer_reasoning(*args, **kwargs)
 
-    monkeypatch.setattr(ask, "_answer_reasoning", _capture)
+    monkeypatch.setattr(ask._response_drafting, "_answer_reasoning", _capture)
     llm = _AnswerOnlyLLM()
     bind_chat_client(repo, "ask_answer", llm)
     bind_chat_client(repo, "reasoning_agent", llm)
@@ -680,7 +680,7 @@ def test_answer_reasoning_fills_counts_sink_before_model_call(repo):
     ask = repo._runtime.ask_service()
     sink: dict = {}
     with pytest.raises(RuntimeError):
-        ask._answer_reasoning(nb.id, "MoE", hits, elements, "",
+        ask._response_drafting._answer_reasoning(nb.id, "MoE", hits, elements, "",
                               element_items=2, counts_sink=sink)
     assert sink == {
         "included_kg": 1,

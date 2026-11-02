@@ -284,8 +284,7 @@
     "backend/app/extensions/ask.py::AskCompletedObserverHost.observe_application": 154,
     "backend/app/extensions/parser_chain.py::ParserProviderChainHost._run": 307,
     "backend/app/extensions/retrieval.py::RetrievalContributorHost._run": 357,
-    "backend/app/services/ask_service.py::AskService._chunk_retrieve": 194,
-    "backend/app/services/ask_service.py::AskService._draft_reasoning_response": 80,
+    "backend/app/services/ask_service.py::AskService._chunk_retrieve": 193,
     "backend/app/services/ask_service.py::AskService._run_reasoning_stage": 67,
     "backend/app/services/ask_service.py::AskService.ask_chunk": 159,
     "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.complete_relations_for_source": 425,
@@ -303,6 +302,7 @@
     "backend/app/services/report_engine.py::ReportEngine._draft_section": 222,
     "backend/app/services/repository_facade.py::RepositoryFacade.__init__": 470,
     "backend/app/services/repository_runtime.py::RepositoryRuntime.__init__": 148,
+    "backend/app/services/response_drafting.py::DefaultResponseDraftStage.draft_response": 76,
     "backend/app/services/source_ingestion.py::SourceIngestionService._process_source_scoped": 352,
     "backend/app/services/source_ingestion.py::SourceIngestionService.process_source": 17
   }

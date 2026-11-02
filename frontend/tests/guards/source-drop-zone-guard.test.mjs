@@ -40,7 +40,7 @@ function bindsSourceAccept(node, sourceFile) {
 }
 
 test("来源上传的每个 file input 外层 label 都显式接管拖放", async () => {
-  const sourceFile = await parseModule("page.tsx");
+  const sourceFile = await parseModule("source-intake-panel.tsx");
   const inputs = [];
   const labelStack = [];
 
@@ -64,7 +64,7 @@ test("来源上传的每个 file input 外层 label 都显式接管拖放", asyn
 
   assert.ok(
     inputs.length >= 2,
-    `page.tsx 里应至少有 2 个绑定 supportedSourceAccept 的来源文件 input，实际 ${inputs.length}`,
+    `source-intake-panel.tsx 里应至少有 2 个绑定 supportedSourceAccept 的来源文件 input，实际 ${inputs.length}`,
   );
   for (const { enclosingLabel } of inputs) {
     assert.ok(enclosingLabel, "来源文件 input 应位于 <label> 内");

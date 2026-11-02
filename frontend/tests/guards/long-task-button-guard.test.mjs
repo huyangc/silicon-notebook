@@ -20,8 +20,9 @@
 // 工程约束 + 代码评审,不是这份测试。
 import test from "node:test";
 import assert from "node:assert/strict";
+import ts from "typescript";
 
-import { findFunction, jsxElements, parseModule, variableInitializersIn } from "../../test-support/semantic-source.mjs";
+import { findFunction, jsxElements, parseModule, parseText, variableInitializersIn } from "../../test-support/semantic-source.mjs";
 import { CHECKUP_FIX, CHECKUP_FIX_BUSY } from "../../app/vocabulary.ts";
 
 // onClick 源码文本里能唯一认出这个入口的片段 → 这个入口是什么、为什么必须禁用。
@@ -47,7 +48,7 @@ const LONG_TASK_BUTTONS = [
   },
   { match: "reviewPendingMerges", module: "kg-graph-view.tsx", why: "自动判重:同步等一批判完;删除知识图谱在跑时候选正被清掉", requires: ["kgGraph.reviewBusy", "kgGraph.deleting"] },
   { match: 'runScaleIndexOp("rebuild", bumpCheckupRepairPoll)', why: "H8 损坏态重建索引:该格常驻显示,不走「忙碌换取消」" },
-  { match: "confirmUpload(", why: "上传:multipart 传大文件期间不能重复提交", requires: "uploadBusy" },
+  { match: "confirmUpload(", module: "source-intake-panel.tsx", why: "上传:multipart 传大文件期间不能重复提交", requires: "uploadBusy" },
   { match: "reparseSource(", why: "来源重新解析:同步等完,大 PDF 可能数分钟" },
   { match: "decideMerge(", module: "kg-graph-view.tsx", why: "待确认合并落决定:确认分支连带跑全量重建,两颗按钮都需防重复提交;删除知识图谱在跑时候选正被清掉", requires: ["kgGraph.rebuilding", "kgGraph.deleting"] },
   { match: "runFindDuplicates(", why: "查重:全库归一化比对,大库不是瞬时的" },
@@ -214,11 +215,10 @@ test("导入弹窗接的是 page 持有的那一份导入状态机(在飞位因�
   assert.match(modals[0].bindings.onRemoveJob ?? "", /notebookImport\.removeJob\(/);
 });
 
-test("page.tsx 的长任务 file input 也带非平凡的 disabled，且表达式里含在飞标志", async () => {
-  const page = await parseModule("page.tsx");
-  const inputs = jsxElements(page, "input");
+function sourceFileInputProblems(panel, hook) {
+  const inputs = jsxElements(panel, "input");
   const initializers = new Map(
-    variableInitializersIn(page).map((item) => [item.name, item.initializer]),
+    variableInitializersIn(hook).map((item) => [item.name, item.initializer]),
   );
   const offenders = [];
 
@@ -262,7 +262,47 @@ test("page.tsx 的长任务 file input 也带非平凡的 disabled，且表达�
     offenders.push(`bundleProcessing 不再包含勾选等待信号 bundleChoice：${processing}`);
   }
 
-  assert.deepEqual(offenders, []);
+  const returned = findFunction(hook, "useSourceIntake").body.statements
+    .find((statement) => ts.isReturnStatement(statement));
+  let expression = returned?.expression;
+  while (expression && (ts.isAsExpression(expression) || ts.isSatisfiesExpression(expression)
+    || ts.isParenthesizedExpression(expression))) expression = expression.expression;
+  const view = expression?.properties?.find((property) => property.name?.getText(hook) === "view");
+  const flag = view?.initializer?.properties?.find((property) => property.name?.getText(hook) === "sourceFilePickerDisabled");
+  if (!flag || !ts.isShorthandPropertyAssignment(flag)) {
+    offenders.push("view must expose the actual sourceFilePickerDisabled binding");
+  }
+  return offenders;
+}
+
+test("来源接入的长任务 file input 也带非平凡的 disabled，且表达式里含在飞标志", async () => {
+  assert.deepEqual(sourceFileInputProblems(
+    await parseModule("source-intake-panel.tsx"), await parseModule("use-source-intake.ts"),
+  ), []);
+});
+
+test("source intake busy guard rejects deletion, relocation and a disconnected view flag", () => {
+  const hook = parseText(`function useSourceIntake() {
+    const bundleProcessing = bundleBusyLabel !== null || bundleChoice !== null;
+    const sourceFilePickerDisabled = bundleProcessing;
+    return { view: { sourceFilePickerDisabled } } as const;
+  }`, "fixture.ts");
+  const input = '<input accept={supportedSourceAccept} disabled={sourceFilePickerDisabled} />';
+  assert.deepEqual(sourceFileInputProblems(parseText(input, "fixture.tsx"), hook), []);
+  for (const mutated of [
+    '<input accept={supportedSourceAccept} />',
+    '<><input accept={supportedSourceAccept} /><input accept="other" disabled={sourceFilePickerDisabled} /></>',
+  ]) {
+    assert.notEqual(mutated, input);
+    assert.ok(sourceFileInputProblems(parseText(mutated, "fixture.tsx"), hook).length > 0);
+  }
+  const disconnected = parseText(`function useSourceIntake() {
+    const bundleProcessing = bundleBusyLabel !== null || bundleChoice !== null;
+    const sourceFilePickerDisabled = bundleProcessing;
+    return { view: { sourceFilePickerDisabled: false } };
+  }`, "fixture.ts");
+  assert.ok(sourceFileInputProblems(parseText(input, "fixture.tsx"), disconnected)
+    .includes("view must expose the actual sourceFilePickerDisabled binding"));
 });
 
 // 「把一个库外链接导入成本笔记本的一条来源」这颗按钮不在 page.tsx 里——它住在

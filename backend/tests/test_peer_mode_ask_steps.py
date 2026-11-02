@@ -199,9 +199,9 @@ def test_selected_source_graph_lane_is_closed_in_peer_mode():
 # ---------------------------------------------------------------------------
 
 def _answer_prompt_call_nodes() -> list:
-    tree = ast.parse(_ASK_SERVICE.read_text(encoding="utf-8"), filename="ask_service.py")
     return [
-        node for node in ast.walk(tree)
+        node for source in (_ASK_SERVICE, _ASK_SERVICE.with_name("response_drafting.py"))
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"), filename=str(source)))
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "answer_prompt"

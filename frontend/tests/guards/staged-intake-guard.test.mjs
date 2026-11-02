@@ -26,6 +26,8 @@ import {
 } from "../../test-support/semantic-source.mjs";
 
 const page = await parseModule("page.tsx");
+const intake = await parseModule("use-source-intake.ts");
+const panel = await parseModule("source-intake-panel.tsx");
 
 /** 一个调用表达式是否有错误出口：被 await，或链上接了 .catch / .then。 */
 function hasErrorOutlet(call, parents) {
@@ -57,7 +59,7 @@ function collectCalls(sourceFile, names) {
 }
 
 test("入列合并从同步 ref 镜像起算，而不是 render 闭包里的 state", () => {
-  const sync = findFunctionIn(page, "Home", "stageIncomingFilesSync");
+  const sync = findFunctionIn(intake, "useSourceIntake", "stageIncomingFilesSync");
   const merges = callSitesIn(sync).filter((call) => call.target === "mergeStagedFiles");
   assert.equal(merges.length, 1, "stageIncomingFilesSync 应恰好合并一次（攒批单次入列）");
   assert.equal(
@@ -69,12 +71,12 @@ test("入列合并从同步 ref 镜像起算，而不是 render 闭包里的 sta
 });
 
 test("待上传列表只有 updateStaged 一个写入口（ref 镜像才可能恒等于最新值）", () => {
-  const writers = scopedCalls(page)
+  const writers = scopedCalls(intake)
     .filter((entry) => entry.target === "setStaged")
     .map((entry) => entry.scope);
   assert.deepEqual(
     writers,
-    ["<module>.Home.updateStaged"],
+    ["<module>.useSourceIntake.updateStaged"],
     "绕开 updateStaged 直接 setStaged 会让 stagedRef 落后于 state，B1 那类覆盖立刻复发",
   );
 });
@@ -88,16 +90,16 @@ test("入列/解包的每条异步链都有错误出口（不是被 await 就是
     "ingestDroppedDirectory",
     "handleBundleFiles",
   ]);
-  const { found, parents } = collectCalls(page, asyncChains);
+  const { found, parents } = collectCalls(intake, asyncChains);
   assert.ok(found.length >= 6, `应至少有 6 处调用，实际 ${found.length}（入口被改名？）`);
   const dangling = found
     .filter((call) => !hasErrorOutlet(call, parents))
-    .map((call) => call.expression.getText(page));
+    .map((call) => call.expression.getText(intake));
   assert.deepEqual(dangling, [], "这些调用丢掉了 promise：失败会变成未处理 rejection，用户只看到「拖了没反应」");
 });
 
 test("文件夹遍历带总字节预算，且预算取自 bundleDirTotalBytesLimit 而不是另抄一份数字", () => {
-  const ingest = findFunctionIn(page, "Home", "ingestDroppedDirectory");
+  const ingest = findFunctionIn(intake, "useSourceIntake", "ingestDroppedDirectory");
   const calls = callSitesIn(ingest);
   const collect = calls.filter((call) => call.target === "collectDirectoryFiles");
   assert.equal(collect.length, 1);
@@ -120,7 +122,7 @@ test("文件夹遍历带总字节预算，且预算取自 bundleDirTotalBytesLim
 });
 
 test("拿不到任何拖放条目时回退扁平文件列表（不是「API 可用就走 entry 分支」）", () => {
-  const drop = findFunctionIn(page, "Home", "handleStageDrop");
+  const drop = findFunctionIn(intake, "useSourceIntake", "handleStageDrop");
   const guarded = ifConditionsIn(drop).filter(
     (condition) => condition.includes("entries !== null") && condition.includes("entries.length"),
   );
@@ -133,7 +135,7 @@ test("拿不到任何拖放条目时回退扁平文件列表（不是「API 可�
 });
 
 test("内联超限的回执带上体积明细（只报总量对用户不可操作）", () => {
-  const stage = findFunctionIn(page, "Home", "stageBundleCandidates");
+  const stage = findFunctionIn(intake, "useSourceIntake", "stageBundleCandidates");
   const targets = callSitesIn(stage).map((call) => call.target);
   assert.ok(
     targets.includes("inlineTooLargeImageLines"),
@@ -148,7 +150,7 @@ test("批量名额闸走 processBundleCandidates，且名额基准是同步 ref 
   // 条目压缩包会先被全部内联成 base64、再丢掉其中绝大多数。判据因此是「闸有没有
   // 在内联之前」，而不是「有没有算过一个 remaining 变量」：把循环搬回本函数、闸
   // 却留在入列处，是这条最容易发生的回退形态。
-  const stage = findFunctionIn(page, "Home", "stageBundleCandidates");
+  const stage = findFunctionIn(intake, "useSourceIntake", "stageBundleCandidates");
   const calls = callSitesIn(stage);
   const targets = calls.map((call) => call.target);
   assert.ok(
@@ -179,7 +181,7 @@ test("图片内联读的是「有效」开关（零值上限等同于关闭）�
   // codex #518 R1 P2：MINERU_MAX_IMAGE_BYTES=0 / MINERU_MAX_IMAGES_PER_SOURCE=0 是
   // 合法部署值（一张都不存）。直接读 sourceImagesEnabled 会在这类部署上照常内联并
   // 报「N 张已内联」，而服务端把资产全部丢弃。
-  const stage = findFunctionIn(page, "Home", "stageBundleCandidates");
+  const stage = findFunctionIn(intake, "useSourceIntake", "stageBundleCandidates");
   const options = callSitesIn(stage)
     .filter((call) => call.target === "processBundleCandidates")
     .flatMap((call) => call.arguments);
@@ -191,7 +193,7 @@ test("图片内联读的是「有效」开关（零值上限等同于关闭）�
     !options.some((argument) => /imagesEnabled:\s*sourceImagesEnabled/.test(argument)),
     "裸 sourceImagesEnabled 会漏掉两个零值上限这一半",
   );
-  const derived = scopedCalls(page).filter(
+  const derived = scopedCalls(intake).filter(
     (entry) => entry.target === "bundleImagesEffectivelyEnabled",
   );
   assert.equal(
@@ -203,7 +205,7 @@ test("图片内联读的是「有效」开关（零值上限等同于关闭）�
 
 test("解包的忙碌位成对 push/pop，嵌套帧不被内层的清零抹掉", () => {
   for (const name of ["ingestZipFile", "ingestDroppedDirectory"]) {
-    const targets = callSitesIn(findFunctionIn(page, "Home", name)).map((call) => call.target);
+    const targets = callSitesIn(findFunctionIn(intake, "useSourceIntake", name)).map((call) => call.target);
     assert.ok(targets.includes("pushBundleBusy"), `${name} 必须取得忙碌位`);
     assert.ok(targets.includes("popBundleBusy"), `${name} 必须在 finally 里释放忙碌位`);
     assert.ok(
@@ -215,7 +217,7 @@ test("解包的忙碌位成对 push/pop，嵌套帧不被内层的清零抹掉",
 });
 
 test("等待用户勾选期间清掉进行态文案（否则「请先选择」那支提示永远到不了用户面前）", () => {
-  const handle = findFunctionIn(page, "Home", "handleBundleFiles");
+  const handle = findFunctionIn(intake, "useSourceIntake", "handleBundleFiles");
   const cleared = callSitesIn(handle).filter(
     (call) => call.target === "setBundleBusyLabel" && call.arguments[0] === "null",
   );
@@ -228,7 +230,7 @@ test("等待用户勾选期间清掉进行态文案（否则「请先选择」�
 });
 
 test("弹窗的两个关闭入口（× 与点遮罩）走同一个 handler，且该 handler 结清挂起的勾选", () => {
-  const overlay = jsxElements(page, "section")
+  const overlay = jsxElements(panel, "section")
     .filter((element) => element.attributes?.className === "source-modal");
   assert.equal(overlay.length, 1, "未找到添加来源弹窗的遮罩层（类名被改？守卫失效）");
   assert.match(
@@ -237,13 +239,16 @@ test("弹窗的两个关闭入口（× 与点遮罩）走同一个 handler，且
     "点遮罩必须走与 × 相同的关闭 handler：只 setSourceModalOpen(false) 会把等待勾选的那条链"
       + "永久挂起，它持有的忙碌位再也不释放",
   );
-  const close = findFunctionIn(page, "Home", "closeSourceModal");
+  const close = findFunctionIn(intake, "useSourceIntake", "closeSourceModal");
   const targets = callSitesIn(close).map((call) => call.target);
-  assert.ok(targets.includes("rootModals.requestClose"), "closeSourceModal 必须交给唯一 modal close sink");
+  assert.ok(targets.includes("modals.requestClose"), "closeSourceModal 必须交给唯一 modal close sink");
   const sink = findFunctionIn(page, "Home", "handleRootModalClosed");
   const sinkTargets = callSitesIn(sink).map((call) => call.target);
-  assert.ok(sinkTargets.includes("resetStagedIntake"), "source-add close sink 必须清空暂存态");
-  const reset = findFunctionIn(page, "Home", "resetStagedIntake");
+  assert.ok(sinkTargets.includes("sourceIntake.commands.dismiss"), "source-add close sink 必须清空暂存态");
+  assert.ok(callSitesIn(findFunctionIn(intake, "useSourceIntake", "dismiss")).some(
+    (call) => call.target === "resetStagedIntake",
+  ), "source-add close sink must reset the intake draft through dismiss");
+  const reset = findFunctionIn(intake, "useSourceIntake", "resetStagedIntake");
   assert.ok(
     callSitesIn(reset).some((call) => call.target === "cancelBundleChoice"),
     "统一清空点必须结清挂起的勾选 resolver",
@@ -256,7 +261,7 @@ test("弹窗的两个关闭入口（× 与点遮罩）走同一个 handler，且
 // 递增，每条异步链在自己起跑那一刻捕获当前世代，落盘前重新比对。
 
 test("世代计数器由统一 close sink 递增，切库同步撤销 source-add lease", () => {
-  const reset = findFunctionIn(page, "Home", "resetStagedIntake");
+  const reset = findFunctionIn(intake, "useSourceIntake", "resetStagedIntake");
   assert.ok(
     assignmentsIn(reset).some(
       (a) => a.target === "bundleIntakeGenerationRef.current" && a.operator === "+=",
@@ -273,7 +278,7 @@ test("世代计数器由统一 close sink 递增，切库同步撤销 source-add
   assert.ok(openTargets.includes("rootModals.beginWorkspaceTransition"));
   const sinkTargets = callSitesIn(findFunctionIn(page, "Home", "handleRootModalClosed"))
     .map((call) => call.target);
-  assert.ok(sinkTargets.includes("resetStagedIntake"));
+  assert.ok(sinkTargets.includes("sourceIntake.commands.dismiss"));
 });
 
 test("openNotebook 经 root transition 进入统一 close sink，结清 bundleChoice", () => {
@@ -289,8 +294,8 @@ test("openNotebook 经 root transition 进入统一 close sink，结清 bundleCh
   assert.ok(openTargets.includes("rootModals.beginWorkspaceTransition"));
   const sinkTargets = callSitesIn(findFunctionIn(page, "Home", "handleRootModalClosed"))
     .map((call) => call.target);
-  assert.ok(sinkTargets.includes("resetStagedIntake"));
-  const resetTargets = callSitesIn(findFunctionIn(page, "Home", "resetStagedIntake"))
+  assert.ok(sinkTargets.includes("sourceIntake.commands.dismiss"));
+  const resetTargets = callSitesIn(findFunctionIn(intake, "useSourceIntake", "resetStagedIntake"))
     .map((call) => call.target);
   assert.ok(resetTargets.includes("cancelBundleChoice"));
 });
@@ -302,7 +307,7 @@ test("resetStagedIntake 结清挂起的 bundleChoice 勾选（不只是递增世
   // 捕获的旧世代去比对，把这次确认静默丢弃，面板却还悬在弹窗里看不出发生了什么。
   // 结构性不变量：所有 source-add 清理（含切库的 root transition）都收口到本函数，
   // 所以世代递增与 cancelBundleChoice 只能成对发生。
-  const reset = findFunctionIn(page, "Home", "resetStagedIntake");
+  const reset = findFunctionIn(intake, "useSourceIntake", "resetStagedIntake");
   const targets = callSitesIn(reset).map((call) => call.target);
   assert.ok(
     targets.includes("cancelBundleChoice"),
@@ -320,7 +325,7 @@ test("每条异步 bundle 链在落盘（入列/写回执/跳过记录）前都�
     "stageBundleCandidates",
   ];
   for (const name of guarded) {
-    const fn = findFunctionIn(page, "Home", name);
+    const fn = findFunctionIn(intake, "useSourceIntake", name);
     const conditions = ifConditionsIn(fn);
     assert.ok(
       conditions.some((condition) => condition.includes("bundleIntakeGenerationRef.current")),

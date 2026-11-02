@@ -183,8 +183,8 @@ BUILDER_FILES = frozenset(site[0] for site in BUILDER_SITES)
 # starts filling the field has to justify itself here.
 DELIBERATELY_ABSENT: dict[Site, str] = {
     (
-        ASK_SERVICE,
-        "AskService._memory_citations",
+        "backend/app/services/response_drafting.py",
+        "DefaultResponseDraftStage._memory_citations",
     ): "Memories belong to the asking user in the active notebook only.",
 }
 

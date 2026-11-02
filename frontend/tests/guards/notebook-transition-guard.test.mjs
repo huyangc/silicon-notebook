@@ -34,6 +34,11 @@ import {
 const page = await parseModule("page.tsx");
 const orchestrator = await parseModule("notebook-transition.ts");
 const calls = scopedCalls(page);
+const intake = await parseModule("use-source-intake.ts");
+// The intake hook receives the same source-library owner as `library`.
+const ownerCalls = [...calls, ...scopedCalls(intake).map((entry) => ({
+  ...entry, target: entry.target.replace(/^library\./, "sourceLibrary."),
+}))];
 
 const STEPS_SCOPE = "<module>.Home.notebookTransitionSteps";
 
@@ -296,8 +301,8 @@ const OWNER_LIFECYCLE_SCOPE_ALLOWLIST = {
   // submitUrlSources(粘贴链接框)与 importGapSuggestion(站外来源建议的「导入」按钮,
   // ask.gap_consult)共用同一份提交逻辑，实际调用 sourceLibrary.commitUrlSources 的
   // 作用域因此从 submitUrlSources 移到了这里。
-  "<module>.Home.confirmUploadInner": "文件上传成功后提交新来源。",
-  "<module>.Home.applyImportedUrlSources":
+  "<module>.useSourceIntake.confirmUploadInner": "文件上传成功后提交新来源。",
+  "<module>.useSourceIntake.applyImportedUrlSources":
     "URL 导入成功后提交新来源(submitUrlSources 与 importGapSuggestion 共用)。",
   // 会话重命名按钮直接内联写在 JSX 事件处理器里，不在任何具名函数体内，最近命名
   // 作用域因而就是 Home 本身；askSession.beginRenameSession/commitRenameSession 是
@@ -306,7 +311,7 @@ const OWNER_LIFECYCLE_SCOPE_ALLOWLIST = {
 };
 
 test("owner 生命周期调用（OWNER_HOOKS × LIFECYCLE）整份 page.tsx deny-by-default", () => {
-  const rogue = calls.filter((entry) => (
+  const rogue = ownerCalls.filter((entry) => (
     isLifecycleCall(entry.target)
       && !Object.prototype.hasOwnProperty.call(OWNER_LIFECYCLE_SCOPE_ALLOWLIST, entry.scope)
   ));
@@ -322,7 +327,7 @@ test("owner 生命周期调用（OWNER_HOOKS × LIFECYCLE）整份 page.tsx deny
 
 test("allowlist 没有失效条目：每一项都至少命中一次真实的生命周期调用", () => {
   const matchedScopes = new Set(
-    calls.filter((entry) => isLifecycleCall(entry.target)).map((entry) => entry.scope),
+    ownerCalls.filter((entry) => isLifecycleCall(entry.target)).map((entry) => entry.scope),
   );
   for (const scope of Object.keys(OWNER_LIFECYCLE_SCOPE_ALLOWLIST)) {
     assert.ok(

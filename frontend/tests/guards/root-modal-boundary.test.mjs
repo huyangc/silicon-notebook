@@ -10,6 +10,7 @@ import {
   importsIn,
   jsxElements,
   parseModule,
+  parseText,
 } from "../../test-support/semantic-source.mjs";
 
 // `handleRootModalClosed`'s switch has one CaseClause per slot, each ending in
@@ -62,8 +63,34 @@ const edgeReviewModal = await parseModule("edge-review-modal.tsx");
 const kgGraphView = await parseModule("kg-graph-view.tsx");
 // 网页导出 / 导入的两个根弹窗(notebook-export / notebook-import)。
 const transferPanel = await parseModule("notebook-transfer-panel.tsx");
+const sourceIntakeHook = await parseModule("use-source-intake.ts");
+const sourceIntakePanel = await parseModule("source-intake-panel.tsx");
 const pageText = page.getText(page);
 const hookText = hook.getText(hook);
+
+function intakeSurfaceProblems(module) {
+  const surfaces = jsxElements(module, "section")
+    .filter((surface) => surface.attributes.className === "source-modal");
+  if (surfaces.length !== 1) return ["source-modal surface count"];
+  return Object.entries({
+    "aria-modal": "modal.topmost",
+    "aria-hidden": "!modal.topmost",
+    inert: "modal.topmost ? undefined : true",
+  }).filter(([name, value]) => surfaces[0].bindings[name] !== value).map(([name]) => name);
+}
+
+test("source intake modal coverage detects deleted and relocated inert bindings", () => {
+  const prefix = '<section className="source-modal" aria-modal={modal.topmost} aria-hidden={!modal.topmost}';
+  const guarded = `${prefix} inert={modal.topmost ? undefined : true} />`;
+  assert.deepEqual(intakeSurfaceProblems(parseText(guarded, "fixture.tsx")), []);
+  for (const mutated of [
+    `${prefix} />`,
+    `<>${prefix} /><aside inert={modal.topmost ? undefined : true} /></>`,
+  ]) {
+    assert.notEqual(mutated, guarded);
+    assert.deepEqual(intakeSurfaceProblems(parseText(mutated, "fixture.tsx")), ["inert"]);
+  }
+});
 
 test("page composes one typed root-modal coordinator and has no legacy modal booleans", () => {
   assert.equal((pageText.match(/useRootModalCoordinator\(/g) ?? []).length, 1);
@@ -125,12 +152,16 @@ test("workspace transitions invalidate root slots before old-domain work and clo
   const leaveWorkspaceOwnersCalls = callSitesIn(findFunctionIn(page, "Home", "leaveWorkspaceOwners")).map(({ target }) => target);
   assert.ok(leaveWorkspaceOwnersCalls.includes("rootModals.leaveWorkspace"));
   const closeCalls = callSitesIn(findFunctionIn(page, "Home", "handleRootModalClosed")).map(({ target }) => target);
-  assert.ok(closeCalls.includes("resetStagedIntake"));
-  assert.ok(closeCalls.includes("setLinkSectionOpen"));
+  assert.ok(closeCalls.includes("sourceIntake.commands.dismiss"));
+  const dismiss = findFunctionIn(sourceIntakeHook, "useSourceIntake", "dismiss");
+  const dismissCalls = callSitesIn(dismiss).map(({ target }) => target);
+  assert.ok(dismissCalls.includes("resetStagedIntake"));
+  assert.ok(dismissCalls.includes("setLinkSectionOpen"));
+  assert.match(dismiss.getText(sourceIntakeHook), /sourceModalDismissedRef\.current = true/);
   const closeText = findFunctionIn(page, "Home", "handleRootModalClosed").getText(page);
   assert.match(
     closeText,
-    /case "source-add":[\s\S]*?resetStagedIntake\(\);[\s\S]*?setLinkSectionOpen\(false\);[\s\S]*?sourceModalDismissedRef\.current = true;[\s\S]*?return;/,
+    /case "source-add":[\s\S]*?sourceIntake\.commands\.dismiss\(\);[\s\S]*?return;/,
   );
   assert.match(closeText, /case "info":[\s\S]*?setInfoModal\(null\);[\s\S]*?return;/);
   assert.doesNotMatch(closeText, /case "info":[\s\S]*?closeInfoModal\(\);[\s\S]*?return;/);
@@ -240,7 +271,7 @@ test("only the coordinator top layer drives the model focus trap", () => {
 // 别名标识符。
 test("every coordinated root surface leaves the interaction tree when it is covered", () => {
   const inlineSlots = [
-    "notebook-share", "shared-preview", "shared-by-me", "source-add",
+    "notebook-share", "shared-preview", "shared-by-me",
     "notebook-editor", "notebook-delete", "info", "analytics",
     // promotion-queue / edge-review 不再内联在 page.tsx——它们的 section 随 PR-5 分片 1
     // 搬进了 PromotionQueueModal / EdgeReviewModal，改由下面 componentBindings 那张表钉住
@@ -255,6 +286,11 @@ test("every coordinated root surface leaves the interaction tree when it is cove
       slot,
     );
   }
+  const sourcePanels = jsxElements(page, "SourceIntakePanel");
+  assert.equal(sourcePanels.length, 1);
+  assert.equal(sourcePanels[0].bindings.modal, 'rootModals.view("source-add")');
+  assert.equal(sourcePanels[0].bindings.intake, "sourceIntake");
+  assert.deepEqual(intakeSurfaceProblems(sourceIntakePanel), []);
   const componentBindings = [
     ["PasswordChangeModal", "password-change"],
     ["ReleaseNotesModal", "release-notes"],

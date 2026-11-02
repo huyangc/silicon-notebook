@@ -1730,7 +1730,7 @@ def test_collection_counts_survive_a_full_evidence_partition(repo):
     block = collection_map_block(
         repo.collection_catalog.collection_map_text(notebook.id)
     )
-    service._answer_reasoning(
+    service._response_drafting._answer_reasoning(
         notebook.id, "多少公式", [], [],
         structured_block="S" * 5_000,
         collection_map_block=block,

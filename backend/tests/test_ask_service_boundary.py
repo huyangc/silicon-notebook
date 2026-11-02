@@ -532,6 +532,7 @@ def test_reasoning_renders_federated_hits_with_their_owning_schema(
 
     service = _minimal_ask_service()
     service.schemas = Schemas()
+    service._response_drafting.effective_schemas = service.schemas.effective_schemas
     service._activate_selected_source_graph = (
         lambda *args, **kwargs: ([], None)
     )

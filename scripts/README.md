@@ -3,6 +3,43 @@
 仓库运维 / 开发 / 评测脚本。**除非特别说明,都在仓库根目录运行**,Python 用装好
 `backend/requirements.txt`(带哈希的运行依赖锁;跑测试再加 `backend/requirements-dev.txt`)依赖的解释器(激活对应环境,或用 `PYTHON_BIN=...` 覆盖脚本默认)。
 
+## 符号级代码导航
+
+先查看符号目录，再读取相关的完整符号；需要扩展到调用方时，明确指定检索目录。
+支持 Python、TypeScript 和 TSX，源码按需解析，不导入目标模块、不执行应用代码，
+也不写入持久索引。Python 使用项目解释器（可设置 `PYTHON_BIN`）；TypeScript/TSX
+使用 PATH 中的 Node.js 和 `frontend/node_modules` 中现有的 TypeScript 编译器。
+
+```bash
+# 大纲纯逻辑的符号目录：
+bash scripts/code_context.sh outline backend/app/services/reasoning_outline.py
+# 一个函数的完整源码、语法引用的 import 和本地依赖候选：
+bash scripts/code_context.sh symbol backend/app/services/reasoning_outline.py parse_outline_sections
+# 嵌套函数使用完整限定名；同名短名称有歧义时会报错：
+bash scripts/code_context.sh symbol frontend/app/use-source-intake.ts useSourceIntake.confirmUploadInner
+# 回答引用卡的真实实现（core 只负责阶段编排与提交）：
+bash scripts/code_context.sh symbol backend/app/services/response_drafting.py DefaultResponseDraftStage._draft_citation_cards
+# 引用搜索必须显式限定范围；可重复 --root：
+bash scripts/code_context.sh references backend/app/services/reasoning_outline.py OutlineSection \
+  --root backend/app/services --root backend/tests
+```
+
+`outline` 输出限定名称、种类及诊断用的行范围，不展开函数体；`symbol` 输出所选
+声明的完整源码，不静默截断。导入和依赖是语法候选，仍需按作用域核对。大纲类型与
+函数的实现已在 `reasoning_outline.py`，旧 `reasoning_retrieval.py` 导入路径保持兼容。
+
+`references` 分别列出可通过显式 import/别名和词法访问确认的引用，以及文本候选。
+文本候选可能是定义、注释、字符串或未解析的接收者，输出仅给位置，不展开整行正文。
+这不是完整调用图：动态分派、实例类型推断、反射与间接重导出不能据此判定不存在引用。
+TypeScript 仅解析相对模块路径；路径别名、星号导入及复杂闭包/推导式等未覆盖形态
+仍需用定向搜索核对。普通常量不属于本轮声明索引，按文本搜索定位。
+默认排除依赖、构建输出、`.git`、`.local` 及符号链接；没有默认的全仓扫描。
+缺少符号、歧义、语法错误、缺失依赖或不可读输入会以非零退出码报错，不能当作空结果。
+
+职责与测试入口见[架构导航](../architecture.md#代码导航入口)，导航工具本身的验证在
+`backend/tests/test_code_context.py` 与 `frontend/tests/unit/code-context.test.mjs`；启动真实
+CLI 子进程的用例属于 `process_contract`，其余解析测试留在普通验证通道。
+
 ## Agent 验证摘要
 
 ```bash

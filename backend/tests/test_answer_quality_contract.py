@@ -112,7 +112,7 @@ def test_answer_fragments_and_numeric_conditions_reach_real_synthesis(
             notebook_id=notebook.id, baseline_sink=baseline,
         )
     else:
-        result = service._answer_reasoning(
+        result = service._response_drafting._answer_reasoning(
             notebook.id, "Compare the measured results and retain exceptions.", [], [],
             chunks=[chunk], baseline_sink=baseline, chunk_context_chars=1200,
             kg_context_chars=500, sectioned=sectioned,
@@ -153,7 +153,7 @@ def test_comparison_granularity_never_projects_away_requested_matrix(repo, quest
     notebook = repo.create_notebook(NotebookCreate(name="Mixed configurations"))
     client = _RecordingAnswer("Values are supplied in the evaluation tables. [k1]")
     baseline = {}
-    repo._runtime.ask_component._answer_reasoning(
+    repo._runtime.ask_component._response_drafting._answer_reasoning(
         notebook.id, question, [], [], answer_client=client,
         chunks=[RetrievedChunk(
             "comparison-chunk", "comparison-source", "Mixed configurations", "Tables",
@@ -193,7 +193,7 @@ def test_title_list_synthesis_keeps_duplicate_source_rows_and_coverage(repo, com
     preview = enumeration_prompt_block([outcome], inline_rows=10, budget_chars=2000)
     client = _RecordingAnswer("1. Same paper [k5001]\n2. Same paper [k5002]")
     baseline = {}
-    result = repo._runtime.ask_component._answer_reasoning(
+    result = repo._runtime.ask_component._response_drafting._answer_reasoning(
         notebook.id, "仅按标题逐一列出文章，保留同文的独立来源记录。", [], [],
         answer_client=client, structured_block=preview.text,
         structured_map=preview.evidence_by_id, chunk_context_chars=2000,

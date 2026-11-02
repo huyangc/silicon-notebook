@@ -432,7 +432,7 @@ def test_the_baseline_upper_bound_includes_what_the_external_block_used(
 
     notebook = _seed(arepo)
     captured: dict = {}
-    service = arepo._runtime.ask_service()
+    service = arepo._runtime.ask_service()._response_drafting
     original = service._answer_reasoning
 
     def _spy(*args, **kwargs):
