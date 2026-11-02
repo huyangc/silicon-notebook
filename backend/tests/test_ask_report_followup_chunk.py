@@ -420,13 +420,15 @@ def test_a_knowledge_object_folded_into_its_cluster_takes_that_objects_key(
 def _count_renders(monkeypatch) -> list[str]:
     """Log the kind of every renderer call the report partition makes."""
     calls: list[str] = []
-    real = AskService._render_report_kind
+    from app.services.response_drafting import DefaultResponseDraftStage
+
+    real = DefaultResponseDraftStage._render_report_kind
 
     def counted(self, kind, items, **kwargs):
         calls.append(kind)
         return real(self, kind, items, **kwargs)
 
-    monkeypatch.setattr(AskService, "_render_report_kind", counted)
+    monkeypatch.setattr(DefaultResponseDraftStage, "_render_report_kind", counted)
     return calls
 
 

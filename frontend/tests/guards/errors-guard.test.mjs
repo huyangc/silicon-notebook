@@ -189,7 +189,7 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
     count: 1,
     reason: "per-item transfer diagnostics are selected only for bounded logging",
   },
-  "page.tsx|<module>.Home.ingestZipFile|diagnostic|error": {
+  "use-source-intake.ts|<module>.useSourceIntake.ingestZipFile|diagnostic|error": {
     count: 1,
     reason: "ZipBundleResult.error is md-bundle.ts's typed parse-failure payload "
       + "({code,path,actual,limit,method}), not a caught exception; it is only ever "

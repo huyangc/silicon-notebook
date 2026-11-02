@@ -768,15 +768,18 @@ def _external_ask():
     from types import SimpleNamespace
 
     from app.core.config import Settings
-    from app.services.ask_service import AskService
     from app.services.evidence_context import EvidenceContextService
+    from app.services.response_drafting import DefaultResponseDraftStage
 
-    ask = object.__new__(AskService)
-    ask.evidence_context = EvidenceContextService(
+    settings = Settings(_env_file=None)
+    evidence_context = EvidenceContextService(
         notebooks=SimpleNamespace(), sources=SimpleNamespace(),
-        knowledge=SimpleNamespace(), settings=Settings(_env_file=None),
+        knowledge=SimpleNamespace(), settings=settings,
     )
-    return ask
+    return DefaultResponseDraftStage(
+        settings=settings, evidence_context=evidence_context, model_clients=None,
+        note_model_error=None, memory_context=None, effective_schemas=None, logger=None,
+    )
 
 
 def test_external_evidence_numbers_after_the_workbook_keys(tmp_path):
@@ -840,7 +843,7 @@ def test_synthesis_counts_workbook_results_on_their_own(ask_repo, tmp_path, tabl
     else:
         block, sheet_map = "", {}
     counts: dict = {}
-    svc._answer_reasoning(
+    svc._response_drafting._answer_reasoning(
         notebook_id, "q", [], [], chunks=[], chunk_context_chars=20_000,
         structured_block=block, structured_map=sheet_map, counts_sink=counts,
     )

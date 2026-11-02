@@ -49,8 +49,8 @@ _ID_ARGUMENT = {
 # Every production call site, as ``file::enclosing function -> callee``.  A new
 # one must be added here, after checking it passes the run's real id.
 _REGISTERED = {
-    "services/ask_service.py::_assemble_reasoning_context -> reasoning_order_for",
-    "services/ask_service.py::_assemble_structured_evidence -> reasoning_order_for",
+    "services/response_drafting.py::_assemble_reasoning_context -> reasoning_order_for",
+    "services/response_drafting.py::_assemble_structured_evidence -> reasoning_order_for",
     "services/ask_service.py::_chunk_retrieve -> mix_reserve_rules",
     "services/ask_service.py::_chunk_retrieve -> quota_fuse_baseline_first",
     "services/ask_service.py::_chunk_retrieve -> select_chunk_candidates",

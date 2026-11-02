@@ -12,9 +12,9 @@
   * 范围守卫(结构性):``render_style_block`` 对三个封闭枚举字段的全部取值组合
     (含 domain_terms 的代表值)渲染出的文本里不出现任何范围/参考库/检索档位
     类关键词——这条断言的钉住力由变异验证证明(报告里记录)。
-  * 三个 ``answer_prompt(...)`` 调用点(``ask_service.py``)都携带
-    ``style_block=``——AST 扫描,不依赖行号(319f7aad 退役 graph 模式删掉了第
-    4 个调用点,计数已同步下修)。T9 修复轮再加一条:同一份 AST
+  * 四个 ``answer_prompt(...)`` 调用点(``ask_service.py`` 和
+    ``response_drafting.py``)都携带 ``style_block=``——AST 扫描,不依赖行号。
+    T9 修复轮再加一条:同一份 AST
     扫描扩到全仓 ``backend/app/`` 目录,带显式豁免名单(当前为空)。
 
 ``render_style_block`` 本身的渲染合同(空 profile/auto 值不渲染/超预算逐条装入
@@ -336,35 +336,35 @@ def test_render_style_block_never_leaks_scope_or_tier_language():
 # --------------------------------------------------------------- ⑤ AST 扫描
 
 
-def test_every_answer_prompt_call_site_in_ask_service_passes_style_block():
-    """AST 扫描 ``ask_service.py`` 的全部 ``answer_prompt(...)`` 调用点,逐一
+def test_every_answer_prompt_call_site_in_ask_owners_passes_style_block():
+    """AST 扫描 Ask 编排与实际起草 owner 的全部 ``answer_prompt(...)`` 调用点,逐一
     断言携带 ``style_block=`` 关键字参数——不依赖行号,源码改动后仍然成立。
 
     这是下面全仓扫描 ``test_every_answer_prompt_call_site_in_app_passes_
-    style_block`` 的一个具体断言(调用点数=4,精确到 ask_service.py 这一个
-    文件，包含通用问答的文档介绍合成路径),两者
-    不是重复覆盖:这一条钉住「今天这个文件有几个调用点」这个
+    style_block`` 的一个具体断言(调用点数=4,精确到 Ask 编排与起草这一个
+    职责，包含通用问答的文档介绍合成路径),两者
+    不是重复覆盖:这一条钉住「今天这项职责有几个调用点」这个
     具体数字,全仓那一条钉住「以后任何文件新增调用点都逃不掉」这条不依赖
     文件名单的结构性合同。"""
     import app.services.ask_service as ask_service_module
 
-    source = Path(ask_service_module.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    source = Path(ask_service_module.__file__)
     calls = [
-        node for node in ast.walk(tree)
+        (owner, node) for owner in (source, source.with_name("response_drafting.py"))
+        for node in ast.walk(ast.parse(owner.read_text(encoding="utf-8"), filename=str(owner)))
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "answer_prompt"
     ]
     assert len(calls) == 4, (
-        "expected 4 answer_prompt(...) call sites in ask_service.py, found "
+        "expected 4 answer_prompt(...) call sites across Ask owners, found "
         f"{len(calls)} — update this test's expected count if that changed "
         "deliberately"
     )
-    for call in calls:
+    for owner, call in calls:
         kw_names = {kw.arg for kw in call.keywords}
         assert "style_block" in kw_names, (
-            f"answer_prompt(...) call at ask_service.py:{call.lineno} is "
+            f"answer_prompt(...) call at {owner.name}:{call.lineno} is "
             "missing style_block=..."
         )
 

@@ -34,6 +34,14 @@ unmapped product area, list headings with `rg -n '^#{1,4} ' <owning-document>`
 and read the relevant complete section; an output limit is not evidence that
 the omitted contract is irrelevant.
 
+For Python and TypeScript/TSX, use the read-only
+[symbol navigation tool](../scripts/README.md#符号级代码导航) to list an outline,
+read one complete qualified symbol, or search explicitly selected reference roots.
+It parses source without importing the target module or executing application
+code, and distinguishes lexical references from text candidates. Indexes are
+generated on demand. Follow the [runtime ownership routes](../architecture.md#代码导航入口)
+for implementation and test entry points.
+
 ## Numeric limits and truncation
 
 Production code must not hide result-changing literal slices or limits at a

@@ -230,13 +230,15 @@ def _payload(response) -> str:
 
 def _without_reuse(monkeypatch):
     """旧路径:原文段腿拿不到装配期备忘,三个读取整池各发一次。"""
-    real = AskService._reasoning_chunk_cards
+    from app.services.response_drafting import DefaultResponseDraftStage
+
+    real = DefaultResponseDraftStage._reasoning_chunk_cards
 
     def _cards(self, chunks, baseline, notebook_id):
         stripped = {k: v for k, v in baseline.items() if k != "citation_lookups"}
         return real(self, chunks, stripped, notebook_id)
 
-    monkeypatch.setattr(AskService, "_reasoning_chunk_cards", _cards)
+    monkeypatch.setattr(DefaultResponseDraftStage, "_reasoning_chunk_cards", _cards)
 
 
 def _section(section_id, title, *keys):
@@ -464,14 +466,16 @@ def test_the_retrieval_only_entry_point_keeps_the_memo_less_reads(
     ec, reads = _install(monkeypatch, arepo, data)
     _patch_retrieval(monkeypatch, chunks=[_chunk(1, elements=1), _chunk(2)])
     seen: list = []
-    real = AskService._assemble_reasoning_context
+    from app.services.response_drafting import DefaultResponseDraftStage
+
+    real = DefaultResponseDraftStage._assemble_reasoning_context
 
     def _spy(self, *args, **kwargs):
         context = real(self, *args, **kwargs)
         seen.append((kwargs.get("citation_lookups"), context.baseline))
         return context
 
-    monkeypatch.setattr(AskService, "_assemble_reasoning_context", _spy)
+    monkeypatch.setattr(DefaultResponseDraftStage, "_assemble_reasoning_context", _spy)
 
     evidence = arepo.ask(
         notebook.id, AskRequest(question="增益", mode="reasoning"),
@@ -487,13 +491,15 @@ def test_the_retrieval_only_entry_point_keeps_the_memo_less_reads(
 def _old_path(monkeypatch):
     """master 的读取:装配不带备忘(``chunk_context`` 不传 sink),原文段腿也拿不到
     备忘(``chunk_citations(lookups=None)``,三个读取整池各一次)。"""
-    real = AskService._assemble_reasoning_context
+    from app.services.response_drafting import DefaultResponseDraftStage
+
+    real = DefaultResponseDraftStage._assemble_reasoning_context
 
     def _assemble(self, *args, **kwargs):
         kwargs["citation_lookups"] = None
         return real(self, *args, **kwargs)
 
-    monkeypatch.setattr(AskService, "_assemble_reasoning_context", _assemble)
+    monkeypatch.setattr(DefaultResponseDraftStage, "_assemble_reasoning_context", _assemble)
 
 
 def _read_totals(reads) -> dict[str, tuple[int, int]]:

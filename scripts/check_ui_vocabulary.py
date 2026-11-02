@@ -154,6 +154,9 @@ MIN_USER_ERROR_SITES = 15
 TRACE_SUMMARY_MODULES = (
     ROOT / "backend" / "app" / "services" / "reasoning_retrieval.py",
     ROOT / "backend" / "app" / "services" / "ask_service.py",
+    ROOT / "backend" / "app" / "services" / "response_drafting.py",
+    ROOT / "backend" / "app" / "services" / "reasoning_paper_actions.py",
+    ROOT / "backend" / "app" / "services" / "reasoning_section_navigation.py",
     ROOT / "backend" / "app" / "services" / "global_ask.py",
     ROOT / "backend" / "app" / "services" / "plugin_ask_engine.py",
     ROOT / "backend" / "app" / "services" / "spreadsheet_analysis.py",

@@ -19,6 +19,7 @@ import pytest
 from app.domain.retrieval import RetrievalSupport, RetrievedChunk
 from app.services import chunk_federation as cf
 from app.services.chunk_federation import reasoning_order_for
+from app.services.response_drafting import DefaultResponseDraftStage
 from app.services.retrieval import (
     RELEVANCE_FLOOR,
     reasoning_passage_order,
@@ -259,7 +260,6 @@ def test_a_section_promotes_its_own_bound_active_passages(repo, monkeypatch):  #
     import json
 
     from app.models.schemas import NotebookCreate
-    from app.services.ask_service import AskService
     from tests.model_testkit import bind_chat_client
 
     class _Echo:
@@ -275,7 +275,7 @@ def test_a_section_promotes_its_own_bound_active_passages(repo, monkeypatch):  #
     bound += [_p("mine-bound", 0.2)]
     trailing = [_p("exact-copy", 1.0, notebook_id="ref")]
     captured: list = []
-    real = AskService._chunk_answer_context
+    real = DefaultResponseDraftStage._chunk_answer_context
 
     def _spy(self, chunks, budget_chars=None, notebook_id="", id_offset=0,
              **kwargs):
@@ -283,8 +283,8 @@ def test_a_section_promotes_its_own_bound_active_passages(repo, monkeypatch):  #
         return real(self, chunks, budget_chars=budget_chars,
                     notebook_id=notebook_id, id_offset=id_offset, **kwargs)
 
-    monkeypatch.setattr(AskService, "_chunk_answer_context", _spy)
-    repo._runtime.ask_service()._answer_reasoning(
+    monkeypatch.setattr(DefaultResponseDraftStage, "_chunk_answer_context", _spy)
+    repo._runtime.ask_service()._response_drafting._answer_reasoning(
         notebook.id, "q", [], [], chunks=bound, sectioned=True,
         section_title="A", section_index=1, section_total=2,
         trailing_chunks=trailing, chunk_context_chars=10_000)
@@ -299,7 +299,6 @@ def test_reasoning_synthesis_passes_the_real_id(repo):  # noqa: F811
     import json
 
     from app.models.schemas import NotebookCreate
-    from app.services.ask_service import AskService
     from tests.model_testkit import bind_chat_client
 
     class _Echo:
@@ -314,7 +313,7 @@ def test_reasoning_synthesis_passes_the_real_id(repo):  # noqa: F811
     chunks = [_p(f"ppr-{i}", 1.0 - i * 0.1, notebook_id=notebook.id, origin="ppr")
               for i in range(6)] + [_p(f"seed-{i}", 0.4 - i * 0.02) for i in range(6)]
     captured: list = []
-    real = AskService._chunk_answer_context
+    real = DefaultResponseDraftStage._chunk_answer_context
 
     def _spy(self, chunks, budget_chars=None, notebook_id="", id_offset=0,
              **kwargs):
@@ -322,12 +321,12 @@ def test_reasoning_synthesis_passes_the_real_id(repo):  # noqa: F811
         return real(self, chunks, budget_chars=budget_chars,
                     notebook_id=notebook_id, id_offset=id_offset, **kwargs)
 
-    AskService._chunk_answer_context = _spy
+    DefaultResponseDraftStage._chunk_answer_context = _spy
     try:
-        repo._runtime.ask_service()._answer_reasoning(
+        repo._runtime.ask_service()._response_drafting._answer_reasoning(
             notebook.id, "q", [], [], chunks=chunks, chunk_context_chars=10_000)
     finally:
-        AskService._chunk_answer_context = real
+        DefaultResponseDraftStage._chunk_answer_context = real
     assert captured[0] == _ids(_three_step(
         chunks, exact_reserve=repo.settings.reasoning_exact_reserve))
 

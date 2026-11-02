@@ -1048,7 +1048,7 @@ def test_default_response_draft_stage_rejects_a_malformed_envelope_directly():
     with pytest.raises(
         StageBoundaryError, match="invalid reasoning response draft input",
     ):
-        service._draft_reasoning_response(SimpleNamespace(), object())
+        service._response_drafting.draft_response(SimpleNamespace(), object())
 
 
 @pytest.mark.parametrize(

@@ -91,6 +91,8 @@ DSO = "services/document_source_overview.py"
 #: citations). An "import gate" says none of them imports the gated module.
 GLOBAL_ENGINE_MODULES = (
     GA, AS, EC, RR, RS, CF, RC, SA, DSO,
+    "services/response_drafting.py", "services/reasoning_paper_actions.py",
+    "services/reasoning_section_navigation.py", "services/reasoning_outline.py",
     "services/graph_retrieval.py", "services/collection_enumeration.py",
     "services/collection_enumeration_answer.py", "services/document_catalog_overview.py",
     "services/kg/follow_chain.py", "services/kg/graph_reason.py",
@@ -213,7 +215,7 @@ REGISTRY = {
     ("services/paper_card_answer.py", "build_paper_card_evidence", 'dict:"element_id"'): (
         "read-registered",
         _COLLECTION_PROOF + (
-            ("calls", AS, "AskService._paper_card_evidence", "collection_item_citations"),),
+            ("calls", "services/response_drafting.py", "DefaultResponseDraftStage._paper_card_evidence", "collection_item_citations"),),
         "paper-card / extracted-value elements, keyed only from the citation "
         "collection_item_citations minted for them", 1),
     ("services/kg/follow_chain.py", "render_follow_chain_context", 'dict:"element_id"'): (
@@ -228,7 +230,7 @@ REGISTRY = {
         "pointer-registered", _TABLE_PROOF, "copies the receipt's (attested) element", 1),
     (SA, "_attested_row_citation", "model_copy:element_id"): (
         "pointer-registered", _TABLE_PROOF, "J2 clear of a dead row locator", 1),
-    (AS, "AskService._memory_citations", "Citation"): (
+    ("services/response_drafting.py", "DefaultResponseDraftStage._memory_citations", "Citation"): (
         "no-element", (), "Memory rows are not source elements (and memory is off in peer mode)", 1),
     (AS, "AskService.ask_plugin_engine", "Citation"): (
         "global-unreachable", _PLUGIN_ENGINE_REFUSED, "global Ask refuses plugin engines", 1),

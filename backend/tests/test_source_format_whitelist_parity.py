@@ -5,7 +5,7 @@ builtin 引擎的扩展名表派生，source_routes 从它 import）；前端的
 `DEFAULT_SUPPORTED_SOURCE_EXTENSIONS`（frontend/app/system-api.ts）是「系统配置返回
 前可用」的兼容默认值，运行时权威清单由 /system/config 下发、直接来自后端注册表。
 兼容默认值与后端注册表仍是同一事实的两份手工同步拷贝（服务端下发覆盖不了「配置
-还没返回」的窗口），此前只靠注释约定；`LEGACY_OFFICE_EXTENSIONS`（page.tsx）的
+还没返回」的窗口），此前只靠注释约定；`LEGACY_OFFICE_EXTENSIONS`（use-source-intake.ts）的
 「另存为」提示列表则绝不能与已支持格式重叠。上传提示文案已由服务端清单派生，
 不再是手工拷贝，无需守卫。
 
@@ -41,7 +41,7 @@ import pytest
 from app.services.parser_registry import SUPPORTED_SOURCE_SUFFIXES
 
 ROOT = Path(__file__).resolve().parents[2]
-PAGE_TSX = ROOT / "frontend" / "app" / "page.tsx"
+SOURCE_INTAKE_TS = ROOT / "frontend" / "app" / "use-source-intake.ts"
 SYSTEM_API_TS = ROOT / "frontend" / "app" / "system-api.ts"
 
 _GUARD_SPEC = importlib.util.spec_from_file_location(
@@ -175,7 +175,7 @@ def extract_string_array(source: str, name: str, *, file_label: str) -> list[str
 
 
 # --------------------------------------------------------------------------
-# 集成测试：对真实的 frontend/app/page.tsx 与后端白名单做一致性校验。
+# 集成测试：对真实的前端配置和来源导入模块与后端白名单做一致性校验。
 # --------------------------------------------------------------------------
 
 
@@ -198,9 +198,9 @@ def test_frontend_backend_supported_suffixes_match():
 
 
 def test_legacy_office_hint_excludes_supported_formats():
-    source = PAGE_TSX.read_text(encoding="utf-8")
+    source = SOURCE_INTAKE_TS.read_text(encoding="utf-8")
     legacy_exts = extract_string_array(
-        source, "LEGACY_OFFICE_EXTENSIONS", file_label=str(PAGE_TSX)
+        source, "LEGACY_OFFICE_EXTENSIONS", file_label=str(SOURCE_INTAKE_TS)
     )
     overlap = {f".{ext}" for ext in legacy_exts} & set(SUPPORTED_SOURCE_SUFFIXES)
     assert not overlap, (
@@ -213,7 +213,7 @@ def test_legacy_office_hint_excludes_supported_formats():
 
 # --------------------------------------------------------------------------
 # 单元测试：直接给 extract_string_array 喂合成 TS 片段，逐条钉住评审列出的假绿路径。
-# 这些测试独立于 page.tsx 的真实内容，即使真实文件从不出现某种写法，回归也能守住。
+# 这些测试独立于生产文件的真实内容，即使真实文件从不出现某种写法，回归也能守住。
 # --------------------------------------------------------------------------
 
 

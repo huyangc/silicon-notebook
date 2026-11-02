@@ -965,8 +965,8 @@ def test_table_rows_outside_the_digest_resolve_through_the_registration(repo, mo
 
 
 def test_the_digest_reserve_shrinks_the_enumeration_preview_budget(repo, monkeypatch):
-    import app.services.ask_service as ask_service_module
     import app.services.collection_enumeration_answer as cea
+    import app.services.response_drafting as ask_service_module
     from app.core.ask_retrieval_policy import ask_retrieval_limits
 
     budgets: list[int] = []
@@ -984,8 +984,8 @@ def test_the_digest_reserve_shrinks_the_enumeration_preview_budget(repo, monkeyp
         enumerations=[SimpleNamespace(items=())], spreadsheet_results=[], document_reads=())
     paper = _evidence(_tools(cards=[_card_outcome("nb", "s1", "A", _card("s1"))]))
     client = SimpleNamespace(configured=True)
-    service._render_structured_side(stage, client, None, {}, None)
-    service._render_structured_side(stage, client, None, {}, paper)
+    service._response_drafting._render_structured_side(stage, client, None, {}, None)
+    service._response_drafting._render_structured_side(stage, client, None, {}, paper)
     reserve = ask_service_module.paper_digest_reserve(paper, limits.chunk_context_chars)
     assert reserve > 0 and budgets[0] - budgets[1] == reserve
 
@@ -1115,7 +1115,7 @@ def test_the_roster_preview_is_left_out_only_for_a_find_sources_paper_table(repo
                              finds=[_find([_found("nb", "s1", "A")])], cards=cards))
     client = SimpleNamespace(configured=True)
     for paper in (searched, direct, prose, None):
-        service._render_structured_side(stage, client, None, {}, paper)
+        service._response_drafting._render_structured_side(stage, client, None, {}, paper)
     assert omitted == [frozenset({"sources"}), frozenset(), frozenset(), frozenset()]
     assert roster_omitted_for(searched) == frozenset({"sources"})
 

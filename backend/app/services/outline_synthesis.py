@@ -35,7 +35,7 @@ OUTLINE_SECTION_KEY_STRIDE = 10000
 class OutlineSectionSlice:
     """一节及其绑定证据的切片(装配一次合成调用所需的全部输入)。"""
 
-    section: Any                    # reasoning_retrieval.OutlineSection
+    section: Any                    # reasoning_outline.OutlineSection
     index: int                      # 在**实际合成**序列里的 0 基序号(=文档序)
     key_offset: int
     # **解析后**的父节 id:空串 = 顶层节(``##``),非空 = 子节(``###``)。

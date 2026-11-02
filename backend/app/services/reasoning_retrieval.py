@@ -17,22 +17,32 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import (
-    Any, Dict, List, Mapping, NamedTuple, Optional, Protocol, Sequence, Tuple,
     TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
 )
 
 from app.core.ask_retrieval_policy import (
-    DEFAULT_RETRIEVAL_EFFORT, EXHAUSTIVE_RETRIEVAL_EFFORT, AskRetrievalLimits,
+    DEFAULT_RETRIEVAL_EFFORT,
+    EXHAUSTIVE_RETRIEVAL_EFFORT,
+    AskRetrievalLimits,
     ask_retrieval_limits,
 )
-from app.core.llm import budget_kwargs
-from app.core.model_values import as_text, as_text_list
 from app.core.config import (
     DEFAULT_EXTERNAL_EVIDENCE_MAX_PER_RUN,
     DEFAULT_REASONING_PER_QUERY_LIMIT,
     DEFAULT_REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS,
     Settings,
 )
+from app.core.llm import budget_kwargs
+from app.core.model_values import as_text, as_text_list
 from app.domain.reflect_action import (
     EXTERNAL_EVIDENCE_MAX_ITEMS_PER_CALL,
     EXTERNAL_EVIDENCE_REFLECT_BLOCK_CHARS,
@@ -42,9 +52,17 @@ from app.domain.reflect_action import (
     ReflectActionSpec,
     fold_control_characters,
 )
+
+# Only the NAME, from the dependency-free domain layer: these modules are
+# not on the participant override's frozen reader whitelist, but their
+# fail-soft handlers must re-raise its control exception instead of
+# degrading an identity-attestation failure into an empty result set.
+from app.domain.retrieval_control import RetrievalControlError
 from app.models.ask import TRACE_RESULT_IDS_MAX, TraceStep
 from app.repositories.lexical_query import (
-    MAX_EXACT_PHRASE_CHARS, MAX_QUOTED_PHRASES, exact_probe_query,
+    MAX_EXACT_PHRASE_CHARS,
+    MAX_QUOTED_PHRASES,
+    exact_probe_query,
     exact_probe_terms,
 )
 from app.repositories.ports import (
@@ -52,118 +70,179 @@ from app.repositories.ports import (
     RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES,
 )
 from app.services.agent_profile_block import (
-    clip_block_value, render_profile_block, rendered_row_count,
+    clip_block_value,
+    render_profile_block,
+    rendered_row_count,
 )
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
-# Only the NAME, from the dependency-free domain layer: these modules are
-# not on the participant override's frozen reader whitelist, but their
-# fail-soft handlers must re-raise its control exception instead of
-# degrading an identity-attestation failure into an empty result set.
-from app.domain.retrieval_control import RetrievalControlError
-from app.services.citation_markers import LOOSE_MARKER_RE
-from app.services.model_work import MalformedModelResponse
+from app.services.citation_markers import LOOSE_MARKER_RE as LOOSE_MARKER_RE
 from app.services.collection_catalog import (
-    ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
+    ENUMERABLE_ELEMENT_KINDS,
+    ENUMERABLE_KG_OBJECT_TYPES,
     render_collection_map,
 )
 from app.services.collection_enumeration import (
-    LOCAL_ONLY_SCOPE_SUFFIX, SELECTED_SOURCES_SCOPE_SUFFIX,
+    LOCAL_ONLY_SCOPE_SUFFIX,
+    SELECTED_SOURCES_SCOPE_SUFFIX,
+    # PR-A:花名册那一行在**模型眼里**的两个字面(无名占位标题、行内字段分隔符)。
+    # 解析模型抄回来的标题必须拿模型看到的那个串去比,所以两者都与渲染方共用同
+    # 一份定义;它们落在执行器模块而不是渲染模块,是为了不在这里与
+    # ``collection_enumeration_answer`` 之间造出 import 环。
+    SOURCE_ROW_FIELD_SEPARATOR,
     TRUNCATED_CONCURRENT_CHANGE,
+    UNNAMED_SOURCE_LABEL,
     EnumerationBudget,
     # PR-A:来源标题 → 花名册条目的比较范式。**共用**枚举侧那一份而不是在这里
     # 再写一个「trim + casefold」:两侧各写一份的话,模型从清单里逐字复制的标题
     # 迟早会在一侧匹配、在另一侧落空。私有名故意直接引用,见那个函数的 docstring
     # ——它是一条窄化规则(只求活过空白与大小写,绝不近似匹配)。
     _normalized_title,
-    # PR-A:花名册那一行在**模型眼里**的两个字面(无名占位标题、行内字段分隔符)。
-    # 解析模型抄回来的标题必须拿模型看到的那个串去比,所以两者都与渲染方共用同
-    # 一份定义;它们落在执行器模块而不是渲染模块,是为了不在这里与
-    # ``collection_enumeration_answer`` 之间造出 import 环。
-    SOURCE_ROW_FIELD_SEPARATOR,
-    UNNAMED_SOURCE_LABEL,
 )
 from app.services.document_source_overview import SourceOverview, prepare_source_overview
+from app.services.model_work import MalformedModelResponse
+
 # 按节合成的号段步长。`read_document` 的号段(`DOCUMENT_READ_KEY_BASE` 起,每次
 # 读取占一个池宽)必须整体落在它之内,否则第 2 节的证据会与按篇取样抢同一个
 # `[kN]`。import 而不是复制那个数:复制出来的两份一旦漂移,合并锚点时不会报错,
 # 只会静静地把引用指错。
 from app.services.outline_synthesis import OUTLINE_SECTION_KEY_STRIDE
-from app.services.paper_extraction import (
-    EXTRACT_MAX_SOURCES, ExtractionRequestError, normalize_fields,
-)
 from app.services.prompts import (
-    project_reflect_actions, reflect_prompt, reflect_schema_hint,
-)
-from app.services.reasoning_paper_tools import (
-    ANSWER_LAYOUT_PROSE, EXTRACT_FROM_SOURCES_ACTION, FIND_SOURCES_ACTION,
-    GET_PAPER_CARDS_ACTION, PAPER_TOOL_ACTIONS, FoundSourcesOutcome,
-    PaperCardOutcome, PaperExtractionItem, PaperExtractionOutcome, PaperHandles,
-    answer_layout_value, cap_find_terms, card_anchor_ids, card_has_content, clip,
-    extraction_value_count, missing_paper_tool_argument, paper_tool_text_fields,
-    note_top_level_arguments, paper_tools_note, parse_paper_tool_arguments,
-    resolve_answer_layout, resolve_source_tokens, year_value,
-)
-from app.services.source_finder import (
-    FIND_SOURCES_MAX_TERMS, FIND_SOURCES_PAGE_SIZE, FindSourcesCursorError,
-    FindSourcesCursorScopeChangedError, FindSourcesCursorStaleError, FindSourcesError,
-    FindSourcesRequest,
+    project_reflect_actions,
+    reflect_prompt,
+    reflect_schema_hint,
 )
 from app.services.reasoning_actions import (
-    ENUMERATE_SCOPE_ALL, ENUMERATE_SCOPE_CURRENT_NOTEBOOK, ENUMERATE_SCOPES,
+    ENUMERATE_SCOPE_ALL,
+    ENUMERATE_SCOPE_CURRENT_NOTEBOOK,
+    ENUMERATE_SCOPES,
     EXACT_TERM_SHAPE_NOTE,
 )
-from app.services.retrieval_experience_block import (
-    CONSULT_MEMORY_TOP_K, action_id_for, adopted_entry_ids, clip_rationale,
-    render_consult_block, render_experience_block,
-    rendered_row_count as rendered_experience_count, select_consultable,
-    select_experiences_layered, worst_experience_for,
+from app.services.reasoning_paper_actions import (
+    PaperActionDependencies,
+    ReasoningPaperActions,
 )
-from app.services.retrieval_experience_projection import current_situation
-from app.services.retrieval import (
-    NeighborExpansion, RetrievedChunk, RetrievedElement, RetrievedKnowledge,
-    prefer_stronger_chunk_candidate,
+from app.services.reasoning_paper_tools import (
+    ANSWER_LAYOUT_PROSE,
+    EXTRACT_FROM_SOURCES_ACTION,
+    FIND_SOURCES_ACTION,
+    GET_PAPER_CARDS_ACTION,
+    PAPER_TOOL_ACTIONS,
+    FoundSourcesOutcome,
+    PaperCardOutcome,
+    PaperExtractionOutcome,
+    PaperHandles,
+    answer_layout_value,
+    missing_paper_tool_argument,
+    paper_tool_text_fields,
+    parse_paper_tool_arguments,
+    resolve_answer_layout,
 )
-from app.services.retrieval_service import attest_chain_evidence
-from app.services.retrieval_run import (
-    memoized_retrieval_value,
-    retrieval_fanout_slot,
+from app.services.reasoning_section_navigation import (
+    _SECTION_ECHO_CHARS as _SECTION_ECHO_CHARS,
 )
-from app.services.search_profile import render_style_block
-from app.services.section_retrieval import (
-    collect_section_vector_stats, embedded_query_texts,
+from app.services.reasoning_section_navigation import (
+    BROWSE_SECTIONS_ACTION as BROWSE_SECTIONS_ACTION,
 )
-from app.services.section_outline import (
-    UNDER_NO_NUMBERING, UNTITLED, AddressBook, Ambiguous, Outline, Resolved,
-    SourceRanking, build_outline, filter_outline, parse_section_id,
-    rank_sections, render_hints, render_outline, render_ranked,
-    resolve_section, select_hints,
+from app.services.reasoning_section_navigation import (
+    ENUMERATE_SOURCES_COLLECTION as ENUMERATE_SOURCES_COLLECTION,
 )
-# The ASK-side peer predicate. This module may not read the participant
-# override (it is not on that module's frozen reader whitelist);
-# ``subjectless_run_active`` only answers "this run has no subject library",
-# which is exactly the fact the element arm's closure turns on, and it is
-# installed by the same one manager that installs the override.
-from app.services.source_scope import current_source_scope, subjectless_run_active
-from app.services.source_element_selection import (
-    rank_source_elements,
-    source_chunk_content_key,
-    source_element_content_key,
+from app.services.reasoning_section_navigation import (
+    READ_SECTION_ACTION as READ_SECTION_ACTION,
+)
+from app.services.reasoning_section_navigation import (
+    SECTION_QUERY_MAX_CHARS as SECTION_QUERY_MAX_CHARS,
+)
+from app.services.reasoning_section_navigation import (
+    ReasoningSectionNavigation,
+    SectionEnumeration,
+    SectionNavigationDependencies,
+    SectionQuery,
+    SectionRosterNumbering,
+)
+from app.services.reasoning_section_navigation import (
+    _display_occurrence as _display_occurrence,
+)
+from app.services.reasoning_section_navigation import (
+    _section_source_title as _section_source_title,
+)
+from app.services.reasoning_section_navigation import (
+    _section_text as _section_text,
+)
+from app.services.reasoning_section_navigation import (
+    _SectionSource as _SectionSource,
 )
 from app.services.reports.policy import (
     DEFAULT_REASONING_COMMUNITY_PEERS_CAP_FACTOR,
     DEFAULT_REASONING_MAX_DOCUMENT_READS,
     DEFAULT_REASONING_MAX_EXACT_LOOKUPS,
     DEFAULT_REASONING_MAX_FOLLOW_CHAIN_ACTIONS,
-    DEFAULT_REASONING_MAX_OUTLINE_UPDATES,
     DEFAULT_REASONING_MAX_PPR_RETRIEVES,
-    OUTLINE_EVIDENCE_KEY_CHARS,
-    OUTLINE_ID_CHARS,
-    OUTLINE_MAX_EVIDENCE,
-    OUTLINE_MAX_SECTIONS,
-    OUTLINE_TITLE_CHARS,
     REASONING_PREFER_WEIGHTS,
+    ReasoningActionPolicy,
     reasoning_action_policy,
 )
+from app.services.reports.policy import (
+    DEFAULT_REASONING_MAX_OUTLINE_UPDATES as DEFAULT_REASONING_MAX_OUTLINE_UPDATES,
+)
+from app.services.reports.policy import (
+    OUTLINE_EVIDENCE_KEY_CHARS as OUTLINE_EVIDENCE_KEY_CHARS,
+)
+from app.services.reports.policy import (
+    OUTLINE_ID_CHARS as OUTLINE_ID_CHARS,
+)
+from app.services.reports.policy import (
+    OUTLINE_MAX_EVIDENCE as OUTLINE_MAX_EVIDENCE,
+)
+from app.services.reports.policy import (
+    OUTLINE_MAX_SECTIONS as OUTLINE_MAX_SECTIONS,
+)
+from app.services.reports.policy import (
+    OUTLINE_TITLE_CHARS as OUTLINE_TITLE_CHARS,
+)
+from app.services.retrieval import (
+    NeighborExpansion,
+    RetrievedChunk,
+    RetrievedElement,
+    RetrievedKnowledge,
+    prefer_stronger_chunk_candidate,
+)
+from app.services.retrieval_experience_block import (
+    CONSULT_MEMORY_TOP_K,
+    action_id_for,
+    adopted_entry_ids,
+    clip_rationale,
+    render_consult_block,
+    render_experience_block,
+    select_consultable,
+    select_experiences_layered,
+    worst_experience_for,
+)
+from app.services.retrieval_experience_block import (
+    rendered_row_count as rendered_experience_count,
+)
+from app.services.retrieval_experience_projection import current_situation
+from app.services.retrieval_run import (
+    memoized_retrieval_value,
+    retrieval_fanout_slot,
+)
+from app.services.retrieval_service import attest_chain_evidence
+from app.services.search_profile import render_style_block
+from app.services.section_outline import (
+    AddressBook,
+    Outline,
+)
+from app.services.source_element_selection import (
+    rank_source_elements,
+    source_chunk_content_key,
+    source_element_content_key,
+)
+
+# The ASK-side peer predicate. This module may not read the participant
+# override (it is not on that module's frozen reader whitelist);
+# ``subjectless_run_active`` only answers "this run has no subject library",
+# which is exactly the fact the element arm's closure turns on, and it is
+# installed by the same one manager that installs the override.
+from app.services.source_scope import current_source_scope, subjectless_run_active
 
 if TYPE_CHECKING:
     from app.repositories.ports import (
@@ -826,7 +905,6 @@ ENUMERATE_ELEMENTS_ACTION = "enumerate_elements"
 ENUMERATE_KG_OBJECTS_ACTION = "enumerate_kg_objects"
 # ``enumerate.collection`` 唯一被识别的取值。缺省或任何其他值都落回按动作 id 的
 # kind/object_type 分派(fail-open,与本分支其他非白名单值的处理同形)。
-ENUMERATE_SOURCES_COLLECTION = "sources"
 
 # PR-A:按篇读取有界原文取样。它**是**一个独立动作 id(与来源清单那个参数值
 # 相反):它不是「换一个集合来列」,而是另一件事——在已经列出来的那份花名册里
@@ -895,45 +973,12 @@ DOCUMENT_READ_MIN_CHARS_PER_ELEMENT = 320
 # 文档内导航的两个动作 id(§3.8/§3.9)。一把闸(``section_navigation_active``)同时
 # 给出两者:目录(不进证据)与按章节读回原文(进证据)是同一件事的两半——没有目录
 # 就没有可读的地址,读不了就没有必要列目录。
-BROWSE_SECTIONS_ACTION = "browse_sections"
-READ_SECTION_ACTION = "read_section"
 # browse_sections.query 进向量排序之前的截断长度(与 `CHUNKS_KEYWORDS_MAX_CHARS`
 # 同口径:再长就是堆砌,只会稀释查询向量)。只在执行处截,解析不截——fail_closed
 # 的 2000 字符硬闸因此仍看得到原值。
-SECTION_QUERY_MAX_CHARS = 300
 # trace detail / 账目里回显模型自写的来源标题、章节文本时的截断长度;库里的来源
 # 标题与章节标签(`section_path` 不设长度上限)进摘要、账目与轨迹前也按它截。
-_SECTION_ECHO_CHARS = 200
 
-
-def _section_text(value) -> str:
-    """一行有界的显示文本:折叠空白,超过 `_SECTION_ECHO_CHARS` 截断并加省略号。"""
-    text = " ".join(str(value or "").split())
-    if len(text) <= _SECTION_ECHO_CHARS:
-        return text
-    return text[:_SECTION_ECHO_CHARS - 1] + "…"
-
-
-def _section_source_title(issued, source_id, raw_title) -> str:
-    """章节导航(目录、读取、线索块)回显的来源标题。
-
-    无标题文档在本 run 花名册里编了号(「未命名来源（第 N 篇）」,`issued` 是 run 级
-    发号簿)时回显那个号,与清单账目、已读账目同一个串——否则两篇无名文档的目录、
-    读取记录都叫「未命名来源」,模型读完分不清读的是哪一篇。只有一篇无名文档(不编号)
-    或不是无名文档时与以前相同。
-    """
-    title = _section_text(raw_title or UNNAMED_SOURCE_LABEL)
-    if title == UNNAMED_SOURCE_LABEL and source_id in issued:
-        return _section_text(issued[source_id])
-    return title
-
-
-def _display_occurrence(occurrence):
-    """渲染用的出现副本:标签与面包屑各段按 `_section_text` 截成有界的一行。地址簿
-    里登记的仍是原出现(只有显示被截,解析与读取不受影响)。"""
-    return replace(
-        occurrence, label=_section_text(occurrence.label),
-        crumbs=tuple(_section_text(crumb) for crumb in occurrence.crumbs))
 
 # `search_chunks` 动作的关键词串(模型回复的根级 `keywords`)解析时的截断上限。
 # 这串原样进全文检索(`keyword_chunk_candidates` → FTS 的 OR 查询):词项越多,
@@ -2218,580 +2263,79 @@ def _enumeration_note(chains, numbering=None,
     )
 
 
-# --------------------------------------------------------- 大纲便签(outline)
-#
-# DualGraph(arXiv:2602.13830)借鉴的 v1(设计文档 §3.1):把「怎么写」(大纲)与
-# 「知道什么」(证据)分开,逐轮共演化。大纲是 **run 局部**的一张便签——不持久化、
-# 不进 AskResponse,只经 trace 与 ReasoningResult 出场。
-#
-# 它只在 exhaustive 档提供(见 outline_wiring_active):按节合成是 k 次真实的模型
-# 调用,那笔钱必须由用户显式选「穷尽」来承担。
-OUTLINE_ACTION = "update_outline"
-
-# 有界性是硬约束(设计文档 §3.1)。三条边界各自的作用:
-#   * 12 节 —— 一份能读的大纲的上限,同时是回喂账目长度的分母;
-#   * 60 字符标题 —— 沿用 `_INTENT_DIRECTION_LABEL_CHARS` 的先例(同一份 prompt
-#     里「一个标签占一行」的宽度);
-#   * 每节 8 个证据 key —— 一节的支撑证据,不是一个证据池。
-# id/parent 32 字符是**模型自己起的**短句柄的宽度;证据 key 48 字符则必须容得下
-# 真实代理 id(`prefix-` + 32 位 uuid hex ≈ 35 字符),截短会让合法绑定对不上。
-_OUTLINE_MAX_SECTIONS = OUTLINE_MAX_SECTIONS
-_OUTLINE_TITLE_CHARS = OUTLINE_TITLE_CHARS
-_OUTLINE_ID_CHARS = OUTLINE_ID_CHARS
-_OUTLINE_EVIDENCE_KEY_CHARS = OUTLINE_EVIDENCE_KEY_CHARS
-_OUTLINE_MAX_EVIDENCE = OUTLINE_MAX_EVIDENCE
-# 标题里的引用形标记(`[k12]`/`[k12, k13]`)在解析入口剥掉(codex r6):证据引用
-# 属于 evidence 字段,标题只是文案。放它留到 `## 标题` 进最终 Markdown 的话,
-# 前端是对合并全文扫标记建引用表的——标题里的 `[k5001]` 要么显示成一个绑不上
-# 的裸引用,要么恰好撞上别节号段、绑到毫不相干的证据。单一定义点在这里:
-# trace 步、账目回喂与最终标题共用同一份解析产物,一处剥、处处干净。
-_OUTLINE_TITLE_MARKER_RE = LOOSE_MARKER_RE
-# 每 run 最多几次 update_outline。大纲本身不带来证据,所以它的成本是「轮次」:
-# 无上限时一个偏爱整理的模型可以把整份步骤预算花在反复重排目录上。6 次足够
-# 「建 → 补 3 轮 → 收尾」,而 exhaustive 档的 50 步预算仍有绝大部分留给检索。
-_MAX_OUTLINE_UPDATES = DEFAULT_REASONING_MAX_OUTLINE_UPDATES
-# pending 最坏由 6 次常规提交 + 1 次专用纠错各贡献 8 个不同 key。完整状态留在
-# 服务端/终态 trace,每轮 prompt 只展示前 8 个,所以提示预算不随批次数增长。
-_OUTLINE_MAX_PENDING_EVIDENCE = _OUTLINE_MAX_EVIDENCE * (
-    _MAX_OUTLINE_UPDATES + 1
+# Compatibility imports; outline implementation belongs to reasoning_outline.
+from app.services.reasoning_outline import (
+    _MAX_OUTLINE_UPDATES as _MAX_OUTLINE_UPDATES,
 )
-
-
-@dataclass
-class OutlineSection:
-    """大纲的一节。``evidence_keys`` 只保留通过服务端校验的候选标识。
-
-    ``parent`` 为空 = 顶层节;非空 = 它的父节 id,且父节自己必须是顶层节(两层封顶,
-    见 ``parse_outline_sections``)。这是给 O2 按节合成用的结构,不是给用户看的
-    ——上屏的只有 trace 摘要与(O2 之后的)答案标题层级。
-    """
-
-    id: str
-    title: str
-    parent: str = ""
-    evidence_keys: List[str] = field(default_factory=list)
-    # 只存在于一次 update_outline 提交里:显式撤销同 id 旧节的绑定。合并后的
-    # run 状态永远把它清空,所以下一轮账目不会把一次性命令误当成持久字段重放。
-    remove_evidence_keys: List[str] = field(default_factory=list)
-
-
-def _outline_text(value: object, limit: int) -> str:
-    """模型给的自由文本 → 压空白 + 截断(镜像 knowhow 补全的 `_completion_text`)。"""
-    if not isinstance(value, str):
-        return ""
-    return " ".join(value.split())[:limit]
-
-
-def parse_outline_sections(raw: object) -> List[OutlineSection]:
-    """把 reflect 响应里的根级 ``outline_sections`` 列表夹成一份合法大纲(形状层,纯函数)。
-
-    只做**形状与边界**:证据 key 是否合法要看 run 局部的候选集合,由
-    ``bind_outline_evidence`` 单独判(那是事实层,而这里连候选是什么都不知道)。
-
-    fail-open 逐项丢弃,与 enumerate 分支的非白名单值处理同形:
-      * 非 dict 的条目、无标题的条目直接丢(没有标题的东西不是「一节」——O2 要拿
-        它当 `## 标题`);
-      * 超过 12 节的部分丢弃,不是整份拒绝;
-      * id 缺失或重复时按位置补一个确定性 id(`s1`、`s2`……),模型才有稳定句柄
-        可以在下一轮原样重提,parent 也才指得准;
-      * parent 指向不存在的节、指向自己、或指向一个**本身就有父节**的节时清空
-        (提为顶层)。第三条就是「两层」的实现,顺带让 A↔B 这类环自动化解。
-    """
-    if not isinstance(raw, list):
-        return []
-    sections: List[OutlineSection] = []
-    used_ids: set = set()
-    for entry in raw:
-        if len(sections) >= _OUTLINE_MAX_SECTIONS:
-            break
-        if not isinstance(entry, dict):
-            continue
-        raw_title = entry.get("title")
-        if isinstance(raw_title, str):
-            # 先剥标记再压空白/截断:截断后再剥会把半截 `[k1` 留在标题里。
-            raw_title = _OUTLINE_TITLE_MARKER_RE.sub("", raw_title)
-        title = _outline_text(raw_title, _OUTLINE_TITLE_CHARS)
-        if not title:
-            continue
-        section_id = _outline_text(entry.get("id"), _OUTLINE_ID_CHARS)
-        if not section_id or section_id in used_ids:
-            section_id = _unique_outline_id(
-                section_id or f"s{len(sections) + 1}", used_ids
-            )
-        used_ids.add(section_id)
-        keys: List[str] = []
-        raw_keys = entry.get("evidence")
-        if isinstance(raw_keys, list):
-            for key in raw_keys:
-                if len(keys) >= _OUTLINE_MAX_EVIDENCE:
-                    break
-                text = _outline_text(key, _OUTLINE_EVIDENCE_KEY_CHARS)
-                if text and text not in keys:
-                    keys.append(text)
-        remove_keys: List[str] = []
-        raw_remove_keys = entry.get("remove_evidence")
-        if isinstance(raw_remove_keys, list):
-            for key in raw_remove_keys:
-                if len(remove_keys) >= _OUTLINE_MAX_EVIDENCE:
-                    break
-                text = _outline_text(key, _OUTLINE_EVIDENCE_KEY_CHARS)
-                if text and text not in remove_keys:
-                    remove_keys.append(text)
-        sections.append(OutlineSection(
-            id=section_id, title=title,
-            parent=_outline_text(entry.get("parent"), _OUTLINE_ID_CHARS),
-            evidence_keys=keys,
-            remove_evidence_keys=remove_keys,
-        ))
-    # 两层封顶:先算出「谁有父节」,再据此裁剪。必须在收齐所有节之后做——模型完全
-    # 可能先写子节再写父节,边走边判会把合法的前向引用误判成非法。
-    ids = {section.id for section in sections}
-    parented = {
-        section.id for section in sections
-        if section.parent and section.parent in ids and section.parent != section.id
-    }
-    for section in sections:
-        if (
-            section.parent not in ids
-            or section.parent == section.id
-            or section.parent in parented
-        ):
-            section.parent = ""
-    return sections
-
-
-def _unique_outline_id(base: str, used: set) -> str:
-    """确定性去重:`s1` 撞了就 `s1-2`、`s1-3`……(同一份输入总得到同一份 id)。
-
-    **有界性论证**(这个函数跑在 Ask 的 worker 线程里,循环体内没有取消检查,外层的
-    `except Exception` 也接不到一个不返回的函数——所以它的终止必须是结构性的,不能
-    靠「大概会撞上一个空位」):
-
-    * 后缀段最多试 `_OUTLINE_MAX_SECTIONS + 1` 个候选,`for range` 天然有界;
-    * 拼后缀**之前**先把 base 裁到 `_OUTLINE_ID_CHARS - len(后缀) - 1`,让后缀不会
-      被那次截断吃掉。少了这一步,长 base 会让每个候选都截回同一个字符串:33 字符
-      且前 32 位相同的两个 id(模型给对比大纲起 `…-approach-a` / `…-approach-b`
-      这类 slug 是默认写法)、或者三个 31 字符的同名 id(`f"{base}-2"[:32]` 恰好把
-      数字截掉、只剩一个尾随连字符),都会让原来的 `while True` 变成 100% CPU 的
-      死循环,只能重启后端;
-    * 位置 id 兜底:候选取自 `s1..s{len(used)+1}`,共 `len(used)+1` 个互异候选对
-      `len(used)` 个已占用 id —— 鸽笼原理保证其中必有一个空位。调用方的 `used` 在
-      分配第 N 个 id 时恰有 N-1 个成员(每接受一节加一个,且总数封在 12),所以这一
-      段实际上只是防御性的。
-    """
-    if base:
-        if base not in used:
-            return base
-        for suffix in range(2, _OUTLINE_MAX_SECTIONS + 2):
-            stem = base[:max(1, _OUTLINE_ID_CHARS - len(str(suffix)) - 1)]
-            candidate = f"{stem}-{suffix}"
-            if candidate not in used:
-                return candidate
-    for position in range(1, len(used) + 2):
-        candidate = f"s{position}"
-        if candidate not in used:
-            return candidate
-    # 鸽笼原理下不可达。真到了这里就是上面的不变式被改坏了,响亮报错胜过返回一个
-    # 与别人重复的 id(那会让 parent 指向两节中的某一节,静默错乱)。
-    raise AssertionError("outline id space exhausted")
-
-
-def outline_binding_keys(
-    collected, elements, chunks, ever_shown_keys, retained_keys=()
-) -> set:
-    """大纲绑定键的合法集合(事实层):候选池里**曾对模型展示**的标识。
-
-    两条边界,方向相反,都要守住:
-
-    * 口径是「本 run 的任一候选摘要展示过它」,而不是只看上一轮窗口。`_summarize`
-      对候选池开头尾窗口,所以用 run 内单调的 ``ever_shown_keys``:早先展示并绑定的
-      key 即使后来滑出窗口也不会失效,窗口中段从未展示的 key 则不能靠猜 id 通过。
-      ``retained_keys`` 是当前大纲已经合法持有的服务端状态,在 union 时继续有效。
-    * 合法集必须 **⊆ 模型可见或服务端已持有**。所以 v1 **不含枚举清单条目的 id**:枚举
-      账目按合同只回覆盖计数、不回条目 id(元素/知识对象清单一个字的正文都不带),
-      模型根本拿不到那些 id,把它们放进合法集只是一片没人能踩到的死面——而它同时
-      放宽了「只能引用服务端给过你的东西」这条校验。O2(或后续让清单条目 id 对模型
-      可见的改动)要用它们时,连同可见性一起加回来,并在设计文档 §3.1 记一笔。
-    * 同样刻意**不含来源 id**:一份文档不是一条证据,绑上它对 O2 的按节合成产不出
-      任何上下文切片;来源清单给模型的句柄本来也是标题而不是 id
-      (见 `_source_titles_note`)。
-    """
-    candidates = set(collected)    # KG 候选:`collected` 的键就是 object_id
-    candidates.update(str(getattr(el, "element_id", "")) for el in elements)
-    candidates.update(str(getattr(c, "chunk_id", "")) for c in chunks)
-    candidates.discard("")
-    allowed = {str(key) for key in ever_shown_keys if str(key)}
-    allowed.update(str(key) for key in retained_keys if str(key))
-    return candidates & allowed
-
-
-def bind_outline_evidence(
-    sections: List[OutlineSection], legal_keys: set
-) -> Tuple[List[OutlineSection], int]:
-    """把模型给的绑定键按合法集合过滤,返回 (新大纲, 被丢弃的键数)。
-
-    非法键**静默丢弃**(口径同 knowhow 补全的证据 key 校验:模型只能引用服务端
-    发出去的标识,自造的一律不算),而丢空了的节**保留为空节**——空节不是错误,
-    它是下一步的检索方向,删掉它等于把这个特性最有用的那半功能扔掉。
-
-    返回新对象而不是就地改:入参来自 `ReflectDecision`,run() 会把返回值当成新的
-    大纲状态留存,共享同一批对象会让后续动作意外改到上一轮的账目。
-    """
-    bound: List[OutlineSection] = []
-    dropped = 0
-    for section in sections:
-        keys = [key for key in section.evidence_keys if key in legal_keys]
-        dropped += len(section.evidence_keys) - len(keys)
-        bound.append(OutlineSection(
-            id=section.id, title=section.title, parent=section.parent,
-            evidence_keys=keys,
-            remove_evidence_keys=list(section.remove_evidence_keys),
-        ))
-    return bound, dropped
-
-
-def merge_outline_evidence(
-    previous: List[OutlineSection],
-    submitted: List[OutlineSection],
-    legal_keys: set,
-) -> Tuple[List[OutlineSection], int, Dict[str, List[str]], int]:
-    """合并一次整份大纲提交,保住同 id 节已经绑定的证据。
-
-    章节结构仍是全量替换:上一份里被整个省略的 section 会消失。证据则是单独的
-    citation-persistence 合同:同 id 节先应用 ``remove_evidence`` 显式删除,再把
-    本次合法 ``evidence`` 与剩余旧键取并集。遗漏一个 evidence key 不再等于删除。
-
-    每节 8 键硬顶下旧键优先。装不下的**新**键不静默挤掉旧绑定,而是按 section id
-    返回给账目回喂,让模型下一轮用 ``remove_evidence`` 明确腾位后再加。返回值依次为
-    ``(merged, invalid_count, overflow_by_section, removed_count)``。
-    """
-    bound, dropped = bind_outline_evidence(submitted, legal_keys)
-    old_by_id = {section.id: section for section in previous}
-    merged: List[OutlineSection] = []
-    overflow: Dict[str, List[str]] = {}
-    removed = 0
-    for section in bound:
-        old = old_by_id.get(section.id)
-        old_keys = list(old.evidence_keys) if old is not None else []
-        remove_keys = set(section.remove_evidence_keys)
-        retained = [key for key in old_keys if key not in remove_keys]
-        removed += len(old_keys) - len(retained)
-        keys = retained
-        for key in section.evidence_keys:
-            # 显式删除优先于同一提交里的重新添加,避免一个自相矛盾的载荷靠字段
-            # 解析顺序得到不同结果。
-            if key in remove_keys or key in keys:
-                continue
-            if len(keys) >= _OUTLINE_MAX_EVIDENCE:
-                overflow.setdefault(section.id, []).append(key)
-                continue
-            keys.append(key)
-        merged.append(OutlineSection(
-            id=section.id,
-            title=section.title,
-            parent=section.parent,
-            evidence_keys=keys,
-        ))
-    return merged, dropped, overflow, removed
-
-
-def carry_outline_overflow(
-    previous: Dict[str, List[str]],
-    submitted: List[OutlineSection],
-    merged: List[OutlineSection],
-    current: Dict[str, List[str]],
-    *,
-    max_pending_evidence: int = _OUTLINE_MAX_PENDING_EVIDENCE,
-) -> Dict[str, List[str]]:
-    """把未接纳 key 当作持久服务端状态,而不是一次性诊断。
-
-    pending key 只有三种退出方式:本次已经成功绑定;模型在 ``remove_evidence``
-    里显式点名放弃;或整节从全量结构中删除。模型只腾出旧键却漏抄待换入 key 时,
-    pending 必须继续留到下一轮/终态 trace,否则又回到了静默丢新证据。
-    """
-    submitted_by_id = {section.id: section for section in submitted}
-    merged_by_id = {section.id: section for section in merged}
-    carried: Dict[str, List[str]] = {}
-    for section_id in merged_by_id:
-        section = submitted_by_id.get(section_id)
-        removed = set(section.remove_evidence_keys) if section is not None else set()
-        accepted = set(merged_by_id[section_id].evidence_keys)
-        keys: List[str] = []
-        for key in list(previous.get(section_id, [])) + list(current.get(section_id, [])):
-            if key in accepted or key in removed or key in keys:
-                continue
-            keys.append(key)
-        if len(keys) > max_pending_evidence:
-            # 解析层每次最多 8 key、状态机最多 6 次常规更新 + 1 次专用纠错;
-            # 超过只能说明这两个结构上限被改坏。响亮失败胜过截断 pending 再静默丢 key。
-            raise AssertionError("outline pending evidence bound exceeded")
-        if keys:
-            carried[section_id] = keys
-    return carried
-
-
-def outline_truncated_kg_evidence(
-    sections: List[OutlineSection],
-    collected: Dict[str, "RetrievedKnowledge"],
-    top_hits: List["RetrievedKnowledge"],
-    *,
-    rescored: Dict[str, "RetrievedKnowledge"] = None,
-    relevance_ceiling: float = None,
-) -> List["RetrievedKnowledge"]:
-    """大纲绑上、但没进最终相关性选集的知识对象。
-
-    这一份是**按节合成(O2)的完整性补丁**,不是一条新的检索通道:`top_hits` 是
-    `collected` 按相关度截到 `top_n` 的选集(穷尽档 cap 96),而绑定键的合法集合
-    是**整个** `collected` —— 模型完全可以在第 3 轮把一个当时排在前面、最终被
-    挤出选集的对象绑给某一节。缺了这一份,那一节的切片会凭空少掉一条它自己
-    指名要的证据,而且悄无声息。
-
-    **零查询**:三个候选池(`collected`/`elements`/`chunks`)在 run 内只增不减
-    (见 `_window` 的注释),所以任何**曾经**合法的绑定键,在 run 收尾时仍然在池
-    子里 —— 按 id 回库 hydrate 是一条永远走不到的分支,而 Ask 的合成路径上多一
-    次数据库往返是要付钱的(运行效率是一等约束)。元素与原文段同理,由
-    `ReasoningResult.elements`/`chunks` 原样带出,这里只补知识对象这一路。
-
-    **相关度必须与 `top_hits` 同口径**,否则这份补集会变成一条抬分的后门:
-    `collected[oid]` 里存的是**首次收下它的那个产出方**给的分,而 `top_hits` 的每
-    一条都经过了对**整个问题**的重排。一个首收 0.95、重排 0.12 的对象若带着 0.95
-    进 `classify_evidence` 的证据池,它一条就能把整篇答案抬到 grounded ——而它恰恰
-    是被截断掉的那种"其实不相关"。两条路径各自校正,都不发新查询:
-
-    * ``rescored`` —— 非 quota 路径手里现成的 `retrieve_scored` 结果映射,与
-      `top_hits` 用的是**同一个** map、同一句 `.get(oid, rk)`,所以补集与选集逐条
-      同口径(不在 map 里的沿用原对象,与 top_hits 对自己成员的处理完全一致)。
-    * ``relevance_ceiling`` —— quota 路径没有全局重排 map(它按子查询配额融合),
-      于是把带出值**夹到选集的最低分**:补集是被选集挤出去的那一批,不可能比选集
-      里最差的一条更相关。选集为空时天花板取 0.0,补集一条都抬不动 —— 那正是
-      "没有任何排名证据"该有的结果。
-
-    返回按大纲顺序去重的列表,并排除已在 `top_hits` 里的对象 —— 调用方把它当成
-    `top_hits` 的补集使用(合并时 `top_hits` 的重排分数优先)。
-    """
-    if not sections:
-        return []
-    present = {hit.object_id for hit in top_hits}
-    extra: List["RetrievedKnowledge"] = []
-    for section in sections:
-        for key in section.evidence_keys:
-            if key in present or key not in collected:
-                continue
-            present.add(key)
-            hit = collected[key]
-            if rescored is not None:
-                hit = _rescored_keeping_origin(rescored.get(key), hit)
-            elif relevance_ceiling is not None and hit.relevance > relevance_ceiling:
-                hit = replace(hit, relevance=relevance_ceiling)
-            extra.append(hit)
-    return extra
-
-
-def outline_signature(sections: List[OutlineSection]) -> tuple:
-    """大纲的可比较快照。用于判定一次 update_outline 是否**实质**改变了大纲——
-    逐字重提同一份大纲不算进展(那正是需要被 stale 熔断兜住的空转),而增删节、
-    改标题、改层级或补上一个绑定都算。"""
-    return tuple(
-        (s.id, s.title, s.parent, tuple(s.evidence_keys)) for s in sections
-    )
-
-
-def _outline_note(
-    sections: List[OutlineSection],
-    updates_left: int,
-    overflow: Optional[Dict[str, List[str]]] = None,
-    overflow_repair_available: bool = False,
-    repair_only: bool = False,
-    kg_gap_segment: str = "",
-) -> str:
-    """把大纲便签回喂给 reflect(镜像 visited / attempted / 枚举三份账目)。
-
-    **这一份必须携带整份大纲的内容,而不只是账目**,理由是机制性的:reflect 的
-    prompt 没有对话历史(每轮都是一条全新的 user message),而章节结构是全量替换——
-    模型手上唯一一份「我上次交了什么」就是这段回喂。证据遗漏已有服务端 union
-    保底,但只报节数与空节名仍会让模型无法保留/调整原来的章节结构。
-
-    有界性仍然成立,且是**常数级**:12 节 × (32 id + 60 标题 + 32 parent +
-    8 × 48 证据 key) + 固定文案 ≈ 6.5KB;pending 虽可在服务端累积至每节 56 个,
-    每轮只展示前 8 个加剩余计数,所以 prompt 仍至多多带 12 × 8 个 key。
-    总量与语料规模无关。真实 id 约 15–36 字符,
-    典型值在 1–3KB。这只在 exhaustive 档出现,那一档的证据预算是 16k/120k 字符。
-
-    ``updates_left`` 是本 run 还剩几次 update_outline(照集合地图那条剩余额度行的
-    先例)。额度耗尽后措辞整段换成「已定稿、别再提交」:便签本身就是模型下一步动作
-    的依据,它若还在说「再次提交时要带上……」,模型就会照做、撞上 outline_budget、
-    白烧一轮反思——账目必须描述**现在**能做什么,而不是当初能做什么。
-
-    ``kg_gap_segment`` 是已渲染好的弱支撑边提示段(见 `kg_gap_note_segment`),
-    默认空串 —— 关闭态与无候选时本函数的输出逐字回到接入前。
-    """
-    if not sections:
-        return ""
-    lines = []
-    for section in sections:
-        parent = f"(隶属 {section.parent})" if section.parent else ""
-        keys = "、".join(section.evidence_keys) if section.evidence_keys else "(无)"
-        lines.append(f"- {section.id}「{section.title}」{parent} 证据: {keys}")
-    empty = [section.title for section in sections if not section.evidence_keys]
-    tail = (
-        "\n无绑定证据的节: "
-        + "、".join(f"「{title}」" for title in empty)
-        + "。这些节就是下一步该定向检索的方向。"
-        if empty else ""
-    )
-    overflow_lines = []
-    by_id = {section.id: section for section in sections}
-    for section_id, keys in (overflow or {}).items():
-        section = by_id.get(section_id)
-        if section is None or not keys:
-            continue
-        visible = list(keys[:_OUTLINE_MAX_EVIDENCE])
-        remaining = len(keys) - len(visible)
-        overflow_lines.append(
-            f"- {section_id}「{section.title}」未接纳新证据: "
-            + "、".join(visible)
-            + (
-                f"（另有 {remaining} 条待处理,处理或放弃这批后继续显示）"
-                if remaining else ""
-            )
-        )
-    overflow_note = ""
-    if overflow_lines:
-        overflow_note = (
-            "\n当前因每节最多 8 条而未接纳的新证据(旧绑定已优先保留):\n"
-            + "\n".join(overflow_lines)
-        )
-        if repair_only:
-            overflow_note += (
-                "\n本次纠错只能在该节 remove_evidence 中点名要移除的旧 key,"
-                "并继续把要加入的 key 放在 evidence;如要明确放弃某个未接纳 key,"
-                "也在 remove_evidence 中点名它。"
-            )
-        elif updates_left > 0 or overflow_repair_available:
-            overflow_note += (
-                "\n如要换入它们,下一次在该节 remove_evidence 中点名要移除的旧 key,"
-                "并继续把要加入的 key 放在 evidence;如要明确放弃某个未接纳 key,"
-                "也在 remove_evidence 中点名它。"
-            )
-        else:
-            overflow_note += (
-                "\n本 run 的大纲整理与纠错资格均已用完,不要再提交 update_outline;"
-                "未接纳 key 会在收尾轨迹中披露。"
-            )
-    if repair_only and overflow_lines:
-        head = (
-            "（本轮大纲便签(这是终态溢出纠错轮,仅可提交一次章节 "
-            "id/标题/parent 完全不变的 update_outline,不得改结构或执行检索):\n"
-        )
-    elif updates_left <= 0 and overflow_lines and overflow_repair_available:
-        head = (
-            "（本轮大纲便签(常规整理次数已用完;因上一份有未接纳证据,仅可再提交一次"
-            "章节 id/标题/parent 完全不变的 update_outline,用 remove_evidence 腾位并"
-            "换入点名的新 key):\n"
-        )
-    elif updates_left <= 0:
-        head = (
-            "（本轮大纲便签(已定稿:整理次数已用完,不要再提交 update_outline;"
-            "请改用检索动作补齐空节,或直接作答):\n"
-        )
-    else:
-        head = (
-            "（本轮大纲便签。update_outline 会整体替换章节结构,再次提交时必须带上仍要"
-            "保留的每一节;相同 id 节的 evidence 与旧绑定取并集,遗漏不会删除旧证据,"
-            "要删除请在该节 remove_evidence 中点名;"
-            f"还可以再整理 {updates_left} 次:\n"
-        )
-    if repair_only:
-        # 终态纠错轮不给弱支撑边提示。这一段的头行写着「可用 add_subquery/
-        # follow_chain 定向补证」,而同一份便签的开头写着「不得改结构或执行检索」
-        # —— 两句话直接打架,而模型照着后写的那句做的话,这一轮会以
-        # `outline_overflow_repair_declined` 收场:纠错资格白烧一次,未接纳的
-        # key 一个都没换进来。这里只挡这一轮:`updates_left<=0` 的定稿轮与
-        # cap-repair 邀请轮都仍然允许(也鼓励)检索动作,提示在那两处照常出现。
-        kg_gap_segment = ""
-    return head + "\n".join(lines) + tail + overflow_note + kg_gap_segment + "）"
-
-
-# --------------------------------------------- 大纲采用引导(设计文档 §3.1.1)
-#
-# 真机动机(穷尽档三次 run、2 个库 3 个问题,update_outline 采用率 0/3)。最有说服
-# 力的一次:84 篇来源的库 + 「综述这个 notebook 里的文章:每篇的核心贡献是什么,
-# 它们之间有什么联系与分歧?」,模型先用 enumerate(collection=sources)**一次性
-# 完整列出 84 篇**(complete=true),随后连开 4 次 PPR 找核心贡献、撞上 PPR 次数
-# 上限,最后自述「虽然枚举了所有 84 篇文章标题,但多次子查询未返回具体每篇文章
-# 的核心贡献,现有候选无法覆盖全部文章」并作答。它手里有完整清单,缺的恰恰是
-# 「把清单变成结构、再逐节补证」——也就是大纲。
-#
-# prompt 里的动作说明讲清了大纲**是什么**、什么场合适用,却从不在模型真的拿到
-# 清单的那一刻说一句「现在正是时候」。这一行补的就是那个时刻,而且是**账目**不是
-# 命令:与 visited / attempted / 枚举三份回喂同区位、同形态,只陈述服务端手上现成
-# 的确定性事实(已完整列出 N 篇 / 有 M 个已确认方向),并显式给出「判断不需要就
-# 忽略」的出口。零新查询、零新模型调用、零新动作。
-#
-# 每 run 至多 2 轮:账目要教新东西,重复喊话只烧 prompt 预算——模型看过两次仍不
-# 采用,就是它判断这题不需要大纲,那正是出口存在的意义。
-_OUTLINE_NUDGE_MAX_ROUNDS = 2
-# 触发引导的最小规模。1 篇文档 / 1 个方向的问题一次合成就答完了,给它建大纲纯属
-# 噪音(prompt 自己也写着「Do NOT open an outline for a single-fact question」)。
-_OUTLINE_NUDGE_MIN_ITEMS = 2
-
-
-def _outline_nudge_note(
-    sections: List[OutlineSection],
-    enum_chains,
-    direction_count: int,
-    *,
-    active: bool,
-    nudges_used: int,
-) -> str:
-    """「该开大纲却还没开」时的一行引导;空串 = 本轮不引导。
-
-    出现条件全部成立才渲染:门开着(``active``,即 `outline_wiring_active`)、大纲
-    **仍为空**(一旦模型建了大纲,`_outline_note` 接管整段区位,引导就成了噪音)、
-    本 run 引导次数未用尽,且存在下列结构性理由之一——
-
-    * (a) 本 run 已把**来源清单**完整列完(`state == "complete"`)且条数 ≥ 2;
-    * (b) 已确认意图给出了 ≥ 2 个必答检索方向。
-
-    两条都成立时优先用 (a):它更具体,而且带着一个真实条数——「84 篇」比「若干个
-    方面」更能让模型看出把清单摊成章节的性价比。
-
-    ``state == "complete"`` 是硬判据,不能放宽成「列过就算」:半份清单变成的大纲
-    天然缺节,而模型此刻并不知道自己缺了什么;引导它按一份没列完的目录定稿,比
-    不引导更糟。条数取各条来源清单链里的最大值(限定单源与全作用域是两条独立的
-    链),`getattr` 兜底是防御性的——覆盖率字段缺失时按 0 处理,即不引导。
-
-    ``direction_count`` 由调用方从 run() 手上现成的已确认方向清单算出(见调用点),
-    这里不做任何解析,也不新增任何查询。
-    """
-    if not active:
-        return ""
-    if sections:
-        return ""
-    if nudges_used >= _OUTLINE_NUDGE_MAX_ROUNDS:
-        return ""
-    listed = 0
-    for chain in (enum_chains or {}).values():
-        outcome = getattr(chain, "outcome", None)
-        if outcome is None or getattr(outcome, "collection", "") != "sources":
-            continue
-        if getattr(chain, "state", "") != "complete":
-            continue
-        returned_total = getattr(
-            getattr(outcome, "coverage", None), "returned_total", 0
-        )
-        listed = max(listed, int(returned_total or 0))
-    if listed >= _OUTLINE_NUDGE_MIN_ITEMS:
-        basis = f"已完整列出 {listed} 篇文档"
-    elif direction_count >= _OUTLINE_NUDGE_MIN_ITEMS:
-        basis = f"本题有 {direction_count} 个已确认的必答方向"
-    else:
-        return ""
-    return (
-        f"（本轮尚未建立大纲。{basis}:把它们变成 update_outline 的章节、"
-        "再逐节补证,通常比反复全库检索更省轮次;若判断一次即可答完,忽略本行。）"
-    )
-
+from app.services.reasoning_outline import (
+    _OUTLINE_EVIDENCE_KEY_CHARS as _OUTLINE_EVIDENCE_KEY_CHARS,
+)
+from app.services.reasoning_outline import (
+    _OUTLINE_ID_CHARS as _OUTLINE_ID_CHARS,
+)
+from app.services.reasoning_outline import (
+    _OUTLINE_MAX_EVIDENCE as _OUTLINE_MAX_EVIDENCE,
+)
+from app.services.reasoning_outline import (
+    _OUTLINE_MAX_PENDING_EVIDENCE as _OUTLINE_MAX_PENDING_EVIDENCE,
+)
+from app.services.reasoning_outline import (
+    _OUTLINE_MAX_SECTIONS as _OUTLINE_MAX_SECTIONS,
+)
+from app.services.reasoning_outline import (
+    _OUTLINE_NUDGE_MAX_ROUNDS as _OUTLINE_NUDGE_MAX_ROUNDS,
+)
+from app.services.reasoning_outline import (
+    _OUTLINE_NUDGE_MIN_ITEMS as _OUTLINE_NUDGE_MIN_ITEMS,
+)
+from app.services.reasoning_outline import (
+    _OUTLINE_TITLE_CHARS as _OUTLINE_TITLE_CHARS,
+)
+from app.services.reasoning_outline import (
+    _OUTLINE_TITLE_MARKER_RE as _OUTLINE_TITLE_MARKER_RE,
+)
+from app.services.reasoning_outline import (
+    OUTLINE_ACTION as OUTLINE_ACTION,
+)
+from app.services.reasoning_outline import (
+    OutlineSection as OutlineSection,
+)
+from app.services.reasoning_outline import (
+    _outline_note as _outline_note,
+)
+from app.services.reasoning_outline import (
+    _outline_nudge_note as _outline_nudge_note,
+)
+from app.services.reasoning_outline import (
+    _outline_text as _outline_text,
+)
+from app.services.reasoning_outline import (
+    _rescored_keeping_origin as _rescored_keeping_origin,
+)
+from app.services.reasoning_outline import (
+    _unique_outline_id as _unique_outline_id,
+)
+from app.services.reasoning_outline import (
+    bind_outline_evidence as bind_outline_evidence,
+)
+from app.services.reasoning_outline import (
+    carry_outline_overflow as carry_outline_overflow,
+)
+from app.services.reasoning_outline import (
+    merge_outline_evidence as merge_outline_evidence,
+)
+from app.services.reasoning_outline import (
+    outline_binding_keys as outline_binding_keys,
+)
+from app.services.reasoning_outline import (
+    outline_signature as outline_signature,
+)
+from app.services.reasoning_outline import (
+    outline_truncated_kg_evidence as outline_truncated_kg_evidence,
+)
+from app.services.reasoning_outline import (
+    parse_outline_sections as parse_outline_sections,
+)
 
 # ------------------------------------------- KG 弱支撑边回喂(kg-gap,§3.3)
 #
@@ -3460,15 +3004,6 @@ def effective_top_n(
     return min(max(settings.retrieval_top_n,
                    settings.reasoning_top_n_per_query * max(n_queries, 1)),
                settings.reasoning_top_n_cap)
-
-
-class _SectionSource(NamedTuple):
-    """文档内导航的来源候选一行(鸭子类型兼容 `_resolve_roster_rows` 读的三格)。
-    `notebook_id` 恒为真实属主 id(活动库也是活动库 id)。"""
-
-    source_id: str
-    source_title: str
-    notebook_id: str
 
 
 @dataclass
@@ -4201,23 +3736,254 @@ class _ReasoningRunState:
     paper_extracted_keys: set = field(default_factory=set)
 
 
+class _PaperRunView:
+    """Explicit live projection; no copied counters, containers, or generic proxy."""
 
-def _rescored_keeping_origin(rescored, collected):
-    """The closing rerank's rescored hit, carrying the ORIGIN the collected
-    hit was stamped with.
+    __slots__ = ("_state",)
 
-    ``retrieve_scored`` re-scores against the active library only and returns
-    unstamped hits; swapping one in for a federated hit dropped its
-    ``notebook_id`` and ``tier``. In a global run (every hit stamped with its
-    owner, the nominal active included) that left the answer's KG card and
-    anchor with no library -- an unattributable citation. A copy, never an
-    in-place edit: the rescored hit may be shared.
-    """
-    if rescored is None:
-        return collected
-    if not getattr(collected, "notebook_id", "") or getattr(rescored, "notebook_id", ""):
-        return rescored
-    return replace(rescored, notebook_id=collected.notebook_id, tier=collected.tier)
+    def __init__(self, state: _ReasoningRunState) -> None:
+        self._state = state
+
+    @property
+    def action_policy(self) -> ReasoningActionPolicy:
+        return self._state.action_policy
+
+    @property
+    def answer_layout_requested(self) -> str:
+        return self._state.answer_layout_requested
+
+    @property
+    def enum_limits(self) -> AskRetrievalLimits:
+        return self._state.enum_limits
+
+    @property
+    def extract_sources_used(self) -> int:
+        return self._state.extract_sources_used
+
+    @extract_sources_used.setter
+    def extract_sources_used(self, value: int) -> None:
+        self._state.extract_sources_used = value
+
+    @property
+    def find_sources_calls(self) -> int:
+        return self._state.find_sources_calls
+
+    @find_sources_calls.setter
+    def find_sources_calls(self, value: int) -> None:
+        self._state.find_sources_calls = value
+
+    @property
+    def notebook_id(self) -> str:
+        return self._state.notebook_id
+
+    @property
+    def paper_allowed(self) -> Optional[frozenset]:
+        return self._state.paper_allowed
+
+    @paper_allowed.setter
+    def paper_allowed(self, value: Optional[frozenset]) -> None:
+        self._state.paper_allowed = value
+
+    @property
+    def paper_card_generations(self) -> int:
+        return self._state.paper_card_generations
+
+    @paper_card_generations.setter
+    def paper_card_generations(self, value: int) -> None:
+        self._state.paper_card_generations = value
+
+    @property
+    def paper_card_reads(self) -> int:
+        return self._state.paper_card_reads
+
+    @paper_card_reads.setter
+    def paper_card_reads(self, value: int) -> None:
+        self._state.paper_card_reads = value
+
+    @property
+    def paper_cards(self) -> Dict[tuple, 'PaperCardOutcome']:
+        return self._state.paper_cards
+
+    @property
+    def paper_deferred_this_turn(self) -> bool:
+        return self._state.paper_deferred_this_turn
+
+    @paper_deferred_this_turn.setter
+    def paper_deferred_this_turn(self, value: bool) -> None:
+        self._state.paper_deferred_this_turn = value
+
+    @property
+    def paper_extracted_keys(self) -> set:
+        return self._state.paper_extracted_keys
+
+    @property
+    def paper_extractions(self) -> List['PaperExtractionOutcome']:
+        return self._state.paper_extractions
+
+    @property
+    def paper_finds(self) -> List['FoundSourcesOutcome']:
+        return self._state.paper_finds
+
+    @property
+    def paper_handles(self) -> PaperHandles:
+        return self._state.paper_handles
+
+    @property
+    def paper_log(self) -> List[str]:
+        return self._state.paper_log
+
+    @property
+    def paper_progress(self) -> int:
+        return self._state.paper_progress
+
+    @paper_progress.setter
+    def paper_progress(self, value: int) -> None:
+        self._state.paper_progress = value
+
+    @property
+    def record(self) -> Callable[[TraceStep], None]:
+        return self._state.record
+
+
+class _SectionRunView:
+    """Explicit live projection; no copied counters, containers, or generic proxy."""
+
+    __slots__ = ("_state",)
+
+    def __init__(self, state: _ReasoningRunState) -> None:
+        self._state = state
+
+    @property
+    def action_policy(self) -> ReasoningActionPolicy:
+        return self._state.action_policy
+
+    @property
+    def attempted(self) -> Mapping[str, SectionQuery]:
+        return self._state.attempted
+
+    @property
+    def chunks(self) -> List[RetrievedChunk]:
+        return self._state.chunks
+
+    @property
+    def elements(self) -> List[RetrievedElement]:
+        return self._state.elements
+
+    @property
+    def enum_chains(self) -> Mapping[tuple, object]:
+        return self._state.enum_chains
+
+    @property
+    def enum_limits(self) -> AskRetrievalLimits:
+        return self._state.enum_limits
+
+    @property
+    def enumerations(self) -> Sequence[SectionEnumeration]:
+        return self._state.enumerations
+
+    @property
+    def max_steps(self) -> int:
+        return self._state.max_steps
+
+    @property
+    def notebook_id(self) -> str:
+        return self._state.notebook_id
+
+    @property
+    def question(self) -> str:
+        return self._state.question
+
+    @property
+    def record(self) -> Callable[[TraceStep], None]:
+        return self._state.record
+
+    @property
+    def roster_numbering(self) -> SectionRosterNumbering:
+        return self._state.roster_numbering
+
+    @property
+    def section_browse_cache(self) -> Dict[tuple, tuple]:
+        return self._state.section_browse_cache
+
+    @property
+    def section_browses(self) -> int:
+        return self._state.section_browses
+
+    @section_browses.setter
+    def section_browses(self, value: int) -> None:
+        self._state.section_browses = value
+
+    @property
+    def section_hint_detail(self) -> Dict[str, Any]:
+        return self._state.section_hint_detail
+
+    @section_hint_detail.setter
+    def section_hint_detail(self, value: Dict[str, Any]) -> None:
+        self._state.section_hint_detail = value
+
+    @property
+    def section_hint_sims(self) -> Dict[tuple, tuple]:
+        return self._state.section_hint_sims
+
+    @property
+    def section_listing_delivered_this_turn(self) -> bool:
+        return self._state.section_listing_delivered_this_turn
+
+    @section_listing_delivered_this_turn.setter
+    def section_listing_delivered_this_turn(self, value: bool) -> None:
+        self._state.section_listing_delivered_this_turn = value
+
+    @property
+    def section_listing_turn(self) -> int:
+        return self._state.section_listing_turn
+
+    @section_listing_turn.setter
+    def section_listing_turn(self, value: int) -> None:
+        self._state.section_listing_turn = value
+
+    @property
+    def section_listings(self) -> Dict[tuple, str]:
+        return self._state.section_listings
+
+    @property
+    def section_log(self) -> List[str]:
+        return self._state.section_log
+
+    @property
+    def section_outlines(self) -> Dict[tuple, 'Outline']:
+        return self._state.section_outlines
+
+    @property
+    def section_read_keys(self) -> set:
+        return self._state.section_read_keys
+
+    @property
+    def section_reads(self) -> int:
+        return self._state.section_reads
+
+    @section_reads.setter
+    def section_reads(self, value: int) -> None:
+        self._state.section_reads = value
+
+    @property
+    def section_titles(self) -> Dict[tuple, str]:
+        return self._state.section_titles
+
+    @property
+    def seen_chunks(self) -> set:
+        return self._state.seen_chunks
+
+    @property
+    def steps(self) -> int:
+        return self._state.steps
+
+    @property
+    def surfaced_sections(self) -> AddressBook:
+        return self._state.surfaced_sections
+
+    @property
+    def zero_hit_by_action(self) -> Dict[str, int]:
+        return self._state.zero_hit_by_action
 
 
 class ReasoningRetriever:
@@ -4404,6 +4170,29 @@ class ReasoningRetriever:
         # 每次运行新建(Ask `_build_reasoning_retriever`、报告每节各自
         # `ReasoningRetriever(...)`、knowhow 补全不走播种),所以不会跨运行串用。
         self._chunk_recall_gate = None
+        self._paper_actions = ReasoningPaperActions(PaperActionDependencies(
+            flags=lambda limits, spent: self.paper_tool_flags(limits, spent),
+            source_scope_pairs=lambda notebook_id: self.collection_enumeration.source_scope_pairs(
+                notebook_id, ceiling_binds=self._run_ceiling_binds()),
+            ceiling_binds=lambda: self._run_ceiling_binds(),
+            tools=lambda: self.paper_tools,
+            cancel_event=lambda: self.cancel_event,
+            fail_closed=lambda: self.fail_closed,
+            actor_id=lambda: self.profile_owner_id,
+            cap_result_ids=_capped_result_ids,
+            display_text=_section_text,
+        ))
+        self._section_navigation = ReasoningSectionNavigation(SectionNavigationDependencies(
+            settings=lambda: self.settings,
+            retrieval=lambda: self.retrieval,
+            cancel_event=lambda: self.cancel_event,
+            fail_closed=lambda: self.fail_closed,
+            navigation_active=lambda limits: self.section_navigation_active(limits),
+            filter_chunks=lambda hits: self._filter_candidates("chunk", hits),
+            resolve_roster_rows=_resolve_roster_rows,
+            cap_result_ids=_capped_result_ids,
+            admit_chunks=take_distinct_chunk_hits,
+        ))
 
     @classmethod
     def from_repository(
@@ -5828,7 +5617,6 @@ class ReasoningRetriever:
         返回 (top_hits, counts): counts[i]=第 i 个子查询贡献数, counts[-1]=兜底组。
 
         """
-        from dataclasses import replace
         from app.services.retrieval import quota_fuse
         reuse = self.settings.reasoning_quota_enabled and getattr(
             self.settings, "reasoning_quota_reuse_enabled", True)
@@ -7593,386 +7381,21 @@ class ReasoningRetriever:
         if decision.answer_layout:
             state.answer_layout_requested = decision.answer_layout
 
-    def _paper_tools_spent(self, state: "_ReasoningRunState") -> "frozenset[str]":
-        """本轮不再提供的论文工具:本 run 已用完档位额度的。三个都没开时恒空(调用形状
-        不变)。来源集合为空**不**在这里关闸:本库一篇没勾、只勾了参考库是合法的
-        范围,而参与库的并集要读库才知道;执行体对空集合各自如实回报(find_sources
-        0 篇并带覆盖说明,卡片/抽取记「不在本次检索范围内」)。"""
-        if not any(self.paper_tool_flags(state.enum_limits)):
-            return frozenset()
-        # 上限为 0 的不算「用完」(那由闸自己关),与 `_section_spent` 同一口径。
-        left = self._paper_budget_left(state)
-        return frozenset(
-            name for name in PAPER_TOOL_ACTIONS
-            if left[name] is not None and left[name] <= 0)
+    def _paper_tools_spent(self, state: "_ReasoningRunState") -> frozenset[str]:
+        return self._paper_actions._paper_tools_spent(_PaperRunView(state))
 
-    @staticmethod
-    def _paper_budget_left(state: "_ReasoningRunState") -> Dict[str, Optional[int]]:
-        """三个论文工具与卡片生成各自本 run 还剩多少(档位上限为 0 的为 None)。"""
-        budget = state.enum_limits
-
-        def left(cap: int, used: int) -> Optional[int]:
-            return None if cap <= 0 else max(0, cap - used)
-
-        return {
-            FIND_SOURCES_ACTION: left(
-                budget.find_sources_calls_per_run, state.find_sources_calls),
-            GET_PAPER_CARDS_ACTION: left(
-                budget.paper_card_reads_per_run, state.paper_card_reads),
-            EXTRACT_FROM_SOURCES_ACTION: left(
-                budget.extract_sources_per_run, state.extract_sources_used),
-            "generations": max(0, budget.paper_card_generations_per_run
-                               - state.paper_card_generations),
-        }
-
-    def _paper_allowed(self, state: "_ReasoningRunState") -> frozenset:
-        """本 run 的来源天花板 ``(属主库, source_id)``,首次需要时读一次:与
-        ``enumerate_sources`` / ``find_sources`` 同一来源集合
-        (``CollectionEnumerationService.source_scope_pairs``,同一份 run 判词)。"""
-        if state.paper_allowed is None:
-            state.paper_allowed = self.collection_enumeration.source_scope_pairs(
-                state.notebook_id, ceiling_binds=self._run_ceiling_binds())
-        return state.paper_allowed
-
-    @staticmethod
-    def _paper_has_results(state: "_ReasoningRunState") -> bool:
-        return (any(card_has_content(o) for o in state.paper_cards.values())
-                or any(extraction_value_count(o) for o in state.paper_extractions))
-
-    def _paper_skip(self, state: "_ReasoningRunState", summary: str, reason: str,
-                    note: str, **detail) -> None:
-        """论文工具的 skip:零命中写法(不写 ``result_ids``),教学措辞同时进账目。"""
-        state.paper_log.append(note)
-        state.record(TraceStep(step_type="skip", summary=summary,
-                               detail={"reason": reason, **detail}))
-
-    def _paper_tool_failed(self, state: "_ReasoningRunState", action: str,
-                           exc: Exception) -> None:
-        """服务抛出非取消、非请求错误的异常:严格调用方照抛,其余记 skip 继续。"""
-        if self.fail_closed:
-            raise exc
-        self._paper_skip(
-            state, "跳过论文工具(执行失败)", "paper_tool_error",
-            f"{action} 这次执行失败({type(exc).__name__}),可以换一个动作或直接作答",
-            action=action, error_type=type(exc).__name__)
+    def _paper_has_results(self, state: "_ReasoningRunState") -> bool:
+        return self._paper_actions._paper_has_results(_PaperRunView(state))
 
     def _paper_tools_ledger(self, state: "_ReasoningRunState") -> str:
-        """论文工具账目(``paper_tools_note``)加本 run 剩余额度;没用过任何论文工具、
-        也没写过 answer_layout 的 run 返回空串。"""
-        if not (state.paper_finds or state.paper_cards or state.paper_extractions
-                or state.paper_log or state.answer_layout_requested):
-            return ""
-        offer_find, offer_cards, offer_extract = self.paper_tool_flags(state.enum_limits)
-        left = self._paper_budget_left(state)
-        remaining: Dict[str, str] = {}
-        if offer_find:
-            remaining[FIND_SOURCES_ACTION] = f"{left[FIND_SOURCES_ACTION]} 次"
-        if offer_cards:
-            remaining[GET_PAPER_CARDS_ACTION] = (
-                f"{left[GET_PAPER_CARDS_ACTION]} 篇(其中最多再生成 {left['generations']} 次)")
-        if offer_extract:
-            remaining[EXTRACT_FROM_SOURCES_ACTION] = f"{left[EXTRACT_FROM_SOURCES_ACTION]} 篇"
-        return paper_tools_note(
-            finds=state.paper_finds, find_calls=len(state.paper_finds),
-            cards=state.paper_cards, extractions=state.paper_extractions,
-            log=state.paper_log, remaining=remaining,
-            layout_requested=state.answer_layout_requested,
-            has_results=self._paper_has_results(state))
-
-    def _resolved_paper_sources(self, state: "_ReasoningRunState", action: str,
-                                tokens) -> "Optional[tuple]":
-        """句柄 / source_id → 本 run 天花板内的 ``ResolvedSource`` 列表,与被拒的条目
-        一起返回;天花板读失败时记 skip 并返回 None。"""
-        try:
-            allowed = self._paper_allowed(state)
-        except (AskCancelled, RetrievalControlError):
-            raise
-        except Exception as exc:  # noqa: BLE001 - one action, not the run
-            self._paper_tool_failed(state, action, exc)
-            return None
-        resolved, rejected = resolve_source_tokens(tokens, state.paper_handles, allowed)
-        if rejected:
-            unknown = [r.token for r in rejected if r.reason == "unknown_handle"]
-            outside = [r.token for r in rejected if r.reason == "out_of_scope"]
-            parts = []
-            if unknown:
-                parts.append(f"句柄 {'、'.join(unknown)} 不是本次 find_sources 发过的号")
-            if outside:
-                parts.append(f"{'、'.join(outside)} 不在本次检索范围内(只能用 find_sources "
-                             "给的句柄或范围内文档的 source_id)")
-            state.paper_log.append(
-                f"{action} 有 {len(rejected)} 个来源没有受理:" + ";".join(parts))
-        return allowed, resolved, rejected
+        return self._paper_actions._paper_tools_ledger(_PaperRunView(state))
 
     def _action_find_sources(self, state: "_ReasoningRunState", decision) -> None:
-        """reflect 的 `find_sources`:一页(20 篇)按主题排好序的文档,发放句柄。
-        翻页(cursor)与新检索同样计入本 run 的次数;请求错误记 skip 不计次。"""
-        if not self.paper_tool_flags(state.enum_limits, self._paper_tools_spent(state))[0]:
-            self._paper_skip(
-                state, "跳过文档级检索(本次检索不提供或额度已用完)",
-                "find_sources_unavailable",
-                "find_sources 本次不可用(本 run 的次数已用完或未提供),请用已有句柄继续或直接作答")
-            return
-        note_top_level_arguments(state.paper_log, decision)
-        terms, dropped = cap_find_terms(decision.find_sources_terms, FIND_SOURCES_MAX_TERMS)
-        if dropped:
-            # 超出上限的词截掉而不是整次拒绝(可接受偏差做兼容);MCP 直调仍由服务拒绝。
-            state.paper_log.append(
-                f"find_sources.terms 最多 {FIND_SOURCES_MAX_TERMS} 个,这次按前 "
-                f"{FIND_SOURCES_MAX_TERMS} 个执行;没有使用:"
-                + "、".join(f"「{clip(term, 32)}」" for term in dropped))
-        request = FindSourcesRequest(
-            query=decision.find_sources_query, terms=terms,
-            year_from=year_value(decision.find_sources_year_from),
-            year_to=year_value(decision.find_sources_year_to),
-            venue=decision.find_sources_venue, author=decision.find_sources_author,
-            kind=decision.find_sources_kind, scope=decision.find_sources_scope,
-            cursor=decision.find_sources_cursor, limit=FIND_SOURCES_PAGE_SIZE)
-        try:
-            result = self.paper_tools.finder.find(
-                state.notebook_id, request, ceiling_binds=self._run_ceiling_binds(),
-                cancel_event=self.cancel_event)
-        except FindSourcesCursorScopeChangedError:
-            # 参数相同、来源集合在两页之间变了(来源被加入或删除):同样从第一页重来,但原因要说对。
-            self._paper_skip(
-                state, "跳过文档级检索(来源集合已变化,需从第一页重来)",
-                "find_sources_cursor_stale",
-                "find_sources.cursor 已失效:翻页之间笔记本的来源有增删,排序已经变化;"
-                "请清空 cursor、用同样的条件从第一页重新检索"
-                "(已发过的句柄不变,重新列出的文档沿用原句柄)")
-            return
-        except FindSourcesCursorStaleError:
-            # 元数据刚被抽取(本 run 的 get_paper_cards 或别处),排序已变:旧偏移会漏篇或重复。
-            self._paper_skip(
-                state, "跳过文档级检索(元数据已变化,需从第一页重来)",
-                "find_sources_cursor_stale",
-                "find_sources.cursor 已失效:翻页之间论文元数据有更新(刚抽取了元数据),"
-                "排序已经变化;请清空 cursor、用同样的条件从第一页重新检索"
-                "(已发过的句柄不变,重新列出的文档沿用原句柄)")
-            return
-        except FindSourcesCursorError as exc:
-            self._paper_skip(
-                state, "跳过文档级检索(翻页游标无效)", "find_sources_cursor_invalid",
-                f"find_sources.cursor 无效({exc}):翻页时只改 cursor、其余参数与上一次完全"
-                "相同;要换条件就清空 cursor 重新检索")
-            return
-        except FindSourcesError as exc:
-            self._paper_skip(
-                state, "跳过文档级检索(参数不合法)", "find_sources_invalid",
-                f"find_sources 参数不合法:{exc}")
-            return
-        except (AskCancelled, RetrievalControlError):
-            raise
-        except Exception as exc:  # noqa: BLE001 - one action, not the run
-            self._paper_tool_failed(state, FIND_SOURCES_ACTION, exc)
-            return
-        state.find_sources_calls += 1
-        handles = []
-        for item in result.items:
-            handle, issued = state.paper_handles.issue(
-                item.notebook_id, item.source_id, item.title)
-            handles.append(handle)
-            state.paper_progress += int(issued)
-        state.paper_finds.append(FoundSourcesOutcome(request, result, tuple(handles)))
-        state.record(TraceStep(
-            step_type="find_documents",
-            summary=(("文档级检索(翻页)" if request.cursor else "文档级检索")
-                     + f":强相关 {result.strong} 篇、相关 {result.related} 篇"),
-            # ``listed`` 不是轨迹计数键:列出文档与列目录一样不算证据命中/零命中。
-            detail={"query": _section_text(request.query),
-                    "terms": [_section_text(t) for t in request.terms],
-                    "kind": request.kind, "listed": len(result.items),
-                    "strong": result.strong, "related": result.related,
-                    "scope_total": result.filtered_scope_total,
-                    "lexical_complete": result.lexical_complete,
-                    "semantic_recall_capped": result.semantic_recall_capped,
-                    "has_more": bool(result.next_cursor)}))
-
+        return self._paper_actions._action_find_sources(_PaperRunView(state), decision)
     def _action_get_paper_cards(self, state: "_ReasoningRunState", decision) -> None:
-        """reflect 的 `get_paper_cards`:读缓存的论文卡片,缺失或过期的在本 run 的
-        生成额度内懒生成。每篇来源先按本 run 的来源天花板校验;已有最终结果的篇不重复
-        请求;单次 ≤10 篇、本 run 的读取篇数与生成次数按档位计。"""
-        if not self.paper_tool_flags(state.enum_limits, self._paper_tools_spent(state))[1]:
-            self._paper_skip(
-                state, "跳过论文卡片(本次检索不提供或额度已用完)", "paper_cards_unavailable",
-                "get_paper_cards 本次不可用(本 run 的篇数已用完或未提供)")
-            return
-        note_top_level_arguments(state.paper_log, decision)
-        checked = self._resolved_paper_sources(
-            state, GET_PAPER_CARDS_ACTION, decision.paper_card_sources)
-        if checked is None:
-            return
-        allowed, resolved, rejected = checked
-        final = ("ready", "generated", "not_paper", "failed", "not_found")
-        held = [r for r in resolved if r.key in state.paper_cards
-                and state.paper_cards[r.key].result.status in final]
-        wanted = [r for r in resolved if r not in held]
-        take = min(state.action_policy.max_paper_cards_per_call,
-                   state.enum_limits.paper_card_reads_per_run - state.paper_card_reads)
-        over, wanted = wanted[take:], wanted[:take]
-        if held:
-            state.paper_log.append(
-                "get_paper_cards:" + "、".join(r.label for r in held) + " 已有结果,未重复请求")
-        if over:
-            state.paper_log.append(
-                f"get_paper_cards 单次最多 {state.action_policy.max_paper_cards_per_call} 篇、"
-                "本 run 篇数有限:" + "、".join(r.label for r in over) + " 这次没有请求")
-        if not wanted:
-            if held and not over:
-                # 要的都已经有结果了:不是「没填对来源」,别把模型教去重填句柄。
-                self._paper_skip(
-                    state, "跳过论文卡片(请求的来源都已有结果)", "paper_cards_repeat",
-                    "get_paper_cards 这次请求的来源都已经有结果,不必再请求;可以对卡片缺的"
-                    "字段用 extract_from_sources,或直接作答")
-                return
-            reason = ("paper_cards_out_of_scope" if rejected and not resolved
-                      else "paper_cards_nothing_to_read")
-            self._paper_skip(
-                state, "跳过论文卡片(没有可读取的来源)", reason,
-                "get_paper_cards 这次没有要读的来源:sources 填 find_sources 给的句柄(p1…)",
-                rejected=len(rejected))
-            return
-        generate_left = max(0, state.enum_limits.paper_card_generations_per_run
-                            - state.paper_card_generations)
-        try:
-            results = self.paper_tools.cards.get_cards(
-                [r.key for r in wanted], allowed=allowed, generate_limit=generate_left,
-                cancel_event=self.cancel_event, actor_id=self.profile_owner_id)
-        except (AskCancelled, RetrievalControlError):
-            raise
-        except Exception as exc:  # noqa: BLE001 - one action, not the run
-            self._paper_tool_failed(state, GET_PAPER_CARDS_ACTION, exc)
-            return
-        # 推迟的篇不计读取篇数:下次再请求它时才算(同一篇不会被扣两次)。
-        state.paper_card_reads += sum(1 for r in results if r.status != "deferred")
-        state.paper_card_generations += sum(int(getattr(r, "calls", 0) or 0) for r in results)
-        by_key = {r.key: r for r in wanted}
-        statuses: Dict[str, int] = {}
-        anchor_ids: List[str] = []
-        for result in results:
-            source = by_key[(result.notebook_id, result.source_id)]
-            outcome = PaperCardOutcome(source.handle, source.title, result)
-            before = state.paper_cards.get(source.key)
-            if card_has_content(outcome) and (before is None or not card_has_content(before)):
-                state.paper_progress += 1
-            # 键已在时原位替换(插入序 = 首次请求序)。
-            state.paper_cards[source.key] = outcome
-            statuses[result.status] = statuses.get(result.status, 0) + 1
-            if card_has_content(outcome):
-                anchor_ids.extend(card_anchor_ids(result.card))
-        ids, truncated = _capped_result_ids(list(dict.fromkeys(anchor_ids)))
-        found = statuses.get("ready", 0) + statuses.get("generated", 0)
-        deferred = statuses.get("deferred", 0)
-        state.paper_deferred_this_turn |= deferred > 0
-        detail = {"requested": len(wanted), "generated": statuses.get("generated", 0),
-                  "deferred": deferred, "statuses": statuses, "result_ids": ids}
-        if deferred < len(results):
-            # 全部推迟时**不写** found:那不是「查了没有」,经验投影不该把它记成零命中。
-            detail["found"] = found
-        if truncated:
-            detail["result_ids_truncated"] = True
-        state.record(TraceStep(
-            step_type="paper_cards",
-            summary=(f"读取论文卡片:{len(wanted)} 篇,得到 {found} 张"
-                     + (f"(新生成 {statuses['generated']} 张)" if statuses.get("generated") else "")),
-            detail=detail))
-
+        return self._paper_actions._action_get_paper_cards(_PaperRunView(state), decision)
     def _action_extract_from_sources(self, state: "_ReasoningRunState", decision) -> None:
-        """reflect 的 `extract_from_sources`:对每篇来源抽取至多 4 个临时字段(不缓存、
-        不看是否论文)。来源先按本 run 的来源天花板校验;单次 ≤8 篇、本 run 的篇数按
-        档位计(真正发起了模型调用的篇才计)。"""
-        if not self.paper_tool_flags(state.enum_limits, self._paper_tools_spent(state))[2]:
-            self._paper_skip(
-                state, "跳过逐篇提取(本次检索不提供或额度已用完)", "extract_unavailable",
-                "extract_from_sources 本次不可用(本 run 的篇数已用完或未提供)")
-            return
-        note_top_level_arguments(state.paper_log, decision)
-        try:
-            fields = normalize_fields(decision.extract_fields)
-        except ExtractionRequestError as exc:
-            self._paper_skip(state, "跳过逐篇提取(字段不合法)", "extract_invalid",
-                             f"extract_from_sources.fields 不合法:{exc}")
-            return
-        checked = self._resolved_paper_sources(
-            state, EXTRACT_FROM_SOURCES_ACTION, decision.extract_sources)
-        if checked is None:
-            return
-        allowed, resolved, rejected = checked
-        # 同一篇、同一组字段本 run 已经抽过:不再花额度和模型调用(结果已在账目里)。
-        fields_key = tuple(field_text.casefold() for field_text in fields)
-        repeats = [r for r in resolved
-                   if (r.notebook_id, r.source_id, fields_key) in state.paper_extracted_keys]
-        if repeats:
-            state.paper_log.append(
-                "extract_from_sources:" + "、".join(r.label for r in repeats)
-                + " 这组字段本次已经抽过,结果见上,未重复抽取")
-            resolved = [r for r in resolved if r not in repeats]
-            if not resolved:
-                self._paper_skip(
-                    state, "跳过逐篇提取(这些来源已经提取过)", "extract_repeat",
-                    "extract_from_sources 这次请求的来源与字段都已经抽过,不必重复;"
-                    "可以换字段、换来源,或直接作答")
-                return
-        per_call = min(state.action_policy.max_extract_sources_per_call, EXTRACT_MAX_SOURCES)
-        over, batch = resolved[per_call:], resolved[:per_call]
-        if over:
-            state.paper_log.append(
-                f"extract_from_sources 单次最多 {per_call} 篇:"
-                + "、".join(r.label for r in over) + " 这次没有抽取")
-        if not batch:
-            reason = "extract_out_of_scope" if rejected else "extract_no_sources"
-            self._paper_skip(
-                state, "跳过逐篇提取(没有可提取的来源)", reason,
-                "extract_from_sources 这次没有可抽取的来源:sources 填 find_sources 给的句柄(p1…)",
-                rejected=len(rejected))
-            return
-        left = state.enum_limits.extract_sources_per_run - state.extract_sources_used
-        try:
-            results = self.paper_tools.extraction.extract(
-                [r.key for r in batch], fields, allowed=allowed,
-                limit=max(0, min(len(batch), left)),
-                cancel_event=self.cancel_event, actor_id=self.profile_owner_id)
-        except ExtractionRequestError as exc:
-            self._paper_skip(state, "跳过逐篇提取(请求不合法)", "extract_invalid",
-                             f"extract_from_sources 请求不合法:{exc}")
-            return
-        except (AskCancelled, RetrievalControlError):
-            raise
-        except Exception as exc:  # noqa: BLE001 - one action, not the run
-            self._paper_tool_failed(state, EXTRACT_FROM_SOURCES_ACTION, exc)
-            return
-        by_key = {r.key: r for r in batch}
-        items = tuple(
-            PaperExtractionItem(by_key[(res.notebook_id, res.source_id)].handle,
-                                by_key[(res.notebook_id, res.source_id)].title, res)
-            for res in results)
-        state.extract_sources_used += sum(
-            1 for res in results
-            if res.status != "not_found" and not (res.status == "deferred" and res.reason == "limit"))
-        state.paper_extracted_keys.update(
-            (res.notebook_id, res.source_id, fields_key) for res in results
-            if res.status in ("extracted", "no_text"))
-        outcome = PaperExtractionOutcome(tuple(fields), items)
-        state.paper_extractions.append(outcome)
-        found = extraction_value_count(outcome)
-        state.paper_progress += found
-        deferred = sum(1 for res in results if res.status == "deferred")
-        state.paper_deferred_this_turn |= deferred > 0
-        ids, truncated = _capped_result_ids(list(dict.fromkeys(
-            value.element_id for res in results for value in res.fields
-            if value.value and value.element_id)))
-        detail = {"sources": len(batch), "fields": [_section_text(f) for f in fields],
-                  "deferred": deferred, "result_ids": ids}
-        if deferred < len(results):
-            # 全部推迟时不写 found(不是零命中,见卡片那一步)。
-            detail["found"] = found
-        if truncated:
-            detail["result_ids_truncated"] = True
-        state.record(TraceStep(
-            step_type="extract_fields",
-            summary=f"逐篇提取 {len(fields)} 个字段:{len(batch)} 篇,提取到 {found} 个值",
-            detail=detail))
-
+        return self._paper_actions._action_extract_from_sources(_PaperRunView(state), decision)
     # --- 文档内导航(§3.5/§3.7–§3.9):browse_sections / read_section / 线索块 ---
     def _not_a_name_note(self, state: "_ReasoningRunState", term: str) -> str:
         """exact_lookup 形状门拒绝时的回喂。本 run 提供 read_section 时追加一句:
@@ -7982,608 +7405,23 @@ class ReasoningRetriever:
             note += ";如果这是章节标题,请改用 browse_sections 或 read_section"
         return note
 
-    @staticmethod
-    def _section_evidence_sources(state: "_ReasoningRunState") -> "List[_SectionSource]":
-        """本 run 两条原文通道里出现过的来源,首次出现序:先原文段(`state.chunks`),
-        再原文元素(`state.elements`,search_elements 与首轮元素兜底)——候选摘要把
-        两者的来源标题都给模型看了,所以两者都能被导航动作按标题解析。属主库一律取
-        真实 id(活动库命中不带 notebook_id 时取 `state.notebook_id`),与地址簿
-        「一个 run 一种口径」一致。零 I/O。"""
-        rows: Dict[str, _SectionSource] = {}
-        for hit in [*state.chunks, *state.elements]:
-            rows.setdefault(hit.source_id, _SectionSource(
-                hit.source_id, str(hit.source_title or ""),
-                str(getattr(hit, "notebook_id", "") or state.notebook_id)))
-        return list(rows.values())
-
-    def _section_source_rows(self, state: "_ReasoningRunState") -> list:
-        """来源解析的候选:本 run 证据里出现过的来源(原文段与原文元素,首次出现序)
-        ∪ 已列出的来源清单行。零 I/O。"""
-        rows: Dict[str, _SectionSource] = {
-            row.source_id: row for row in self._section_evidence_sources(state)}
-        for listed in state.enumerations:
-            if listed.collection != ENUMERATE_SOURCES_COLLECTION:
-                continue
-            for row in listed.items:
-                rows.setdefault(row.source_id, _SectionSource(
-                    row.source_id, str(row.source_title or ""),
-                    str(getattr(row, "notebook_id", "") or state.notebook_id)))
-        return list(rows.values())
-
-    def _resolve_section_source(
-        self, state: "_ReasoningRunState", requested: str, verb: str,
-    ) -> "Tuple[Optional[_SectionSource], str]":
-        """模型抄来的来源标题 → 唯一一行候选,或 (None, skip 文案)。
-
-        解析复用 `_resolve_roster_rows`(逐步精确匹配,同名序号占位串与清单同一
-        发号簿)。0 篇与多篇的下一步不同,文案分叉,措辞与按篇读取同一口径。候选
-        只来自本 run 已出现的来源(都已过天花板),所以「越界」与「不存在」在这里
-        本来就是同一件事:不在候选里。
-        """
-        issued = state.roster_numbering.sync(state.enum_chains).issued
-        matches = _resolve_roster_rows(
-            self._section_source_rows(state), str(requested or ""), issued)
-        if len(matches) > 1:
-            # 本库与参考库同名:优先本库那一篇(与花名册「本库优先」的读法一致);
-            # 要读参考库那篇,抄花名册给它的「（第 N 篇）」占位串。
-            local = [row for row in matches if row.notebook_id == state.notebook_id]
-            if len(local) == 1:
-                matches = local
-        if len(matches) == 1:
-            return matches[0], ""
-        if matches:
-            return None, (f"跳过{verb}:候选与来源清单里有 {len(matches)} 篇同名文档,"
-                          "按标题无法区分,请改用章节线索里的 [sN] 或换一篇")
-        return None, (f"跳过{verb}:本轮候选与来源清单里没有匹配这个标题的文档,"
-                      "请从候选或清单里逐字复制标题后重试")
-
-    def _section_outline_for(
-        self, state: "_ReasoningRunState", owner: str, source_id: str,
-        title: str = "",
-    ) -> "Outline":
-        """这个来源的大纲,本 run 只读一次(地址簿的出现序号依赖它不变)。
-
-        与 `search_chunks` 同路:I/O 在 `retrieval_fanout_slot()` 里(这是单库叶子
-        读取,对等 run 也一样)。权限在检索层(越界与不存在都返回空大纲)。"""
-        key = (owner, source_id)
-        if title and key not in state.section_titles:
-            state.section_titles[key] = title
-        cached = state.section_outlines.get(key)
-        if cached is None:
-            with retrieval_fanout_slot():
-                rows, truncated = self.retrieval.section_outline(owner, source_id)
-            cached = build_outline(rows, truncated)
-            state.section_outlines[key] = cached
-        return cached
-
-    def _section_similarities(
-        self, owner: str, source_id: str, chunk_ids, query_texts,
-    ) -> Dict[str, float]:
-        """`RetrievalPort.section_chunk_similarities` 的包装(扇出槽同 search_chunks)。"""
-        ids = list(dict.fromkeys(chunk_ids))
-        if not ids:
-            return {}
-        with retrieval_fanout_slot():
-            return dict(self.retrieval.section_chunk_similarities(
-                owner, source_id, ids, list(query_texts)))
-
-    def _section_similarities_parallel(
-        self, requests: "List[Tuple[str, str, List[str]]]", texts,
-    ) -> "Dict[Tuple[str, str], Dict[str, float]]":
-        """线索块的多来源相似度:`(库, 来源, chunk ids)` 各一次端口调用,并发跑
-        (冷读整源向量是 I/O 加解码,串行时 4 个来源的冷读全压在首次 reflect 之前)。
-
-        有界线程池(至多 4 路);每个任务用 `contextvars.copy_context().run` 继承
-        检索 run(扇出槽、run 内记忆)、来源天花板与统计作用域;扇出槽仍在
-        `_section_similarities` 里逐次取。取消:提交前与收结果时各查一次,任务内的
-        端口等待也会查;第一个异常原样抛给调用方(失败开放在 `_section_hint_block`)。"""
-        if not requests:
-            return {}
-        raise_if_cancelled(self.cancel_event)
-        if len(requests) == 1:
-            owner, source_id, ids = requests[0]
-            return {(owner, source_id): self._section_similarities(
-                owner, source_id, ids, texts)}
-        with ThreadPoolExecutor(max_workers=min(len(requests), 4)) as pool:
-            futures = {
-                (owner, source_id): pool.submit(
-                    contextvars.copy_context().run,
-                    self._section_similarities, owner, source_id, ids, texts)
-                for owner, source_id, ids in requests}
-            results = {}
-            for key, future in futures.items():
-                results[key] = future.result()
-                raise_if_cancelled(self.cancel_event)
-        return results
-
-    @staticmethod
-    def _take_section_hint_detail(state: "_ReasoningRunState") -> Dict[str, Any]:
-        """本轮 reflect 步 detail 的稀疏 `section_hints` 键(没算线索时为空),取走即清。"""
-        taken = dict(state.section_hint_detail)
-        state.section_hint_detail = {}
-        return {"section_hints": taken} if taken else {}
-
+    def _take_section_hint_detail(self, state: "_ReasoningRunState") -> Dict[str, Any]:
+        return self._section_navigation._take_section_hint_detail(_SectionRunView(state))
     def _section_hint_block(self, state: "_ReasoningRunState") -> str:
-        """章节向量线索块(§3.7),惰性计算,**失败开放**(出不来就不出块、不记 skip)。
+        return self._section_navigation._section_hint_block(_SectionRunView(state))
 
-        * 来源:本 run 证据里首次出现的前 `REASONING_SECTION_HINT_SOURCES` 个来源,
-          只取大纲真实出现 ≥ 2 的;
-        * 查询文本:问题 + 已执行的查询(`attempted`,含跑过的已确认方向),查询向量走检索层
-          的 run 内记忆;相似度按 (来源, 查询文本) 缓存在 state 上,新增子查询才重算,
-          chunk 向量由检索层按 (库, 来源) 记忆、不重复解码;
-        * 排除本 run 已有 chunk 覆盖的节与导航节(`rank_sections`;导航出现不进大纲);
-        * 相对阈值的基准 = 本 run 已有 chunk 在同一把尺子下的最高相似度。没有任何已有
-          chunk 拿得到相似度(向量不可用)时没有基准,整块不出。基准来自**已覆盖**的
-          高分块,而线索只列**未覆盖**的节(天然更低分),所以默认比例取 0.5;噪声靠
-          名次上限 `REASONING_SECTION_HINT_MAX_ENTRIES` 控制。
-        """
-        state.section_hint_detail = {}
-        # read_section 不提供或次数已用完:线索没有可用的下一步,不出块也不重算。
-        if not state.chunks or not self._section_read_left(state):
-            return ""
-        max_entries = int(getattr(self.settings, "reasoning_section_hint_max_entries", 0) or 0)
-        max_sources = int(getattr(self.settings, "reasoning_section_hint_sources", 0) or 0)
-        if max_entries <= 0 or max_sources <= 0:
-            return ""
-        try:
-            # 只计本次线索计算(含它开的线程)的读取:run 级累计被报告并行章节共享。
-            with collect_section_vector_stats() as hint_reads:
-                text, sources_used, entries = self._section_hints_text(
-                    state, max_entries, max_sources)
-            delta = hint_reads.snapshot()
-            # 稀疏:只在这一轮真的读了/借了向量,或线索块非空时写(冻结金样里
-            # 闸关、没算或全命中 run 内记忆的轮次一个键都不多)。
-            if text or delta.get("vector_loads") or delta.get("process_cache_hits"):
-                state.section_hint_detail = {
-                    "sources": sources_used, "entries": entries,
-                    "vectors_read": delta.get("vectors_read", 0),
-                    "vector_loads": delta.get("vector_loads", 0),
-                    "process_cache_hits": delta.get("process_cache_hits", 0),
-                    "vector_ms": delta.get("vector_ms", 0),
-                }
-            return text
-        except (AskCancelled, RetrievalControlError):
-            raise
-        except Exception:  # noqa: BLE001 — 线索是提示,不是必需品(失败开放)
-            if self.fail_closed:
-                raise
-            return ""
-
-    def _section_hints_text(
-        self, state: "_ReasoningRunState", max_entries: int, max_sources: int,
-    ) -> "Tuple[str, int, int]":
-        """`_section_hint_block` 的计算体(异常由调用方失败开放):
-        `(线索块文本, 参与排序的来源数, 列出的条数)`。"""
-        # 与来源解析同一份候选、同一个首次出现序(原文段,再原文元素)。
-        issued = state.roster_numbering.sync(state.enum_chains).issued
-        sources: Dict[tuple, str] = {
-            (row.notebook_id, row.source_id): _section_source_title(
-                issued, row.source_id, row.source_title)
-            for row in self._section_evidence_sources(state)[:max_sources]}
-        # 只用本 run 已经嵌入过的文本(问题 + 已执行的查询),且只取检索 run 的嵌入
-        # 记忆里已有向量的那些(`embedded_query_texts`):线索块不新增嵌入调用;未执行
-        # 的已确认方向还没有贡献过任何证据。
-        texts = tuple(embedded_query_texts(self.settings, (
-            str(text or "") for text in (
-                [state.question]
-                + [entry.query for entry in state.attempted.values()]))))
-        run_ids = {chunk.chunk_id for chunk in state.chunks}
-        outlines: List[Tuple[str, str, str, "Outline"]] = []
-        for (owner, source_id), title in sources.items():
-            source_outline = self._section_outline_for(state, owner, source_id, title)
-            if source_outline.section_count >= 2:
-                outlines.append((owner, source_id, title, source_outline))
-        recompute = [
-            (owner, source_id, [cid for occ in source_outline.occurrences
-                                for cid in occ.chunk_ids])
-            for owner, source_id, _title, source_outline in outlines
-            if (state.section_hint_sims.get((owner, source_id)) or (None,))[0] != texts]
-        for key, sims in self._section_similarities_parallel(recompute, texts).items():
-            state.section_hint_sims[key] = (texts, sims)
-        rankings: List[SourceRanking] = []
-        best = None
-        for owner, source_id, title, source_outline in outlines:
-            sims = state.section_hint_sims[(owner, source_id)][1]
-            for chunk_id in run_ids:
-                if chunk_id in sims and (best is None or sims[chunk_id] > best):
-                    best = sims[chunk_id]
-            rankings.append(SourceRanking(
-                owner, source_id, title, tuple(rank_sections(
-                    source_outline, sims, exclude_chunk_ids=run_ids,
-                    limit=max_entries))))
-        if best is None:
-            return "", len(rankings), 0
-        hints = select_hints(
-            rankings, max_entries=max_entries,
-            relative_floor=float(getattr(
-                self.settings, "reasoning_section_hint_relative_floor", 0.5)),
-            best_chunk_sim=best)
-        # 标签按显示口径截(地址簿里存的仍是原出现):条目数已有上限,每行也有界。
-        return render_hints([
-            (state.surfaced_sections.assign(hint.notebook_id, hint.source_id,
-                                            hint.occurrence),
-             replace(hint, occurrence=_display_occurrence(hint.occurrence)))
-            for hint in hints]), len(rankings), len(hints)
-
-    def _section_skip(
-        self, state: "_ReasoningRunState", reason: str, summary: str,
-        *, feed: bool = True, **detail,
-    ) -> None:
-        """导航动作的 skip:零命中写法(不写 `result_ids`),教学措辞同时进账目。
-        账目行带「未执行:」前缀,与「已浏览/已读」的执行记录分开。"""
-        if feed:
-            state.section_log.append("未执行:" + summary.removeprefix("跳过"))
-        state.record(TraceStep(step_type="skip", summary=summary,
-                               detail={"reason": reason, **detail}))
-
-    def _section_actions_offered(
-        self, section_nav: bool, spent: "frozenset[str]" = frozenset(),
-    ) -> "Tuple[bool, bool]":
-        """(browse_sections, read_section) 各自提供不提供:总闸开、上限 > 0、本 run
-        没用完。prompt / schema / 白名单三处读这一个结论。"""
-        policy = reasoning_action_policy(self.settings)
-        return (
-            bool(section_nav and policy.max_section_browses > 0
-                 and BROWSE_SECTIONS_ACTION not in spent),
-            bool(section_nav and policy.max_section_reads > 0
-                 and READ_SECTION_ACTION not in spent),
-        )
-
-    @staticmethod
-    def _section_spent(state: "_ReasoningRunState") -> "frozenset[str]":
-        """本 run 已用完次数的导航动作(上限为 0 的不算「用完」,那由闸自己关)。"""
-        return frozenset(
-            name for name, used, cap in (
-                (BROWSE_SECTIONS_ACTION, state.section_browses,
-                 state.action_policy.max_section_browses),
-                (READ_SECTION_ACTION, state.section_reads,
-                 state.action_policy.max_section_reads))
-            if cap > 0 and used >= cap)
-
-    def _section_read_left(self, state: "_ReasoningRunState") -> bool:
-        """本轮还能不能 read_section(总闸开、上限 > 0、没用完)。"""
-        return self._section_actions_offered(
-            self.section_navigation_active(state.enum_limits),
-            self._section_spent(state))[1]
-
+    def _section_actions_offered(self, section_nav: bool, spent: frozenset = frozenset()) -> Tuple[bool, bool]:
+        return self._section_navigation._section_actions_offered(section_nav, spent)
+    def _section_spent(self, state: "_ReasoningRunState") -> frozenset[str]:
+        return self._section_navigation._section_spent(_SectionRunView(state))
     def _section_listing_note(self, state: "_ReasoningRunState") -> str:
-        """上一轮新交付了章节目录时,替代「无新证据」提示的那一句;否则空串。"""
-        if state.section_listing_turn != state.steps - 1:
-            return ""
-        return (
-            "（系统提示:上一步列出了章节目录(目录不是证据,所以没有新增证据)。"
-            + ("可用 read_section 按目录里的 [sN] 读取需要的章节原文,"
-               if self._section_read_left(state) else
-               "可按目录里文档自己的章节用词改写检索,")
-            + "或改用其他检索动作。）")
+        return self._section_navigation._section_listing_note(_SectionRunView(state))
 
-    def _section_failed(
-        self, state: "_ReasoningRunState", reason: str, verb: str, exc: Exception,
-    ) -> None:
-        """一次导航 I/O 失败收成 skip(与按篇读取的失败同形,codex #724 R5):
-        本 run 已收集的证据与轨迹不因一次读失败作废;只记异常类名。"""
-        self._section_skip(
-            state, reason,
-            f"跳过{verb}:读取时出错({type(exc).__name__}),本次没有结果;"
-            "请改用别的章节或检索动作",
-            error=type(exc).__name__)
+    def _action_browse_sections(self, state: "_ReasoningRunState", decision) -> None:
+        return self._section_navigation._action_browse_sections(_SectionRunView(state), decision)
 
-    def _action_browse_sections(
-        self, state: "_ReasoningRunState", decision: "ReflectDecision",
-    ) -> None:
-        """reflect 的 `browse_sections`(§3.8):列出一篇来源的章节目录,不进证据。
-
-        `query` 非空时按 §3.7 的向量打分在该来源(及 `under` 范围)内按名次列出;
-        为空时按文档序列出章节树。目录进下一轮 reflect 摘要(每个来源只留最近一次),
-        列出的地址进 `surfaced_sections`;本轮新交付了目录则 stale 持平。同参数重复
-        浏览零 I/O 地把缓存的目录放回摘要(不扣次数、不持平 stale)。读取失败收成
-        `section_browse_failed`(扣一次),整次提问不作废。skip 都不写 `result_ids`。"""
-        verb = "查看章节目录"
-        if not self.section_navigation_active(state.enum_limits):
-            # 纵深防御:闸关时动作不在 allowed_actions 里,正常路径到不了这里。
-            self._section_skip(state, "section_nav_disabled",
-                               f"跳过{verb}(未启用)", feed=False)
-            return
-        if state.steps >= state.max_steps:
-            # 纵深防御:最后一轮 browse 不在 allowed_actions 里。目录无人消费,
-            # 不扣次数、不进账目(账目同样只给下一轮看)。
-            self._section_skip(state, "section_browse_last_turn",
-                               f"跳过{verb}(已是最后一轮,目录无人消费)", feed=False)
-            return
-        cap = state.action_policy.max_section_browses
-        if state.section_browses >= cap:
-            self._section_skip(state, "section_browse_cap",
-                               f"跳过{verb}(已达次数上限 {cap})")
-            return
-        row, unresolved = self._resolve_section_source(
-            state, decision.browse_sections_source, verb)
-        if row is None:
-            self._section_skip(
-                state, "section_source_unresolved", unresolved,
-                requested_title=decision.browse_sections_source[:_SECTION_ECHO_CHARS])
-            return
-        under = " ".join(decision.browse_sections_under.split())[:_SECTION_ECHO_CHARS]
-        query = " ".join(decision.browse_sections_query.split())[:SECTION_QUERY_MAX_CHARS]
-        browse_key = (row.notebook_id, row.source_id, under.casefold(), query.casefold())
-        title = _section_source_title(
-            state.roster_numbering.sync(state.enum_chains).issued,
-            row.source_id, row.source_title)
-        if browse_key in state.section_browse_cache:
-            self._replay_section_listing(state, row, title, browse_key, under, query)
-            return
-        counted = False
-        try:
-            source_outline = self._section_outline_for(
-                state, row.notebook_id, row.source_id, title)
-            if not source_outline.occurrences:
-                self._section_skip(state, "section_outline_empty",
-                                   f"跳过{verb}:《{title}》没有可列出的章节")
-                return
-            view = filter_outline(source_outline, under)
-            if not view.under_supported:
-                self._section_skip(
-                    state, "section_under_unsupported",
-                    f"跳过{verb}:《{title}》的章节没有编号,under 不可用,请留空 under 或改用 query"
-                    if view.status == UNDER_NO_NUMBERING else
-                    f"跳过{verb}:under「{under}」不是章节编号,请填写如 5.7 这样的编号或留空",
-                    under=under)
-                return
-            if not view.entries:
-                # 不用空目录覆盖同一来源上一份目录,也不扣次数。
-                self._section_skip(
-                    state, "section_under_empty",
-                    f"跳过{verb}:《{title}》里没有编号在 {under} 之下的章节,"
-                    "请换一个编号或留空 under", under=under)
-                return
-            state.section_browses += 1
-            counted = True
-            self._deliver_section_listing(
-                state, row, title, view.entries, under, query, browse_key)
-        except (AskCancelled, RetrievalControlError):
-            raise
-        except Exception as exc:  # noqa: BLE001 - one failed read must not void the run
-            # 失败也扣一次(不论败在读大纲还是读向量),同参数重试受上限约束。
-            if not counted:
-                state.section_browses += 1
-            self._section_failed(state, "section_browse_failed", verb, exc)
-
-    def _replay_section_listing(
-        self, state: "_ReasoningRunState", row: "_SectionSource", title: str,
-        browse_key: tuple, under: str, query: str,
-    ) -> None:
-        """同参数的第二次浏览:把缓存的目录重新放回摘要(成为该来源最近一份),
-        零 I/O、不扣次数;它不是新信息,所以不持平 stale。"""
-        listing, listed, scope = state.section_browse_cache[browse_key]
-        key = (row.notebook_id, row.source_id)
-        state.section_listings.pop(key, None)
-        state.section_listings[key] = listing
-        state.section_log.append(f"已浏览《{title}》{scope}(本轮已列过,目录已放回)")
-        state.record(TraceStep(
-            step_type="browse_sections",
-            summary=f"查看章节目录:《{title}》{scope},列出 {listed} 条(本轮已列过)",
-            detail={"source": title, "under": under, "query": query,
-                    "listed": listed, "repeat": True}))
-
-    def _deliver_section_listing(
-        self, state: "_ReasoningRunState", row: "_SectionSource", title: str,
-        entries, under: str, query: str, browse_key: tuple,
-    ) -> None:
-        """渲染并交付一次目录:按名次(有 query 且拿得到相似度)或按文档序。
-
-        地址只发给真正列出来的那一段前缀(先按预计号渲染,再按同一顺序发号——
-        渲染保留的是一段前缀,所以两者逐个相同),未列出的条目不进封闭集合。"""
-        key = (row.notebook_id, row.source_id)
-        source_outline = state.section_outlines[key]
-        ranked = []
-        if query:
-            sims = self._section_similarities(
-                row.notebook_id, row.source_id,
-                [cid for occ in entries for cid in occ.range_chunk_ids], [query])
-            ranked = [item.occurrence for item in rank_sections(
-                source_outline, sims, entries=entries)]
-        listed_entries = ranked or list(entries)
-        fresh = 0
-        provisional = []
-        for occ in listed_entries:
-            sid = state.surfaced_sections.sid_of(row.notebook_id, row.source_id, occ.index)
-            if not sid:
-                fresh += 1
-                sid = f"s{len(state.surfaced_sections) + fresh}"
-            provisional.append((sid, occ))
-        render = render_ranked if ranked else render_outline
-        rendered = render(
-            [(sid, _display_occurrence(occ)) for sid, occ in provisional],
-            max_chars=int(getattr(self.settings, "reasoning_section_browse_max_chars", 3000)),
-            truncated_scan=source_outline.truncated,
-            scan_rows=source_outline.scanned_rows)
-        for _sid, occ in provisional[:rendered.listed]:
-            state.surfaced_sections.assign(row.notebook_id, row.source_id, occ)
-        scope = (f" under {under}" if under else "") + (
-            f" 按「{query}」排序" if ranked else
-            f" 「{query}」(向量不可用,按文档顺序)" if query else "")
-        listing = (
-            f"（章节目录:《{title}》{scope},列出 {rendered.listed} 条;目录不是证据"
-            + (",用 read_section 按 [sN] 读取原文" if self._section_read_left(state)
-               else "")
-            + "）\n" + rendered.text)
-        state.section_listings.pop(key, None)
-        state.section_listings[key] = listing
-        state.section_browse_cache[browse_key] = (listing, rendered.listed, scope)
-        state.section_listing_delivered_this_turn = True
-        state.section_listing_turn = state.steps
-        state.section_log.append(f"已浏览《{title}》{scope}(列出 {rendered.listed} 条)")
-        state.record(TraceStep(
-            step_type="browse_sections",
-            summary=f"查看章节目录:《{title}》{scope},列出 {rendered.listed} 条",
-            detail={"source": title, "under": under, "query": query,
-                    "listed": rendered.listed}))
-
-    def _resolve_section_address(
-        self, state: "_ReasoningRunState", decision: "ReflectDecision",
-    ):
-        """`read_section.section` → `(SectionAddress, 来源标题)`,或 `(None, (原因码,
-        skip 文案, detail))`。§3.5:`sN` 只认本 run 发过的号;标题/编号文本在该来源
-        的(本 run 只建一次的)大纲里解析——唯一即采用,多处优先含本 run 已有 chunk
-        的那一处,仍不唯一则回喂各处的 `sN`。地址是封闭集合,不经过 exact_probe_terms。"""
-        verb = "按章节读取原文"
-        text = " ".join(decision.read_section_section.split())
-        echo = text[:_SECTION_ECHO_CHARS]
-        sid = parse_section_id(text)
-        if sid or not text:
-            address = state.surfaced_sections.get(sid) if sid else None
-            if address is None:
-                return None, ("section_not_surfaced",
-                              f"跳过{verb}:「{echo}」不是本轮列出过的章节地址,"
-                              "请从章节线索或 browse_sections 的目录里复制 [sN]",
-                              {"section": echo})
-            return address, state.section_titles.get(
-                (address.notebook_id, address.source_id), "")
-        row, unresolved = self._resolve_section_source(
-            state, decision.read_section_source, verb)
-        if row is None:
-            return None, ("section_source_unresolved", unresolved, {
-                "requested_title": decision.read_section_source[:_SECTION_ECHO_CHARS]})
-        title = _section_text(row.source_title or UNNAMED_SOURCE_LABEL)
-        source_outline = self._section_outline_for(
-            state, row.notebook_id, row.source_id, title)
-        found = resolve_section(
-            source_outline, text, {chunk.chunk_id for chunk in state.chunks})
-        if isinstance(found, Resolved):
-            state.surfaced_sections.assign(
-                row.notebook_id, row.source_id, found.occurrence)
-            return state.surfaced_sections.get(state.surfaced_sections.sid_of(
-                row.notebook_id, row.source_id, found.occurrence.index)), title
-        if isinstance(found, Ambiguous):
-            return None, self._ambiguous_section_skip(
-                state, row, title, echo, found.candidates, verb)
-        return None, ("section_not_surfaced",
-                      f"跳过{verb}:《{title}》的目录里没有「{echo}」,"
-                      "请先用 browse_sections 列出目录再复制 [sN]",
-                      {"section": echo})
-
-    def _ambiguous_section_skip(
-        self, state: "_ReasoningRunState", row: "_SectionSource", title: str,
-        echo: str, candidates, verb: str,
-    ) -> tuple:
-        """同名多处的教学 skip:候选按目录的有界渲染器列出(预算
-        `REASONING_SECTION_BROWSE_MAX_CHARS`,与 browse 同一份已校验的 Settings),
-        只给**显示出来**的候选发 `sN`(先按预计号渲染,再按同一顺序发号),其余如实
-        注明省略数。这行文本会留在账目里、每轮重放,所以必须有界。"""
-        fresh = 0
-        provisional = []
-        for occ in candidates:
-            sid = state.surfaced_sections.sid_of(row.notebook_id, row.source_id, occ.index)
-            if not sid:
-                fresh += 1
-                sid = f"s{len(state.surfaced_sections) + fresh}"
-            provisional.append((sid, occ))
-        rendered = render_ranked(
-            [(sid, _display_occurrence(occ)) for sid, occ in provisional],
-            max_chars=int(getattr(self.settings, "reasoning_section_browse_max_chars", 3000)),
-            truncated_scan=False, scan_rows=0)
-        for _sid, occ in provisional[:rendered.listed]:
-            state.surfaced_sections.assign(row.notebook_id, row.source_id, occ)
-        # 渲染器在截断时把它自己的省略说明放在最后一行;这里换成同名场景的措辞,
-        # 列表本身改成一行(账目是一行一条)。
-        lines = rendered.text.split("\n")
-        if rendered.omitted:
-            lines = lines[:-1]
-        listed = "、".join(line for line in lines if line)
-        omitted = (f";另有 {rendered.omitted} 处同名未列出,"
-                   "可用 browse_sections 的 under/query 收窄" if rendered.omitted else "")
-        return ("section_ambiguous",
-                f"跳过{verb}:「{echo}」在《{title}》里出现 {len(candidates)} 处,"
-                f"请改用其中一个 [sN]:{listed}{omitted}",
-                {"section": echo, "matches": len(candidates),
-                 "listed": rendered.listed})
-
-    def _action_read_section(
-        self, state: "_ReasoningRunState", decision: "ReflectDecision",
-    ) -> None:
-        """reflect 的 `read_section`(§3.9):把一个已展示过的章节整节读回证据池。
-
-        取数 `RetrievalPort.section_chunks`(权限、归属核验、导航页剔除、与普通
-        chunk 检索同一把尺子的 relevance、`section_read` 标志都在检索层),再过
-        `_filter_candidates("chunk", …)`,按文档序 `take_distinct_chunk_hits` 并进
-        `state.chunks`,不开新证据号段。整节 chunk id 交给端口,由端口按上限截取
-        (导航页不占名额);本节可读段数超过上限时 trace 注明截取。读取失败(解析
-        大纲或读回整节)收成 `section_read_failed`(扣一次),整次提问不作废。"""
-        verb = "按章节读取原文"
-        if not self.section_navigation_active(state.enum_limits):
-            self._section_skip(state, "section_nav_disabled",
-                               f"跳过{verb}(未启用)", feed=False)
-            return
-        cap = state.action_policy.max_section_reads
-        if state.section_reads >= cap:
-            self._section_skip(state, "section_read_cap",
-                               f"跳过{verb}(已达次数上限 {cap})")
-            return
-        try:
-            address, title_or_skip = self._resolve_section_address(state, decision)
-        except (AskCancelled, RetrievalControlError):
-            raise
-        except Exception as exc:  # noqa: BLE001 - one failed read must not void the run
-            state.section_reads += 1
-            self._section_failed(state, "section_read_failed", verb, exc)
-            return
-        if address is None:
-            reason, summary, detail = title_or_skip
-            self._section_skip(state, reason, summary, **detail)
-            return
-        title = _section_source_title(
-            state.roster_numbering.sync(state.enum_chains).issued,
-            address.source_id, title_or_skip)
-        label = _section_text(address.label or UNTITLED)
-        read_key = (address.notebook_id, address.source_id, address.occurrence)
-        if read_key in state.section_read_keys:
-            self._section_skip(
-                state, "section_read_repeat",
-                f"跳过{verb}:《{title}》 {label} 本轮已经读过,请改读别的章节或直接作答")
-            return
-        state.section_reads += 1
-        state.section_read_keys.add(read_key)
-        limit = int(getattr(self.settings, "reasoning_section_read_max_chunks", 12))
-        try:
-            with retrieval_fanout_slot():
-                got = self.retrieval.section_chunks(
-                    address.notebook_id or state.notebook_id, address.source_id,
-                    list(address.chunk_ids), limit, state.question)
-        except (AskCancelled, RetrievalControlError):
-            raise
-        except Exception as exc:  # noqa: BLE001 - one failed read must not void the run
-            # 次数已在上面扣过、这一节进了防重键:同一节的持续性失败不反复重试。
-            self._section_failed(state, "section_read_failed", verb, exc)
-            return
-        new = take_distinct_chunk_hits(
-            self._filter_candidates("chunk", got), state.seen_chunks, state.chunks)
-        state.chunks.extend(new)
-        state.zero_hit_by_action["read_section"] = (
-            0 if new else state.zero_hit_by_action.get("read_section", 0) + 1)
-        # 范围内的 chunk 已剔除导航页(大纲折叠时),所以「本节可读段数 > 上限」
-        # 就是端口截取了。另一种不完整与上限无关:大纲扫描在这一节里停下
-        # (`SectionAddress.incomplete`),地址里只有扫到的前缀——不论走线索、
-        # 标题还是 sN 进来,都如实报未完。
-        cut = len(address.chunk_ids) > limit
-        scan_cut = address.incomplete
-        result_ids, result_ids_truncated = _capped_result_ids([c.chunk_id for c in new])
-        detail = {"source": title, "section": label, "found": len(new),
-                  "result_ids": result_ids}
-        if result_ids_truncated:
-            detail["result_ids_truncated"] = True
-        if cut or scan_cut:
-            detail["truncated"] = True
-        if scan_cut:
-            detail["scan_truncated"] = True
-        scanned = getattr(state.section_outlines.get(
-            (address.notebook_id, address.source_id)), "scanned_rows", 0)
-        tail = (f"(截取本节前 {limit} 段)" if cut else "") + (
-            f"(大纲只覆盖本篇前 {scanned} 段,本节之后可能还有内容)" if scan_cut else "")
-        state.section_log.append(f"已读《{title}》 {label}(新增 {len(new)} 段){tail}")
-        state.record(TraceStep(
-            step_type="read_section",
-            summary=f"按章节读取原文:《{title}》 {label},新增 {len(new)} 段{tail}",
-            detail=detail))
-
+    def _action_read_section(self, state: "_ReasoningRunState", decision) -> None:
+        return self._section_navigation._action_read_section(_SectionRunView(state), decision)
     def _plugin_action_timeout(self) -> float:
         return float(getattr(
             self.settings,

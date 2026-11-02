@@ -619,7 +619,7 @@ def test_answer_reasoning_passes_reasoning_timeout_and_retries(rrepo):
     rrepo.settings.reasoning_max_retries = 2
     llm = _AnswerRecordingLLM()
     bind_chat_client(rrepo, "ask_answer", llm)
-    rrepo._runtime.ask_component._answer_reasoning(nb.id, "问题", [], [], "")
+    rrepo._runtime.ask_component._response_drafting._answer_reasoning(nb.id, "问题", [], [], "")
     assert llm.calls, "_answer_reasoning must call chat_json"
     assert llm.calls[0].get("timeout") == 88
     assert llm.calls[0].get("max_retries") == 2
@@ -634,7 +634,7 @@ def test_refine_context_passes_reasoning_kwargs(rrepo):
     rrepo.settings.kg_query_refine_enabled = True
     llm = _AnswerRecordingLLM()
     # Call _refine_context directly with a non-empty context block.
-    rrepo._runtime.ask_component._refine_context("问题", "k1: RTL到GDSII流程概述", llm)
+    rrepo._runtime.ask_component._response_drafting._refine_context("问题", "k1: RTL到GDSII流程概述", llm)
     assert llm.calls, "_refine_context must call chat_json"
     assert llm.calls[0].get("timeout") == 77
     assert llm.calls[0].get("max_retries") == 3
@@ -938,7 +938,7 @@ def test_answer_reasoning_renders_citable_hops_and_uncited_inference(rrepo):
     llm = _ChainAnswerLLM()
     bind_chat_client(rrepo, "ask_answer", llm)
     rrepo.settings.kg_query_refine_enabled = False
-    answer, grounded, anchors, _counts = rrepo._runtime.ask_component._answer_reasoning(
+    answer, grounded, anchors, _counts = rrepo._runtime.ask_component._response_drafting._answer_reasoning(
         nb.id, "derive", chain_result.nodes, [], "",
         chains=chain_result.inferences)
     assert grounded is True

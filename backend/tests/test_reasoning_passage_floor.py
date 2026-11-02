@@ -25,9 +25,9 @@ import pytest
 
 from app.domain.retrieval import RetrievalSupport, RetrievedChunk
 from app.models.schemas import NotebookCreate
-from app.services import ask_service as ask_module
-from app.services.ask_service import AskService
+from app.services import response_drafting as ask_module
 from app.services.chunk_federation import reasoning_order_for
+from app.services.response_drafting import DefaultResponseDraftStage
 from app.services.retrieval import passage_floor
 
 HEADING = len(f"\n\n[{ask_module._REASONING_CHUNK_HEADING}]\n")
@@ -120,7 +120,7 @@ def service(repo):  # noqa: F811
 
 def _render(svc, notebook_id, chunks, structured_block, structured_map):
     captured: dict = {}
-    real = AskService._chunk_answer_context
+    real = DefaultResponseDraftStage._chunk_answer_context
 
     def _spy(self, chunks, budget_chars=None, notebook_id="", id_offset=0,
              **kwargs):
@@ -130,14 +130,14 @@ def _render(svc, notebook_id, chunks, structured_block, structured_map):
         captured["rendered"] = {entry["object_id"] for entry in id_map.values()}
         return block, id_map
 
-    AskService._chunk_answer_context = _spy
+    DefaultResponseDraftStage._chunk_answer_context = _spy
     try:
-        svc._answer_reasoning(
+        svc._response_drafting._answer_reasoning(
             notebook_id, "q", [], [], chunks=chunks,
             chunk_context_chars=PARTITION, structured_block=structured_block,
             structured_map=structured_map)
     finally:
-        AskService._chunk_answer_context = real
+        DefaultResponseDraftStage._chunk_answer_context = real
     return captured.get("rendered", set())
 
 
@@ -378,14 +378,14 @@ def test_a_spreadsheet_block_left_out_for_space_leaves_a_notice(service):
     sheet = _sheet()
     sheet.source_title = "wb" * 200          # the first line alone is ~500
     smap: dict = {}
-    out = svc._add_sheet_prompt("K", smap, [sheet], _Echo(),
+    out = svc._response_drafting._add_sheet_prompt("K", smap, [sheet], _Echo(),
                                 max_chars=len(notice) + 10)
     assert out == f"K\n\n{notice}" and smap == {}
     # Not even the notice fits: nothing is written.
-    assert svc._add_sheet_prompt("K", {}, [sheet], _Echo(),
+    assert svc._response_drafting._add_sheet_prompt("K", {}, [sheet], _Echo(),
                                  max_chars=len(notice) - 1) == "K"
     # No floor (max_chars None): the historical byte cap only, no notice.
-    assert notice not in svc._add_sheet_prompt("K", {}, [sheet], _Echo())
+    assert notice not in svc._response_drafting._add_sheet_prompt("K", {}, [sheet], _Echo())
 
 
 def test_no_notice_when_nothing_is_left_out(service):

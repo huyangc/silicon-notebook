@@ -240,7 +240,7 @@ Parser ProviderChain 是生产 ingestion 的唯一解析路由，启动拓扑为
 
 URL 导入由 core 统一探测与建源。初始 origin 命中部署的受信代理名单时，普通界面按钮与插件端口都可接纳 `text/markdown` 快照，按 `.md` 来源交给内建 Markdown 解析器而不经过 MinerU；其它 origin 保持 PDF 直链规则。受信 origin 的 `allow_private` 判定沿重定向链和解析下载应用，来源写入与解析仍走同一权限、容量与作业边界。
 
-Ask reasoning 与 Deep Report 的应用编排都已迁到 `backend/app/application` 的不可变 stage envelope。Ask 的 prepared input、retrieval evidence、response draft、committed answer 是四个所有权交接点，其中 response draft 由**可注入**的 `ResponseDraftStage`（入口 `execute_response_draft_stage`）产出、默认实现 `DefaultResponseDraftStage` 就是既有内联的合成/绑定逻辑，它只收冻结的 `ResponseDraftInput`（激活与 fail-open 降级之后的证据 + 检索前的披露事实）、只欠一份 `ReasoningResponseDraft`，取消在 seam 前与提交边界各检查一次；提交边界按 prepared 复核 mode 与身份元数据（`notebook_id`/`question`/`conversation_id`/`user_id`/`job_id`/`asked_at`，不一致即 `StageBoundaryError`），`model_errors` 由 core 在 stage 返回后、检索 ContextVar reset 之前统一填充；Report 明确交接 confirmed planning、generated sections、core final audit artifact 与 committed report。application 的精确 import allowlist 禁止 implementation/SDK/registry 反向依赖。两条流水都显式绑定 source scope、point-specific retrieval run、取消权威、非空 actor 与注入连接探针；retrieval run 仍是 embedding single-flight 与 leaf-I/O semaphore 的唯一所有者，stage wrapper 不占外层 slot，也不移动任何 KG/chunk/element/PPR leaf。Report planning 与 generation 各创建新 run，保留可变 `ReasoningResult` 作为 generation 内的独占工作副本，不做 evidence/id-map JSON 或递归 deep copy。多节 all-retrieval barrier → 至多一次 synthesis → 并行 drafting、单节零 synthesis、final editor、claim ledger、citation remap、整篇图片 batch、zero-body failed 与 retry 顺序均不变；final-audit 边界额外禁止改写 section Markdown。连接持有或 authority 漂移抛显式 boundary error，不能伪装成 optional retrieval miss。
+Ask reasoning 与 Deep Report 的应用编排都已迁到 `backend/app/application` 的不可变 stage envelope。Ask 的 prepared input、retrieval evidence、response draft、committed answer 是四个所有权交接点，其中 response draft 由**可注入**的 `ResponseDraftStage`（入口 `execute_response_draft_stage`）产出、默认实现 `DefaultResponseDraftStage` 位于 `response_drafting.py`，拥有合成/绑定的实际实现且不持有 AskService 回指，它只收冻结的 `ResponseDraftInput`（激活与 fail-open 降级之后的证据 + 检索前的披露事实）、只欠一份 `ReasoningResponseDraft`，取消在 seam 前与提交边界各检查一次；提交边界按 prepared 复核 mode 与身份元数据（`notebook_id`/`question`/`conversation_id`/`user_id`/`job_id`/`asked_at`，不一致即 `StageBoundaryError`），`model_errors` 由 core 在 stage 返回后、检索 ContextVar reset 之前统一填充；Report 明确交接 confirmed planning、generated sections、core final audit artifact 与 committed report。application 的精确 import allowlist 禁止 implementation/SDK/registry 反向依赖。两条流水都显式绑定 source scope、point-specific retrieval run、取消权威、非空 actor 与注入连接探针；retrieval run 仍是 embedding single-flight 与 leaf-I/O semaphore 的唯一所有者，stage wrapper 不占外层 slot，也不移动任何 KG/chunk/element/PPR leaf。Report planning 与 generation 各创建新 run，保留可变 `ReasoningResult` 作为 generation 内的独占工作副本，不做 evidence/id-map JSON 或递归 deep copy。多节 all-retrieval barrier → 至多一次 synthesis → 并行 drafting、单节零 synthesis、final editor、claim ledger、citation remap、整篇图片 batch、zero-body failed 与 retry 顺序均不变；final-audit 边界额外禁止改写 section Markdown。连接持有或 authority 漂移抛显式 boundary error，不能伪装成 optional retrieval miss。
 
 流式 Ask 的完成后扩展只有 `ask.completed_observer` 一个 point-specific host，它把既有 agent-profile、retrieval-experience 与 search-profile 三段后处理迁成三个内建 contribution；同步 `POST /ask`、MCP `ask` 与全局问答 worker 也驱动同一个 host（全局问答一次作业一条通知，`scope="global"`、`notebook_id` 为锚点库、`notebook_ids` 为按检索/引用归因的参与库集）。唯一组合根把 host 作为 domain port 注入 runtime，workflow 不 import SDK/registry。执行顺序保持 answer save → job done/unregister → browser final → agent-profile → reasoning-only retrieval-experience → search-profile → sentinel；三个 observer 仍串行、各自 fail-open，身份能力分别只有 notebook+actor、零身份、actor。入口/每贡献边界都用无 I/O connection probe 防止带 lease 调用插件；无插件或无适用 contribution 不触碰 clock/event/context/I/O。同步 POST Ask 与 MCP Ask 不进入该 streaming completion 口径，facade 没有新增公开插件 seat。
 
@@ -391,6 +391,9 @@ Legacy 的 `prompts.reflect_prompt` 在原 user 消息内先输出固定指令�
 `frontend/app/page.tsx` 是 collection/workspace 编排器，不再是所有模型与面板实现的唯一所有者：
 
 - `workspace-model.ts` 保存共享 API/视图类型与常量。
+- `use-source-intake.ts` 拥有来源暂存、文件/文件夹接入、类型确认、上传与链接提交；
+  `source-intake-panel.tsx` 只呈现其 typed view/commands。来源列表和提交后的状态仍由
+  `use-source-library.ts` 拥有，弹窗租约与焦点仍归根协调器，`page.tsx` 组合这些接口。
 - `use-source-sidebar.ts` 只拥有来源栏的临时拖动宽度、指针捕获与收起动画；持久收起状态仍由 `use-source-library.ts` 拥有，壳层组合来源栏与历史会话的切换。`source-sidebar-hint.tsx` 拥有按用户记忆的一次性发现提示，不发网络请求。
 - `notebook-question-suggestions.tsx` 仅在问答欢迎态读取模型问题建议，立即保留
   模板并隔离用户/笔记本/工作区代次；`useSourceLibrary.contentRevision` 提供与
@@ -609,6 +612,11 @@ transport disconnect / navigation / refresh
 
 ### 3.3 联合检索与回答合成
 
+论文工具执行与账目在 `reasoning_paper_actions.py`，章节定位、重放与读取在
+`reasoning_section_navigation.py`。各模块只接收能力所需的端口与显式 live view；
+视图读写同一份 `_ReasoningRunState`，不复制标量预算或另建证据池。
+`ReasoningRetriever` 保留动作派发、运行编排、预算与取消的权威入口。
+
 原文段落通道（`chunk` 基线与 `reasoning` 的 `search_chunks` 共用）按**参与集**读取：active notebook + 本次勾选的参考库各出一条召回腿，由 `backend/app/services/chunk_federation.py` 扁平化成单层扇出后合并，`CHUNK_FEDERATION_ENABLED` 是它的单一回退开关。非 active 的参与库按「该库当前可见来源」下推天花板，且大库只借用暖索引不冷加载。启用 KG overlay 或 PPR 时再加入 federated KG 上下文与 base-backed chunk。`reasoning` 使用 federated KG 路径。导航页（目录、图表清单）标记 `chunks.navigation` 在建块层计算（`services/navigation_chunks.py`，存量由后台回填补判），在检索产出点剔除（`services/navigation_filter.py`：`score_chunks`、PPR、KG 来源段落、精确标识符通道、选定来源图谱、按 id 水合的扩展提案与元素通道各自接入，读侧开关 `RETRIEVAL_NAVIGATION_FILTER_ENABLED`）。
 
 `reasoning` 的首轮原文播种（按子查询 + 整题关键词词法臂）与已确认方向补种、`add_subquery` 的原文半也走这条通道，且**不看**检索范围内有没有知识图谱：唯一的闸是 `chunk_search_active()`（`REASONING_CHUNK_SEARCH_ENABLED` + 调用方策略位 `allow_search_chunks`）。有图 run 的原文分区因此由 PPR 段与播种段共享；装配顺序单点在 `retrieval.reasoning_passage_order`（生产入口 `chunk_federation.reasoning_order_for` 从 settings 读席位数），问答 `_answer_reasoning`（按节合成逐节复用、只在本节绑定段之间）与深度报告 `ReportEngine._section_passage_order`（未绑定段；大纲绑定段仍排最前并抵扣席位）共用：先按相关度排序，再用 `interleave_by_lane` 按来源两道交错（判道看 relevance 的量纲：`relevance_on_ppr_scale`，PPR 段是 run 内 min-max 归一分，检索段是绝对融合分，二者不可比；精确段锚定在相关度位置、不参与交错），再由精确段占前缀席位，最后是当前库 / 逐库保底前缀（`retrieval.library_floor_rules`，与 mix 切分同一套规则，无参考库段落时惰性）；relevance 数值不改写（它参与接地阈值）。单次合成先于原文段装配的结构化块按 `retrieval.passage_floor` 留出的下限渲染（`AskService._assemble_structured_evidence`）。首轮播种外层池为 `min(N, 8)`；召回在宽度为 `max(1, min(N, 8, 8 // P))`（P = 参与库数）的信号量里跑，外层召回 × 联邦腿压在 8 以内；精排在闸外并发。原文检索工具 `ReasoningRetriever.search_chunks` 的选择步：绑定了 `retrieval_rerank` 且 `REASONING_CHUNK_RERANK_ENABLED` 开启时，召回后按融合分取前 `REASONING_CHUNK_RERANK_CANDIDATES` 条基线候选交 cross-encoder（生成问题补充候选单独精排、排在基线之后），按精排序取 k 段再按真实的当前库 id 走 `apply_active_reserve`（保底在最后一刀之后）；未配置 / 失败 / 超时（`REASONING_CHUNK_RERANK_TIMEOUT_SECONDS`）/ 候选池不超过 k 时回到 `select_chunk_candidates` 的 MMR，逐字节不变；取消信号与时间预算随调用交给 `RerankClientPort.rerank`（仅关键字可选参数，chunk 模式 mix 分支不传、行为不变）。精排的时间预算只管排队截止（只收紧、不超过该优先级的默认截止）与调用方等待，不改写 HTTP 请求超时，避免调用方私有预算把共享精排服务判成故障、打开 `retrieval_rerank` 熔断器。rerank 能力按 `model_clients` 属性探测，不进 `ReasoningModelProvider` 协议；失败只发 `reasoning_chunk_rerank_fallback` 事件、不进横幅集合。`search_chunks` 动作另有可选参数 `chunks_keywords`（`REFLECT_SCHEMA_TOP_LEVEL_FIELDS` 登记）。它骑子闸 `ReasoningRetriever.keyword_search_active()`（`chunk_search_active()` 且关键词臂本 run 能返回东西；后者单点在通道模块的 `retrieval_candidates.keyword_arm_available(settings)`，经 `RetrievalService.keyword_arm_available` 按属性探测，对等 run + `GLOBAL_ASK_KEYWORD_ARM_ENABLED=false` 时为假），schema（`reflect_schema_hint(keyword_search=…)`）、prompt、解析、执行四处读同一个值；首轮播种的词法臂也受这把子闸（关时不调通道、seed 步不写 `keyword_found`）。非空时在向量半之后走同一条 `keyword_chunks` 词法通道（单库只查本库、对等 run 逐库联邦），经 `top_chunks_by_relevance(…, chunk_mmr_k)` 并入，失败语义复用 `_keyword_seed_search`；通道内部（单库路径）的检索失败不记 model_error、不进横幅集合，只发 `ask_stage/chunk_keyword_union` 事件（chunk 模式的关键词补召回同一处）；解析截到 `CHUNKS_KEYWORDS_MAX_CHARS`（列表形态先按空格拼接）。语料语言由 `RetrievalService.keyword_corpus_languages` 单点给出（单库 = 本库、对等 = 参与库并集；不入 `RetrievalPort`，reasoning 按属性探测），`_first_round_plan` 取一次存进 run 状态，交给 `plan()` 的 `expand_query(corpus_langs=…)` 与每轮 reflect 的 `search_chunks` 说明。「范围内有没有图」（`kg_in_scope_for`）只决定无图披露步、规划的 KG 类型词表与五个图动作是否提供。
@@ -623,7 +631,7 @@ base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 
 
 Excel 专业分析插在 reasoning retrieval 结束与 response-draft seam 之前。它遍历冻结参与集中的当前笔记本及获准挂载库，只读取各自通过 `ActiveSourceScope.allows(owner_notebook_id, source_id)` 的可见来源 ceiling（显式选择，或当次全选快照，再减当前库隐藏合成来源），并按来源所属笔记本读取快照；仅在命中分析意图与已有快照时付 planner 成本。结果作为 `ResponseDraftInput.spreadsheet_results` 进入合成，并同时追加 `AskResponse.result_sets(kind="spreadsheet")` 与可点击来源引用。lane 内任何异常都只记录稳定异常类型并 fail-open，不能放宽 scope、阻塞原回答或修改用户来源。
 
-**关联报告分区**（单库问答带 `report_id` 时；可观察行为与预算见产品/API 文档「就深度报告追问（关联报告）」）。`AskService._engine_scope` 在来源天花板与 retrieval run 安装之后计算一次 `ReportFollowup`（报告行过报告门 → 判词 → 可读时由检索层 `AskCandidatePort.restore_report_references` 按 id 复原被引条目，每条读取再过同一个天花板），装进 `report_followup_context`：chunk 引擎读 `current_report_followup()`，reasoning 经 `PreparedReasoningAsk.report_followup` 显式传递。判词只有一个实现（`services/report_followup.report_link_verdict`），提问执行、`preview_reasoning_intent` 与就地预检 `report_link_check`（经 `_retrieval_ceiling` 非懒安装、不复原）三处共用；扩展引擎只让报告行过报告门（不通过为 `report_unavailable`），通过即定为 `engine_unsupported`，不读引用的归属与内容；全局（无主体）run 不计算报告。复原条目以原生对象类型与原生号段进入一个独立分区（`services/report_evidence.assemble_report_evidence`，渲染器由调用方注入、每类一次调用、按相关度跨类入选，预算 `ask_report_evidence_budget_chars` 与检索预算分开）：chunk 在记忆块之后、reasoning 在总预算截断与证据精炼之后、外部证据之前追加；不并入检索池参与排名（复原条目没有本轮检索分数）。报告块（`render_report_block`，`ask_report_context_max_chars`）经 `answer_prompt(report_block=…)` 与规则 15 进入回答 prompt。读入报告的 reasoning 轮次保持单次合成（`_draft_reasoning_response` 的按节合成门要求本轮没有读入报告的 `ReportTurn`），报告可读的 chunk 轮次不走文档概览快路径。回执在 `_save_answer` / `ask_evidence` 收口兜底补写（`_stamp_report_receipt`），同一处剥除 `[evidence not loaded]` 并发内容无关事件。读取失败 fail-soft 为「不读报告」（`read_failed`），`AskCancelled`、`RetrievalControlError` 与布线错误 `ReportRestoreScopeError` 照常上抛。
+**关联报告分区**（单库问答带 `report_id` 时；可观察行为与预算见产品/API 文档「就深度报告追问（关联报告）」）。`AskService._engine_scope` 在来源天花板与 retrieval run 安装之后计算一次 `ReportFollowup`（报告行过报告门 → 判词 → 可读时由检索层 `AskCandidatePort.restore_report_references` 按 id 复原被引条目，每条读取再过同一个天花板），装进 `report_followup_context`：chunk 引擎读 `current_report_followup()`，reasoning 经 `PreparedReasoningAsk.report_followup` 显式传递。判词只有一个实现（`services/report_followup.report_link_verdict`），提问执行、`preview_reasoning_intent` 与就地预检 `report_link_check`（经 `_retrieval_ceiling` 非懒安装、不复原）三处共用；扩展引擎只让报告行过报告门（不通过为 `report_unavailable`），通过即定为 `engine_unsupported`，不读引用的归属与内容；全局（无主体）run 不计算报告。复原条目以原生对象类型与原生号段进入一个独立分区（`services/report_evidence.assemble_report_evidence`，渲染器由调用方注入、每类一次调用、按相关度跨类入选，预算 `ask_report_evidence_budget_chars` 与检索预算分开）：chunk 在记忆块之后、reasoning 在总预算截断与证据精炼之后、外部证据之前追加；不并入检索池参与排名（复原条目没有本轮检索分数）。报告块（`render_report_block`，`ask_report_context_max_chars`）经 `answer_prompt(report_block=…)` 与规则 15 进入回答 prompt。读入报告的 reasoning 轮次保持单次合成（`DefaultResponseDraftStage._draft_sectioned_attempt` 的按节合成门要求本轮没有读入报告的 `ReportTurn`），报告可读的 chunk 轮次不走文档概览快路径。回执在 `_save_answer` / `ask_evidence` 收口兜底补写（`_stamp_report_receipt`），同一处剥除 `[evidence not loaded]` 并发内容无关事件。读取失败 fail-soft 为「不读报告」（`read_failed`），`AskCancelled`、`RetrievalControlError` 与布线错误 `ReportRestoreScopeError` 照常上抛。
 
 ### 3.3.1 逐步推理预算与结构化完整枚举
 
@@ -714,7 +722,10 @@ PostgreSQL KG 词法 producer 在同一召回词项和额度下选择 SQL 路径
 ### 3.3.3 大纲便签与按节合成
 
 `reasoning_retrieval.py` 的 `update_outline` 分支维护 run 内大纲，
-`outline_synthesis.py` 负责把终态结构映射为证据切片。
+`reasoning_outline.py` 拥有 `OutlineSection`、形状解析、证据绑定/合并、溢出保留和
+便签渲染等纯逻辑，以及保持来源归属的重排结果投影。原 `reasoning_retrieval`
+导入路径直接重导出同一批类型、函数和常量；动作分派、预算消耗、取消检查及唯一
+run 状态仍留在检索编排层。`outline_synthesis.py` 负责把终态结构映射为证据切片。
 `outline_wiring_active` 直接读取 `limits.effort` 与 `REASONING_OUTLINE_ENABLED`，
 不从预算数字反推档位。大纲属于检索运行状态，不新增持久表或独立响应载荷。
 
@@ -951,6 +962,21 @@ before 写回到目标点（行/列**原样复用 id**，引用跳转与代码�
 - **结构化输出能力所有权**：provider 按协议/接口/模型/凭据身份持有进程内 JSON Schema 能力状态，容量或标签变化不会使状态失效。首个调度内聊天调用由物理客户端单次并发去重探测；状态读取与客户端解析无网络 I/O。`core/model_schema.py` 负责示例到正式 schema 的保守转换及原始回复校验；物理客户端记录每个格式的连续不合规回复并记忆降级，调度出口则把 schema 不匹配的原始回复交回所有业务传输模式共用的 JSON 解析与形状兼容，领域 parser 继续拥有语义/证据准入。无法无损表达的动态映射保留普通 JSON。探测失败不参与熔断，实际 schema 与普通 JSON 的响应缓存隔离，不合 schema 的兜底回复不写严格缓存。精确生命周期、预算和回退合同归配对产品/API 与部署文档。
 
 ## 5. 当前模块边界
+
+### 代码导航入口
+
+以下只定位现有实现与验证入口；行为契约仍归上文数据流与配对产品/API 文档所有。
+用 `scripts/code_context.sh` 按限定符号读取，命令见 `scripts/README.md`「符号级代码导航」。
+
+| 修改任务 | 编排/接口入口 | 实现与相关验证 |
+| --- | --- | --- |
+| 大纲形状、绑定、溢出与便签 | `reasoning_retrieval.ReasoningRetriever._apply_outline_update` | `reasoning_outline` 的对应纯函数；`test_reasoning_outline.py`、`test_reasoning_outline_synthesis.py` |
+| 反思动作或运行状态 | `reasoning_retrieval.ReasoningRetriever.run`、`_dispatch_reflect_action` | 对应 `_action_*`；`test_reasoning_run_state_authority.py`、`test_reasoning_loop_characterization.py` |
+| 论文工具动作 | `reasoning_paper_actions.ReasoningPaperActions` | `test_reasoning_paper_tools.py`、`test_reasoning_run_state_authority.py` |
+| 章节导航动作 | `reasoning_section_navigation.ReasoningSectionNavigation` | `test_reasoning_section_nav.py`、`test_reasoning_run_state_authority.py` |
+| 回答起草与引用卡 | `response_drafting.DefaultResponseDraftStage.draft_response`、`_draft_citation_cards` | `ask_evidence.py`、`evidence_context.py`；`test_response_draft_module.py`、`test_ask_reasoning_stage_contract.py`、`test_ask_repository_golden.py` |
+| 来源上传与工作区归属 | `use-source-intake.ts::useSourceIntake.confirmUploadInner`、`source-intake-panel.tsx::SourceIntakePanel` | `use-source-library.ts`、`use-root-modal-coordinator.ts`；`source-intake.component.test.tsx`、来源拖放/暂存守卫及对应 owner hook 测试 |
+
 
 | 区域 | 当前所有者 | 当前边界与约束 |
 |---|---|---|

@@ -62,6 +62,7 @@ HIT_CLASSES = {
 RC = "services/retrieval_candidates.py"
 CF = "services/chunk_federation.py"
 RR = "services/reasoning_retrieval.py"
+RO = "services/reasoning_outline.py"
 AS = "services/ask_service.py"
 
 _CHUNKS_STAMPED = (
@@ -71,7 +72,7 @@ _CHUNKS_STAMPED = (
 _KNOWLEDGE_STAMPED = (
     ("assigns-attr", RC, "CandidateRetrievalService._federated_retrieve_impl", "notebook_id"),
     ("calls", RR, "ReasoningRetriever._closing_rerank", "_rescored_keeping_origin"),
-    ("calls", RR, "outline_truncated_kg_evidence", "_rescored_keeping_origin"),
+    ("calls", RO, "outline_truncated_kg_evidence", "_rescored_keeping_origin"),
 )
 _ELEMENTS_STAMPED = (
     ("passes-kw", CF, "_stamped", "notebook_id"),
@@ -421,6 +422,33 @@ def test_an_unstamped_hit_construction_fails(tmp_path, monkeypatch, source):
 def test_a_stamped_hit_construction_passes(tmp_path, monkeypatch):
     source = "def make(r, nb):\n    return RetrievedChunk(chunk_id=r.c, notebook_id=nb)\n"
     assert _scanned_problems(tmp_path, monkeypatch, source) == []
+
+
+@pytest.mark.parametrize("relocate", [False, True], ids=["deleted", "moved-to-other-function"])
+def test_outline_origin_proof_follows_its_implementation(tmp_path, monkeypatch, relocate):
+    proof = next(proof for proof in _KNOWLEDGE_STAMPED if proof[1] == RO)
+    fake = tmp_path / "app"
+    target = fake / RO
+    target.parent.mkdir(parents=True)
+    baseline = (
+        "def outline_truncated_kg_evidence(rescored, collected):\n"
+        "    return _rescored_keeping_origin(rescored, collected)\n"
+    )
+    target.write_text(baseline, encoding="utf-8")
+    monkeypatch.setattr(d9, "APP", fake)
+    assert _proof_problems(proof) == []
+    mutated = (
+        "def outline_truncated_kg_evidence(rescored, collected):\n"
+        "    return collected\n"
+    )
+    if relocate:
+        mutated += (
+            "def unrelated(rescored, collected):\n"
+            "    return _rescored_keeping_origin(rescored, collected)\n"
+        )
+    assert mutated != baseline
+    target.write_text(mutated, encoding="utf-8")
+    assert _proof_problems(proof)
 
 
 @pytest.mark.parametrize("replacement", [

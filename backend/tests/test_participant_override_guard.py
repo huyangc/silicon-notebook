@@ -926,7 +926,7 @@ _SEAT_FAILSOFT_SITES = (
     # D0-3:``synth()`` 把 KG 证据装配算在合成里(``_answer_context`` ->
     # ``evidence_context.knowledge_context`` -> canonical 折叠范围读座位),
     # 吞掉就是重试一次再返回空答案。
-    ("app/services/ask_service.py", "AskService._answer_with_retry", "synth"),
+    ("app/services/response_drafting.py", "DefaultResponseDraftStage._answer_with_retry", "synth"),
     # 对等模式的表格分析臂(联邦化):``_peer_workbook_results`` ->
     # ``RetrievalService.workbook_libraries`` -> ``federated_library_sources``
     # -> ``_bounded_participants`` -> 参与集座位。宽 handler 吞掉身份复核失败

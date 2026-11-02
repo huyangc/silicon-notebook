@@ -22,6 +22,7 @@ import { findFunctionIn, parseModule } from "../../test-support/semantic-source.
 
 
 const page = await parseModule("page.tsx");
+const sourceIntakePanel = await parseModule("source-intake-panel.tsx");
 
 
 /** page 里名为 `name` 的 JSX 标签上 `attribute={…}` 的表达式文本（每个出现处一项）。 */
@@ -117,16 +118,17 @@ test("报告那句的「全选」与来源栏「全选」是同一个动作（�
 test("「关闭并管理来源」关掉弹窗、展开来源栏、把焦点交给来源搜索框", () => {
   let onClick = null;
   function visit(node) {
-    if (ts.isJsxElement(node) && node.children.some((child) => ts.isJsxText(child) && child.getText(page).includes("关闭并管理来源"))) {
+    if (ts.isJsxElement(node) && node.children.some((child) => ts.isJsxText(child) && child.getText(sourceIntakePanel).includes("关闭并管理来源"))) {
       const property = node.openingElement.attributes.properties.find(
-        (item) => ts.isJsxAttribute(item) && item.name.getText(page) === "onClick",
+        (item) => ts.isJsxAttribute(item) && item.name.getText(sourceIntakePanel) === "onClick",
       );
-      onClick = property?.initializer?.expression?.getText(page) ?? "";
+      onClick = property?.initializer?.expression?.getText(sourceIntakePanel) ?? "";
     }
     ts.forEachChild(node, visit);
   }
-  visit(page);
-  assert.equal(onClick, "closeSourceModalToManageSources");
+  visit(sourceIntakePanel);
+  assert.equal(onClick, "onManageSources");
+  assert.deepEqual(jsxAttributeTexts("SourceIntakePanel", "onManageSources"), ["closeSourceModalToManageSources"]);
   const body = findFunctionIn(page, "Home", "closeSourceModalToManageSources").getText(page);
   assert.match(body, /rootModals\.requestClose\("source-add"/);
   assert.match(body, /if \(sourcesCollapsedRef\.current\) setSourcesCollapsedWithMorph\(false\)/);

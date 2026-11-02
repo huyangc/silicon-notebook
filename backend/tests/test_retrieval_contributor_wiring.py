@@ -81,7 +81,6 @@ def _report_with_host(host, *, graph=None):
 
 def _graph_service_access_violations(text: str) -> list[str]:
     tree = ast.parse(text)
-    graph_aliases = set()
 
     def assigned_names(node) -> tuple[str, ...]:
         if isinstance(node, ast.Assign):
@@ -93,71 +92,135 @@ def _graph_service_access_violations(text: str) -> list[str]:
             return (node.target.id,)
         return ()
 
-    for node in ast.walk(tree):
-        value = getattr(node, "value", None)
-        if (
-            isinstance(node, (ast.Assign, ast.AnnAssign))
-            and isinstance(value, ast.Call)
-            and isinstance(value.func, ast.Name)
-            and value.func.id == "getattr"
-            and len(value.args) >= 2
-            and isinstance(value.args[1], ast.Constant)
-            and value.args[1].value == "selected_source_graph"
-        ):
-            graph_aliases.update(assigned_names(node))
-    changed = True
-    while changed:
-        changed = False
-        for node in ast.walk(tree):
-            value = getattr(node, "value", None)
-            if (
-                isinstance(node, (ast.Assign, ast.AnnAssign))
-                and isinstance(value, ast.Name)
-                and value.id in graph_aliases
-            ):
-                for name in assigned_names(node):
-                    if name not in graph_aliases:
-                        graph_aliases.add(name)
-                        changed = True
-
-    def graph_value(node) -> bool:
-        return (
-            isinstance(node, ast.Name) and node.id in graph_aliases
-        ) or (
-            isinstance(node, ast.Attribute)
-            and node.attr == "selected_source_graph"
-        )
-
     violations = []
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Attribute)
-            and node.attr in {"run", "fail_closed"}
-            and graph_value(node.value)
-        ):
-            violations.append(node.attr)
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "getattr"
-            and len(node.args) >= 2
-            and graph_value(node.args[0])
-            and isinstance(node.args[1], ast.Constant)
-            and node.args[1].value in {"run", "fail_closed"}
-        ):
-            violations.append(str(node.args[1].value))
-        if isinstance(node, ast.Call):
-            bridge_call = (
-                isinstance(node.func, ast.Name)
-                and node.func.id == "SelectedSourceGraphContributionCall"
+    function_types = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+    comprehension_types = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+    scope_types = (*function_types, ast.ClassDef, *comprehension_types)
+
+    def scan_scope(scope, inherited: set[str], default_aliases=()) -> None:
+        # A method's local alias belongs to that method. Nested functions may
+        # capture it, unless their own parameter or local binding shadows it.
+        nodes, nested = [], []
+
+        def collect(node):
+            nodes.append(node)
+            if isinstance(node, scope_types):
+                nested.append(node)
+                # Defaults and decorators execute in the enclosing scope.
+                if isinstance(node, function_types):
+                    for default in (*node.args.defaults, *node.args.kw_defaults):
+                        if default is not None:
+                            collect(default)
+                    for decorator in getattr(node, "decorator_list", ()):
+                        collect(decorator)
+                elif isinstance(node, comprehension_types):
+                    collect(node.generators[0].iter)
+                return
+            for child in ast.iter_child_nodes(node):
+                collect(child)
+
+        for child in ast.iter_child_nodes(scope):
+            collect(child)
+        local_names = {
+            node.id for node in nodes
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+        }
+        local_names.update(node.arg for node in nodes if isinstance(node, ast.arg))
+        local_names.update(
+            node.name for node in nested
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        )
+        for node in nodes:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                local_names.update(
+                    alias.asname or alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                local_names.add(node.name)
+        enclosing_writes = set()
+        for node in nodes:
+            if isinstance(node, (ast.Global, ast.Nonlocal)):
+                local_names.difference_update(node.names)
+                enclosing_writes.update(node.names)
+        graph_aliases = (inherited - local_names) | set(default_aliases)
+
+        def graph_value(node) -> bool:
+            return (
+                isinstance(node, ast.Name) and node.id in graph_aliases
+            ) or (
+                isinstance(node, ast.Attribute)
+                and node.attr == "selected_source_graph"
+            ) or (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "selected_source_graph"
             )
-            for index, argument in enumerate(node.args):
-                if graph_value(argument) and not (bridge_call and index == 0):
-                    violations.append("graph_service_forwarded")
-            if not bridge_call:
-                for keyword in node.keywords:
-                    if graph_value(keyword.value):
+
+        changed = True
+        while changed:
+            changed = False
+            for node in nodes:
+                if graph_value(getattr(node, "value", None)):
+                    for name in assigned_names(node):
+                        if name not in graph_aliases:
+                            graph_aliases.add(name)
+                            changed = True
+        for node in nodes:
+            # Reject graph writes that escape this scope. Otherwise a nested
+            # binder can taint its owner or a sibling after their local scan.
+            if (
+                enclosing_writes.intersection(assigned_names(node))
+                and graph_value(getattr(node, "value", None))
+            ):
+                violations.append("graph_service_escaped")
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr in {"run", "fail_closed"}
+                and graph_value(node.value)
+            ):
+                violations.append(node.attr)
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr"
+                and len(node.args) >= 2
+                and graph_value(node.args[0])
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value in {"run", "fail_closed"}
+            ):
+                violations.append(str(node.args[1].value))
+            if isinstance(node, ast.Call):
+                bridge_call = (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id == "SelectedSourceGraphContributionCall"
+                )
+                for index, argument in enumerate(node.args):
+                    if graph_value(argument) and not (bridge_call and index == 0):
                         violations.append("graph_service_forwarded")
+                if not bridge_call:
+                    for keyword in node.keywords:
+                        if graph_value(keyword.value):
+                            violations.append("graph_service_forwarded")
+        # Class namespaces do not form enclosing lexical scopes for methods.
+        captured = inherited if isinstance(scope, ast.ClassDef) else graph_aliases
+        for child in nested:
+            defaults = set()
+            if isinstance(child, function_types):
+                positional = [*child.args.posonlyargs, *child.args.args]
+                for parameter, value in zip(
+                    positional[len(positional) - len(child.args.defaults):],
+                    child.args.defaults,
+                ):
+                    if graph_value(value):
+                        defaults.add(parameter.arg)
+                for parameter, value in zip(child.args.kwonlyargs, child.args.kw_defaults):
+                    if graph_value(value):
+                        defaults.add(parameter.arg)
+            scan_scope(child, captured, defaults)
+
+    scan_scope(tree, set())
     return violations
 
 
@@ -344,7 +407,77 @@ def test_graph_service_direct_call_guard_catches_alias_and_forwarding_mutations(
         "service = getattr(self, 'selected_source_graph'); helper(value=service)",
         "service: object = getattr(self, 'selected_source_graph'); service.run()",
     )
-    assert all(_graph_service_access_violations(text) for text in mutations)
+    for mutation in mutations:
+        assert _graph_service_access_violations(mutation), mutation
+        relocated = (
+            "class Workflow:\n"
+            "    def unrelated(self, service='llm'):\n"
+            "        return helper(service)\n"
+            "    def relocated(self):\n"
+            f"        {mutation}\n"
+        )
+        assert _graph_service_access_violations(relocated), mutation
+
+
+def test_graph_aliases_do_not_leak_into_other_methods_or_shadowed_locals():
+    source = """
+class Workflow:
+    def graph(self):
+        service = getattr(self, 'selected_source_graph')
+        SelectedSourceGraphContributionCall(service)
+        def parameter(service):
+            return helper(service)
+        def local():
+            service = 'llm'
+            return helper(service)
+        [helper(service) for service in ('llm',)]
+
+    def retry(self, service='llm'):
+        return self._response_drafting._answer_with_retry(service=service)
+"""
+    assert _graph_service_access_violations(source) == []
+
+
+@pytest.mark.parametrize("declaration,use", [
+    ("def nested():", "service.run()"),
+    ("def nested():", "helper(service)"),
+    ("def nested():", "helper(value=service)"),
+    ("def nested(service=service):", "service.run()"),
+    ("def nested(*, captured=service):", "helper(captured)"),
+])
+def test_graph_alias_captured_by_nested_function_still_fails_the_guard(declaration, use):
+    source = (
+        "class Workflow:\n"
+        "    def graph(self):\n"
+        "        service = getattr(self, 'selected_source_graph')\n"
+        f"        {declaration}\n"
+        f"            {use}\n"
+    )
+    assert _graph_service_access_violations(source)
+
+
+@pytest.mark.parametrize("binding", ["nonlocal", "global"])
+@pytest.mark.parametrize("consumer", ["outer", "sibling"])
+def test_graph_alias_cannot_escape_through_nonlocal_or_global_writes(binding, consumer):
+    source = f"""
+service = None
+def outer(self):
+    {"global service" if binding == "global" else ""}
+    service = None
+    def bind():
+        {binding} service
+        graph = getattr(self, 'selected_source_graph')
+        service = graph
+    def sibling():
+        return helper(service)
+    bind()
+"""
+    if consumer == "outer":
+        source += "    service.run()\n"
+    else:
+        source += "    sibling()\n"
+    compile(source, "<graph escape mutation>", "exec")
+    assert _graph_service_access_violations(source)
 
 
 def test_report_runs_selected_evidence_without_graph_service():

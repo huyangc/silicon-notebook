@@ -701,7 +701,7 @@ def test_synthesis_step_truncates_anchor_evidence_ids(rrepo):
         bind_chat_client(rrepo, service, llm)
     service = rrepo._runtime.ask_service()
     with mock.patch.object(ReasoningRetriever, "run", lambda self, *a, **k: result), \
-         mock.patch.object(type(service), "_parse_answer_anchors",
+         mock.patch.object(type(service._response_drafting), "_parse_answer_anchors",
                            lambda self, *a, **k: fake_anchors):
         response = service.ask_reasoning(
             nb.id, AskRequest(question="综述一下版图设计要点", mode="reasoning"),

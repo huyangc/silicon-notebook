@@ -726,11 +726,15 @@ _SELF_METHODS = (
     "_primary_llm_unconfigured", "_unconfigured_model_response",
     "_no_kg_scope_admits_run", "_build_reasoning_retriever",
     "_activate_selected_source_graph", "_spreadsheet_reasoning_results",
-    "_response_draft_stage_for", "_draft_reasoning_response", "_draft_reasoning_evidence",
+    "_response_draft_stage_for", "_draft_reasoning_evidence",
     "_attach_gap_consult_result", "_consult_gap_sources",
     "_draft_external_evidence_section", "_commit_reasoning_draft", "_save_answer",
     "_short_circuit_evidence",
-    # what the shipped draft stage (``_draft_reasoning_response``) calls
+)
+
+# The default stage owns its implementation. Keep the observation names so
+# characterization still asserts the same semantic calls after their move.
+_DRAFT_METHODS = (
     "_reasoning_report_turn", "_assemble_structured_evidence", "_answer_reasoning",
     "_answer_reasoning_sections", "_answer_with_retry", "_memory_citations",
     "_reasoning_chunk_cards", "_extend_report_cards", "_external_exact_keys",
@@ -769,11 +773,18 @@ def _install_recording(rig: Rig, monkeypatch: Any) -> None:
     for name in _SELF_METHODS:
         monkeypatch.setattr(service, name,
                             _recorded("self", name, getattr(service, name), recorder, hooks))
+    drafting = service._response_drafting
+    monkeypatch.setattr(drafting, "draft_response", _recorded(
+        "self", "_draft_reasoning_response", drafting.draft_response, recorder, hooks))
+    for name in _DRAFT_METHODS:
+        monkeypatch.setattr(drafting, name,
+                            _recorded("self", name, getattr(drafting, name), recorder, hooks))
     for label, attribute, names in _PORT_METHODS:
         port = getattr(service, attribute)
         for name in names:
             monkeypatch.setattr(port, name,
                                 _recorded(label, name, getattr(port, name), recorder, hooks))
+    drafting.effective_schemas = service.schemas.effective_schemas
     for module_name, names in _MODULE_FUNCTIONS:
         module = importlib.import_module(module_name)
         for name in names:
@@ -2399,10 +2410,10 @@ def _direct_draft(rig: Rig, payload, job_id, cancel, on_trace):
     for label, args in (("stage", ("not a stage", runtime)),
                         ("runtime", (stage, "not a runtime"))):
         try:
-            service._draft_reasoning_response(*args)
+            service._response_drafting.draft_response(*args)
         except Exception as exc:  # noqa: BLE001 — the raise IS the observation
             outcomes[label] = f"{type(exc).__name__}: {exc}"
-    outcomes["draft"] = service._draft_reasoning_response(stage, runtime)
+    outcomes["draft"] = service._response_drafting.draft_response(stage, runtime)
     return outcomes
 
 

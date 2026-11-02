@@ -425,10 +425,10 @@ def test_hint_sources_load_their_vectors_concurrently(repo, monkeypatch):
         seen.append((source_id, current_retrieval_run(), len(_STATS_SCOPES.get())))
         return {chunk_ids[0]: 0.5}
 
-    monkeypatch.setattr(retriever, "_section_similarities", similarities)
+    monkeypatch.setattr(retriever._section_navigation, "_section_similarities", similarities)
     with retrieval_run(run_kind="ask_reasoning") as run:
         with collect_section_vector_stats():
-            result = retriever._section_similarities_parallel(
+            result = retriever._section_navigation._section_similarities_parallel(
                 [("nb", "src-a", ["a-1"]), ("nb", "src-b", ["b-1"])], ("q",))
     assert result == {("nb", "src-a"): {"a-1": 0.5}, ("nb", "src-b"): {"b-1": 0.5}}
     assert sorted(seen, key=lambda item: item[0]) == [
@@ -567,7 +567,7 @@ def test_peer_run_keeps_the_gate_and_routes_by_owner(repo, monkeypatch):
         state = SimpleNamespace(
             chunks=[_hit("c-s0", notebook_id="nb-b")], notebook_id="nb-a",
             elements=[], enumerations=[])
-        rows = retriever._section_source_rows(state)
+        rows = retriever._section_navigation._section_source_rows(state)
     assert [(r.source_id, r.notebook_id) for r in rows] == [("src-spec", "nb-b")]
 
 
@@ -1268,13 +1268,13 @@ def test_element_sources_keep_their_owner_and_follow_passage_sources():
         chunks=[_hit("c-s0", notebook_id="nb-b")], notebook_id="nb-a",
         elements=[_element("src-x", "参考库表格", "nb-c"), _element()],
         enumerations=[])
-    rows = retriever._section_source_rows(state)
+    rows = retriever._section_navigation._section_source_rows(state)
     assert [(r.source_id, r.notebook_id) for r in rows] == [
         ("src-spec", "nb-b"), ("src-x", "nb-c")]
     # an unstamped element of the run's own notebook reads as that notebook
     state.chunks, state.elements = [], [_element()]
     assert [(r.source_id, r.notebook_id)
-            for r in retriever._section_source_rows(state)] == [("src-spec", "nb-a")]
+            for r in retriever._section_navigation._section_source_rows(state)] == [("src-spec", "nb-a")]
 
 
 def test_the_last_turn_offers_no_browse_but_still_offers_read(repo, monkeypatch):

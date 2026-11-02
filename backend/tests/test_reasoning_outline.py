@@ -18,19 +18,15 @@ from app.core.ask_retrieval_policy import ask_retrieval_limits
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
-from app.services.reasoning_retrieval import (
+from app.services.reasoning_outline import (
     OUTLINE_ACTION,
-    CollectionEnumerationOutcome,
     OutlineSection,
-    ReasoningRetriever,
     bind_outline_evidence,
     carry_outline_overflow,
     merge_outline_evidence,
     outline_binding_keys,
     outline_signature,
-    outline_wiring_active,
     parse_outline_sections,
-    _EnumChain,
     _MAX_OUTLINE_UPDATES,
     _OUTLINE_MAX_PENDING_EVIDENCE,
     _OUTLINE_EVIDENCE_KEY_CHARS,
@@ -43,12 +39,38 @@ from app.services.reasoning_retrieval import (
     _outline_note,
     _outline_nudge_note,
 )
+from app.services.reasoning_retrieval import (
+    CollectionEnumerationOutcome,
+    ReasoningRetriever,
+    _EnumChain,
+    outline_wiring_active,
+)
 from app.services.retrieval import RetrievedChunk, RetrievedElement
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients, bind_chat_client
 
 
 NOW = "2026-07-30T00:00:00+08:00"
+
+
+def test_legacy_outline_imports_preserve_type_and_function_identity():
+    from app.services import reasoning_outline as outline
+    from app.services import reasoning_retrieval as legacy
+
+    for name in (
+        "OUTLINE_ACTION", "OutlineSection", "parse_outline_sections",
+        "outline_binding_keys", "bind_outline_evidence", "merge_outline_evidence",
+        "carry_outline_overflow", "outline_truncated_kg_evidence",
+        "outline_signature", "_outline_note", "_outline_nudge_note",
+        "_outline_text", "_unique_outline_id", "_rescored_keeping_origin",
+        "_MAX_OUTLINE_UPDATES", "_OUTLINE_MAX_SECTIONS", "_OUTLINE_TITLE_CHARS",
+        "_OUTLINE_ID_CHARS", "_OUTLINE_EVIDENCE_KEY_CHARS", "_OUTLINE_MAX_EVIDENCE",
+        "_OUTLINE_MAX_PENDING_EVIDENCE", "_OUTLINE_NUDGE_MAX_ROUNDS",
+        "_OUTLINE_NUDGE_MIN_ITEMS", "_OUTLINE_TITLE_MARKER_RE",
+    ):
+        assert getattr(legacy, name) is getattr(outline, name), name
+    sections = legacy.parse_outline_sections([{"id": "intro", "title": "概述"}])
+    assert type(sections[0]) is outline.OutlineSection
 
 
 @pytest.fixture

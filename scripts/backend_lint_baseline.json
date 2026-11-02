@@ -706,9 +706,6 @@
   "backend/app/services/ask_execution.py": {
     "I001": 1
   },
-  "backend/app/services/ask_service.py": {
-    "I001": 11
-  },
   "backend/app/services/batch_ingest.py": {
     "I001": 2
   },
@@ -959,9 +956,6 @@
     "I001": 1
   },
   "backend/app/services/query_rewrite.py": {
-    "I001": 2
-  },
-  "backend/app/services/reasoning_retrieval.py": {
     "I001": 2
   },
   "backend/app/services/remote_sources.py": {

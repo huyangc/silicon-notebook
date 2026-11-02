@@ -27,6 +27,7 @@ import pytest
 from app.domain.retrieval import RetrievedChunk, RetrievedElement
 from app.models.schemas import NotebookCreate
 from app.services.ask_service import AskService
+from app.services.response_drafting import DefaultResponseDraftStage
 from app.services.retrieval import promote_bounded_prefix
 from tests.model_testkit import bind_chat_client
 from tests.test_exact_lookup import (  # noqa: F401  (repo fixture)
@@ -68,7 +69,7 @@ def _tied_filler(index):
     return chunk
 
 
-_REAL_CHUNK_ANSWER_CONTEXT = AskService._chunk_answer_context
+_REAL_CHUNK_ANSWER_CONTEXT = DefaultResponseDraftStage._chunk_answer_context
 
 
 def _spy_assembly(monkeypatch):
@@ -102,7 +103,7 @@ def _spy_assembly(monkeypatch):
         captured.update(call)
         return block, id_map
 
-    monkeypatch.setattr(AskService, "_chunk_answer_context", _spy)
+    monkeypatch.setattr(DefaultResponseDraftStage, "_chunk_answer_context", _spy)
     return captured
 
 
@@ -128,7 +129,7 @@ def _run(repo, notebook_id, question, monkeypatch, *, filler_count=8):
     # twice must get two independent captures.
     with monkeypatch.context() as patch:
         captured = _spy_assembly(patch)
-        repo._runtime.ask_service()._answer_reasoning(
+        repo._runtime.ask_service()._response_drafting._answer_reasoning(
             notebook_id, question, [], [], chunks=chunks,
             chunk_context_chars=_CHUNK_CHARS,
         )
@@ -251,7 +252,7 @@ def test_reserve_zero_is_byte_for_byte_the_pre_feature_assembly(repo, monkeypatc
         with monkeypatch.context() as patch:
             patch.setattr(repo.settings, "reasoning_exact_reserve", reserve)
             captured = _spy_assembly(patch)
-            repo._runtime.ask_service()._answer_reasoning(
+            repo._runtime.ask_service()._response_drafting._answer_reasoning(
                 notebook.id, IDENTIFIER_QUESTION, [], [], chunks=chunks,
                 chunk_context_chars=_CHUNK_CHARS,
             )
@@ -348,7 +349,7 @@ def _assemble(repo, monkeypatch, **kwargs):
     baseline: dict = {}
     with monkeypatch.context() as patch:
         captured = _spy_assembly(patch)
-        repo._runtime.ask_service()._answer_reasoning(
+        repo._runtime.ask_service()._response_drafting._answer_reasoning(
             notebook.id, IDENTIFIER_QUESTION, [], kwargs.pop("elements", []),
             baseline_sink=baseline, **kwargs,
         )
@@ -442,14 +443,14 @@ def test_with_room_to_spare_the_trailing_block_is_admitted_after_the_bound_keys(
     still starting at `_MIX_KG_KEY_BASE`.
     """
     seen: list = []
-    original = AskService._answer_context
+    original = DefaultResponseDraftStage._answer_context
 
     def _spy_kg(self, notebook_id, top_hits, id_offset=0, budget_chars=None):
         seen.append(id_offset)
         return original(self, notebook_id, top_hits, id_offset=id_offset,
                         budget_chars=budget_chars)
 
-    monkeypatch.setattr(AskService, "_answer_context", _spy_kg)
+    monkeypatch.setattr(DefaultResponseDraftStage, "_answer_context", _spy_kg)
     counts: dict = {}
     captured, baseline = _assemble(
         repo, monkeypatch,
@@ -481,14 +482,14 @@ def test_a_section_with_only_trailing_chunks_still_moves_the_kg_segment(
     own k1 — two different objects behind one anchor, silently.
     """
     seen: list = []
-    original = AskService._answer_context
+    original = DefaultResponseDraftStage._answer_context
 
     def _spy_kg(self, notebook_id, top_hits, id_offset=0, budget_chars=None):
         seen.append(id_offset)
         return original(self, notebook_id, top_hits, id_offset=id_offset,
                         budget_chars=budget_chars)
 
-    monkeypatch.setattr(AskService, "_answer_context", _spy_kg)
+    monkeypatch.setattr(DefaultResponseDraftStage, "_answer_context", _spy_kg)
     captured, baseline = _assemble(
         repo, monkeypatch,
         trailing_chunks=[_labeled_chunk("inject", "inject", False)],
@@ -532,7 +533,7 @@ def test_the_seat_promotes_a_low_relevance_marked_chunk_ahead_of_a_tied_filler(
 
     with monkeypatch.context() as patch:
         captured = _spy_assembly(patch)
-        repo._runtime.ask_service()._answer_reasoning(
+        repo._runtime.ask_service()._response_drafting._answer_reasoning(
             notebook.id, IDENTIFIER_QUESTION, [], [],
             chunks=[filler, marked],
         )
