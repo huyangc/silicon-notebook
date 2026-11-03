@@ -14,6 +14,7 @@ local_tables()。这样即使全覆盖性被破坏, 报错的是这条测试给�
 from __future__ import annotations
 
 import ast
+import dataclasses
 import pathlib
 import re
 import sqlite3
@@ -779,6 +780,49 @@ def test_foreign_key_parents_have_lower_copy_rank_than_children_when_both_synced
         "(child, parent, rank(child), rank(parent)): "
         f"{violations}"
     )
+
+
+# --------------------------------------------------------------- 行过滤 (D15 (a))
+
+
+def test_row_filters_are_memory_items_and_its_three_children_only():
+    """只有 memory_items 按行过滤（未采纳的系统建议不导出），三张 PARENT 子表
+    跟随父行；其它表一律不过滤。新增一处过滤必须在这里显式登记。"""
+    filtered = {
+        spec.name: sync_manifest_module.row_filter_for(spec.name)
+        for spec in SYNC_MANIFEST
+        if spec.sync_class is not SyncClass.LOCAL
+        and sync_manifest_module.row_filter_for(spec.name) is not None
+    }
+    assert {name: hop for name, (hop, _) in filtered.items()} == {
+        "memory_items": 0,
+        "memory_revisions": 1,
+        "memory_provenance": 1,
+        "memory_embeddings": 1,
+    }
+    for _hop, predicate in filtered.values():
+        assert predicate is spec_for("memory_items").row_filter
+    assert spec_for("memory_items").row_filter("t0") == (
+        "NOT (t0.suggested_signal IS NOT NULL AND t0.status IN ('candidate', 'rejected'))"
+    )
+
+
+@pytest.mark.parametrize(
+    ("table", "change", "message"),
+    [
+        ("memory_revisions", {"follows_parent_filter": False}, "must set follows_parent_filter"),
+        ("chunks", {"follows_parent_filter": True}, "whose parent has a row_filter"),
+        ("memory_revisions", {"row_filter": str}, "NOTEBOOK-scoped"),
+        ("answers", {"row_filter": str}, "NOTEBOOK-scoped"),
+    ],
+)
+def test_row_filter_shape_rules_are_checked_when_the_manifest_loads(table, change, message):
+    specs = tuple(
+        dataclasses.replace(spec, **change) if spec.name == table else spec
+        for spec in SYNC_MANIFEST
+    )
+    with pytest.raises(ValueError, match=message):
+        sync_manifest_module._check_row_filters(specs)
 
 
 # --------------------------------------------------------------- import 白名单

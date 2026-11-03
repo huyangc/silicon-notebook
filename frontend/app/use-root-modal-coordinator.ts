@@ -19,6 +19,8 @@ export type RootModalSlot =
   | "shared-preview"
   | "shared-by-me"
   | "memory-save"
+  | "memory-suggest-close"
+  | "memory-suggestion-adopt"
   | "catalog-review"
   | "conversation-share"
   | "analytics"
@@ -143,6 +145,8 @@ export const ROOT_MODAL_POLICIES: Readonly<Record<RootModalSlot, ModalPolicy>> =
   "shared-preview": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
   "shared-by-me": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },
   "memory-save": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 84, backdrop: false, escape: false },
+  "memory-suggest-close": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false, workspaceSensitive: true },
+  "memory-suggestion-adopt": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false, workspaceSensitive: true },
   "catalog-review": { ownerKinds: ["source"], conflictGroup: "primary", layer: 80, backdrop: true, escape: false },
   "conversation-share": { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false },
   analytics: { ownerKinds: ["workspace"], conflictGroup: "primary", layer: 60, backdrop: true, escape: false },

@@ -628,6 +628,8 @@ def _drain_knowhow_projection_schedulers():
     next test, producing order-dependent foreign-key and projection failures.
     """
     yield
+    from app.services.notebook_activity_writer import _drain_activity_writers_for_tests
+    _drain_activity_writers_for_tests()
     from app.services.knowhow import api as knowhow_api
 
     schedulers = list(knowhow_api._SCHEDULERS.values())
@@ -638,6 +640,7 @@ def _drain_knowhow_projection_schedulers():
             pending = list(scheduler._timers.values())
             scheduler._timers.clear()
             scheduler._rerun.clear()
+            scheduler._contexts.clear()
         pending_timers.extend(pending)
         for timer in pending:
             timer.cancel()

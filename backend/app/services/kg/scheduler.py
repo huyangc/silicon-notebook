@@ -14,12 +14,12 @@ job threads are blocked the window pool keeps draining windows.
 from __future__ import annotations
 
 import concurrent.futures as cf
-import contextvars
 import logging
 import threading
 from typing import Any, Callable
 
 from app.core.config import Settings
+from app.services.collab_jobs import submission_context
 
 _logger = logging.getLogger(__name__)
 _lock = threading.Lock()
@@ -73,7 +73,7 @@ def submit_window(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Fu
     fresh Context per submission so per-user model routing/log ownership is
     preserved even when many windows run concurrently."""
     _ensure()
-    ctx = contextvars.copy_context()
+    ctx = submission_context()
     ticket = {"started": False}
     global _window_waiting
     with _active_lock:
@@ -123,7 +123,7 @@ def submit_job(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Futur
     包一层 _run 让 _job_active 反映在跑的 job 数,但仍经 ctx.run 重放 ContextVar 快照
     (每用户 KG_LLM 的命脉,不得退化成裸 submit(fn))。"""
     _ensure()
-    ctx = contextvars.copy_context()
+    ctx = submission_context()
     ticket = {"started": False}
     global _job_waiting
     with _active_lock:

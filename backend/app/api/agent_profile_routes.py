@@ -60,9 +60,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from app.api.collab_marks import append_mark, committed_result
 
 from app.api.deps import (
+    notebook_capability_owner,
     get_current_user,
     mirrored_notebook_error,
     notebook_capability_allowed,
@@ -180,7 +182,7 @@ def _label_allowed_for_scope(scope: str, label: str) -> bool:
     return label in allowed
 
 
-def _owner_for_scope(scope: str, notebook_id: str, user: UserProfile) -> str:
+def _owner_for_scope(scope: str, notebook_id: str, user: UserProfile, request: Request = None) -> str:
     """``scope="shared"`` resolves to the base sentinel and requires the
     ``agent_profile:write`` capability (404 on denial — existence is never
     disclosed to a caller who cannot write). ``scope="mine"`` resolves to the
@@ -188,10 +190,11 @@ def _owner_for_scope(scope: str, notebook_id: str, user: UserProfile) -> str:
     from the request, so there is no separate authorization check to make —
     a reader editing "mine" can only ever be editing their own row."""
     if scope == "shared":
-        if not notebook_capability_allowed(
-            "agent_profile:write", notebook_id, user.id
-        ):
+        owner_id = notebook_capability_owner("agent_profile:write", notebook_id, user.id)
+        if owner_id is None:
             raise HTTPException(status_code=404, detail="Notebook not found")
+        if request is not None:
+            append_mark(request, notebook_id, "agent_profile:write", owner_id, user, source="guard")
         # 镜像写入围栏,与所有装饰器端点同序(权限先判)。今天
         # ``_CAPABILITY_MIRROR_FENCE["agent_profile:write"]`` 是 False——理解底座是
         # 目标端用户自己用出来的,不在同步闭包里——所以这一句恒为 no-op。**刻意写在
@@ -410,10 +413,13 @@ def _can_manage_experiences(notebook_id: str, user_id: str) -> bool:
     return notebook_capability_allowed("agent_profile:write", notebook_id, user_id)
 
 
-def _require_experience_manager(notebook_id: str, user: UserProfile) -> None:
+def _require_experience_manager(notebook_id: str, user: UserProfile, request: Request = None) -> None:
     """两个写端点共用的守卫:能力 → 404,镜像围栏 → 409(与 rebuild 同序同形)。"""
-    if not notebook_capability_allowed("agent_profile:write", notebook_id, user.id):
+    owner_id = notebook_capability_owner("agent_profile:write", notebook_id, user.id)
+    if owner_id is None:
         raise HTTPException(status_code=404, detail="Notebook not found")
+    if request is not None:
+        append_mark(request, notebook_id, "agent_profile:write", owner_id, user, source="guard")
     mirrored = notebook_mirror_fence("agent_profile:write", notebook_id)
     if mirrored:
         raise mirrored_notebook_error(mirrored)
@@ -462,12 +468,13 @@ def get_notebook_experiences(
     dependencies=[Depends(require_notebook_read)],
 )
 def distill_notebook_experiences(
-    notebook_id: str, user: UserProfile = Depends(get_current_user)
+    notebook_id: str, user: UserProfile = Depends(get_current_user),
+    request: Request = None,
 ) -> ExperienceDistillStarted:
     # 权限在总闸**之前**,与 ``rebuild_understanding`` 刻意相反:下面的 DELETE
     # 根本不跟随总闸,两个写端点若一个先判闸、一个先判权限,同一个没有管理权的
     # 成员会因为按了哪个按钮而收到 404 或 409。先判权限让这一对恒为 404。
-    _require_experience_manager(notebook_id, user)
+    _require_experience_manager(notebook_id, user, request)
     store = retrieval_experience_store()
     if not _experiences_wiring_active(store):
         raise user_error(409, _EXPERIENCE_DISABLED_MESSAGE)
@@ -485,7 +492,7 @@ def distill_notebook_experiences(
         raise user_error(409, _EXPERIENCE_DISABLED_MESSAGE)
     if outcome != MANUAL_DISTILL_STARTED:
         raise user_error(409, _EXPERIENCE_UNAVAILABLE_MESSAGE)
-    return ExperienceDistillStarted(started=True)
+    return committed_result(request, notebook_id, "agent_profile:write", ExperienceDistillStarted(started=True))
 
 
 @router.delete(
@@ -494,9 +501,10 @@ def distill_notebook_experiences(
     dependencies=[Depends(require_notebook_read)],
 )
 def clear_notebook_experiences(
-    notebook_id: str, user: UserProfile = Depends(get_current_user)
+    notebook_id: str, user: UserProfile = Depends(get_current_user),
+    request: Request = None,
 ) -> ExperiencePartitionCleared:
-    _require_experience_manager(notebook_id, user)
+    _require_experience_manager(notebook_id, user, request)
     store = retrieval_experience_store()
     # ⚠ 有一批正在跑(或正排着队)时不清空,回 409。那一批此刻可能正卡在
     # ``chat_json()`` 上,清完之后它会把结果 upsert 回这个分区:用户看到「已清空
@@ -518,7 +526,7 @@ def clear_notebook_experiences(
     # 路径参数,空串匹配不上这条路由——所以这一句碰不到全局分区(``''``),
     # 而那正是 ``evict_to_limit`` 的 ⚠ 里唯一真正危险的误用。
     removed = store.evict_to_limit(0, notebook_id=notebook_id)
-    return ExperiencePartitionCleared(removed=removed)
+    return committed_result(request, notebook_id, "agent_profile:write", ExperiencePartitionCleared(removed=removed))
 
 
 @router.put(
@@ -531,6 +539,7 @@ def update_understanding_block(
     label: UnderstandingLabel,
     payload: UnderstandingBlockUpdate,
     user: UserProfile = Depends(get_current_user),
+    request: Request = None,
 ) -> UnderstandingBlockOut:
     if not _wiring_active():
         raise user_error(409, _DISABLED_MESSAGE)
@@ -538,7 +547,7 @@ def update_understanding_block(
         raise user_error(422, _SCOPE_LABEL_MISMATCH_MESSAGE)
     if len(payload.value) > AGENT_PROFILE_VALUE_MAX_CHARS:
         raise user_error(422, _VALUE_TOO_LONG_MESSAGE)
-    owner_id = _owner_for_scope(payload.scope, notebook_id, user)
+    owner_id = _owner_for_scope(payload.scope, notebook_id, user, request)
     try:
         row = _profile_store().write_block(
             notebook_id,
@@ -554,7 +563,7 @@ def update_understanding_block(
         )
     except AgentProfileRevisionConflict:
         raise user_error(409, _REVISION_CONFLICT_MESSAGE)
-    return _block_out(row)
+    return committed_result(request, notebook_id, "agent_profile:write", _block_out(row))
 
 
 @router.delete(
@@ -568,6 +577,7 @@ def clear_understanding_block(
     scope: UnderstandingScope = Query(...),
     expected_revision: int = Query(..., ge=0),
     user: UserProfile = Depends(get_current_user),
+    request: Request = None,
 ) -> UnderstandingBlockOut:
     # codex R1 P2: DELETE 与 PUT 同享乐观并发——``expected_revision`` 是浏览器
     # **看到过**的那个版本,必填。服务端自读当前 revision 再清空会把「加载后被
@@ -576,7 +586,7 @@ def clear_understanding_block(
         raise user_error(409, _DISABLED_MESSAGE)
     if not _label_allowed_for_scope(scope, label):
         raise user_error(422, _SCOPE_LABEL_MISMATCH_MESSAGE)
-    owner_id = _owner_for_scope(scope, notebook_id, user)
+    owner_id = _owner_for_scope(scope, notebook_id, user, request)
     store = _profile_store()
     current = store.read_block(notebook_id, owner_id, label)
     if current is None:
@@ -600,7 +610,7 @@ def clear_understanding_block(
         # 读到行之后、清空之前被别的请求整块删掉(``clear_all``)——浏览器看到的
         # 值确实已经不在了,按幂等空块收。
         return _empty_block_out(label)
-    return _block_out(row)
+    return committed_result(request, notebook_id, "agent_profile:write", _block_out(row))
 
 
 @router.post(
@@ -612,25 +622,19 @@ def rebuild_understanding(
     notebook_id: str,
     payload: UnderstandingRebuildRequest,
     user: UserProfile = Depends(get_current_user),
+    request: Request = None,
 ) -> UnderstandingRebuildResponse:
     if not _wiring_active():
         raise user_error(409, _DISABLED_MESSAGE)
     jobs = repository().agent_profile_jobs
     if payload.scope == "shared":
-        if not notebook_capability_allowed(
-            "agent_profile:write", notebook_id, user.id
-        ):
-            raise HTTPException(status_code=404, detail="Notebook not found")
-        # 镜像写入围栏,与 `_owner_for_scope` 逐字同款(同一条理由写在那里)。
-        mirrored = notebook_mirror_fence("agent_profile:write", notebook_id)
-        if mirrored:
-            raise mirrored_notebook_error(mirrored)
+        _owner_for_scope("shared", notebook_id, user, request)
         started = jobs.start_base(notebook_id)
     else:
         started = jobs.start_overlay(notebook_id, user.id)
     if not started:
         raise user_error(409, _REBUILD_BUSY_MESSAGE)
-    return UnderstandingRebuildResponse(started=True)
+    return committed_result(request, notebook_id, "agent_profile:write", UnderstandingRebuildResponse(started=True))
 
 
 # --------------------------------------------------------------------------

@@ -83,6 +83,34 @@ const NOTEBOOKS: NotebookSummary[] = [
     created_label: "昨天",
     access: "reader",
   },
+  // 分享编辑 P1:点名编辑者有编辑权(can_manage_content)、没有管理权。共享给群组是管理档
+  // (notebook:grant),所以它不该进「待添加」候选——提交必 404。
+  {
+    id: "nb-editor",
+    name: "我是编辑者的库",
+    purpose: "",
+    primary_domain: "",
+    status: "ready",
+    counts: {},
+    created_label: "昨天",
+    access: "reader",
+    can_manage_content: true,
+    can_manage_notebook: false,
+    collaborator_role: "editor",
+  },
+  // 组管理员(admin 授权):管理权在手,照常是候选。
+  {
+    id: "nb-managed",
+    name: "我管理的组内库",
+    purpose: "",
+    primary_domain: "",
+    status: "ready",
+    counts: {},
+    created_label: "昨天",
+    access: "reader",
+    can_manage_content: true,
+    can_manage_notebook: true,
+  },
 ];
 
 beforeEach(() => {
@@ -127,6 +155,8 @@ test("独立页面集中展示群组知识库，并只列出当前用户可管�
   expect(screen.getByText("共享可靠性资料")).toBeInTheDocument();
   expect(screen.getByText("先进封装工艺")).toBeInTheDocument();
   expect(screen.queryByText("只读参考库")).not.toBeInTheDocument();
+  expect(screen.queryByText("我是编辑者的库")).not.toBeInTheDocument();
+  expect(screen.getByText("我管理的组内库")).toBeInTheDocument();
 
   vi.mocked(shareNotebookToGroup).mockResolvedValue({
     id: "grant-1", principal_type: "group", principal_id: "g1", role: "viewer",

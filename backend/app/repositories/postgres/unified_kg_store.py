@@ -3328,7 +3328,8 @@ class UnifiedKgStore:
             "SELECT s.id AS id, s.title AS title, s.source_type AS source_type, "
             "s.status AS status, s.parse_status AS parse_status, "
             "s.chunked_at AS chunked_at, er.created_at AS last_extraction_at, "
-            "er.status AS last_extraction_status, s.created_at AS created_at "
+            "er.status AS last_extraction_status, s.created_at AS created_at, "
+            "s.uploaded_by AS uploaded_by "
             "FROM sources s "
             "LEFT JOIN LATERAL ("
             "SELECT e.created_at, e.status FROM extraction_runs e "
@@ -3344,7 +3345,8 @@ class UnifiedKgStore:
                 (row["id"], row["title"], row["source_type"], row["status"],
                  row["parse_status"], iso_timestamp(row["chunked_at"]),
                  iso_timestamp(row["last_extraction_at"]),
-                 row["last_extraction_status"], iso_timestamp(row["created_at"]))
+                 row["last_extraction_status"], iso_timestamp(row["created_at"]),
+                 row["uploaded_by"])
                 for row in rows
             ),
         )

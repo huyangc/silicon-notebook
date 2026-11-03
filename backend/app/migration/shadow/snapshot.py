@@ -17,6 +17,7 @@ from app.migration.shadow.identity import fingerprint_sqlite
 from app.migration.shadow.manifest import MANIFEST, validate_sqlite_schema
 from app.migration.shadow.types import Manifest
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite_functions import register_sqlite_functions
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,7 @@ def open_fresh_live_sqlite(
             timeout=source.settings.db_busy_timeout_ms / 1000,
             check_same_thread=True,
         )
+        register_sqlite_functions(connection)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
@@ -186,6 +188,7 @@ def _validate_snapshot_file(
 ) -> int:
     uri = path.resolve(strict=True).as_uri() + "?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
+    register_sqlite_functions(conn)
     conn.row_factory = sqlite3.Row
     try:
         _cancelled(cancel_requested)
@@ -296,6 +299,7 @@ def create_snapshot(
             raise ValueError("live SQLite capture run is not enabled and safe")
         assert_live_sqlite_path(source, live_binding)
         destination_conn = sqlite3.connect(temporary)
+        register_sqlite_functions(destination_conn)
 
         def on_progress(status: int, remaining: int, total: int) -> None:
             if cancel_requested is not None and cancel_requested():

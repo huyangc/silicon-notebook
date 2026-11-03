@@ -19,6 +19,7 @@ import sqlite3
 import stat
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote
@@ -27,7 +28,6 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 import diag_common
-
 
 REPORT_LIMIT_BYTES = 32 * 1024
 EVIDENCE_LIMIT_BYTES = 128 * 1024
@@ -931,6 +931,21 @@ def _cleanup_stale_workspaces(
                 _safe_close_descriptor(evidence, child, "snapshot.stale_directory_close")
 
 
+def _sqlite_utc_microsecond_key(value: object) -> int | None:
+    # This diagnostic must remain stdlib-only and app-free. Mirror the pure
+    # schema callback without loading the application; semantic parity with
+    # app.domain.instant_order is pinned by test_diag_sqlite_schema_functions.
+    if value is None:
+        return None
+    try:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return (parsed.astimezone(timezone.utc) - datetime(1970, 1, 1, tzinfo=timezone.utc)) // timedelta(microseconds=1)
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
 def _open_read_only(
     path: Path, deadline: float, *, immutable_snapshot: bool = False
 ) -> sqlite3.Connection:
@@ -946,6 +961,7 @@ def _open_read_only(
         timeout=timeout,
     )
     try:
+        connection.create_function("sn_utc_us", 1, _sqlite_utc_microsecond_key, deterministic=True)
         connection.row_factory = sqlite3.Row
         if hasattr(connection, "setlimit"):
             connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 1024 * 1024)

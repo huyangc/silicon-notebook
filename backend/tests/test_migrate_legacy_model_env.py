@@ -91,6 +91,7 @@ def test_build_plan_preserves_roles_bindings_protocols_and_inferred_capacity(tmp
     assert plan.bindings["kg_extract"] == "kg"
     assert plan.bindings["knowledge_object_embedding"] == "embedding"
     assert plan.bindings["retrieval_rerank"] == "rerank"
+    assert plan.bindings["memory_suggest"] == "general"
     assert set(plan.bindings) == set(WORKLOADS)
     for secret in plan.secrets.values():
         assert secret not in plan.toml_text

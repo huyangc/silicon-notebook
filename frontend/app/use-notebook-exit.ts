@@ -26,6 +26,7 @@ import { httpErrorStatus, humanizedError, toUserMessage } from "./errors.ts";
 import { transferMemoriesInBatches } from "./memory-transfer.ts";
 import {
   EXIT_FAILED_TEXT,
+  EXIT_UNAVAILABLE_TEXT,
   EXIT_UNVERIFIED_TEXT,
   EXIT_WAIT_FOR_EXPORT_TEXT,
   EXPORT_TOO_LARGE_TEXT,
@@ -40,10 +41,13 @@ import {
   getExitDisclosure,
   leaveNotebook,
   listOwnTransferableMemoryIds,
+  MEMBERSHIP_EXIT,
   readExitState,
+  type ExitRoute,
   type ExitState,
   type LeaveOutcome,
 } from "./notebook-exit-api.ts";
+import { MEMBERSHIP_EXIT_PLAN, type ExitPlan } from "./notebook-exit-entries.ts";
 import type { Box } from "./notebook-exit-placement.ts";
 import { summarizeTransferResults, type TransferMode } from "./transfer-model.ts";
 
@@ -68,6 +72,9 @@ export const anchorAt = (left: number, top: number): ExitAnchor => ({
   box: { left, top, right: left, bottom: top },
 });
 
+export type { ExitPlan } from "./notebook-exit-entries.ts";
+export { MEMBERSHIP_EXIT_PLAN } from "./notebook-exit-entries.ts";
+
 export type ExitPhase =
   | "checking" // 正在读会删多少条
   | "leaving" // DELETE 在途(含事后核对)
@@ -76,10 +83,15 @@ export type ExitPhase =
 
 export type ExitFlow = {
   notebookId: string;
+  /** 入口上的动作名,确认面板的名称与「直接退出」按钮跟着它。 */
+  label: string;
   anchor: ExitAnchor;
   phase: ExitPhase;
   /** 确认框上显示的、离开将删除的条数。 */
   count: number;
+  /** Unadopted system drafts are disclosed separately and cannot be exported. */
+  suggestionCount?: number;
+  needsSuggestionRecount?: boolean;
   /** 服务端数到的条数与用户确认过的不一致(409):提示重新确认。 */
   changed: boolean;
   /** DELETE 在途。 */
@@ -124,6 +136,17 @@ export function useNotebookExit(handlers: {
   const epochRef = useRef(0);
   const controllerRef = useRef<AbortController | null>(null);
   const afterLeaveRef = useRef<Map<string, () => Promise<void>>>(new Map());
+  // 每本笔记本这一次退出的计划与进度(按笔记本记,同 afterLeaveRef:面板关掉之后才落地的
+  // DELETE 也要知道自己走的是哪条出口)。`step` 是正在走的那一步,`deleted` 是前几步累计删掉的条数。
+  const planRef = useRef<Map<string, { plan: ExitPlan; step: number; deleted: number; deletedSuggestions: number }>>(new Map());
+  const planOf = useCallback(
+    (id: string) => planRef.current.get(id) ?? { plan: MEMBERSHIP_EXIT_PLAN, step: 0, deleted: 0, deletedSuggestions: 0 },
+    [],
+  );
+  const routeOf = useCallback((id: string): ExitRoute => {
+    const entry = planOf(id);
+    return entry.plan.steps[entry.step] ?? MEMBERSHIP_EXIT;
+  }, [planOf]);
   // runCheck 在条数为 0 时直接接着发 DELETE;sendLeave 又要在结果里回头调 runCheck,用 ref 断开循环。
   const sendLeaveRef = useRef<(id: string, acknowledged: number) => Promise<void>>(async () => {});
   const handlersRef = useRef(handlers);
@@ -176,27 +199,37 @@ export function useNotebookExit(handlers: {
     const controller = new AbortController();
     controllerRef.current = controller;
     let count: number | null = null;
+    let suggestionCount = 0;
     try {
-      count = (await getExitDisclosure(id, controller.signal)).memory_count;
+      const disclosure = await getExitDisclosure(id, controller.signal, routeOf(id));
+      count = disclosure.memory_count;
+      suggestionCount = disclosure.suggestion_count;
     } catch {
       count = null;
     }
     if (controllerRef.current === controller) controllerRef.current = null;
     if (epochRef.current !== epoch) return; // 已取消/被替换:不再往下走,更不能发 DELETE
     if (count === null) {
+      if (mode === "quiet" && flowRef.current?.needsSuggestionRecount) {
+        const knownResult = flowRef.current.notice || flowRef.current.failure;
+        update({ phase: "unavailable", recounting: false, failure: `${knownResult}${knownResult ? " " : ""}${EXIT_UNAVAILABLE_TEXT}` });
+        return;
+      }
       // 静默重读失败时保留服务端刚给的数字与说明;只有首次/转移后的读取才退到「不盲退」。
       update(mode === "quiet" ? { recounting: false } : { phase: "unavailable", recounting: false, failure: "" });
       return;
     }
-    if (count === 0 && mode === "first") {
+    if (count === 0 && suggestionCount === 0 && mode === "first") {
       // 直接退出:条数为 0,不惊动面板(慢了才露出)。
       await sendLeaveRef.current(id, 0);
       return;
     }
-    update({ phase: "confirm", count, recounting: false });
-  }, [update]);
+    update({ phase: "confirm", count, suggestionCount, needsSuggestionRecount: false, recounting: false });
+  }, [routeOf, update]);
 
-  const afterLeft = useCallback(async (id: string, deleted: number | null) => {
+  const afterLeft = useCallback(async (id: string, deleted: number | null, deletedSuggestions = 0) => {
+    const { plan, deleted: earlier, deletedSuggestions: earlierSuggestions } = planOf(id);
+    planRef.current.delete(id);
     const anchor = flowRef.current?.notebookId === id ? flowRef.current.anchor : null;
     if (anchor) publish(null);
     try {
@@ -205,9 +238,9 @@ export function useNotebookExit(handlers: {
       handlersRef.current.onError(error);
     }
     // 刷新列表失败也要告诉用户退出已经发生(以及删了几条):这条提示是永久删除的唯一确认。
-    handlersRef.current.onToast(leftText(deleted ?? 0));
+    handlersRef.current.onToast(leftText(earlier + (deleted ?? 0), plan.label.replace(/（.*）$/, ""), plan.leftNote, earlierSuggestions + deletedSuggestions));
     if (anchor) restoreFocus(anchor);
-  }, [publish, restoreFocus]);
+  }, [planOf, publish, restoreFocus]);
 
   const settle = useCallback(async (
     id: string,
@@ -216,28 +249,48 @@ export function useNotebookExit(handlers: {
   ) => {
     const attached = flowRef.current?.notebookId === id;
     const toast = handlersRef.current.onToast;
+    const { still } = planOf(id).plan;
     const recount = () => { void runCheck(id, epochRef.current, "quiet"); };
     const reopen = (patch: Partial<ExitFlow>) => updateFor(id, {
       phase: "confirm", leaving: false, verifying: false, recounting: false, ...patch,
     });
+    // 多步计划(见 ExitPlan):这一步退成了、后面还有一步——面板还在就接着走下一步的告知;
+    // 面板已被取消则停下并如实说明,不报「已退出」(第二条读权还在)。
+    const advance = async (deleted: number | null, deletedSuggestions = 0): Promise<boolean> => {
+      const entry = planRef.current.get(id);
+      if (!entry || entry.step + 1 >= entry.plan.steps.length) return false;
+      entry.step += 1;
+      entry.deleted += deleted ?? 0;
+      entry.deletedSuggestions += deletedSuggestions;
+      if (!attached) {
+        planRef.current.delete(id);
+        toast(`退出没有完成：${still}。可以再点一次「${entry.plan.label}」。`);
+        return true;
+      }
+      updateFor(id, { phase: "checking", leaving: false, verifying: false, failure: "", notice: "", changed: false });
+      await runCheck(id, epochRef.current, "first");
+      return true;
+    };
     switch (outcome.kind) {
       case "left":
-        await afterLeft(id, outcome.deleted);
+        if (await advance(outcome.deleted, outcome.deletedSuggestions)) return;
+        await afterLeft(id, outcome.deleted, outcome.deletedSuggestions);
         return;
       case "disclosure":
         // 什么都没删、仍是成员。面板还在就换成服务端的新数字;面板已关(用户取消了)无事可报。
-        reopen({ count: outcome.memoryCount, changed: true, failure: "", notice: "" });
+        reopen({ count: outcome.memoryCount, suggestionCount: outcome.suggestionCount, needsSuggestionRecount: false, changed: true, failure: "", notice: "" });
         return;
       case "incomplete":
         if (!attached) {
           toast(outcome.status === 409
-            ? incompleteLateText(outcome.deleted, outcome.remaining)
-            : incompleteFailedText(outcome.deleted, outcome.remaining));
+            ? incompleteLateText(outcome.deleted, outcome.remaining, still)
+            : incompleteFailedText(outcome.deleted, outcome.remaining, still));
           return;
         }
         reopen(outcome.status === 409
           ? { count: outcome.remaining, changed: false, failure: "", notice: incompleteConfirmText(outcome.deleted, outcome.remaining) }
-          : { count: outcome.remaining, changed: false, notice: "", failure: incompleteFailedText(outcome.deleted, outcome.remaining) });
+          : { count: outcome.remaining, changed: false, notice: "", failure: incompleteFailedText(outcome.deleted, outcome.remaining, still) });
+        updateFor(id, { suggestionCount: undefined, needsSuggestionRecount: true });
         // 契约:未完成之后从告知重新开始——静默重读一次,以服务端此刻的条数为准。
         updateFor(id, { recounting: true });
         recount();
@@ -254,18 +307,19 @@ export function useNotebookExit(handlers: {
     }
     // unknown:传输中断/超时。核对之后才说话。
     if (state?.left) {
+      if (await advance(null)) return;
       await afterLeft(id, null);
       return;
     }
     if (state) {
-      const text = stillMemberText(state.remaining);
+      const text = stillMemberText(state.remaining, still, state.suggestionCount);
       if (!attached) toast(text);
-      else reopen({ count: state.remaining, changed: false, failure: "", notice: text });
+      else reopen({ count: state.remaining, suggestionCount: state.suggestionCount, needsSuggestionRecount: false, changed: false, failure: "", notice: text });
       return;
     }
     if (!attached) toast(EXIT_UNVERIFIED_TEXT);
     else updateFor(id, { phase: "unavailable", leaving: false, verifying: false, failure: EXIT_UNVERIFIED_TEXT });
-  }, [afterLeft, runCheck, updateFor]);
+  }, [afterLeft, planOf, runCheck, updateFor]);
 
   const sendLeave = useCallback(async (id: string, acknowledged: number) => {
     leavingRef.current.add(id);
@@ -279,7 +333,7 @@ export function useNotebookExit(handlers: {
     }
     let outcome: LeaveOutcome | { kind: "failed"; cause: unknown };
     try {
-      outcome = await leaveNotebook(id, acknowledged);
+      outcome = await leaveNotebook(id, acknowledged, routeOf(id));
     } catch (error) {
       outcome = { kind: "failed", cause: error };
     }
@@ -287,7 +341,7 @@ export function useNotebookExit(handlers: {
     if (outcome.kind === "unknown") {
       updateFor(id, { verifying: true });
       try {
-        state = await readExitState(id);
+        state = await readExitState(id, routeOf(id));
       } catch {
         state = null;
       }
@@ -295,26 +349,34 @@ export function useNotebookExit(handlers: {
     leavingRef.current.delete(id);
     bump();
     await settle(id, outcome, state);
-  }, [settle, update, updateFor]);
+  }, [routeOf, settle, update, updateFor]);
 
   sendLeaveRef.current = sendLeave;
 
-  /** 按下「退出共享」。`afterLeave` 由入口给:各入口退出后对账的方式不同。 */
-  const start = useCallback((notebookId: string, anchor: ExitAnchor, afterLeave: () => Promise<void>) => {
+  /** 按下「退出共享」/「退出协作」。`afterLeave` 由入口给:各入口退出后对账的方式不同。
+   *  `plan` 缺省 = 成员关系一步(「退出共享」),与这个参数出现之前逐字相同。 */
+  const start = useCallback((
+    notebookId: string,
+    anchor: ExitAnchor,
+    afterLeave: () => Promise<void>,
+    plan: ExitPlan = MEMBERSHIP_EXIT_PLAN,
+  ) => {
     if (flowRef.current?.notebookId === notebookId) return; // 双击:这本已经在流程里
     afterLeaveRef.current.set(notebookId, afterLeave);
     const epoch = ++epochRef.current;
     controllerRef.current?.abort(); // 上一本笔记本的读取作废;它已发出的 DELETE 不受影响
     controllerRef.current = null;
-    // 这本笔记本上一次 DELETE 还没落地(用户取消过):接回它,不发第二个请求。
+    // 这本笔记本上一次 DELETE 还没落地(用户取消过):接回它,不发第二个请求——也不换计划,
+    // 在途那次的出口才是要接回的。
     const attached = leavingRef.current.has(notebookId);
+    if (!attached) planRef.current.set(notebookId, { plan, step: 0, deleted: 0, deletedSuggestions: 0 });
     publish({
-      notebookId, anchor, phase: attached ? "leaving" : "checking", count: 0, changed: false,
+      notebookId, label: planOf(notebookId).plan.label, anchor, phase: attached ? "leaving" : "checking", count: 0, suggestionCount: 0, changed: false,
       leaving: attached, verifying: false, recounting: false, failure: "", notice: "",
       transfer: "idle", transferIds: [],
     });
     if (!attached) void runCheck(notebookId, epoch, "first");
-  }, [publish, runCheck]);
+  }, [planOf, publish, runCheck]);
 
   /** 收起面板,不动焦点(离开页面时用)。已在飞的请求不撤销,结果照常以提示告知。 */
   const dismiss = useCallback(() => {
@@ -335,7 +397,7 @@ export function useNotebookExit(handlers: {
     const current = flowRef.current;
     if (!current || current.phase !== "confirm") return;
     if (leavingRef.current.has(current.notebookId)) return;
-    if (current.recounting || current.transfer !== "idle") return;
+    if (current.recounting || current.needsSuggestionRecount || current.transfer !== "idle") return;
     // 导出按页读取:导出没完就清除,后面的页读到空,文件「成功」却只有前一截,原件已删。
     if (exportingRef.current.has(current.notebookId)) return;
     void sendLeave(current.notebookId, current.count);

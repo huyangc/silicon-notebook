@@ -19,6 +19,7 @@ import { clampSourcePage, sourcePageRequestIsCurrent } from "./source-page-state
 import { PROMOTION_SOURCE_TYPE, sourceIsPending } from "./source-management.ts";
 import { pageDocumentCount } from "./document-limit.ts";
 import { sourceElementDomId } from "./source-detail-state.ts";
+import { COLLAB_CHANGE_NOTICE_MS } from "./collab-refresh.ts";
 import {
   crossLibrarySourceNotebookId,
   defaultSourceScopeSelection,
@@ -52,6 +53,12 @@ const NO_SOURCE_IDS: ReadonlySet<string> = new Set();
  * request failed, or abandoned -- the owner (notebook + account) or write access
  * changed while it waited, so nothing was submitted, shown or refreshed for it.
  */
+
+/** 单篇重新解析撞上同一篇正在解析(409)时的兜底文案;服务端的 X-User-Message 优先。 */
+export const SOURCE_REPARSE_BUSY_TEXT = "这份来源正在解析，请等它完成";
+/** 那句说明在按钮旁停留多久。 */
+export const SOURCE_REPARSE_BUSY_HOLD_MS = 5000;
+
 export type SourceReparseOutcome = ReparseOutcome;
 
 /**
@@ -139,11 +146,41 @@ export function useSourceLibrary({
   const [sourcesPage, setSourcesPage] = useState(0);
   const [sourcesPageLoading, setSourcesPageLoading] = useState(false);
   const [sourcesCollapsed, setSourcesCollapsedState] = useState(false);
+  const [sourceListRefreshPending, setSourceListRefreshPending] = useState(false);
+  const [sourceListRefreshResult, setSourceListRefreshResult] = useState<{ text: string } | null>(null);
+  useEffect(() => {
+    if (!sourceListRefreshResult) return;
+    const timer = setTimeout(() => setSourceListRefreshResult(null), COLLAB_CHANGE_NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [sourceListRefreshResult]);
   const [sourceQuery, setSourceQueryState] = useState("");
   const [sourceDetail, setSourceDetail] = useState<SourceSummary | null>(null);
+  const [sourceDetailRefreshPending, setSourceDetailRefreshPending] = useState(false);
+  const [sourceDetailRefreshResult, setSourceDetailRefreshResult] = useState<{ text: string } | null>(null);
+  useEffect(() => {
+    if (!sourceDetailRefreshResult) return;
+    const timer = setTimeout(() => setSourceDetailRefreshResult(null), COLLAB_CHANGE_NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [sourceDetailRefreshResult]);
   const [deletingSourceIds, setDeletingSourceIds] = useState<Set<string>>(() => new Set());
   // The source detail's own (synchronous) reparse: the source it is for, null when none is in flight.
   const [reparsingSourceId, setReparsingSourceId] = useState<string | null>(null);
+  // 单篇重新解析被拒(409「这份来源正在解析，请等它完成」,分享编辑 P1 D8:另一位协作者刚
+  // 提交了同一篇)。它是「重新解析」按钮的结果,画在按钮旁、自带计时消失,不走顶部状态条。
+  const [reparseBusy, setReparseBusy] = useState<{ sourceId: string; text: string } | null>(null);
+  const reparseBusyTimerRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (reparseBusyTimerRef.current !== null) window.clearTimeout(reparseBusyTimerRef.current);
+  }, []);
+  const showReparseBusy = (sourceId: string, text: string) => {
+    if (reparseBusyTimerRef.current !== null) window.clearTimeout(reparseBusyTimerRef.current);
+    const notice = { sourceId, text };
+    setReparseBusy(notice);
+    reparseBusyTimerRef.current = window.setTimeout(() => {
+      reparseBusyTimerRef.current = null;
+      setReparseBusy((current) => (current === notice ? null : current));
+    }, SOURCE_REPARSE_BUSY_HOLD_MS);
+  };
   const [sourceElements, setSourceElements] = useState<SourceElement[]>([]);
   const [sourceElementsTotal, setSourceElementsTotal] = useState(0);
   const [sourceElementStartOffset, setSourceElementStartOffset] = useState(0);
@@ -186,7 +223,17 @@ export function useSourceLibrary({
   const generationRef = useRef(0);
   const sourcesRef = useRef<SourceSummary[]>(sources);
   const sourceDetailRef = useRef<SourceSummary | null>(sourceDetail);
+  const sourceElementWindowRef = useRef({ items: sourceElements, offset: sourceElementStartOffset });
+  sourceElementWindowRef.current = { items: sourceElements, offset: sourceElementStartOffset };
+  const detailReadInFlightRef = useRef<number | null>(null);
+  const sourceMutationGenerationRef = useRef(0);
+  const reparsingSourceIdRef = useRef(reparsingSourceId);
+  reparsingSourceIdRef.current = reparsingSourceId;
   const sourcesPageRef = useRef(sourcesPage);
+  const sourcesCollapsedRef = useRef(sourcesCollapsed);
+  sourcesCollapsedRef.current = sourcesCollapsed;
+  const sourceListRefreshRequestRef = useRef<object | null>(null);
+  const sourceListRefreshPendingRef = useRef(false);
   const sourceQueryRef = useRef(sourceQuery);
   const committedListWindowRef = useRef<{ page: number; q: string } | null>(null);
   const pageRequestRef = useRef(0);
@@ -267,8 +314,19 @@ export function useSourceLibrary({
     const currentActor = actorIdRef.current;
     return currentActor ? ownerKey(currentActor, notebookId) : "";
   };
+  function markSourceListRefreshPending(pending: boolean) {
+    sourceListRefreshPendingRef.current = pending;
+    setSourceListRefreshPending(pending);
+  }
 
   function resetVisibleState() {
+    sourceListRefreshRequestRef.current = null;
+    markSourceListRefreshPending(false);
+    setSourceListRefreshResult(null);
+    sourceDetailRef.current = null;
+    sourceElementWindowRef.current = { items: [], offset: 0 };
+    detailReadInFlightRef.current = null;
+    reparsingSourceIdRef.current = null;
     committedListWindowRef.current = null;
     setSources([]);
     setSourceScopeSelection(defaultSourceScopeSelection());
@@ -278,6 +336,8 @@ export function useSourceLibrary({
     setSourcesPage(0);
     setSourceQueryState("");
     setSourceDetail(null);
+    setSourceDetailRefreshPending(false);
+    setSourceDetailRefreshResult(null);
     setDeletingSourceIds(new Set());
     setSourceElements([]);
     setSourceElementsTotal(0);
@@ -348,7 +408,16 @@ export function useSourceLibrary({
     ));
     setSourcesPage(0);
     setSourceQueryState("");
+    sourceDetailRef.current = null;
+    sourceElementWindowRef.current = { items: [], offset: 0 };
+    detailReadInFlightRef.current = null;
+    reparsingSourceIdRef.current = null;
+    sourceListRefreshRequestRef.current = null;
+    markSourceListRefreshPending(false);
+    setSourceListRefreshResult(null);
     setSourceDetail(null);
+    setSourceDetailRefreshPending(false);
+    setSourceDetailRefreshResult(null);
     setDeletingSourceIds(new Set(
       deletingIdsByOwnerRef.current.get(ownerKey(input.actorId, input.notebookId)) ?? [],
     ));
@@ -387,12 +456,12 @@ export function useSourceLibrary({
   const loadSourcesPageRef = useRef(loadSourcesPage);
   loadSourcesPageRef.current = loadSourcesPage;
 
-  async function loadSourcesPage(input: {
+  async function loadSourcesPageResult(input: {
     notebookId?: string;
     page?: number;
     q?: string;
     guard?: () => boolean;
-  } = {}) {
+  } = {}, publishContentRevision = true) {
     const owner = ownerRef.current;
     const notebookId = input.notebookId ?? owner?.notebookId;
     if (!owner || !notebookId || owner.notebookId !== notebookId) return;
@@ -532,13 +601,14 @@ export function useSourceLibrary({
     const previousWindow = committedListWindowRef.current;
     const membershipChanged = previousWindow?.page === pageNum && previousWindow.q === q
       && (previousById.size !== filtered.items.length || filtered.items.some((source) => !previousById.has(source.id)));
-    if (membershipChanged || filtered.items.some((source) => {
+    const fulfillsReopen = publishContentRevision && sourceListRefreshPendingRef.current;
+    if (publishContentRevision && (fulfillsReopen || membershipChanged || filtered.items.some((source) => {
       const previous = previousById.get(source.id);
       return previous && (
         previous.title !== source.title || previous.summary !== source.summary
         || previous.parse_status !== source.parse_status || previous.element_count !== source.element_count
       );
-    })) setContentRevision((value) => value + 1);
+    }))) setContentRevision((value) => value + 1);
     committedListWindowRef.current = { page: pageNum, q };
     setSources(filtered.items);
     setSourcesTotal(visibleTotal);
@@ -551,6 +621,125 @@ export function useSourceLibrary({
     setSourcesPage(pageNum);
     setSourcesPageLoading(false);
     pageAbortRef.current = null;
+    if (fulfillsReopen) {
+      sourceListRefreshRequestRef.current = null;
+      markSourceListRefreshPending(false);
+      setSourceListRefreshResult({ text: "已刷新" });
+    }
+    return true;
+  }
+
+  // Preserve the existing void command contract; collaboration additionally
+  // needs to distinguish a committed snapshot from a superseded read.
+  async function loadSourcesPage(input: Parameters<typeof loadSourcesPageResult>[0] = {}): Promise<void> {
+    await loadSourcesPageResult(input);
+  }
+
+  async function refreshForCollaboration(guard: () => boolean): Promise<boolean> {
+    const owner = currentOwner();
+    if (!owner) return false;
+    const mutation = sourceMutationGenerationRef.current;
+    const current = () => !disposedRef.current && document.visibilityState !== "hidden" && owns(owner) && guard()
+      && sourceMutationGenerationRef.current === mutation
+      && reparsingSourceIdRef.current === null && deletingIdsRef.current.size === 0;
+    if (!current()) return false;
+    try {
+      const [listed, detailed] = await Promise.all([
+        loadSourcesPageResult({ page: sourcesPageRef.current, guard: current }, false),
+        refreshSourceDetailForCollaboration(owner, current),
+      ]);
+      if (listed !== true || !detailed || !current()) return false;
+      // A sources hint invalidates the whole notebook's derived readers,
+      // including changes outside this list page or with identical metadata.
+      setContentRevision((value) => value + 1);
+      if (sourceListRefreshPendingRef.current) {
+        sourceListRefreshRequestRef.current = null;
+        markSourceListRefreshPending(false);
+        setSourceListRefreshResult({ text: "已刷新" });
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function readSourceElementWindow(notebookId: string, sourceId: string,
+    start: number, length: number, current: () => boolean) {
+    let page = await getNotebookSourceElementsPage(notebookId, sourceId, start, SOURCE_ELEMENT_PAGE_SIZE);
+    if (!current()) return null;
+    const total = page.total_count;
+    const offset = Math.min(start, Math.max(0, (Math.ceil(total / SOURCE_ELEMENT_PAGE_SIZE) - 1) * SOURCE_ELEMENT_PAGE_SIZE));
+    if (total === 0) return { items: [] as SourceElement[], offset: 0, total_count: 0 };
+    if (offset !== start) {
+      page = await getNotebookSourceElementsPage(notebookId, sourceId, offset, SOURCE_ELEMENT_PAGE_SIZE);
+      if (!current() || page.total_count !== total) return null;
+    }
+    const items = [...page.items];
+    const end = Math.min(total, offset + Math.max(SOURCE_ELEMENT_PAGE_SIZE, length));
+    if (page.offset !== offset) return null;
+    while (offset + items.length < end) {
+      const nextOffset = offset + items.length;
+      const next = await getNotebookSourceElementsPage(notebookId, sourceId, nextOffset,
+        Math.min(SOURCE_ELEMENT_PAGE_SIZE, end - nextOffset));
+      if (!current() || next.total_count !== total || next.offset !== nextOffset || next.items.length === 0) return null;
+      items.push(...next.items);
+    }
+    return { items, offset, total_count: total };
+  }
+
+  async function refreshSourceDetailForCollaboration(owner: SourceLibraryOwner, guard: () => boolean): Promise<boolean> {
+    const detail = sourceDetailRef.current;
+    // A pulse belongs to the active notebook, never a borrowed source's owner.
+    if (detailReadInFlightRef.current !== null) {
+      if (detail && !crossLibrarySourceNotebookId(detail.notebook_id, owner.notebookId)) setSourceDetailRefreshPending(true);
+      return false;
+    }
+    if (!detail || crossLibrarySourceNotebookId(detail.notebook_id, owner.notebookId)) return true;
+    const requestGeneration = ++detailRequestRef.current;
+    detailReadInFlightRef.current = requestGeneration;
+    const window = sourceElementWindowRef.current;
+    const current = () => guard() && detailRequestRef.current === requestGeneration
+      && sourceDetailRef.current?.id === detail.id && sourceDetailRef.current?.notebook_id === owner.notebookId;
+    setSourceDetailRefreshPending(true);
+    setSourceDetailRefreshResult(null);
+    setSourceElementsLoading(true);
+    try {
+      const [fresh, elements] = await Promise.all([
+        getNotebookSource(owner.notebookId, detail.id),
+        readSourceElementWindow(owner.notebookId, detail.id, window.offset, window.items.length, current),
+      ]);
+      if (!current() || !elements) return false;
+      if (fresh.notebook_id !== owner.notebookId) {
+        closeSourceDetail();
+        return true;
+      }
+      sourceDetailRef.current = fresh;
+      sourceElementWindowRef.current = elements;
+      setSourceDetail(fresh);
+      setSourceElements(elements.items);
+      setSourceElementsTotal(elements.total_count);
+      setSourceElementStartOffset(elements.offset);
+      setSourceDetailRefreshPending(false);
+      setSourceDetailRefreshResult({ text: "已刷新" });
+      return true;
+    } catch (error) {
+      if (current() && httpErrorStatus(error) === 404) {
+        closeSourceDetail();
+        return true;
+      }
+      if (current()) {
+        // Stop a sibling element-window read from continuing to later pages
+        // after metadata failed; its confirmed view remains retryable.
+        detailRequestRef.current += 1;
+        setSourceDetailRefreshResult({ text: "暂时没能刷新，当前内容仍保留" });
+      }
+      return false;
+    } finally {
+      if (detailReadInFlightRef.current === requestGeneration) {
+        detailReadInFlightRef.current = null;
+        setSourceElementsLoading(false);
+      }
+    }
   }
 
   function setSourceQuery(value: string) {
@@ -565,7 +754,51 @@ export function useSourceLibrary({
   }
 
   function setSourcesCollapsed(value: boolean) {
+    const reopening = sourcesCollapsedRef.current && !value;
+    sourcesCollapsedRef.current = value;
     setSourcesCollapsedState(value);
+    if (value && sourceListRefreshRequestRef.current) {
+      sourceListRefreshRequestRef.current = null;
+      abortInFlightSourcesPage();
+      pageRequestRef.current += 1;
+      setSourcesPageLoading(false);
+    }
+    if (reopening) void readSourcesAfterExpand(true);
+  }
+
+  async function readSourcesAfterExpand(supersede = false): Promise<boolean> {
+    const owner = currentOwner();
+    if (!owner || sourcesCollapsedRef.current || (!supersede && sourceListRefreshRequestRef.current)) return false;
+    const ticket = {};
+    sourceListRefreshRequestRef.current = ticket;
+    const mutation = sourceMutationGenerationRef.current;
+    const current = () => !disposedRef.current && !sourcesCollapsedRef.current && owns(owner)
+      && sourceListRefreshRequestRef.current === ticket && sourceMutationGenerationRef.current === mutation;
+    markSourceListRefreshPending(true);
+    setSourceListRefreshResult(null);
+    try {
+      // Reopening reads once for this visible owner/window, including changes
+      // acknowledged while closed. It never resets the search or selection.
+      const committed = await loadSourcesPageResult({ page: sourcesPageRef.current, q: sourceQueryRef.current, guard: current }, false);
+      if (!current()) return false;
+      if (committed) {
+        setContentRevision((revision) => revision + 1);
+        markSourceListRefreshPending(false);
+        setSourceListRefreshResult({ text: "已刷新" });
+        return true;
+      }
+      setSourceListRefreshResult({ text: "暂时没能刷新，当前内容仍保留" });
+      return false;
+    } catch {
+      if (current()) setSourceListRefreshResult({ text: "暂时没能刷新，当前内容仍保留" });
+      return false;
+    } finally {
+      if (sourceListRefreshRequestRef.current === ticket) sourceListRefreshRequestRef.current = null;
+    }
+  }
+
+  async function refreshSourceList(): Promise<boolean> {
+    return readSourcesAfterExpand();
   }
 
   function selectAllSources() {
@@ -595,6 +828,7 @@ export function useSourceLibrary({
     addedCount: number,
   ): boolean {
     if (!owner || !owns(owner)) return false;
+    sourceMutationGenerationRef.current += 1;
     setContentRevision((value) => value + 1);
     setSources((previous) => [
       ...previous.filter((source) => !uploaded.some((item) => item.id === source.id)),
@@ -611,6 +845,7 @@ export function useSourceLibrary({
     created: readonly SourceSummary[],
   ): boolean {
     if (!owner || !owns(owner)) return false;
+    sourceMutationGenerationRef.current += 1;
     setContentRevision((value) => value + 1);
     setSources((previous) => [
       ...previous.filter((source) => !created.some((item) => item.id === source.id)),
@@ -625,6 +860,7 @@ export function useSourceLibrary({
     const owner = ownerRef.current;
     if (!owner) return false;
     const requestGeneration = ++detailRequestRef.current;
+    detailReadInFlightRef.current = requestGeneration;
     setSourceElementsLoading(false);
     let detail: SourceSummary;
     let elementPage: PaginatedSourceElements;
@@ -640,8 +876,10 @@ export function useSourceLibrary({
         ),
       ]);
     } catch (error) {
-      if (owns(owner)) throw error;
+      if (owns(owner) && detailRequestRef.current === requestGeneration && !disposedRef.current) throw error;
       return false;
+    } finally {
+      if (detailReadInFlightRef.current === requestGeneration) detailReadInFlightRef.current = null;
     }
     const deleted = deletedIdsRef.current.get(ownerKey(owner.actorId, detail.notebook_id));
     if (
@@ -649,6 +887,10 @@ export function useSourceLibrary({
       || !owns(owner)
       || deleted?.has(sourceId)
     ) return false;
+    sourceDetailRef.current = detail;
+    sourceElementWindowRef.current = { items: elementPage.items, offset: elementPage.offset };
+    setSourceDetailRefreshPending(false);
+    setSourceDetailRefreshResult(null);
     setSourceDetail(detail);
     setSourceElements(elementPage.items);
     setSourceElementsTotal(elementPage.total_count);
@@ -660,6 +902,11 @@ export function useSourceLibrary({
 
   function closeSourceDetail() {
     detailRequestRef.current += 1;
+    sourceDetailRef.current = null;
+    sourceElementWindowRef.current = { items: [], offset: 0 };
+    detailReadInFlightRef.current = null;
+    setSourceDetailRefreshPending(false);
+    setSourceDetailRefreshResult(null);
     setSourceDetail(null);
     setSourceElements([]);
     setSourceElementsTotal(0);
@@ -671,11 +918,12 @@ export function useSourceLibrary({
   async function loadSourceElementPage(direction: "previous" | "next") {
     const detail = sourceDetailRef.current;
     const owner = ownerRef.current;
-    if (!detail || !owner || sourceElementsLoading) return;
+    if (!detail || !owner || sourceElementsLoading || detailReadInFlightRef.current !== null) return;
     const offset = direction === "previous"
       ? Math.max(0, sourceElementStartOffset - SOURCE_ELEMENT_PAGE_SIZE)
       : sourceElementStartOffset + sourceElements.length;
     const requestGeneration = detailRequestRef.current;
+    detailReadInFlightRef.current = requestGeneration;
     setSourceElementsLoading(true);
     try {
       const page = await getNotebookSourceElementsPage(
@@ -689,12 +937,18 @@ export function useSourceLibrary({
         || sourceDetailRef.current?.id !== detail.id
         || !owns(owner)
       ) return;
+      const previous = sourceElementWindowRef.current;
+      sourceElementWindowRef.current = {
+        items: direction === "previous" ? [...page.items, ...previous.items] : [...previous.items, ...page.items],
+        offset: direction === "previous" ? page.offset : previous.offset,
+      };
       setSourceElements((current) => direction === "previous"
         ? [...page.items, ...current]
         : [...current, ...page.items]);
       if (direction === "previous") setSourceElementStartOffset(page.offset);
       setSourceElementsTotal(page.total_count);
     } finally {
+      if (detailReadInFlightRef.current === requestGeneration) detailReadInFlightRef.current = null;
       if (
         detailRequestRef.current === requestGeneration
         && sourceDetailRef.current?.id === detail.id
@@ -710,6 +964,8 @@ export function useSourceLibrary({
     // A reparse of this source submitted elsewhere (the KG analysis findings) has not
     // finished yet: submitting it again would run the same expensive parse twice.
     if (reparsingSourceIdsRef.current.has(detail.id) || submittingRef.current.has(detail.id)) return;
+    sourceMutationGenerationRef.current += 1;
+    reparsingSourceIdRef.current = detail.id;
     setReparsingSourceId(detail.id);
     try {
       const updated = await parseSource(detail.id);
@@ -726,9 +982,19 @@ export function useSourceLibrary({
       await effectsRef.current.refreshNotebook(owner.notebookId, guard);
       if (owns(owner)) effectsRef.current.setToast("Source 已重新解析");
     } catch (error) {
-      if (owns(owner)) effectsRef.current.reportError(error);
+      if (owns(owner)) {
+        if (httpErrorStatus(error) === 409) {
+          showReparseBusy(detail.id, toUserMessage(error, SOURCE_REPARSE_BUSY_TEXT));
+        } else {
+          effectsRef.current.reportError(error);
+        }
+      }
     } finally {
-      if (owns(owner)) setReparsingSourceId(null);
+      if (owns(owner)) {
+        sourceMutationGenerationRef.current += 1;
+        reparsingSourceIdRef.current = null;
+        setReparsingSourceId(null);
+      }
     }
   }
 
@@ -743,6 +1009,7 @@ export function useSourceLibrary({
       || deletingIdsRef.current.has(source.id)
       || !canWriteRef.current
     ) return false;
+    sourceMutationGenerationRef.current += 1;
     const actorAtStart = ownerAtStart.actorId;
     const pendingKey = ownerKey(ownerAtStart.actorId, ownerAtStart.notebookId);
     deletingIdsRef.current.add(source.id);
@@ -1134,6 +1401,7 @@ export function useSourceLibrary({
     try {
       const baseline = await readFollowBaseline(sourceId);
       if (!stillOwned()) return "abandoned";
+      sourceMutationGenerationRef.current += 1;
       const outcome = await submit(stillOwned);
       if (!stillOwned()) return "abandoned";
       if (outcome === "started" && followCurrent()) {
@@ -1182,11 +1450,17 @@ export function useSourceLibrary({
     notebookDocumentCount: ownerIsActive ? notebookDocumentCount : 0,
     sourcesPage: ownerIsActive ? sourcesPage : 0,
     sourcesPageLoading: ownerIsActive ? sourcesPageLoading : false,
+    sourceListRefreshPending: ownerIsActive && sourceListRefreshPending,
+    sourceListRefreshNotice: ownerIsActive ? sourceListRefreshResult?.text ?? "" : "",
     sourcesCollapsed,
     sourceQuery: ownerIsActive ? sourceQuery : "",
     sourceDetail: ownerIsActive ? sourceDetail : null,
+    sourceDetailRefreshPending: ownerIsActive && sourceDetail !== null && sourceDetailRefreshPending,
+    sourceDetailRefreshNotice: ownerIsActive && sourceDetail !== null ? sourceDetailRefreshResult?.text ?? "" : "",
     deletingSourceIds: ownerIsActive ? deletingSourceIds : inactiveDeletingIdsRef.current,
     reparsingSource: ownerIsActive ? reparsingSourceId !== null : false,
+    /** 当前来源详情那一篇的「重新解析」被拒原因(409),空串 = 没有。 */
+    reparseBusyText: ownerIsActive && reparseBusy && sourceDetail?.id === reparseBusy.sourceId ? reparseBusy.text : "",
     sourceElements: ownerIsActive ? sourceElements : NO_SOURCE_ELEMENTS,
     sourceElementsTotal: ownerIsActive ? sourceElementsTotal : 0,
     sourceElementStartOffset: ownerIsActive ? sourceElementStartOffset : 0,
@@ -1200,6 +1474,8 @@ export function useSourceLibrary({
     currentPageRequest,
     deleteGeneration,
     loadSourcesPage,
+    refreshForCollaboration,
+    refreshSourceList,
     searchSources,
     setSourceQuery,
     setSourcesCollapsed,

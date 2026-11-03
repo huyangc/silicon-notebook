@@ -517,7 +517,15 @@ def test_sync_ask_paths_notify_the_three_memory_chains():
         "MCP 两类提问重新零计数,2 次说明有人在某条出口上又抄了一遍(双计)"
     )
     call = calls[0]
-    assert len(call.args) == 3 and not call.keywords, ast.dump(call)
+    assert len(call.args) == 3, ast.dump(call)
+    # 自动用户记忆(设计 2026-10-28 §4.1)只加了三个关键字事实,三条既有链的
+    # 位置实参不变:job id 必须是这一行的 job_id、入口是建行时的那个字面量。
+    keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+    assert set(keywords) == {"ask_job_id", "submitted_via", "had_clarification"}, (
+        ast.dump(call)
+    )
+    assert getattr(keywords["ask_job_id"], "id", None) == "job_id"
+    assert getattr(keywords["submitted_via"], "id", None) == "submitted_via"
     assert [getattr(arg, "id", None) for arg in call.args[:2]] == [
         "notebook_id", "user_id",
     ], ast.dump(call)

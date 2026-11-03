@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from app.domain.share_disclosure import ShareMemoryGuard
 
 from app.core.config import Settings
+from app.repositories.access_level import NotebookAccess
 from app.repositories.auth_ports import AuthStorePort
 from app.domain.ask import AskMode
 from app.domain.cancellation import CancelEvent
@@ -253,7 +254,9 @@ class KgMaintenanceAlreadyRunning(RuntimeError):
     must not inherit that table's LLM-configured precondition.
     """
 
-    def __init__(self, notebook_id: str, holder: str) -> None:
+    def __init__(
+        self, notebook_id: str, holder: str, *, actor_id: str = "", actor_name: str = ""
+    ) -> None:
         super().__init__(notebook_id)
         self.notebook_id = notebook_id
         # "relink" | "rebuild" | "delete" — the kind of pass currently holding
@@ -261,6 +264,21 @@ class KgMaintenanceAlreadyRunning(RuntimeError):
         # Required, not defaulted: a default would let a future raise site tell
         # the user to wait on an action that is not the one running.
         self.holder = holder
+        # Who started the pass holding the slot (share-edit P1): recorded on
+        # the slot entry when it was claimed, from the request's user, so the
+        # 409 can name another initiator without a read. Empty when unknown
+        # (a pass started outside a request, or the "buildkg" refusals, whose
+        # initiator is the durable job row's ``created_by``).
+        self.actor_id = actor_id
+        self.actor_name = actor_name
+
+
+class KgCandidateAlreadyDecided(ValueError):
+    """A conflict-review candidate was already decided (applied / rejected)
+    when a second reviewer acted on it (share-edit P1, spec §5 and §13 item 1):
+    the browser answers 409 「这一项已被处理」 instead of a raw message. A
+    ``ValueError`` so every caller that already treats "not pending" as a
+    refusal keeps doing so."""
 
 
 class CatalogJobAlreadyRunning(RuntimeError):
@@ -361,6 +379,7 @@ class RepositoryDatabasePort(Protocol):
     def connect(self) -> object: ...
     def write(self) -> object: ...
     def close(self) -> None: ...
+    def pool_wait_stats(self) -> dict[str, int]: ...
 
 
 class RepositorySeams(Protocol):
@@ -597,6 +616,175 @@ class AnswerLinkStorePort(Protocol):
     def sweep_answer_links(self, *, grace_seconds: int) -> int: ...
 
 
+class MemorySuggestStorePort(Protocol):
+    """Auto user-memory suggestions (v106/0087; design 2026-10-28).
+
+    Rows: ``memory_suggest_users`` (the per-user switch and UTC daily budget),
+    ``memory_suggest_jobs`` (one single-flight row per (notebook, owner): the
+    ``agent_profile_jobs`` claim/settle protocol plus the sampling cursor) and
+    ``memory_suggest_fingerprints`` (hash-only "never suggest again" rows).
+    Every read binds its owner in SQL: ask jobs by ``created_by``, answers and
+    feedback through ``conversations.created_by``, memories by ``created_by``.
+    Instants are ISO strings in and out.
+    """
+
+    # Pure in-memory invalidation stamp; None while any mode writer is active.
+    def mode_epoch(self) -> int | None: ...
+
+    def user_state(self, owner_id: str) -> "dict | None": ...
+
+    # The ONLY writer of user_profiles.memory_mode (with the switch row, in one
+    # transaction); switching to manual deletes the owner's job rows. A supplied
+    # clock is sampled after acquiring the write/mode barrier, so opt-in cannot
+    # predate a read-loss transaction it waited for. Explicit instants remain
+    # supported for deterministic fixtures.
+    def set_memory_mode(self, user_id: str, mode: str, *, now: str | Callable[[], str]) -> None: ...
+
+    # One write transaction, gated on the owner's switch being on AND the owner
+    # still reading this live notebook (0 = not counted; PostgreSQL share-locks
+    # the access rows first): creates the row at the triggering ask (inclusive)
+    # or only counts; an empty/foreign ask id starts the window at ``now``.
+    def note_signal(
+        self, notebook_id: str, owner_id: str, *, ask_job_id: str, now: str
+    ) -> int: ...
+
+    def claim(
+        self, notebook_id: str, owner_id: str, *, claim_token: str, now: str
+    ) -> "dict | None": ...
+
+    # CAS on the claim token; ``cursor`` None keeps it, else (created_at, id,
+    # inclusive). Consumes the pending count observed at claim time.
+    def settle(
+        self,
+        notebook_id: str,
+        owner_id: str,
+        *,
+        claim_token: str,
+        outcome: str,
+        failure_reason: str,
+        cursor: "tuple[str, str, bool] | None",
+        consecutive_failures: int,
+        consumed_pending: int,
+        candidates_written: int,
+        now: str,
+    ) -> bool: ...
+
+    # Settles rows a restart left ``running`` as one ``failed`` run
+    # (FAILURE_REASON_INTERRUPTED, consecutive_failures + 1, cursor kept).
+    def sweep_stale_on_start(self, *, now: str) -> int: ...
+
+    # Rechecks current authority; surviving/regranted readers keep their window.
+    def clear_job_rows(self, notebook_id: str, owner_ids: Sequence[str]) -> int: ...
+
+    # One conditional UPDATE; False = at the cap for ``today_utc`` (or no row).
+    def reserve_daily_quota(
+        self, owner_id: str, *, today_utc: str, cap: int, now: str
+    ) -> bool: ...
+
+    def unadopted_candidate_count(self, owner_id: str, notebook_id: str) -> int: ...
+
+    # ``{id, created_at}`` of the owner's earliest still-running ask here that
+    # the sampling predicate would read once done within the current cursor
+    # window. Read before the sampling scans; retain this fence until settle.
+    def earliest_unfinished_ask(
+        self, owner_id: str, notebook_id: str, *,
+        cursor_created_at: str, cursor_id: str, inclusive: bool,
+    ) -> dict[str, Any] | None: ...
+
+    # The owner's finished web answers here (no report follow-up), ascending
+    # from the cursor.
+    def clarified_scan(
+        self,
+        owner_id: str,
+        notebook_id: str,
+        *,
+        cursor_created_at: str,
+        cursor_id: str,
+        inclusive: bool,
+        limit: int,
+    ) -> list[dict]: ...
+
+    # Ascending eligible asks and their immediate, independently eligible
+    # same-conversation predecessor; the predecessor cannot predate this window.
+    def corrected_scan(
+        self,
+        owner_id: str,
+        notebook_id: str,
+        *,
+        cursor_created_at: str,
+        cursor_id: str,
+        inclusive: bool,
+        window_started_at: str,
+        limit: int,
+    ) -> list[dict]: ...
+
+    # Same predicate, newest first, at or after ``lower``.
+    def repeated_window(
+        self, owner_id: str, notebook_id: str, *, lower: str, limit: int
+    ) -> list[dict]: ...
+
+    # Only the owner's answers; the finalized intent's clarification answers
+    # as {id, question, answer} (question cut to clarification_chars); the
+    # excerpt is cut in SQL.
+    def answer_projections(
+        self,
+        owner_id: str,
+        answer_ids: Sequence[str],
+        *,
+        excerpt_chars: int,
+        clarification_chars: int,
+        with_sources: bool = False,
+    ) -> dict[str, dict]: ...
+
+    def latest_feedback(self, owner_id: str, answer_ids: Sequence[str]) -> dict[str, str]: ...
+
+    # Any status (``idx_memory_answer_once``).
+    def answers_with_memory(self, owner_id: str, answer_ids: Sequence[str]) -> set[str]: ...
+
+    # Present = kind 'proposed', or an unexpired 'declined'.
+    def fingerprints_present(
+        self, owner_id: str, notebook_id: str, fingerprints: Sequence[str], *, now: str
+    ) -> set[str]: ...
+
+    # 'proposed' upgrades 'declined' and never expires; 'declined' never
+    # downgrades 'proposed' and only extends a later expiry.
+    def write_fingerprints(
+        self,
+        owner_id: str,
+        notebook_id: str,
+        fingerprints: Sequence[str],
+        *,
+        kind: str,
+        expires_at: "str | None",
+        now: str,
+    ) -> None: ...
+
+    # Per item: vector side (raw cosine over the most recently updated
+    # vector-bearing memories) then lexical side; ``statuses`` must be a subset
+    # of MemoryStatus (ValueError otherwise).
+    def suggest_neighbors(
+        self,
+        owner_id: str,
+        notebook_id: str,
+        *,
+        query_vectors: Sequence[Sequence[float]],
+        lexical_queries: Sequence[str],
+        statuses: Sequence[str],
+        k: int,
+    ) -> list[list[dict]]: ...
+
+    # candidate -> rejected (revision reason 'expired') for suggestions only.
+    def expire_overdue(
+        self,
+        *,
+        now: str,
+        cutoff: str,
+        limit: int,
+        owner_id: "str | None" = None,
+        notebook_id: "str | None" = None,
+    ) -> list[dict]: ...
+
+
 @runtime_checkable
 class WishStorePort(Protocol):
     def create_wish(
@@ -708,6 +896,11 @@ class NotebookAccessReadRepository(Protocol):
 
 
 class NotebookAccessRepository(NotebookAccessReadRepository, Protocol):
+    # None means refused; an authorized legacy notebook may have owner_id="",
+    # the same normalization as NotebookAccess. Callers must use `is None`.
+    def owner_if_can_edit(self, notebook_id: str, user_id: str) -> str | None: ...
+    def owner_if_can_admin(self, notebook_id: str, user_id: str) -> str | None: ...
+    def collab_pulse_wanted(self, notebook_id: str, user_id: str) -> bool: ...
     # `DELETE /api/notebooks/{id}` 依赖专属（codex #659 R6 P2）:owner 判定
     # 不带生命周期过滤,好让 owner 对自己正在删除/拷贝中的库仍然"看得见"这一行,
     # 使路由体内的 request() 走到它自己的 409 分支而不是被依赖层挡成假 404。
@@ -721,6 +914,14 @@ class NotebookAccessRepository(NotebookAccessReadRepository, Protocol):
     # 管理权(P2 能力翻转):owner ∪ role='admin' 的有效授权边。与写权**并列**而不是
     # 取代它——notebook:delete 与 Agent/MCP 面仍恒 owner,两条谓词各有引用者。
     def user_can_admin_notebook(self, notebook_id: str, user_id: str) -> bool: ...
+    # 编辑权(分享编辑 P1,决策 D1):owner ∪ role IN ('admin','editor') 的有效授权边。
+    # 与管理权并列——七个内容写能力走它,notebook:grant/manage 仍走管理权。
+    def user_can_edit_notebook(self, notebook_id: str, user_id: str) -> bool: ...
+    # 访问级别点查(PD-5):一条语句答出 owner/admin/edit/read 与库主 id;无权或库
+    # 不存在/非存活为 None。供既要判档、又要知道调用者是哪一档的体内判定用。
+    def notebook_access_level(
+        self, notebook_id: str, user_id: str
+    ) -> NotebookAccess | None: ...
     # 目标端写入围栏的读侧(docs/incremental-sync-design.md §5):非空 ⇒ 这本笔记本
     # 是从别的环境同步来的镜像,值是源环境标识;本地库与不存在的行都返回 ''。
     # 它**不是**授权判定——`_CAPABILITY_MIRROR_FENCE` 在能力守卫放行之后才查它,
@@ -895,7 +1096,11 @@ class SourceRepository(Protocol):
     def parse_source(self, source_id: str) -> SourceSummary: ...
     def source_elements(self, source_id: str) -> list[SourceElement]: ...
     def source_elements_page(self, source_id: str, offset: int = 0, limit: int = 40, anchor_element_id: str = "", *, positions: Sequence[int] | None = None) -> PaginatedSourceElements: ...
-    def delete_source(self, source_id: str) -> None: ...
+    # `uploader_must_be`(分享编辑 P1,决策 D14):只删这个人自己上传的来源,判定在
+    # 删除事务锁住的那一行上;不符(含上传人为空)一律 KeyError(路由 404)。
+    def delete_source(
+        self, source_id: str, *, uploader_must_be: str | None = None
+    ) -> None: ...
     def extract_source(self, source_id: str) -> None: ...
 
 
@@ -1241,7 +1446,8 @@ class NotebookStorePort(Protocol):
     @staticmethod
     def participant_tiers(db: object, active_notebook_id: str, *, viewer_id: str | None) -> tuple[list[str], dict[str, str]]: ...
     def list_mount_edges_for_notebook(
-        self, notebook_id: str, viewer_id: str | None = None
+        self, notebook_id: str, viewer_id: str | None = None,
+        *, with_closes_when_shared: bool = False,
     ) -> list[dict]: ...
     def mounted_by_count_for_notebook(self, notebook_id: str) -> int: ...
     def mountable_for_notebook(self, notebook_id: str) -> list[dict]: ...
@@ -1274,6 +1480,7 @@ class KgBuildJobStorePort(Protocol):
     ) -> dict: ...
     def get(self, job_id: str) -> dict: ...
     def has_running(self, notebook_id: str) -> bool: ...
+    def running_initiator(self, notebook_id: str) -> "tuple[str, str] | None": ...
     def latest(self, notebook_id: str) -> dict | None: ...
     def latest_on(
         self, db: object, notebook_id: str
@@ -4352,6 +4559,7 @@ class AskStateStorePort(Protocol):
 from app.models.memory import (  # noqa: E402
     MemoryRevision,
     MemoryWrite,
+    SuggestionWriteResult,
 )
 
 
@@ -4402,6 +4610,23 @@ class MemoryStorePort(Protocol):
     def create_answer_with_initial_revision(
         self, write: MemoryWrite, changed_by: str, reason: str
     ) -> MemoryRecord: ...
+    # Auto memory suggestions (design §4.2 step 8): one write transaction that
+    # re-checks access, switch and claim under locks; raises
+    # ``memory_suggest_contracts.SuggestionRevoked`` with nothing written.
+    def create_suggestions_with_initial_revision(
+        self, *, notebook_id: str, owner_id: str, claim_token: str,
+        writes: Sequence[MemoryWrite], proposed_fingerprints: Sequence[str], now: str,
+    ) -> SuggestionWriteResult: ...
+    # §5.3 row 1: CAS the open suggestion bound to the answer to confirmed;
+    # None = nothing to adopt (nothing written).
+    def adopt_suggestion_from_answer(
+        self, notebook_id: str, user_id: str, answer_id: str, *,
+        fields: Mapping[str, Any], changed_by: str, reason: str,
+    ) -> MemoryRecord | None: ...
+    # §5.3 row 2 / D16: replace a dismissed suggestion with a plain save.
+    def replace_rejected_suggestion_with_answer(
+        self, write: MemoryWrite, changed_by: str, reason: str
+    ) -> MemoryRecord: ...
     def memory_for_user(
         self,
         memory_id: str,
@@ -4436,9 +4661,15 @@ class MemoryStorePort(Protocol):
         self, user_id: str, *, notebook_id: str | None, status: str | None,
         origin: str | None, query: str, offset: int, limit: int,
     ) -> PaginatedMemories: ...
+    # Unadopted system suggestions are not links (design §5.3).
     def answer_memory_links(
         self, notebook_id: str, user_id: str, answer_ids: Sequence[str]
     ) -> dict[str, str]: ...
+    # One read: {"links": <as answer_memory_links>, "states": {answer_id:
+    # {memory_id, status, suggested}} with drafts included}.
+    def answer_memory_link_rows(
+        self, notebook_id: str, user_id: str, answer_ids: Sequence[str]
+    ) -> dict[str, dict]: ...
     def memory_by_answer(self, user_id: str, answer_id: str) -> MemoryRecord | None: ...
     def memory_by_agent_request(
         self, user_id: str, notebook_id: str, agent_profile_id: str | None,
@@ -4456,6 +4687,7 @@ class MemoryStorePort(Protocol):
     def transition_with_revision(
         self, memory_id: str, user_id: str, expected: set[str], target: str, *,
         fields: Mapping[str, Any] | None, changed_by: str, reason: str,
+        resync_children: bool = False,
     ) -> MemoryRecord: ...
     def delete_memory(self, memory_id: str, user_id: str) -> None: ...
     def delete_memory_if_unchanged(
@@ -4464,6 +4696,9 @@ class MemoryStorePort(Protocol):
     def bulk_delete_memories(
         self, user_id: str, memory_ids: Sequence[str]
     ) -> int: ...
+    def delete_open_suggestions(
+        self, user_id: str, memory_ids: Sequence[str]
+    ) -> list[str]: ...
     # 测试观察点:修订历史观察点(生产不读修订列表)
     def revisions_for_user(
         self, memory_id: str, user_id: str
@@ -4565,11 +4800,21 @@ class CopyRowsNotConsumedError(RuntimeError):
 
 @runtime_checkable
 class SharingStorePort(Protocol):
+    def owner_if_can_edit(self, notebook_id: str, user_id: str) -> str | None: ...
+    def owner_if_can_admin(self, notebook_id: str, user_id: str) -> str | None: ...
+    def collab_pulse_wanted(self, notebook_id: str, user_id: str) -> bool: ...
+    def insert_activity(self, activity: Mapping) -> None: ...
+    def list_recent_activity(self, notebook_id: str, limit: int) -> list[dict]: ...
+    def purge_expired_activity(self, cutoff: str) -> int: ...
     def bind_insert_row(self, insert_row: Callable) -> None: ...
     @staticmethod
     def insert_row_values(db: object, table: str, data: dict) -> None: ...
     def user_can_access_notebook(self, notebook_id: str, user_id: str) -> bool: ...
     def user_can_admin_notebook(self, notebook_id: str, user_id: str) -> bool: ...
+    def user_can_edit_notebook(self, notebook_id: str, user_id: str) -> bool: ...
+    def notebook_access_level(
+        self, notebook_id: str, user_id: str
+    ) -> NotebookAccess | None: ...
     def user_can_read_notebook(self, notebook_id: str, user_id: str) -> bool: ...
     # 镜像标记的读/写(SQLite v79 / PostgreSQL 0059)。读侧喂目标端写入围栏;
     # 写侧只有跨环境导入器用——它走 repository 层,刻意绕过服务层围栏。
@@ -4667,6 +4912,21 @@ class NotebookNotFoundError(RuntimeError):
 
     路由映射成 **404**,与能力守卫拒绝时同一个状态码口径(不泄露存在性)。
     """
+
+
+class NotebookIsPublicLibrary(RuntimeError):
+    """点名共享(分享编辑 P1)的写事务在锁住笔记本行后发现它是公共知识库
+    (`tier='base'`):公共库对所有人只读,不加编辑者。路由 → 409。"""
+
+
+class CollaboratorTargetInvalid(RuntimeError):
+    """要加成编辑者的人不存在、未启用,或就是库主本人。路由 → 400/404。"""
+
+
+class NotebookHasEditors(RuntimeError):
+    """发布为公共知识库(`set_tier('base')`)时这本库还有编辑者:判定写在那条
+    UPDATE 自己的 `NOT EXISTS` 里(PD-8),与授予编辑者的 `FOR SHARE` 串行。
+    路由 → 409「请先移除这本笔记本的编辑者」。"""
 
 
 class NotebookDeletingAbortsMaintenanceError(RuntimeError):
@@ -5024,6 +5284,23 @@ class GroupStorePort(Protocol):
     def delete_group_grants_for_notebook(
         self, group_id: str, notebook_id: str
     ) -> int: ...
+
+    # --- 点名共享(分享编辑 P1):principal_type='user' 的授权边 ------------
+    # `list_grants` / `delete_grant` 不再碰 user 行(只归库主在点名共享里管);两组
+    # 端点合起来覆盖表内每一行(集合相等守卫在 API 层)。
+    def list_user_grants(self, notebook_id: str) -> list[dict]: ...
+    def list_editor_names(self, notebook_id: str) -> list[dict]: ...
+    def user_grant_role(self, notebook_id: str, user_id: str) -> "str | None": ...
+    def list_user_grants_for_owner(self, owner_id: str) -> list[dict]: ...
+    def set_user_editor_grant(
+        self, notebook_id: str, *, owner_id: str, target_user_id: str
+    ) -> dict:
+        """单写事务设编辑者:锁住存活且归 `owner_id` 的笔记本行(否则
+        `NotebookNotFoundError`),公共库 `NotebookIsPublicLibrary`,目标无效
+        `CollaboratorTargetInvalid`;返回 ``{grant, previous_role, changed}``,
+        ``changed=False`` 表示本来就是编辑者(幂等,不该再发通知)。"""
+        ...
+    def delete_user_grant(self, notebook_id: str, user_id: str) -> bool: ...
 
     # --- 成员贡献审批流(群组知识共享 P2-T3) -----------------------------
     def create_share_request(
@@ -5479,7 +5756,7 @@ class KnowhowStorePort(Protocol):
         require_assets: Sequence[str] = (),
         actor: str = "",
         origin: str = "user",
-    ) -> None: ...
+    ) -> int: ...
     def update_knowhow_table_meta(
         self,
         table_id: str,
@@ -5559,7 +5836,7 @@ class KnowhowStorePort(Protocol):
         require_assets: Sequence[str] = (),
         actor: str = "",
         origin: str = "user",
-    ) -> None: ...
+    ) -> int | None: ...
     def update_knowhow_cells_bulk_guarded(
         self, notebook_id: str, updates: list[tuple[str, str, str, str, str]],
         actor: str = "",

@@ -636,6 +636,57 @@ Python 环境并自检，失败不联网回退、不改旧环境。配置不自�
 
 还须绑定新增 chat workload `report_context_compress`（「报告材料整理」），默认关闭 thinking、使用报告队列优先级；可复用现有服务，不另设模型并发预算。
 
+还须绑定新增 chat workload `memory_suggest`（「记忆建议」）：用户在记忆页开启「系统建议」后，
+后台每轮至多一次有界调用，把他本人在该库的提问整理成待确认的记忆草稿。默认关闭 thinking、
+使用后台优先级，可复用现有 chat 服务（示例绑到 `general`）。启用后，用户本人的提问、澄清答复与
+回答节选会发往这个服务——部署时按数据外发评估它绑定的服务。严格校验是双向的：新版本缺
+`[bindings] memory_suggest` 会拒启（`[thinking]` 里可以不写，缺省 `disabled`）；**旧版本看到这一行
+同样拒启**（对旧版本它是未知 id）。所以升级必须按这个顺序：
+
+1. 停掉旧版本。
+2. 在 `MODEL_SERVICES_CONFIG` 指向的文件里，`[bindings]` 加 `memory_suggest = "<某个 chat 服务的 id>"`；
+   有 `[thinking]` 表的可以加 `memory_suggest = "disabled"`。同一次升级还新增了别的工作负载时，在这一步一并补齐。
+   若该构建同时引入 `kg_attr_enrich`，两条绑定一起补；未提供该工作负载的构建不能提前写入未知 id。
+3. 用**新构建**自检，退出码为 0 才继续（非 0 时最后一行点名缺了或多了哪些绑定）：
+   `PYTHONPATH=backend python -c "from app.core.config import get_settings; from app.services.model_registry import SystemModelServiceRegistry; SystemModelServiceRegistry.load(get_settings())"`。
+   这条命令只读 `.env` 与模型配置文件，不连数据库、不写文件、不起线程；不要用 `import app.main`
+   代替——它会构造整个应用，顺带压缩归档旧日志、装载扩展。
+4. 启动新版本。
+
+回滚到旧版本前，先删掉 `[bindings]` 与 `[thinking]` 里的 `memory_suggest` 两行，否则旧版本拒启。
+同一次升级带来的数据库迁移（SQLite v106 / PostgreSQL 0087，新增记忆建议的列、索引与四张表）是单向的：
+旧版本发现库的版本超前会拒绝启动，回退只能恢复升级前的数据库备份——升级前请先备份。
+
+已有数据的 PostgreSQL 库，在备份后、停旧服务前，用**新 checkout** 的在线工具预建：
+
+```bash
+PYTHONPATH=backend python scripts/build_hotpath_indexes.py
+PYTHONPATH=backend python scripts/build_hotpath_indexes.py --apply
+```
+
+它检查 / 构建累计登记表，包含批 10 的 `idx_ask_jobs_memory_suggest_sample`，没有按批选择参数。
+较旧 schema 上会先幂等补齐 `ask_jobs.submitted_via`、`output`、`report_id` 中缺少的列，
+沿用已封存迁移的默认值与 `C` 排序规则；已有值不变，未知的历史提问入口仍为未知，工具不推进迁移账本。
+应用使用 `CREATE INDEX CONCURRENTLY`，启动迁移可复用形态正确的索引，避免持启动写锁建索引。
+同名但形态不同、或遗留 INVALID 的索引会被拒绝，不会静默替换；按工具明确提示修复后再跑。
+SQLite v106 在迁移时建立精确 UTC 表达式索引，支持取样与原始会话前序查找。
+启动后核对 `/api/system/config` 的接线和模型就绪状态符合预期，
+用户开启之前不应出现建议运行。
+
+`AUTO_MEMORY_SUGGEST_ENABLED=false` 停止触发和写建议，已有草稿仍照常过期。
+`AUTO_MEMORY_SUGGEST_CLARIFIED_ENABLED`、`AUTO_MEMORY_SUGGEST_REPEATED_ENABLED`、
+`AUTO_MEMORY_SUGGEST_CORRECTED_ENABLED` 分别关闭澄清、反复提问、追问纠正类建议，所有类别
+全关也会关闭接线门。纠正类开关对应 `Settings.auto_memory_suggest_corrected_enabled`。
+它们属于高级部署控制，不是个人偏好，不要求加进
+入门 `.env`。成本设置包括 `AUTO_MEMORY_SUGGEST_TRIGGER`、`AUTO_MEMORY_SUGGEST_BACKLOG_MAX`、
+`AUTO_MEMORY_SUGGEST_DAILY_CAP`、`AUTO_MEMORY_SUGGEST_ITEMS_PER_RUN`、
+`AUTO_MEMORY_SUGGEST_CANDIDATES_PER_RUN`，以及同前缀的 `QUESTION_MAX_CHARS`、
+`CLARIFICATION_MAX_CHARS`、`ANSWER_EXCERPT_MAX_CHARS`、`INPUT_MAX_CHARS`、
+`OUTPUT_MAX_TOKENS`、`EXPIRY_DAYS`、`DECLINED_TTL_DAYS`、`EXPIRY_SWEEP_LIMIT`。
+数值默认值与算法护栏统一见[自动用户记忆建议](./product-and-api_zh.md#自动用户记忆建议)，
+数值设置拒绝非正值。近邻 lookup 也可能把有界的问题 / 澄清文本发给已配置的记忆向量服务；
+采纳沿既有记忆向量和图谱工作负载执行，数据外发评估应覆盖这些服务。
+
 **绑定表在启动时被硬校验：缺一个工作负载或多一个未知 id，后端直接拒绝启动。**
 只要 `MODEL_SERVICES_CONFIG` 非空，`[bindings]` 就必须覆盖全部工作负载（chat / embedding /
 rerank 三类都算），且不得出现不是工作负载的 id（拼错的，或版本升级后已退役的，如
@@ -1618,3 +1669,17 @@ EXTENSION_ADMISSION_REFRESH_SECONDS  # 服务进程重读管理员运行时开�
 W3专有字段、TLS/CA及Secret环境引用由插件文档维护。反向代理、APM及前端访问日志需去掉OAuth回调/交接query；主仓会去除Uvicorn认证访问记录中的query，这不会代替上游基础设施配置。
 
 生产Settings校验仍要求非默认 `SILICON_NOTEBOOK_ADMIN_PASSWORD`；内置 `admin` 仍是本地账号，停用插件后即可使用。
+
+## 协作脉搏部署
+
+保持单 API worker、单实例：协作提示和在场保存在进程内。本功能没有开关；只有详情判断允许时
+浏览器才轮询，单人私有库与只经公共臂可读的读者不产生轮询。连接池压力可放慢间隔，在场过期
+时间同步延长。
+
+高级设置为 `COLLAB_PULSE_INTERVAL_SECONDS`、`COLLAB_PULSE_SLOW_INTERVALS`、
+`COLLAB_PULSE_POOL_WAIT_SLOW_MS`、`COLLAB_PULSE_POOL_WAIT_VERY_SLOW_MS`、
+`COLLAB_PULSE_RING_SIZE`、`COLLAB_PULSE_MAX_NOTEBOOKS`、
+`NOTEBOOK_ACTIVITY_RETENTION_DAYS`、`NOTEBOOK_ACTIVITY_PANEL_LIMIT`、
+`NOTEBOOK_ACTIVITY_QUEUE_SIZE`，不加入入门 `.env.example`。
+[产品契约](./product-and-api_zh.md#协作脉搏)维护默认值与校验关系；
+[运维参考](./operations_zh.md#协作脉搏运维)维护队列诊断、证据与 schema 兼容回退步骤。

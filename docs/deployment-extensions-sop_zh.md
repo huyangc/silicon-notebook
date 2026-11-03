@@ -258,6 +258,8 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 
 九个接缝，仅此而已：`plugin_id`、`settings`、`require_notebook_capability`、`require_notebook_read`、`current_actor`、`user_error`、`url_sources`、`task_stream`、`emit_event`。
 
+`require_notebook_capability` 按 core 的同一张能力表判定：内容写能力（`sources:write`、`kg:write`、`knowhow:write` 等七个）自分享编辑 P1 起是**编辑权**档，除 owner 与组管理员外也放行被点名的编辑者；要求「只有 owner 或组管理员」的插件动作请改用管理档能力（例如 `notebook:manage`）。
+
 *core 替你做的：*
 
 - **按端口授权。** `url_sources.import_urls` 对**请求自己的那个用户**核对 `sources:write`——用户从 core 的请求上下文解析，绝不从你传进去的任何东西解析——不通过就用与 core 端点相同的 404 拒绝（不泄露存在性）。过了这一关，它就是 core 自己那个 URL 导入函数本人：同样的容量记账、管理员豁免、未配置解析器映射与后台解析调度。
@@ -313,6 +315,26 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 - `ReflectActionContributor.invoke` 跑在同一类私有 worker 线程上、受同一套硬 deadline 纪律约束（`REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS`，可用性检查与调用本身共用同一份预算——默认值与完整预算账目见 [Reflect 插件动作](./product-and-api_zh.md#reflect-插件动作askreflect_action)）：同样不要依赖 `contextvars`/线程局部状态，`ReflectActionCallContext` 上也没有 notebook id、actor id、检索范围或任何其它核心端口的位置——只有 `question`、模型自己写的、已校验过的 `arguments`、一个 `cancellation` 令牌、`deadline_monotonic` 与 `max_items`。返回一个 `ReflectActionResult`（不是裸元组，也不要包一层 `ContributorResult`）；每个 `ReflectActionItem.excerpt` 就是引用卡将会原样显示的那段文字——绝不会被二次摘要，所以把可引用的原文放在这里，不是一段转述。每个字符串字段都会被渲染在一个以 `k<n>:` 为键的证据块的一行里，因此带换行或其它控制字符的值会被折成一个空格，而不是被信任留在自己那一行；`url` 只在是 `http`/`https` 时才被接纳。框架在启动冻结期校验你的描述符形状——超长字符串、控制字符、重复或保留的动作/参数名、或取值不足两个的枚举都会直接注册失败（`ExtensionRegistryError`，即启动失败），绝不静默夹取。描述符上的 `max_calls_per_run` 是一道天花板，部署自己的 `REASONING_MAX_PLUGIN_ACTIONS` 策略只能把它调低，不能调高。
 - `AskEngineProvider` 只能引用自己那次 `retrieval` 端口返回的证据句柄。伪造、过期或跨 run 的句柄都会拒绝整份答案；不得捕获该拒绝并以无接地正文重试。
 - `ElementEnricher` 的可用性探测与 `enrich()` 调用一起跑在一条私有 worker 线程上、受一个硬 deadline 约束，与 `GapConsultContributor` 完全同形：不要依赖 `contextvars` 或任何指望核心 ContextVar 能带进那条线程——按设计一个都带不进去。`context.assets.read(ref)` 只在同一次调用期间返回字节：你的 `enrich()` 一旦返回、超时或被放弃，之后的读取恒为 `None`，绝不要把 ref 或 reader 本身留到那之后再用。返回的 `description` 不得含 `\n`/`\t` 之外的控制字符；凭据或端点类设置（API key、其环境变量名、base URL）绝不能写进候选的 `metadata`——模型 id 这类非机密的来源信息可以写，样板记录的正是它。
+
+### Ask 完成观察者与记忆建议
+
+`ask.completed_observer` 有四个核心通知能力：
+`ask:agent_profile_completed_access`、`ask:retrieval_experience_completed_access`、
+`ask:search_profile_completed_access`、`ask:memory_suggest_completed_access`。
+每个观察者至多请求一个，多选在冻结 host 构造时拒绝。内建顺序是画像 → 检索经验（仅
+reasoning）→ 搜索画像 → 记忆建议，在持久化终态 / 交付后串行、共享截止时刻并隔离失败。
+观察者不得持核心连接；预算耗尽时可跳过最后一项。
+
+新能力只在 notebook Ask 投影 opaque `access.notify()`，不给 actor / notebook 身份或
+参与库列表，原能力的身份投影不变。核心 `CompletedAskNotification` 追加
+`submitted_via:str=""`、`had_clarification:bool=False`、`ask_job_id:str=""`，严格
+校验运行时类型，不能用数字 / 字符串冒充布尔。这些不是 SDK context 字段；核心触发器
+只计合格网页提问。
+
+认证刚读到且仍稳定的 manual 提示仅可跳过**精确身份的内建项**，端口仍在。使用同能力的
+第三方贡献照常执行 availability、SDK 投影、notify 与事件。私有严格布尔跳过证明不进
+SDK，直接 notify 仍复核核心门。失效 / 回退见[产品契约](./product-and-api_zh.md#自动用户记忆建议)
+与架构文档；插件不能缓存个人模式或仿造核心 writer。
 
 ## 4. 第二步：写前端包
 

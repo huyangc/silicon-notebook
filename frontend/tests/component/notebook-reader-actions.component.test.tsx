@@ -131,7 +131,7 @@ test("交叉态(既是只读成员又在授权群组里):成员行优先,退出�
 test("组管理员打开共享库:徽章说「可管理」而不是「只读」", () => {
   render(
     <ReaderNotebookBadge
-      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true })}
+      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true, can_manage_notebook: true })}
       leaveBusy={false}
       onLeave={vi.fn()}
     />,
@@ -161,7 +161,7 @@ test("卡片菜单:组管理员只有「由组管理员管理」——没有编�
   // 编辑信息——他改名走工作区顶栏的行内输入框(见下一条),那条是 PATCH-only。
   render(
     <NotebookMenuActions
-      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true })}
+      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true, can_manage_notebook: true })}
       canManageNotebook
       canDeleteNotebook
       onLeave={vi.fn()}
@@ -183,7 +183,7 @@ test("顶栏徽章:组管理员的标题是可编辑输入框,改名回调可用
   const onChange = vi.fn();
   render(
     <ReaderNotebookBadge
-      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true })}
+      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true, can_manage_notebook: true })}
       leaveBusy={false}
       onLeave={vi.fn()}
       rename={{
@@ -373,7 +373,7 @@ test("卡片菜单:不传说明时那一格直接没有,不会退回写死的镜
 test("顶栏徽章:不下发 rename 时标题退回只读,镜像说明就地出现", () => {
   render(
     <ReaderNotebookBadge
-      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true, sync_origin: "site-a" })}
+      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true, can_manage_notebook: true, sync_origin: "site-a" })}
       leaveBusy={false}
       onLeave={vi.fn()}
       mirrorNote={MIRROR_NOTEBOOK_MANAGE_NOTE}
@@ -396,7 +396,7 @@ test("顶栏徽章:不下发 rename 时标题退回只读,镜像说明就地出�
 test("顶栏徽章:本地库不渲染镜像说明", () => {
   const { container } = render(
     <ReaderNotebookBadge
-      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true })}
+      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true, can_manage_notebook: true })}
       leaveBusy={false}
       onLeave={vi.fn()}
       rename={{

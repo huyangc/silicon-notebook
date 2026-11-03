@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from app.extension_sdk import (
     ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     ASK_COMPLETED_OBSERVER_POINT,
+    ASK_MEMORY_SUGGEST_COMPLETED_ACCESS_CAPABILITY,
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY,
     ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     EXTENSION_API_VERSION,
@@ -32,6 +33,11 @@ ASK_RETRIEVAL_EXPERIENCE_COMPLETED_CONTRIBUTION_ID = (
     "builtin.ask_retrieval_experience"
 )
 ASK_SEARCH_PROFILE_COMPLETED_CONTRIBUTION_ID = "builtin.ask_search_profile"
+# ⚠ The host runs observers in contribution-id order (the registry sorts a
+# point's non-chain contributions by id at freeze), so "last among the
+# built-ins" is THIS spelling: it must sort after "builtin.ask_search_profile"
+# (pinned by test_memory_suggest_observer_runs_last_among_builtins).
+ASK_MEMORY_SUGGEST_COMPLETED_CONTRIBUTION_ID = "builtin.ask_user_memory_suggest"
 
 
 class _DelegatingCompletedObserver:
@@ -61,6 +67,7 @@ _RETRIEVAL_EXPERIENCE = _declaration(
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_CONTRIBUTION_ID
 )
 _SEARCH_PROFILE = _declaration(ASK_SEARCH_PROFILE_COMPLETED_CONTRIBUTION_ID)
+_MEMORY_SUGGEST = _declaration(ASK_MEMORY_SUGGEST_COMPLETED_CONTRIBUTION_ID)
 
 
 @dataclass(frozen=True)
@@ -127,11 +134,41 @@ class SearchProfileCompletedBundle:
         )
 
 
+@dataclass(frozen=True)
+class MemorySuggestCompletedBundle:
+    """Auto user-memory suggestions (design 2026-10-28 §4.1).
+
+    It runs LAST among the built-in Ask observers: the host runs observers
+    serially under one shared deadline and ``break``s once it is spent, so the
+    least important of the four is the first one a tight budget drops. The
+    order is the contribution-id order (see the id constant above), not the
+    bundle tuple's; a deployment plugin's observer sorts by its own id and may
+    run before or after it.
+    """
+
+    manifest: ExtensionManifest = ExtensionManifest(
+        id=ASK_MEMORY_SUGGEST_COMPLETED_CONTRIBUTION_ID,
+        version="1.0.0",
+        api_version=EXTENSION_API_VERSION,
+        display_name="Ask memory-suggestion completion",
+        trust="builtin",
+        contributions=(_MEMORY_SUGGEST,),
+        requires=(ASK_MEMORY_SUGGEST_COMPLETED_ACCESS_CAPABILITY,),
+    )
+
+    @staticmethod
+    def register(registrar: ExtensionRegistrar) -> None:
+        registrar.add_observer(
+            ExtensionContribution(_MEMORY_SUGGEST, _DelegatingCompletedObserver())
+        )
+
+
 ASK_AGENT_PROFILE_COMPLETED_BUNDLE = AgentProfileCompletedBundle()
 ASK_RETRIEVAL_EXPERIENCE_COMPLETED_BUNDLE = (
     RetrievalExperienceCompletedBundle()
 )
 ASK_SEARCH_PROFILE_COMPLETED_BUNDLE = SearchProfileCompletedBundle()
+ASK_MEMORY_SUGGEST_COMPLETED_BUNDLE = MemorySuggestCompletedBundle()
 
 
 __all__ = [
@@ -139,6 +176,8 @@ __all__ = [
     "ASK_AGENT_PROFILE_COMPLETED_CONTRIBUTION_ID",
     "AGENT_PROFILE_WORKSPACE_UI_CAPABILITY",
     "AGENT_PROFILE_WORKSPACE_UI_CONTRIBUTION_ID",
+    "ASK_MEMORY_SUGGEST_COMPLETED_BUNDLE",
+    "ASK_MEMORY_SUGGEST_COMPLETED_CONTRIBUTION_ID",
     "ASK_RETRIEVAL_EXPERIENCE_COMPLETED_BUNDLE",
     "ASK_RETRIEVAL_EXPERIENCE_COMPLETED_CONTRIBUTION_ID",
     "ASK_SEARCH_PROFILE_COMPLETED_BUNDLE",

@@ -15,6 +15,12 @@ export type NotebookSummaryLike = {
 
 export type TierAction = "set" | "unset";
 
+// A system role does not grant management access to an invited notebook.
+export const canChangeNotebookTier = (
+  role: string | undefined,
+  canManageNotebook: boolean,
+): boolean => role === "admin" && canManageNotebook;
+
 export type TierActionState = {
   action: TierAction;
   label: string;

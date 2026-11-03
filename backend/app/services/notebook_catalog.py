@@ -30,6 +30,8 @@ from app.core.query_syntax import strip_accepted_quote_markers
 from app.repositories.group_rows import (
     fold_granted_notebook_groups,
     notebook_grant_confers_admin,
+    notebook_grant_confers_edit,
+    notebook_named_grant_role,
 )
 from app.repositories.ports import (
     IdentityStorePort,
@@ -603,6 +605,7 @@ class NotebookSummaryQuery:
         if owner_id == user_id:
             summary.access = "owner"
             summary.can_manage_content = True
+            summary.can_manage_notebook = True
             return
         summary.access = "reader"
         summary.shared_from = (
@@ -613,10 +616,20 @@ class NotebookSummaryQuery:
         )
         if not granted:
             return
+        # 分享编辑 P1:内容写入口跟编辑边(admin ∪ editor),管理档入口(画像、tier、
+        # 授权边)跟管理边;点名编辑者两者分别为真、假。
         summary.can_manage_content = any(
+            notebook_grant_confers_edit(item) for item in granted
+        )
+        summary.can_manage_notebook = any(
             notebook_grant_confers_admin(item) for item in granted
         )
+        summary.collaborator_role = next(
+            (role for role in map(notebook_named_grant_role, granted) if role), ""
+        )
         if self.queries.joined_notebook_rows(db, user_id, notebook_id=summary.id):
+            # 交叉态(点名授权 + 成员行):两个退出各管各的,前端据此并排给出。
+            summary.collaborator_is_member = bool(summary.collaborator_role)
             return
         summary.granted_via = [
             GrantedGroupRef(**item)
@@ -893,8 +906,10 @@ class NotebookSummaryQuery:
                 )
                 nb.access = "owner"
                 nb.can_manage_content = True
+                nb.can_manage_notebook = True
                 seen.add(nb.id)
                 out.append(nb)
+            joined_ids = {row["id"] for row in joined}
             for row in joined:
                 nb = self.from_row(
                     db,
@@ -911,6 +926,13 @@ class NotebookSummaryQuery:
                 out.append(nb)
             admin_ids = {
                 row["id"] for row in granted if notebook_grant_confers_admin(row)
+            }
+            edit_ids = {
+                row["id"] for row in granted if notebook_grant_confers_edit(row)
+            }
+            named_roles = {
+                row["id"]: notebook_named_grant_role(row)
+                for row in granted if notebook_named_grant_role(row)
             }
             groups_by_notebook = fold_granted_notebook_groups(
                 [
@@ -945,8 +967,13 @@ class NotebookSummaryQuery:
                 ]
                 out.append(nb)
         for nb in out:
-            if nb.id in admin_ids:
+            if nb.id in edit_ids:
                 nb.can_manage_content = True
+            if nb.id in admin_ids:
+                nb.can_manage_notebook = True
+            if nb.id in named_roles:
+                nb.collaborator_role = named_roles[nb.id]
+                nb.collaborator_is_member = nb.id in joined_ids
         return out
 
 

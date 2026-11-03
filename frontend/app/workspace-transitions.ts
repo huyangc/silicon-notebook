@@ -180,16 +180,27 @@ export async function openMemoryDeepLink(
  *     目标端自己的可见性由目标端管理）、`canManageReports`、理解底座（agent_profile:write）。
  *
  * 缺省 `""` = 本地库 = 逐字复现本参数出现之前的行为（旧后端不发这个字段）。
+ *
+ * `canManageNotebook` 是 `NotebookSummary.can_manage_notebook`（分享编辑与协作 P1）:
+ * owner ∨ 一条 admin 授权边。点名共享引入**编辑者**之后,`can_manage_content` 的语义
+ * 收窄为「有编辑权」（owner ∪ admin 边 ∪ editor 边）,而改名/tier（`notebook:manage`）与
+ * 群组授权边（`notebook:grant`）是**管理档**——编辑者没有。所以这两位不再跟 `canWrite`
+ * 走,改看 `isOwner || canManageNotebook`;内容写入口（`canWriteNotebook` 等）仍看编辑权。
+ * 缺省 false = 收:旧后端不发这个字段时,组管理员会暂时看不到改名与群组授权入口,
+ * 而不会让编辑者看到一个必然 404 的入口。
  */
 export function workspaceCapabilities(
   access: string | undefined,
   role: string,
   canManageContent: boolean = false,
   syncOrigin: string = "",
+  canManageNotebookParam: boolean = false,
 ) {
   const canWrite = access !== "reader" || canManageContent;
   const mirrored = Boolean(syncOrigin);
   const isOwner = access !== "reader";
+  // 管理档(notebook:manage / notebook:grant):owner 或 admin 边。编辑者 ✗。
+  const canManage = isOwner || canManageNotebookParam;
   return {
     /** 这本库是不是同步来的镜像。只给**标注**用（来源面板那句说明），不要拿它在
      *  调用侧重新拼「能不能按」——那些判据已经逐格算在下面各位里。 */
@@ -202,10 +213,11 @@ export function workspaceCapabilities(
      *
      * 给的是**就地说明该不该出现**这个问题,不是权限问题:纯只读成员本来就没有那些控件,
      * 对他冒一句「镜像的名称…随源环境同步」是在解释一件他从未见过的事,只会占地方。
-     * 判据写成 `mirrored && canWrite`(未加围栏的那个 canWrite)而不是
-     * `mirrored && !canManageNotebook`——后者对只读成员恒真,正是要避开的那一格。
+     * 判据写成 `mirrored && canManage`(未加围栏的那个管理档)而不是
+     * `mirrored && !canManageNotebook`——后者对只读成员恒真,正是要避开的那一格。编辑者
+     * 本来就没有改名/tier,对他同样不冒这句话。
      */
-    mirrorHidesNotebookManage: mirrored && canWrite,
+    mirrorHidesNotebookManage: mirrored && canManage,
     canWriteNotebook: canWrite && !mirrored,
     canGovernKnowledge: canWrite && !mirrored,
     /**
@@ -228,12 +240,20 @@ export function workspaceCapabilities(
      * 时写入源端授权,之后不覆盖」。「分享」入口后面同时挂着它与 `canConfigureNotebook`
      * （链接分享,恒 owner,同样放行），所以那颗按钮跟这一位走,**不能**跟
      * `canWriteNotebook` 走——否则镜像的库主连自己这一侧的可见性都管不了。
+     * 分享编辑 P1:它是管理档,**编辑者没有**(否则点名邀请的编辑者能把库共享给他管理的
+     * 任何群组,库主「我只邀请了张三」就不成立)。
      */
-    canGrantAccess: canWrite,
+    canGrantAccess: canManage,
     // owner 对本库对外处置（链接分享）的配置权，**恒 owner**。组管理员有内容管理权
     // （canWrite）但没有它——见函数头注释与 deps.py 的 notebook:configure。
     // 镜像上照常放行:share_token 是目标端自有列，不随同步走。
     canConfigureNotebook: isOwner,
+    /**
+     * 「点名共享」的编辑者名单（`notebook:collaborate`,**恒 owner**,分享编辑 P1）。组管理员
+     * 有群组授权边的管理权,但不能把写权点名发给别人——否则库主「我只邀请了张三」不成立。
+     * 不加镜像与项:围栏放行它（目标端自管可见性,同 canGrantAccess）。
+     */
+    canManageCollaborators: isOwner,
     /**
      * 挂载参考库（`PUT /notebooks/{id}/bases` 与它专用的 mountable/mounted-by-count
      * 枚举）。级别与 `canConfigureNotebook` 同为恒 owner——P2-T2 评审 P0 的那套论证
@@ -245,9 +265,21 @@ export function workspaceCapabilities(
     /**
      * 笔记本改名/描述性画像编辑（`PATCH /notebooks/{id}`）与 tier 切换
      * （`POST .../tier`）,即后端的 `notebook:manage`（admin 档,组管理员 ✓）。
-     * 镜像上这些字段是**同步来的**，目标端改不留，故收起。
+     * 镜像上这些字段是**同步来的**，目标端改不留，故收起。编辑者没有（管理档）。
      */
-    canManageNotebook: canWrite && !mirrored,
+    canManageNotebook: canManage && !mirrored,
+    /**
+     * 删除**任何人**上传的来源(`DELETE /sources/{id}`,sources:write 体内再判上传人)。库主与
+     * 管理者(admin 边)可以;点名编辑者只能删本人上传的(决策 D14),逐行判据见
+     * `sourceDeleteAllowed`。镜像上收起(sources:write 被围栏挡)。
+     */
+    canDeleteAnySource: canManage && !mirrored,
+    /**
+     * Knowhow 整表级的破坏性动作:删除整张表、「移动」到别的笔记本、清理变更历史(决策 D14)。
+     * 库主与管理者可以;点名编辑者对这三样恒 404,入口不渲染(行/列/格的删除与回退照旧跟
+     * `canWriteNotebook`)。镜像上收起(knowhow:write 被围栏挡)。
+     */
+    canDestroyKnowhowTables: canManage && !mirrored,
     /**
      * 删除笔记本（`notebook:delete`,恒 owner）。镜像上收起:§5 明文——镜像只能由同步
      * 导入退役，目标端删掉它只会让下一次导入把整本库重新造出来。
@@ -277,6 +309,20 @@ export function workspaceCapabilities(
     canManageNotebookSchemas: canWrite && !mirrored,
     canManageGlobalSchemas: role === "admin",
   };
+}
+
+
+/**
+ * 这一篇来源要不要给「删除」入口(分享编辑 P1,决策 D14)。
+ *
+ * = 能写来源,且(能删任何人的,或这篇是本人上传的)。点名编辑者对他人上传的来源不渲染删除
+ * ——后端对它恒 404。`uploaded_by_me` 缺失(旧后端)按「不是本人」,只影响编辑者。
+ */
+export function sourceDeleteAllowed(
+  capabilities: { canWriteNotebook: boolean; canDeleteAnySource: boolean },
+  source: { uploaded_by_me?: boolean },
+): boolean {
+  return capabilities.canWriteNotebook && (capabilities.canDeleteAnySource || source.uploaded_by_me === true);
 }
 
 
@@ -336,5 +382,7 @@ export function notebookRoleText(
 
 
 export function doneItemDestination(kind: string | undefined): "sources" | "kg" {
-  return kind === "paper_meta_done" ? "sources" : "kg";
+  // 「被添加为编辑者」(分享编辑 P1)停在来源面板:编辑者最先要做的是看/加来源,
+  // 而这本库的知识图谱可能还没整理过。
+  return kind === "paper_meta_done" || kind === "notebook_collaborator_granted" ? "sources" : "kg";
 }

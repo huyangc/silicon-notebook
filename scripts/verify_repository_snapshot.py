@@ -65,6 +65,7 @@ if str(BACKEND_ROOT) not in sys.path:
 from app.core.config import Settings
 from app.migration.sync.capture import sqlite_trigger_sql
 from app.repositories.sqlite.anchor_normalization import sqlite_js_trim_expression
+from app.repositories.sqlite_functions import register_sqlite_functions
 from app.services.model_registry import WORKLOADS, SystemModelServiceRegistry
 from app.services.sqlite_repository import (
     SCHEMA_VERSION,
@@ -1113,6 +1114,8 @@ def snapshot_database(
     uri = _sqlite_read_uri(db_path)
     meta_conn = sqlite3.connect(uri, uri=True)
     digest_conn = sqlite3.connect(uri, uri=True)
+    register_sqlite_functions(meta_conn)
+    register_sqlite_functions(digest_conn)
     digest_conn.text_factory = bytes  # byte-exact TEXT digesting, no decode risk
     try:
         user_version = int(meta_conn.execute("PRAGMA user_version").fetchone()[0])
@@ -1845,6 +1848,7 @@ def exercise_reads(repo: Any, backup_path: Path) -> Dict[str, int]:
     )
 
     probe = sqlite3.connect(_sqlite_read_uri(backup_path), uri=True)
+    register_sqlite_functions(probe)
     try:
         # Top KG notebooks plus notebooks that actually hold Ask jobs/reports,
         # so those read paths are exercised whenever the database has them.
@@ -1995,8 +1999,10 @@ def verify_snapshot(database: Path, storage_dir: Path) -> VerificationResult:
         temp_storage.mkdir()
 
         source_conn = sqlite3.connect(_source_read_uri(database), uri=True)
+        register_sqlite_functions(source_conn)
         try:
             backup_conn = sqlite3.connect(backup_path)
+            register_sqlite_functions(backup_conn)
             try:
                 source_conn.backup(backup_conn)
             finally:
@@ -6194,6 +6200,162 @@ MIGRATION_MANIFEST[(104, 105)] = {
     "triggers": {},
     "views": {},
 }
+
+# v106 (parity with PostgreSQL 0087_memory_suggest.sql): auto user-memory
+# suggestions. memory_items gains the nullable suggested_signal (a bare-column
+# ALTER, so memory_items' stored CREATE TABLE text changes and the column
+# entry below explains it), two partial memory_items indexes, two exact-UTC
+# ask_jobs expression indexes, and four new
+# tables (the job rows and fingerprints FK notebooks ON DELETE CASCADE). No
+# trigger or view, no backfill: every existing memory reads NULL.
+MEMORY_SUGGEST_COLUMNS = {
+    "memory_items": {
+        "suggested_signal": ("suggested_signal", "TEXT", 0, None, 0),
+    },
+}
+MEMORY_SUGGEST_TABLES = {
+    "memory_suggest_users": """CREATE TABLE memory_suggest_users (
+                  owner_id TEXT NOT NULL PRIMARY KEY,
+                  enabled INTEGER NOT NULL DEFAULT 0,
+                  enabled_at TEXT,
+                  quota_day TEXT NOT NULL DEFAULT '',
+                  quota_used INTEGER NOT NULL DEFAULT 0,
+                  updated_at TEXT NOT NULL
+                )""",
+    "memory_suggest_jobs": """CREATE TABLE memory_suggest_jobs (
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  owner_id TEXT NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'idle'
+                    CHECK(status IN ('idle', 'running')),
+                  pending_signal INTEGER NOT NULL DEFAULT 0,
+                  cursor_created_at TEXT NOT NULL,
+                  cursor_id TEXT NOT NULL DEFAULT '',
+                  cursor_inclusive INTEGER NOT NULL DEFAULT 1,
+                  window_started_at TEXT NOT NULL,
+                  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                  claim_token TEXT NOT NULL DEFAULT '',
+                  runs INTEGER NOT NULL DEFAULT 0,
+                  candidates_written INTEGER NOT NULL DEFAULT 0,
+                  last_outcome TEXT NOT NULL DEFAULT '',
+                  failure_reason TEXT NOT NULL DEFAULT '',
+                  started_at TEXT,
+                  finished_at TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  PRIMARY KEY (notebook_id, owner_id)
+                )""",
+    "memory_suggest_read_fences": """CREATE TABLE memory_suggest_read_fences (
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  owner_id TEXT NOT NULL,
+                  lost_at TEXT NOT NULL,
+                  PRIMARY KEY (notebook_id, owner_id)
+                )""",
+    "memory_suggest_fingerprints": """CREATE TABLE memory_suggest_fingerprints (
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  owner_id TEXT NOT NULL,
+                  fingerprint TEXT NOT NULL,
+                  kind TEXT NOT NULL CHECK(kind IN ('proposed', 'declined')),
+                  expires_at TEXT,
+                  created_at TEXT NOT NULL,
+                  PRIMARY KEY (notebook_id, owner_id, fingerprint)
+                )""",
+}
+MEMORY_SUGGEST_INDEXES = {
+    "idx_ask_jobs_memory_suggest_utc": (
+        "CREATE INDEX idx_ask_jobs_memory_suggest_utc\n"
+        "                  ON ask_jobs(created_by, notebook_id, status, sn_utc_us(created_at), id)\n"
+        "                  WHERE submitted_via = 'web' AND output = 'answer' AND report_id = ''"
+    ),
+    "idx_ask_jobs_conv_utc": (
+        "CREATE INDEX idx_ask_jobs_conv_utc\n"
+        "                  ON ask_jobs(conversation_id, sn_utc_us(created_at), id)"
+    ),
+    "idx_memory_suggest_unadopted": (
+        "CREATE INDEX idx_memory_suggest_unadopted\n"
+        "                  ON memory_items(created_by, notebook_id, status)\n"
+        "                  WHERE suggested_signal IS NOT NULL AND status IN ('candidate', 'rejected')"
+    ),
+    "idx_memory_suggest_users_enabled": (
+        "CREATE INDEX idx_memory_suggest_users_enabled\n"
+        "                  ON memory_suggest_users(owner_id) WHERE enabled = 1"
+    ),
+    "idx_memory_suggest_expiry": (
+        "CREATE INDEX idx_memory_suggest_expiry\n"
+        "                  ON memory_items(created_at)\n"
+        "                  WHERE suggested_signal IS NOT NULL AND status = 'candidate'"
+    ),
+}
+# A hop that creates memory_items fresh (every hop from before the Memory
+# tables, the frozen v9 fixture included) observes only the ALTERed text: the
+# table ends with a plain column definition, so SQLite splices the new column
+# in place of the closing parenthesis (the AGENT_ACCESS_TOKENS_TABLE_V89
+# position; verified against a real ALTERed table).
+MEMORY_ITEMS_TABLE_V106 = EXPECTED_MEMORY_TABLES["memory_items"].replace(
+    "updated_at TEXT NOT NULL\n                )",
+    "updated_at TEXT NOT NULL\n                , suggested_signal TEXT)",
+)
+assert MEMORY_ITEMS_TABLE_V106 != EXPECTED_MEMORY_TABLES["memory_items"]
+MIGRATION_MANIFEST = {
+    (key[0], 106, *key[2:]): {
+        **manifest,
+        "tables": {
+            **manifest["tables"],
+            **(
+                {"memory_items": MEMORY_ITEMS_TABLE_V106}
+                if "memory_items" in manifest["tables"]
+                else {}
+            ),
+            **MEMORY_SUGGEST_TABLES,
+        },
+        "columns": {
+            **manifest["columns"],
+            "memory_items": {
+                **manifest["columns"].get("memory_items", {}),
+                **MEMORY_SUGGEST_COLUMNS["memory_items"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **MEMORY_SUGGEST_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(105, 106)] = {
+    "tables": MEMORY_SUGGEST_TABLES,
+    "columns": MEMORY_SUGGEST_COLUMNS,
+    "indexes": MEMORY_SUGGEST_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+# SQLite v107 / PostgreSQL 0088: local collaboration hints. Propagate the
+# additive table/index expectations to every already-deployed upgrade hop.
+NOTEBOOK_ACTIVITY_TABLES = {
+    "notebook_activity": """CREATE TABLE notebook_activity (
+                  id TEXT NOT NULL PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  kind TEXT NOT NULL,
+                  capability TEXT NOT NULL,
+                  actor_id TEXT NOT NULL,
+                  actor_name TEXT NOT NULL,
+                  target TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL
+                )""",
+}
+NOTEBOOK_ACTIVITY_INDEXES = {
+    "idx_notebook_activity_nb_created": "CREATE INDEX idx_notebook_activity_nb_created\n                  ON notebook_activity(notebook_id, created_at DESC, id)",
+    "idx_notebook_activity_created": "CREATE INDEX idx_notebook_activity_created ON notebook_activity(created_at)",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 107, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **NOTEBOOK_ACTIVITY_TABLES},
+        "indexes": {**manifest["indexes"], **NOTEBOOK_ACTIVITY_INDEXES},
+    } for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(106, 107)] = {
+    "tables": NOTEBOOK_ACTIVITY_TABLES, "indexes": NOTEBOOK_ACTIVITY_INDEXES,
+    "columns": {}, "triggers": {}, "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

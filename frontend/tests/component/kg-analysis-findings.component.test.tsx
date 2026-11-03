@@ -869,6 +869,22 @@ test("没建立关联的内容：可能改变结果时出「补上关联」，�
   expect(within(zone(/^待处理/)).getByText("补上关联已跑完：新增 12 条关联，还剩 1,818 个没有关联的知识条目")).toBeInTheDocument();
 });
 
+// 分享编辑 P1(D8):别人发起的任务占着维护槽,「补上关联」被服务端 409 点名挡下。那句说明是这颗
+// 按钮的结果:画在同一条问题的按钮旁,不走顶部状态条;别的问题上不出现。
+test("补上关联被占用：服务端点名的说明画在这条问题的「补上关联」旁", async () => {
+  renderPanel({ findingHandlers: { onRelink: vi.fn() }, relinkBusyNotice: "张三发起的重新合并正在运行" });
+  await ready();
+  const f5 = findingByRule("没建立关联的内容");
+  const status = within(f5).getByRole("status");
+  expect(status).toHaveTextContent("张三发起的重新合并正在运行");
+  expect(status.closest(".kg-finding-actions")).toBe(
+    within(f5).getByRole("button", { name: "补上关联" }).closest(".kg-finding-actions"),
+  );
+  for (const other of findingItems().filter((item) => item !== f5)) {
+    expect(within(other).queryByText("张三发起的重新合并正在运行")).toBeNull();
+  }
+});
+
 test("补上关联一条都没补上、报告是最新的：那一条移进折叠的诊断数据，结果仍写在看得见的待处理区", async () => {
   // 场景 A:报告与当前一致,补连 0 条 → 读侧判成 relink_spent、随 passed 那一页回来。
   const view = renderPanel({ findingHandlers: { onRelink: vi.fn() } });
@@ -1479,6 +1495,9 @@ test("两条问题引用同一篇来源：从一条提交重新解析，另一�
 test.each([
   ["failed", "没能开始重新解析，请稍后重试"],
   ["none", "这篇来源已不在或无需重新解析"],
+  // 分享编辑 P1(D8):另一位协作者刚提交了同一篇(批量 skipped_busy / 单篇 409)。原因写在
+  // 这颗按钮旁,不走横幅。
+  ["busy", "这篇来源正在解析，请等它完成"],
 ] as const)("没排上（%s）：占位当场撤掉，按钮恢复可点，结果写在按钮旁", async (outcome, text) => {
   openRows = [F3, MISMATCH_ON_D];
   vi.mocked(getSource).mockResolvedValue(detailAt("src-d", "extracted", "T0"));

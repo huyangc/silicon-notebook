@@ -258,7 +258,10 @@ def test_answer_memory_links_are_bounded_owner_private_and_notebook_scoped(
         json={"answer_ids": [answer_a, answer_reader, answer_b, "missing", answer_a]},
     )
     assert owner_links.status_code == 200, owner_links.text
-    assert owner_links.json() == {"links": {answer_a: owner_memory["id"]}}
+    assert owner_links.json() == {
+        "links": {answer_a: owner_memory["id"]},
+        "states": {answer_a: {"memory_id": owner_memory["id"], "status": "confirmed", "suggested": False}},
+    }
 
     reader_links = client.post(
         f"/api/notebooks/{notebook_a}/answer-memory-links",
@@ -266,7 +269,10 @@ def test_answer_memory_links_are_bounded_owner_private_and_notebook_scoped(
         json={"answer_ids": [answer_a, answer_reader]},
     )
     assert reader_links.status_code == 200
-    assert reader_links.json() == {"links": {answer_reader: reader_memory["id"]}}
+    assert reader_links.json() == {
+        "links": {answer_reader: reader_memory["id"]},
+        "states": {answer_reader: {"memory_id": reader_memory["id"], "status": "confirmed", "suggested": False}},
+    }
     assert owner_memory["created_by"] == owner_id
 
     too_many = client.post(

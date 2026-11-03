@@ -79,9 +79,13 @@ import {
   reformatKnowhowCell,
   rewriteAssetUrls,
   uploadNotebookAsset,
+  knowhowCellConflictOf,
+  type KnowhowCellConflict,
+  type KnowhowCellValue,
   type KnowhowColumn,
   type KnowhowTableDetail,
 } from "./knowhow-model.ts";
+import { KnowhowCellConflictNotice, SAVE_BLOCKED_CONFLICT_HINT } from "./knowhow-cell-conflict.tsx";
 import { orderColumnsForGrid, sortColumnsByPosition, isInternalAssetUrl } from "./knowhow-panel-logic.ts";
 import { extractErrorMessage } from "./knowhow-import-logic.ts";
 import {
@@ -624,8 +628,19 @@ export interface KnowhowCellEditorProps {
   /** 落库；panel 负责真正调用 patchKnowhowCell + 把结果合并回 detail 状态。
    * 若该格是合并共享格，panel 会批量写整组、不只是这一行（同一份
    * affectedBranchCount 判定，保证提示与实际写入范围一致）。reject 时本组件
-   * 在原地展示错误，不关闭浮窗（用户可以重试）。 */
-  onSave: (rowId: string, columnId: string, contentMd: string) => Promise<void>;
+   * 在原地展示错误，不关闭浮窗（用户可以重试）。
+   *
+   * 分享编辑 P1（决策 D7）：panel 带着打开编辑器时钉住的存储值做乐观校验；别人在这期间
+   * 改过这一格时 reject 的异常上挂着冲突（knowhowCellConflictOf），本组件就地给出双版本
+   * （knowhow-cell-conflict.tsx）。第 4 参 `overwrite` 只在「用我的覆盖」时传：panel 以它的
+   * current 为基线重发。 */
+  onSave: (rowId: string, columnId: string, contentMd: string, overwrite?: KnowhowCellConflict) => Promise<void>;
+  /** 冲突里点「放弃我的」：panel 把冲突时取回的当前存储值写进表数据并前移基线；本组件把
+   * 草稿换成对方的版本。未接线（测试/预览）时只换草稿。 */
+  onDiscardConflict?: (conflict: KnowhowCellConflict) => KnowhowCellValue[] | void;
+  /** 「这一组已被重新分组」里点「刷新」：panel 重拉整表并把基线改钉到刷新后的值。
+   * resolve(false) = 没拉成。未接线时恒为没拉成。 */
+  onRefreshConflict?: () => Promise<boolean>;
   /** 「保存并下一格」算出下一格坐标后，把「该切到哪一格、停留在编辑态」的
    * 决定报给 panel——panel 更新 cellModal 状态，本组件靠 key 变化重新挂载。 */
   onNavigate: (rowId: string, columnId: string) => void;
@@ -663,6 +678,8 @@ export function KnowhowCellEditor({
   rowTitle,
   affectedBranchCount,
   onSave,
+  onDiscardConflict,
+  onRefreshConflict,
   onNavigate,
   onClose,
   onHistory,
@@ -709,7 +726,11 @@ export function KnowhowCellEditor({
   const [draftText] = useState<string | null>(draftScan.offer ? draftScan.stored : null);
   const [showRestoreBanner, setShowRestoreBanner] = useState(draftScan.offer);
   const [savingMode, setSavingMode] = useState<"save" | "next" | null>(null);
+  const saveInFlightRef = useRef(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // 保存撞上别人的改动（409，决策 D7）：就地双版本的数据源；serial 让每一次新冲突重挂
+  // 提示组件（它自带进行中/结果态，不能带着上一次的状态见新冲突）。
+  const [cellConflict, setCellConflict] = useState<{ conflict: KnowhowCellConflict; serial: number } | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [pendingLeave, setPendingLeave] = useState<LeaveIntent | null>(null);
@@ -920,15 +941,22 @@ export function KnowhowCellEditor({
   }, [rowId, columnId]);
   flushDraftRef.current = flushDraft;
 
+  const conflictSerialRef = useRef(0);
+  const showCellConflict = useCallback((conflict: KnowhowCellConflict) => {
+    conflictSerialRef.current += 1;
+    setCellConflict({ conflict, serial: conflictSerialRef.current });
+  }, []);
+
   const runSave = useCallback(
     async (mode: "save" | "next") => {
       // 上传未完成就保存会漏掉「还没插进正文的图片」，故上传中不许发起保存；⌘↩ 走
       // 到这里会静默无响应，所以顺手把原因显示出来。优化在飞**不**挡保存（见
       // isSaveBlocked 注释：LLM 请求可能卡很久，不能连带锁死存盘）。
-      if (isSaveBlocked(savingMode !== null, uploading)) {
+      if (saveInFlightRef.current || cellConflict !== null || isSaveBlocked(savingMode !== null, uploading)) {
         if (uploading) setSaveError(SAVE_BLOCKED_UPLOADING_HINT);
         return;
       }
+      saveInFlightRef.current = true;
       setSavingMode(mode);
       setSaveError(null);
       try {
@@ -964,13 +992,65 @@ export function KnowhowCellEditor({
         if (completion.kind === "navigate") onNavigate(completion.rowId, completion.columnId);
         else if (completion.kind === "close") onClose();
       } catch (err) {
-        setSaveError(extractErrorMessage(err, "保存失败，请重试"));
+        const conflict = knowhowCellConflictOf(err);
+        if (conflict) showCellConflict(conflict);
+        else setSaveError(extractErrorMessage(err, "保存失败，请重试"));
       } finally {
+        saveInFlightRef.current = false;
         setSavingMode(null);
       }
     },
-    [savingMode, uploading, onSave, rowId, columnId, content, table, onNavigate, onClose, flushDraft],
+    [savingMode, cellConflict, uploading, onSave, rowId, columnId, content, table, onNavigate, onClose, flushDraft, showCellConflict],
   );
+
+  // 冲突里「对方的版本」：取这一格的当前存储值；合并共享格的冲突带的是整组，这一行缺席时
+  // 退回组内同列的第一项（规格 §5「对方的版本取组内代表行的当前存储值」）。
+  const conflictTheirsMd = (conflict: KnowhowCellConflict): string =>
+    (conflict.current.find((value) => value.rowId === rowId && value.columnId === columnId)
+      ?? conflict.current.find((value) => value.columnId === columnId))?.contentMd ?? "";
+
+  // 「用我的覆盖」：以冲突时的当前值为基线重发此刻编辑框里的内容。成功后与普通保存（runSave
+  // 的 "save"）**同一个收尾**：把草稿基线推进到刚落库的内容、处置草稿，然后关闭浮窗（主会话
+  // 裁决：覆盖就是一次保存，不该留下一个要用户再关一次的编辑器）。草稿没落成时与 runSave 同
+  // 契约——不离开、原地报 DRAFT_FLUSH_FAILED。本格已卸载时什么都不做（resolveSaveCompletion）。
+  // 又撞上一次冲突（第三个人刚改过）就换上新的冲突，返回 false，浮窗留着。
+  async function handleConflictOverwrite(conflict: KnowhowCellConflict): Promise<boolean> {
+    if (saveInFlightRef.current || isSaveBlocked(savingMode !== null, uploading)) return false;
+    saveInFlightRef.current = true;
+    setSavingMode("save");
+    setSaveError(null);
+    try {
+      const sent = content;
+      try {
+        await onSave(rowId, columnId, sent, conflict);
+      } catch (err) {
+        const next = knowhowCellConflictOf(err);
+        if (!next) throw err;
+        if (mountedRef.current) showCellConflict(next);
+        return false;
+      }
+      savedContentRef.current = sent;
+      if (mountedRef.current && !flushDraft()) {
+        setSaveError(DRAFT_FLUSH_FAILED_MESSAGE);
+        return true;
+      }
+      if (resolveSaveCompletion("save", null, mountedRef.current).kind === "close") onClose();
+      return true;
+    } finally {
+      saveInFlightRef.current = false;
+      if (mountedRef.current) setSavingMode(null);
+    }
+  }
+
+  // 「放弃我的」：把编辑框换成对方的版本（panel 同时更新表数据与基线）；之后的保存以对方
+  // 的版本为基线，不再冲突。
+  function handleConflictDiscard(conflict: KnowhowCellConflict) {
+    const accepted = onDiscardConflict?.(conflict);
+    const theirs = conflictTheirsMd(accepted ? { ...conflict, current: accepted } : conflict);
+    savedContentRef.current = theirs;
+    contentRef.current = theirs;
+    setContent(theirs);
+  }
 
   // 唯一的「确认离开」执行器：所有 close/switch 路径（Esc/背景/关闭按钮、取消、
   // 切兄弟格、守卫「放弃」按钮）都经此，保存收尾那条出口也遵循同一契约。
@@ -1513,6 +1593,20 @@ export function KnowhowCellEditor({
             </div>
           )}
 
+          {cellConflict && (
+            <KnowhowCellConflictNotice
+              key={cellConflict.serial}
+              reason={cellConflict.conflict.reason}
+              theirsMd={conflictTheirsMd(cellConflict.conflict)}
+              mineMd={content}
+              onOverwrite={() => handleConflictOverwrite(cellConflict.conflict)}
+              onDiscard={() => handleConflictDiscard(cellConflict.conflict)}
+              onRefresh={onRefreshConflict ?? (async () => false)}
+              onSettled={() => setCellConflict(null)}
+              overwriteBlockedReason={uploading ? SAVE_BLOCKED_UPLOADING_HINT : undefined}
+            />
+          )}
+
           {optimizeState.status === "ready" ? (
             <div className="kh-optimize-compare">
               <div className="kh-optimize-pane">
@@ -1823,11 +1917,13 @@ export function KnowhowCellEditor({
                 <button type="button" onClick={() => performLeave({ kind: "close" })}>
                   {CANCEL_LABEL}
                 </button>
+                {/* 冲突提示挂着时两颗保存置灰：同一份基线再存一次只会再撞一次，先在提示里
+                    选保留哪个版本（D7）。 */}
                 <button
                   type="button"
                   onClick={() => runSave("save")}
-                  disabled={saveBlocked}
-                  title={uploading ? SAVE_BLOCKED_UPLOADING_HINT : undefined}
+                  disabled={saveBlocked || cellConflict !== null}
+                  title={uploading ? SAVE_BLOCKED_UPLOADING_HINT : cellConflict ? SAVE_BLOCKED_CONFLICT_HINT : undefined}
                 >
                   <Check size={14} /> {savingMode === "save" ? "保存中…" : SAVE_LABEL}
                 </button>
@@ -1835,8 +1931,8 @@ export function KnowhowCellEditor({
                   type="button"
                   className="kh-primary-button"
                   onClick={() => runSave("next")}
-                  disabled={saveBlocked}
-                  title={uploading ? SAVE_BLOCKED_UPLOADING_HINT : undefined}
+                  disabled={saveBlocked || cellConflict !== null}
+                  title={uploading ? SAVE_BLOCKED_UPLOADING_HINT : cellConflict ? SAVE_BLOCKED_CONFLICT_HINT : undefined}
                 >
                   {savingMode === "next" ? "保存中…" : SAVE_AND_NEXT_LABEL} <ArrowRight size={14} />
                 </button>

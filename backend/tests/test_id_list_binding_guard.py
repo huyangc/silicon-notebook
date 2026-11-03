@@ -143,6 +143,23 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(ANY, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source") for _ in range(6)),
     ("postgres/knowledge_store.py", "KnowledgeStore.clear_sources_extraction_state"): tuple(
         s(ANY, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source") for _ in range(2)),
+    ("postgres/memory_suggest_store.py", "MemorySuggestStore.suggest_neighbors"): (
+        s(PG_EXP, BOUNDED, "memory statuses, a checked subset of the four MemoryStatus values"),),
+    ("sqlite/memory_suggest_store.py", "MemorySuggestStore.suggest_neighbors"): (
+        s(SQ_EXP, BOUNDED, "memory statuses, a checked subset of the four MemoryStatus values"),),
+    ("postgres/memory_suggest_store.py", "MemorySuggestStore.expire_overdue"): (
+        s("unnest(%s)", BOUNDED, "the rows this call just moved, paired with their revision ids (<= limit)"),),
+    ("sqlite/memory_suggest_store.py", "MemorySuggestStore.expire_overdue"): (
+        s(JSON, BOUNDED, "the rows this call just moved, paired with their revision ids (<= limit)"),),
+    # These are composite INSERT row data, not scalar membership lists. The
+    # PG arrays zip by position; SQLite preserves each pair in a JSON row.
+    # bind_ids accepts only strings: two independent memberships would invent
+    # notebook/owner combinations. The existing read-period finite-work test
+    # checks set-based linear growth; neither path introduces a data cap.
+    ("postgres/memory_suggest_read_period.py", "record_read_loss_on"): (
+        s("unnest(%s)", NOT_IDS, "paired notebook/owner INSERT columns, positional zip; not a scalar membership list"),),
+    ("sqlite/memory_suggest_read_period.py", "record_read_loss_on"): (
+        s(JSON, NOT_IDS, "composite notebook/owner INSERT rows, one JSON payload; not a scalar membership list"),),
     ("postgres/memory_store.py", "MemoryStore._hard_delete_on"): tuple(
         s(ANY, BOUNDED, "one purge page: <= 200 memory ids (_PURGE_PAGE, bulk-delete cap)") for _ in range(2)),
     ("postgres/memory_store.py", "MemoryStore.owned_memory_refs"): (
@@ -329,7 +346,9 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
     ),
     ("postgres/memory_store.py", "MemoryStore.answer_memory_links"): (
         s(PG_EXP, BOUNDED, "capped at 200 answer ids"),),
-    ("postgres/memory_store.py", "MemoryStore._mutate_with_revision"): (
+    ("postgres/memory_store.py", "MemoryStore.answer_memory_link_rows"): (
+        s(PG_EXP, BOUNDED, "capped at 200 answer ids"),),
+    ("postgres/memory_store.py", "MemoryStore._write_mutation_on"): (
         s(PG_EXP, NOT_IDS, "the expected lifecycle statuses"),),
     ("postgres/memory_store.py", "MemoryStore.promotion_rows_on"): (
         s(ANY, DRIVEN, "the promotion queue's memory primary keys"),),
@@ -678,7 +697,9 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
         s(SQ_EXP, BATCHED, "vector ids, one batch per statement"),),
     ("sqlite/memory_store.py", "MemoryStore.answer_memory_links"): (
         s(SQ_EXP, BOUNDED, "capped at 200 answer ids"),),
-    ("sqlite/memory_store.py", "MemoryStore._mutate_with_revision"): (
+    ("sqlite/memory_store.py", "MemoryStore.answer_memory_link_rows"): (
+        s(SQ_EXP, BOUNDED, "capped at 200 answer ids"),),
+    ("sqlite/memory_store.py", "MemoryStore._write_mutation_on"): (
         s(SQ_EXP, NOT_IDS, "the expected lifecycle statuses"),),
     # ---- Memory purge: see the PostgreSQL block; one page per statement.
     ("sqlite/governance_store.py", "GovernanceStore.withdraw_memory_promotions_on"): (

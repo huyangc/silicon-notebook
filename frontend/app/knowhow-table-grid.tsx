@@ -56,6 +56,7 @@ export function KnowhowTableGrid({
   error,
   actionError,
   canEdit,
+  canDeleteTable = true,
   onDismissActionError,
   onRetryLoad,
   query,
@@ -88,6 +89,9 @@ export function KnowhowTableGrid({
   error: string | null;
   actionError: string | null;
   canEdit: boolean;
+  /** 「删除表」这一颗（分享编辑 P1，D14）：点名编辑者 canEdit 为真却删不了整张表（后端 404），
+   *  为 false 时不渲染。缺省 true = 本参数出现之前的行为（仍在 canEdit 门内）。 */
+  canDeleteTable?: boolean;
   onDismissActionError: () => void;
   onRetryLoad: () => void;
   query: string;
@@ -256,10 +260,10 @@ export function KnowhowTableGrid({
             className="sort-button knowhow-reproject-button"
             onClick={onTransfer}
             disabled={!detail || deleting}
-            title="把这张表复制或移动到另一个笔记本"
+            title={canEdit && canDeleteTable ? "把这张表复制或移动到另一个笔记本" : "把这张表复制到另一个笔记本"}
           >
             <Copy size={14} />
-            复制/移动到…
+            {canEdit && canDeleteTable ? "复制/移动到…" : "复制到…"}
           </button>
           {/* knowhow 表版本管理 Task 15：「历史」——同「复制/移动到…」一样不
               整体挂在 canEdit 门内（只读成员也能看时间线和单次改动/两版
@@ -291,7 +295,7 @@ export function KnowhowTableGrid({
                 <RefreshCw size={14} className={retryingReproject ? "knowhow-spin" : undefined} />
                 {retryingReproject ? "重建中…" : "重新同步"}
               </button>
-              {confirmDelete ? (
+              {!canDeleteTable ? null : confirmDelete ? (
                 <span className="knowhow-confirm">
                   <span>删除这张表？行、格与同步生成的内容将一并删除</span>
                   <button type="button" className="knowhow-confirm-yes" disabled={deleting} onClick={onConfirmDelete}>

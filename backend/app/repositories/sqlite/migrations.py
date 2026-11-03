@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from app.core.config import Settings
+from app.domain.notebook_delete_grace import stored_instant_text
 from app.repositories.sqlite.anchor_normalization import sqlite_js_trim_expression
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite_functions import register_sqlite_functions
 
 from app.domain.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT_TYPE_LABELS
 
@@ -372,7 +375,15 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # <digits>, id) -- and idx_source_elements_source_created /
 # idx_source_elements_source_type are dropped. Index only, no backfill. See
 # ``_migration_105``.
-SCHEMA_VERSION = 105
+# v106 (paired with PostgreSQL 0087_memory_suggest.sql) is auto user-memory
+# suggestions: memory_items.suggested_signal (nullable TEXT, no CHECK), the
+# partial idx_memory_suggest_unadopted / idx_memory_suggest_expiry, and the
+# memory_suggest_users / memory_suggest_jobs / memory_suggest_fingerprints
+# tables (the last two FK notebooks ON DELETE CASCADE; no owner FK). No
+# backfill. See ``_migration_106``.
+# v107 / PostgreSQL 0088 add local collaboration activity hints. Actor ids
+# remain audit-kept without a user FK; notebook deletion cascades.
+SCHEMA_VERSION = 107
 
 # Frozen copy of ``element_reading_order.INDEX_DIGITS_SQL`` as v105 built it (a
 # migration must not change meaning when the live module changes). The readers
@@ -4457,6 +4468,10 @@ class SqliteMigrator:
             "WHERE julianday(expires_at) <= julianday(?)",
             (now,),
         ))
+        cutoff = stored_instant_text(datetime.fromisoformat(now) - timedelta(days=self.settings.notebook_activity_retention_days))
+        _settle("notebook_activity", lambda: _write(
+            "DELETE FROM notebook_activity WHERE created_at<?", (cutoff,),
+        ))
 
         def _purge_retained_global_turns() -> None:
             # The global Ask turns retained after a participant library's
@@ -6397,6 +6412,121 @@ class SqliteMigrator:
             )
             db.execute("DROP INDEX IF EXISTS idx_source_elements_source_created")
             db.execute("DROP INDEX IF EXISTS idx_source_elements_source_type")
+
+    def _migration_106(self) -> None:
+        """Auto user-memory suggestions, parity with PostgreSQL
+        ``0087_memory_suggest.sql`` (that file's header has the full account;
+        design docs/superpowers/specs/2026-10-28-auto-user-memory-design_zh.md
+        §10).
+
+        ``memory_items.suggested_signal`` marks a system suggestion (NULL for
+        every other memory; a plain ``ADD COLUMN``, so neither the origin CHECK
+        nor the external-content FTS table is touched). The two partial
+        indexes serve the "original count minus unadopted suggestions" readers
+        with the backlog gate, and the expiry sweep; their predicates are
+        spelled out here rather than rendered from ``memory_sql`` so a later
+        change of the live fragment cannot change what this migration built.
+        ``memory_suggest_users`` is the per-user switch and daily budget,
+        ``memory_suggest_jobs`` the single-flight row per (notebook, owner),
+        ``memory_suggest_fingerprints`` the hash-only "never suggest again"
+        table, and ``memory_suggest_read_fences`` the retained last-read-loss
+        boundary even when no job existed. No historical period is backfilled.
+        The two exact-UTC expression indexes bound owner sampling (including
+        the unfinished-turn fence) and raw conversation-predecessor seeks.
+        The latter deliberately includes ineligible turns: filtering it would
+        incorrectly join nonadjacent turns. ``sn_utc_us`` is registered as a
+        deterministic function on application and offline-maintenance connections.
+        Both indexes belong to this feature's first release: deployed v105
+        upgrades install them together with the new suggestion storage. No
+        already-released v106 migration is being amended here.
+        Optional instants are NULL on both backends (no empty-string
+        sentinel). Re-runnable: ``add_column_if_missing`` and ``IF NOT
+        EXISTS`` throughout.
+        """
+        with self._connect() as db:
+            register_sqlite_functions(db)
+            self.add_column_if_missing(db, "memory_items", "suggested_signal", "TEXT")
+            db.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_memory_suggest_unadopted
+                  ON memory_items(created_by, notebook_id, status)
+                  WHERE suggested_signal IS NOT NULL AND status IN ('candidate', 'rejected');
+                CREATE INDEX IF NOT EXISTS idx_memory_suggest_expiry
+                  ON memory_items(created_at)
+                  WHERE suggested_signal IS NOT NULL AND status = 'candidate';
+                CREATE INDEX IF NOT EXISTS idx_ask_jobs_memory_suggest_utc
+                  ON ask_jobs(created_by, notebook_id, status, sn_utc_us(created_at), id)
+                  WHERE submitted_via = 'web' AND output = 'answer' AND report_id = '';
+                CREATE INDEX IF NOT EXISTS idx_ask_jobs_conv_utc
+                  ON ask_jobs(conversation_id, sn_utc_us(created_at), id);
+                CREATE TABLE IF NOT EXISTS memory_suggest_users (
+                  owner_id TEXT NOT NULL PRIMARY KEY,
+                  enabled INTEGER NOT NULL DEFAULT 0,
+                  enabled_at TEXT,
+                  quota_day TEXT NOT NULL DEFAULT '',
+                  quota_used INTEGER NOT NULL DEFAULT 0,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS memory_suggest_jobs (
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  owner_id TEXT NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'idle'
+                    CHECK(status IN ('idle', 'running')),
+                  pending_signal INTEGER NOT NULL DEFAULT 0,
+                  cursor_created_at TEXT NOT NULL,
+                  cursor_id TEXT NOT NULL DEFAULT '',
+                  cursor_inclusive INTEGER NOT NULL DEFAULT 1,
+                  window_started_at TEXT NOT NULL,
+                  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                  claim_token TEXT NOT NULL DEFAULT '',
+                  runs INTEGER NOT NULL DEFAULT 0,
+                  candidates_written INTEGER NOT NULL DEFAULT 0,
+                  last_outcome TEXT NOT NULL DEFAULT '',
+                  failure_reason TEXT NOT NULL DEFAULT '',
+                  started_at TEXT,
+                  finished_at TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  PRIMARY KEY (notebook_id, owner_id)
+                );
+                CREATE TABLE IF NOT EXISTS memory_suggest_read_fences (
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  owner_id TEXT NOT NULL,
+                  lost_at TEXT NOT NULL,
+                  PRIMARY KEY (notebook_id, owner_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_suggest_users_enabled
+                  ON memory_suggest_users(owner_id) WHERE enabled = 1;
+                CREATE TABLE IF NOT EXISTS memory_suggest_fingerprints (
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  owner_id TEXT NOT NULL,
+                  fingerprint TEXT NOT NULL,
+                  kind TEXT NOT NULL CHECK(kind IN ('proposed', 'declined')),
+                  expires_at TEXT,
+                  created_at TEXT NOT NULL,
+                  PRIMARY KEY (notebook_id, owner_id, fingerprint)
+                );
+                """
+            )
+
+    def _migration_107(self) -> None:
+        """Non-owner collaboration activity; PostgreSQL 0088 parity."""
+        with self._connect() as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS notebook_activity (
+                  id TEXT NOT NULL PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  kind TEXT NOT NULL,
+                  capability TEXT NOT NULL,
+                  actor_id TEXT NOT NULL,
+                  actor_name TEXT NOT NULL,
+                  target TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_notebook_activity_nb_created
+                  ON notebook_activity(notebook_id, created_at DESC, id);
+                CREATE INDEX IF NOT EXISTS idx_notebook_activity_created ON notebook_activity(created_at);
+            """)
 
     def migrate(self) -> list[int]:
         with self._connect() as db:

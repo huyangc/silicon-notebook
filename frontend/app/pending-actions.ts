@@ -7,6 +7,18 @@ import type { PendingItem, DoneToast } from "./pending-center";
 import { importPublished } from "./notebook-transfer-phases.ts";
 
 
+/**
+ * 改变「我能看到哪些笔记本、能在里面做什么」的推送事件(分享编辑 P1):收到即走
+ * `refreshAfterAccessChange`——重取笔记本清单并对账当前工作区,而不只是在铃铛里报一句。
+ * 今天只有一种:库主把我添加为编辑者(`notebook_collaborator_granted`,后端
+ * `services/notebook_collaborators.py::COLLABORATOR_GRANTED_EVENT`)。
+ */
+export const NOTEBOOK_COLLABORATOR_GRANTED_EVENT = "notebook_collaborator_granted";
+
+export function isAccessChangeEvent(event: string): boolean {
+  return event === NOTEBOOK_COLLABORATOR_GRANTED_EVENT;
+}
+
 export function doneMessage(
   event: string,
   message: {
@@ -15,6 +27,10 @@ export function doneMessage(
     not_paper?: number;
   },
 ): string | null {
+  if (event === NOTEBOOK_COLLABORATOR_GRANTED_EVENT) {
+    // 事件只带 notebook_id(不带库名):库名要等清单重取之后才有,这里不猜。
+    return "你被添加为一本笔记本的编辑者，点击查看";
+  }
   if (event === "index_done") {
     return `「${message.notebook_name || ""}」索引构建完成,点击查看`;
   }

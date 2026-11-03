@@ -68,6 +68,11 @@ export type SharedByMeItem = {
    * 也不该给「取消分享」(那个动作对授权边是空操作)。
    */
   group_count: number;
+  /**
+   * 这本库的点名协作者(分享编辑 P1)。只因点名共享而出现的行(无链接、无群组)靠它
+   * 才不是一张空卡片。旧后端不发 → 缺失按空。
+   */
+  collaborators?: { username: string; display_name: string; role: string; user_id: string }[];
 };
 
 // 读当前的分享链接状态(仅 owner)。**无副作用**——打开分享弹窗走它,不会铸出链接。

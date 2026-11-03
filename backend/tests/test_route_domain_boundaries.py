@@ -7,6 +7,7 @@ from app.api.admin_routes import router as admin_router
 from app.api.agent_profile_routes import router as agent_profile_router
 from app.api.ask_routes import router as ask_router
 from app.api.catalog_routes import router as catalog_router
+from app.api.collab_routes import router as collab_router
 from app.api.content_overview_routes import router as content_overview_router
 from app.api.group_routes import router as group_router
 from app.api.global_ask_routes import router as global_ask_router
@@ -14,6 +15,7 @@ from app.api.kg_routes import router as kg_router
 from app.api.knowhow_routes import router as knowhow_router
 from app.api.knowledge_routes import router as knowledge_router
 from app.api.memory_routes import memory_router
+from app.api.notebook_collaborator_routes import router as notebook_collaborator_router
 from app.api.notebook_routes import router as notebook_router
 from app.api.notebook_transfer_routes import download_router as notebook_transfer_download_router
 from app.api.notebook_transfer_routes import router as notebook_transfer_router
@@ -42,6 +44,8 @@ DOMAIN_ROUTERS = (
     wish_router,
     global_ask_router,
     notebook_transfer_router,
+    notebook_collaborator_router,
+    collab_router,
 )
 EXPECTED_COMPOSITION_NAMES = (
     "memory_router",
@@ -72,6 +76,9 @@ EXPECTED_COMPOSITION_NAMES = (
     # 网页导出/导入单本笔记本(.snbk);票据下载另有一个不带 session 的
     # download_router,由 app.main 单独挂载(见下面那条用例)。
     "notebook_transfer_router",
+    # 点名共享(分享编辑 P1),同上:接在末尾只是延续写法。
+    "notebook_collaborator_router",
+    "collab_router",
 )
 
 

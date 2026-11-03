@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.services.collab_jobs import pulse_touch_for_job, pulse_touch_for_job_kinds
 
 import concurrent.futures
 import contextvars
@@ -16,6 +17,7 @@ from urllib.parse import urlparse
 from app.core.config import Settings
 from app.domain.extraction_profiles import ObjectSchema
 from app.core.event_logging import EventLogger
+from app.domain.collaboration import SOURCE_TERMINAL_PULSE_KINDS
 from app.domain.indexing_pipeline import (
     BUILTIN_INDEXING_PIPELINE_VERSION,
     IndexingPipelineHostPort,
@@ -46,6 +48,7 @@ from app.models.sources import (
     SourceImportRequest,
     SourceSummary,
     UploadedSourceSummary,
+    carry_uploader,
 )
 from app.repositories.ports import (
     DocumentCapacityExceeded,
@@ -214,6 +217,7 @@ class SourceIngestionService:
       a pipeline exception records the failed source state instead of
       propagating (record_and_continue).
     """
+    _collab_touch = None
 
     def __init__(
         self,
@@ -675,8 +679,12 @@ class SourceIngestionService:
     def parse_source_compat(self, source_id: str) -> SourceSummary:
         return self.parse_source(source_id, self.pipeline_hooks())
 
-    def delete_source_compat(self, source_id: str) -> None:
-        return self.delete_source(source_id, self.pipeline_hooks())
+    def delete_source_compat(
+        self, source_id: str, *, uploader_must_be: str | None = None
+    ) -> None:
+        return self.delete_source(
+            source_id, self.pipeline_hooks(), uploader_must_be=uploader_must_be
+        )
 
     def list_sources(self, notebook_id: str) -> List[SourceSummary]:
         self.notebooks.get_row(notebook_id)
@@ -1012,9 +1020,9 @@ class SourceIngestionService:
         if retyped or summary.parse_status == "failed":
             # 失败重试认领会翻动行；重读让返回值如实反映现状。
             summary = self.sources.get_source(source_id)
-        return UploadedSourceSummary.model_validate(
+        return carry_uploader(UploadedSourceSummary.model_validate(
             {**summary.model_dump(), "reused": True}
-        )
+        ), summary)
 
     def _reextract_retyped(
         self, source_id: str, notebook_id: str, hooks: SourcePipelineHooks
@@ -1038,6 +1046,13 @@ class SourceIngestionService:
         没有人在等这一条；这里有一个正在等结果的上传请求，语境不同。）
 
         绝不把异常抛回上传请求：用户的其它文件已经建好了。"""
+        try:
+            self._run_reextract_retyped(source_id, notebook_id, hooks)
+        finally:
+            pulse_touch_for_job_kinds(self._collab_touch, notebook_id, SOURCE_TERMINAL_PULSE_KINDS)
+
+    def _run_reextract_retyped(self, source_id: str, notebook_id: str, hooks: SourcePipelineHooks) -> None:
+        """Reconcile the graph and settle before the terminal observer fires."""
         try:
             self._extract_reconciling_doc_type(source_id, hooks.extract_source)
         except Exception:  # noqa: BLE001 — 一个源的抽取失败不该炸掉整次上传
@@ -1252,11 +1267,12 @@ class SourceIngestionService:
                 scheduler(source_id)
             else:
                 self.process_source(source_id, hooks)
-            imported.append(
+            fresh = self.sources.get_source(source_id)
+            imported.append(carry_uploader(
                 UploadedSourceSummary.model_validate(
-                    {**self.sources.get_source(source_id).model_dump(), "reused": False}
-                )
-            )
+                    {**fresh.model_dump(), "reused": False}
+                ), fresh,
+            ))
         return imported
 
     def _insert_uploaded_source(
@@ -1331,6 +1347,10 @@ class SourceIngestionService:
         if kg_extraction_deferred():  # 离线 ingest 不抽 KG(offline_batch)
             return False
         return self.settings.kg_auto_extract or self.notebook_has_kg(notebook_id)
+
+    def _finish_notebook_ingestion(self, notebook_id: str) -> None:
+        self._note_notebook_ingestion(notebook_id, -1)
+        pulse_touch_for_job_kinds(self._collab_touch, notebook_id, SOURCE_TERMINAL_PULSE_KINDS)
 
     def _note_notebook_ingestion(self, notebook_id: str, delta: int) -> None:
         with self._active_notebooks_cond:
@@ -2021,7 +2041,7 @@ class SourceIngestionService:
                         source_parse_lock.release()
                 finally:
                     self._release_source_lease(source_id)
-                    self._note_notebook_ingestion(notebook_id, -1)
+                    self._finish_notebook_ingestion(notebook_id)
         # Content-add settle point: if this notebook already has a scale index,
         # enqueue an idle incremental fold so the new (post-watermark) source
         # becomes semantically searchable. Idle queue coalesces batch runs (many
@@ -2121,9 +2141,23 @@ class SourceIngestionService:
             purpose=desc_val if meta["purpose_auto"] else "",
         )
 
-    def delete_source(self, source_id: str, hooks: SourcePipelineHooks) -> None:
+    def delete_source(
+        self, source_id: str, hooks: SourcePipelineHooks,
+        *, uploader_must_be: str | None = None,
+    ) -> None:
+        """``uploader_must_be`` (share-edit P1, decision D14 / PD-9): a named
+        editor may delete only a source they uploaded themselves. The check is
+        made on the row the teardown locks (``lock_sources_for_teardown_tx``,
+        ``FOR UPDATE`` on PostgreSQL), in the same transaction that deletes it:
+        any other uploader -- or none recorded -- is ``KeyError`` (the route's
+        404, the answer a missing source gets)."""
         source = self.sources.get_source(source_id)
         with self.write() as db:
+            locked = None
+            if uploader_must_be is not None:
+                locked = self.sources.lock_sources_for_teardown_tx(db, [source_id])
+                if not locked or locked[0].get("uploaded_by") != uploader_must_be:
+                    raise KeyError(source_id)
             # Extraction's terminal write holds a KEY SHARE lock on this row.
             # Take the conflicting aggregate lock before scanning/deleting any
             # projections so extraction cannot publish KG after our cursor.
@@ -2183,7 +2217,7 @@ class SourceIngestionService:
             # single delete and the batched Memory purge
             # (``remove_memory_sources``) run the same statements, so they
             # cannot drift apart.
-            self._teardown_sources_tx(db, [source_id])
+            self._teardown_sources_tx(db, [source_id], locked=locked)
             # codex #638 R5: this transaction DELETES knowledge_objects /
             # knowledge_relations / concept_clusters rows (via
             # clear_source_extraction_state → clear_source_graph_state), so its
@@ -3646,10 +3680,11 @@ class SourceIngestionService:
         完成通知（被后来者覆盖的旧世代不该报完成，见调用处注释）。"""
         with self._paper_meta_backfilling_lock:
             entry = self._paper_meta_backfilling.get(notebook_id)
-            if entry is not None and entry.get("_gen") == my_gen:
-                self._paper_meta_backfilling.pop(notebook_id, None)
-                return True
-            return False
+            if entry is None or entry.get("_gen") != my_gen:
+                return False
+            self._paper_meta_backfilling.pop(notebook_id, None)
+        pulse_touch_for_job(self._collab_touch, notebook_id, "sources")
+        return True
 
     @staticmethod
     def _pending_user_id(nb_row: Any) -> Optional[str]:

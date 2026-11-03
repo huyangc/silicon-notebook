@@ -161,7 +161,8 @@
        "processing": false,
        "source_id": "src-off",
        "source_type": "markdown",
-       "title": "Title of src-off"
+       "title": "Title of src-off",
+       "uploaded_by_me": false
       }
      ],
      "rule_id": "F1",
@@ -224,14 +225,16 @@
        "processing": false,
        "source_id": "src-dup-a",
        "source_type": "markdown",
-       "title": "Title of src-dup-a"
+       "title": "Title of src-dup-a",
+       "uploaded_by_me": false
       },
       {
        "exists": true,
        "processing": false,
        "source_id": "src-dup-b",
        "source_type": "markdown",
-       "title": "Title of src-dup-b"
+       "title": "Title of src-dup-b",
+       "uploaded_by_me": false
       }
      ],
      "rule_id": "F2",
@@ -286,7 +289,8 @@
        "processing": false,
        "source_id": "src-broken",
        "source_type": "markdown",
-       "title": "Title of src-broken"
+       "title": "Title of src-broken",
+       "uploaded_by_me": false
       }
      ],
      "rule_id": "F3",
@@ -335,7 +339,8 @@
        "processing": false,
        "source_id": "src-core-0",
        "source_type": "markdown",
-       "title": "Title of src-core-0"
+       "title": "Title of src-core-0",
+       "uploaded_by_me": false
       }
      ],
      "rule_id": "F5",
@@ -401,14 +406,16 @@
        "processing": false,
        "source_id": "src-core-0",
        "source_type": "markdown",
-       "title": "Title of src-core-0"
+       "title": "Title of src-core-0",
+       "uploaded_by_me": false
       },
       {
        "exists": true,
        "processing": false,
        "source_id": "src-core-1",
        "source_type": "markdown",
-       "title": "Title of src-core-1"
+       "title": "Title of src-core-1",
+       "uploaded_by_me": false
       }
      ],
      "rule_id": "F4",

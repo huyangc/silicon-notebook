@@ -420,6 +420,38 @@ test("parseTrustedStructuredFailure:status 与登记值必须成对", () => {
   assert.equal(parseTrustedStructuredFailure(409, mirrorBody()), MIRROR_MESSAGE);
 });
 
+test("knowhow_cell_conflict:409 才可信,别的状态码一律不认(分享编辑 P1,D7)", async () => {
+  const body = {
+    detail: {
+      code: "knowhow_cell_conflict",
+      reason: "content_changed",
+      message: "内容已被其他人修改，请刷新后重试",
+      current: [{ row_id: "r1", column_id: "c1", content_md: "别人改的" }],
+    },
+  };
+  assert.equal(parseTrustedStructuredFailure(409, body), "内容已被其他人修改，请刷新后重试");
+  for (const status of [200, 400, 403, 404, 410, 500]) {
+    assert.equal(parseTrustedStructuredFailure(status, body), null, `status ${status}`);
+  }
+  const { value } = await captureConsole(() => readHttpError(jsonResponse(409, body), "t"));
+  assert.equal(value.trusted, true);
+  assert.equal(value.userDetail, "内容已被其他人修改，请刷新后重试");
+});
+
+test("memory_suggest_unavailable only trusts the named 409 instruction", async () => {
+  const message = "这项功能当前未开启，请联系管理员开启记忆建议";
+  const body = { detail: { code: "memory_suggest_unavailable", message } };
+  assert.equal(parseTrustedStructuredFailure(409, body), message);
+  for (const status of [200, 400, 403, 404, 410, 500, 503]) {
+    assert.equal(parseTrustedStructuredFailure(status, body), null);
+  }
+  assert.equal(parseTrustedStructuredFailure(409, { detail: { message } }), null);
+  assert.equal(parseTrustedStructuredFailure(409, { detail: { code: "other_memory_failure", message } }), null);
+  const { value } = await captureConsole(() => readHttpError(jsonResponse(409, body), "t"));
+  assert.equal(value.trusted, true);
+  assert.equal(toUserMessage(humanizedError(humanizeHttpError(value.status, value.userDetail, value.trusted))), message);
+});
+
 test("parseMirroredFailure:status 与 code 成对命中才认", () => {
   assert.equal(parseMirroredFailure(409, mirrorBody()), MIRROR_MESSAGE);
 

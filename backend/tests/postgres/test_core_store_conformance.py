@@ -92,7 +92,7 @@ def core_stores(request) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 86
+    assert PostgresMigrator(postgres_database).migrate() == 88
     yield CoreStores(
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
@@ -294,6 +294,30 @@ def test_set_user_ui_mode_round_trips_and_survives_a_missing_profile_row(
         (user.id,),
     )
     assert fetched_recreated["ui_mode"] == "advanced"
+
+
+@pytest.mark.parametrize("stored", ["auto", "", "SUGGEST", "manual"])
+def test_unknown_memory_mode_reads_back_as_manual(core_stores: CoreStores, stored):
+    """自动用户记忆 G27:memory_mode 没有 CHECK,读侧把不认识的取值兜成 manual。"""
+    store = core_stores.identity
+    user = store.create_user("b00123457", "correct horse battery staple")
+    _write_sql(
+        core_stores,
+        "UPDATE user_profiles SET memory_mode=%s WHERE user_id=%s",
+        (stored, user.id),
+    )
+
+    assert store.authenticate_user(
+        "b00123457", "correct horse battery staple"
+    ).memory_mode == "manual"
+    _write_sql(
+        core_stores,
+        "UPDATE user_profiles SET memory_mode='suggest' WHERE user_id=%s",
+        (user.id,),
+    )
+    assert store.authenticate_user(
+        "b00123457", "correct horse battery staple"
+    ).memory_mode == "suggest"
 
 
 def test_set_user_ui_mode_updates_a_non_derived_profile_row_in_place(
@@ -2101,16 +2125,21 @@ def test_group_sharing_shows_up_in_the_owner_facing_projections(
     assert shared[0]["share_token"] is None      # 只因群组共享而出现,没有分享链接
     assert shared[0]["group_count"] == 1         # 两条边、一个组
 
-    # `user` / `everyone` 主体不算「共享给群组」:前者是只读共享(徽标那一半由
-    # `notebooks.is_shared` 负责),后者是公共知识库的兼容映射。
+    # `everyone` 主体不算「已分享」(公共知识库的兼容映射);点名(`user`)主体从分享
+    # 编辑 P1 起算——点名编辑者也是一次共享,它不计入 group_count(不是群组)。
     other_notebook = core_stores.notebooks.create_row(
         NotebookCreate(name="别的库"), owner.id
     )
-    _pg_grant(core_stores, "gr-user-x", other_notebook, "user", owner.id, owner.id)
     _pg_grant(core_stores, "gr-all-x", other_notebook, "everyone", "", owner.id)
     assert [item["id"] for item in core_stores.sharing.list_shared_by_owner(owner.id)] == [
         notebook_id
     ]
+    _pg_grant(core_stores, "gr-user-x", other_notebook, "user", owner.id, owner.id)
+    shared = {
+        item["id"]: item for item in core_stores.sharing.list_shared_by_owner(owner.id)
+    }
+    assert set(shared) == {notebook_id, other_notebook}
+    assert shared[other_notebook]["group_count"] == 0
 
 
 def test_point_query_forms_of_the_two_list_projections(core_stores: CoreStores):
@@ -2302,6 +2331,35 @@ def test_granted_notebook_rows_matches_the_sqlite_list_projection(
         [viewer_notebook, admin_notebook]
     )
 
+    # 分享编辑 P1:点名(user 主体)分支。deputy 在 viewer_notebook 上同时有群组边与点名
+    # 编辑边、在 everyone_notebook 上只有点名边:两条点名行的组列为 NULL,同一本库里
+    # NULL 组行排在群组行之前(NULLS FIRST,与 SQLite 默认一致)。
+    for notebook_id in (viewer_notebook, everyone_notebook):
+        groups.set_user_editor_grant(
+            notebook_id, owner_id=owner.id, target_user_id=deputy.id
+        )
+    with core_stores.database.connect() as connection:
+        deputy_rows = queries.granted_notebook_rows(connection, deputy.id)
+        point_rows = queries.granted_notebook_rows(
+            connection, deputy.id, notebook_id=viewer_notebook
+        )
+    shaped = [
+        (row["id"], row["_group_id"], row["_grant_principal_type"], row["_grant_role"])
+        for row in deputy_rows
+    ]
+    by_notebook = {}
+    for notebook_id, group_id, principal_type, role in shaped:
+        by_notebook.setdefault(notebook_id, []).append((group_id, principal_type, role))
+    assert by_notebook[viewer_notebook] == [
+        (None, "user", "editor"), (group["id"], "group", "viewer"),
+    ]
+    assert by_notebook[everyone_notebook] == [(None, "user", "editor")]
+    assert by_notebook[admin_notebook] == [(group["id"], "group_admins", "admin")]
+    assert [row["_group_id"] for row in point_rows] == [None, group["id"]]
+    assert all(row["_owner_username"] == "o00123456" for row in deputy_rows)
+    for notebook_id in (viewer_notebook, everyone_notebook):
+        groups.delete_user_grant(notebook_id, deputy.id)
+
     # 降级即失效;半拷贝的哨兵状态与另外两段一样被排除。
     groups.upsert_member(group["id"], deputy.id, role="member", added_by=owner.id)
     _write_sql(
@@ -2343,7 +2401,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 86
+    assert PostgresMigrator(postgres_database).migrate() == 88
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -2426,7 +2484,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 86
+    assert PostgresMigrator(postgres_database).migrate() == 88
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -2498,7 +2556,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 86
+    assert PostgresMigrator(postgres_database).migrate() == 88
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )

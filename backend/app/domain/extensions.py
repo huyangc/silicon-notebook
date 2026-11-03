@@ -236,16 +236,29 @@ ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY = (
 ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY = (
     "ask:search_profile_completed_access"
 )
+# Auto user-memory suggestions (design 2026-10-28 §4.1): the fourth built-in
+# observer, registered last so a tight budget breaks it first.
+ASK_MEMORY_SUGGEST_COMPLETED_ACCESS_CAPABILITY = (
+    "ask:memory_suggest_completed_access"
+)
 
 
 @dataclass(frozen=True)
 class CompletedAskNotification:
-    """The smallest core notification needed by the three built-in observers.
+    """The smallest core notification needed by the built-in observers.
 
     ``scope`` is ``"notebook"`` for a notebook Ask and ``"global"`` for a
     global (cross-library) Ask; for the latter ``notebook_id`` is the run's
     naming anchor (the first participant) and ``notebook_ids`` lists every
     participant library. A notebook Ask leaves ``notebook_ids`` empty.
+
+    The last three fields are appended with defaults (old positional and
+    keyword constructions stay valid) and are read by core only, never
+    projected to a plugin context: ``submitted_via`` is the ``ask_jobs`` row's
+    entry point (``"web"`` / ``"mcp"``, ``""`` when not recorded),
+    ``had_clarification`` says the finalized understanding carried non-empty
+    clarification answers, and ``ask_job_id`` is the opaque ``ask_jobs.id`` of
+    this Ask (``""`` for an entry without a job row).
     """
 
     actor_id: str
@@ -253,6 +266,9 @@ class CompletedAskNotification:
     mode_id: str
     notebook_ids: tuple[str, ...] = ()
     scope: str = "notebook"
+    submitted_via: str = ""
+    had_clarification: bool = False
+    ask_job_id: str = ""
 
 
 class AgentProfileAskCompletedPort(Protocol):
@@ -267,6 +283,10 @@ class SearchProfileAskCompletedPort(Protocol):
     def notify(self) -> None: ...
 
 
+class MemorySuggestAskCompletedPort(Protocol):
+    def notify(self) -> None: ...
+
+
 @dataclass(frozen=True)
 class AskCompletedObserverCallContext:
     notification: CompletedAskNotification
@@ -275,6 +295,9 @@ class AskCompletedObserverCallContext:
     search_profile: SearchProfileAskCompletedPort | None
     connection_probe: Any
     deadline_monotonic: float
+    memory_suggest: MemorySuggestAskCompletedPort | None = None
+    # Core-only attestation; never projected into the extension SDK context.
+    skip_builtin_memory_suggest: bool = False
 
 
 class AskCompletedObserverHostPort(Protocol):

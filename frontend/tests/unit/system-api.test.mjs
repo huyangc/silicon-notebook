@@ -33,6 +33,8 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
       source_images_enabled: false,
       agent_profile_enabled: true,
       user_search_profile_enabled: true,
+      auto_memory_suggest_enabled: true,
+      auto_memory_suggest_model_ready: true,
       notebook_transfer_max_bytes: 512 * 1024 * 1024,
     }), {
       status: 200,
@@ -63,6 +65,8 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
       source_images_enabled: false,
       agent_profile_enabled: true,
       user_search_profile_enabled: true,
+      auto_memory_suggest_enabled: true,
+      auto_memory_suggest_model_ready: true,
       notebook_transfer_max_bytes: 512 * 1024 * 1024,
     });
   } finally {
@@ -72,6 +76,30 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
 
   assert.match(calls[0].url, /\/api\/system\/config$/);
   assert.equal(calls[0].init.headers.get("Authorization"), "Bearer source-upload-token");
+});
+
+test("memory suggestion capabilities require explicit true and stay unavailable on an old backend", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const [enabled, ready, expected] of [
+      [undefined, undefined, false],
+      [false, false, false],
+      ["true", 1, false],
+      [true, true, true],
+    ]) {
+      globalThis.fetch = async () => new Response(JSON.stringify({
+        source_upload_max_bytes: 1024,
+        source_upload_max_files_per_batch: 20,
+        auto_memory_suggest_enabled: enabled,
+        auto_memory_suggest_model_ready: ready,
+      }));
+      const configuration = await fetchSystemConfiguration();
+      assert.equal(configuration.auto_memory_suggest_enabled, expected);
+      assert.equal(configuration.auto_memory_suggest_model_ready, expected);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("fetchSystemConfiguration treats a missing user_activity_view_enabled as unavailable (old backend)", async () => {

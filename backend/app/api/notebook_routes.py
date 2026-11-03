@@ -5,6 +5,8 @@ from fastapi.responses import JSONResponse, Response
 
 from app.api.deps import (
     get_current_user,
+    collaboration_service,
+    group_repository,
     memory_membership_service,
     notebook_catalog_repository,
     notebook_question_suggestions_service,
@@ -32,6 +34,7 @@ from app.domain.indexing_pipeline import (
     IndexingPipelineUnavailableError,
 )
 from app.domain.memory_kg_isolation import NotebookHoldsMemory
+from app.repositories.ports import NotebookHasEditors
 from app.models.identity import UserProfile
 from app.models.memory import MemberExitResult, MemoryExitDisclosure
 from app.models.question_suggestions import QuestionSuggestionsResponse
@@ -96,7 +99,19 @@ def list_notebooks() -> List[NotebookSummary]:
 # 注意:静态段路由必须在 /notebooks/{notebook_id} 之前注册,否则 "shared-by-me" 被当作 {notebook_id}。
 @router.get("/notebooks/shared-by-me", response_model=List[SharedByMeItem])
 def shared_by_me_route(user: UserProfile = Depends(get_current_user)) -> List[SharedByMeItem]:
-    return [SharedByMeItem(**it) for it in notebook_sharing_repository().shared_by_me(user.id)]
+    # 点名协作者(分享编辑 P1):库主名下全部库一条语句聚合,按库挂到各行上。范围判据
+    # (`GROUP_GRANT_EXISTS_SQL`)已含 user 主体,所以只有点名编辑者的库也在清单里。
+    collaborators: dict[str, list[dict[str, str]]] = {}
+    for row in group_repository().list_user_grants_for_owner(user.id):
+        collaborators.setdefault(row["notebook_id"], []).append({
+            "username": row["username"],
+            "display_name": row["display_name"],
+            "role": row["role"],
+        })
+    return [
+        SharedByMeItem(**it, collaborators=collaborators.get(it["id"], []))
+        for it in notebook_sharing_repository().shared_by_me(user.id)
+    ]
 
 
 @router.post("/notebooks", response_model=NotebookSummary)
@@ -109,11 +124,15 @@ def create_notebook(payload: NotebookCreate) -> NotebookSummary:
     response_model=NotebookSummary,
     dependencies=[Depends(require_notebook_read_or_delete_notice)],
 )
-def get_notebook(notebook_id: str) -> NotebookSummary:
+def get_notebook(notebook_id: str, user: UserProfile = Depends(get_current_user)) -> NotebookSummary:
     """单本笔记本。读不到 → 404;正在删除窗口里、调用者能读它 → 404 带说明码
     (`require_notebook_read_or_delete_notice`)。"""
     try:
-        return notebook_catalog_repository().get_notebook(notebook_id)
+        cursor = collaboration_service().pulse.cursor()
+        result = notebook_catalog_repository().get_notebook(notebook_id)
+        result.collab_pulse = notebook_access_repository().collab_pulse_wanted(notebook_id, user.id)
+        result.pulse_cursor = cursor
+        return result
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -291,6 +310,9 @@ def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfi
     except NotebookHoldsMemory as exc:
         # M1: members' personal memories never go public with the library.
         raise user_error(409, exc.user_message)
+    except NotebookHasEditors:
+        # Share-edit P1 (PD-8): a public library is read-only for everyone.
+        raise user_error(409, "请先移除这本笔记本的编辑者")
 
 
 @router.get("/notebooks/{notebook_id}/bases", response_model=List[MountedBase],
@@ -519,10 +541,13 @@ def join_shared_route(token: str, user: UserProfile = Depends(get_current_user))
 def membership_exit_disclosure_route(
     notebook_id: str, user: UserProfile = Depends(get_current_user)
 ) -> MemoryExitDisclosure:
-    """退出前告知:退出会永久删除调用者本人在这本库里的多少条记忆(各种状态都算)。
-    不是成员、或退出后仍能凭所有者身份/授权读这本库时为 0。"""
+    """退出前告知:退出会永久删除调用者本人在这本库里的多少条「你的记忆」
+    (``memory_count``,除未采纳的系统建议外各种状态都算,退出时要确认的就是这个数),
+    以及另外多少条未采纳的系统建议(``suggestion_count``,不需要单独确认)。
+    不是成员、或退出后仍能凭所有者身份/授权读这本库时两者都为 0。"""
+    counts = memory_membership_service().exit_disclosure(notebook_id, user.id)
     return MemoryExitDisclosure(
-        memory_count=memory_membership_service().exit_disclosure(notebook_id, user.id)
+        memory_count=counts.memory_count, suggestion_count=counts.suggestion_count
     )
 
 
@@ -530,18 +555,21 @@ _EXIT_RESPONSES: dict = {
     200: {
         "model": MemberExitResult,
         "description": "The exit finished; this request deleted `deleted_memory_count` "
-        "Memories (counted by the server).",
+        "of \"your memories\" and `deleted_suggestion_count` unadopted system "
+        "suggestions (counted by the server).",
     },
     204: {"description": "Nothing to delete: the membership ended (or was already absent)."},
     409: {
-        "description": "`exit_disclosure_required` `{code, memory_count}`: the "
-        "acknowledgement differs from the count; nothing deleted, membership unchanged. "
-        "`exit_incomplete` `{code, deleted_memory_count, memory_count}`: that many were "
-        "deleted, Memories saved during the exit remain; still a member.",
+        "description": "`exit_disclosure_required` `{code, memory_count, "
+        "suggestion_count}`: the acknowledgement differs from the count; nothing "
+        "deleted, membership unchanged. `exit_incomplete` `{code, deleted_memory_count, "
+        "deleted_suggestion_count, memory_count}`: that many were deleted, Memories "
+        "saved (or suggestions adopted) during the exit remain; still a member.",
     },
     503: {
-        "description": "`exit_incomplete` `{code, deleted_memory_count, memory_count}`: the "
-        "purge failed part-way; still a member; what was deleted stays deleted; retry is safe.",
+        "description": "`exit_incomplete` `{code, deleted_memory_count, "
+        "deleted_suggestion_count, memory_count}`: the purge failed part-way; still a "
+        "member; what was deleted stays deleted; retry is safe.",
     },
 }
 
@@ -552,6 +580,7 @@ def _exit_incomplete(status_code: int, exc: MemberExitIncomplete | MemberExitFai
         detail={
             "code": "exit_incomplete",
             "deleted_memory_count": exc.deleted_memory_count,
+            "deleted_suggestion_count": exc.deleted_suggestion_count,
             "memory_count": exc.memory_count,
         },
     )
@@ -571,34 +600,43 @@ def leave_notebook_route(
     """本人退出共享:结束自己的成员关系(幂等,不影响他人)。成员记录是本人读这本库的最后
     途径时,同时永久删除本人在这本库里的全部记忆及其派生数据。
 
-    服务端在成员行锁下领取此刻要删的记忆,条数 C;`acknowledged_memory_count`(缺省按 0)
-    必须等于 C:
+    服务端在成员行锁下领取此刻要删的「你的记忆」,条数 C(未采纳的系统建议另计 S,
+    不需要确认);`acknowledged_memory_count`(缺省按 0)必须等于 C:
     - 不等(含 C=0 而确认数大于 0:期间已不是成员、有了授权或把记忆移走了)→ 409
-      `exit_disclosure_required`(带 C),什么都不删、成员关系不变;
-    - C=0 → 204,成员关系结束(或本来就不在),什么都不删;
-    - C>0 且全部删完、收尾成功 → 200 `{"deleted_memory_count": d}`,d 是本次请求实际删除
-      的条数;
-    - 删了 d 条(d>0),但期间又保存了未确认的 r 条 → 409 `exit_incomplete`(带 d、r),
-      仍是成员;
+      `exit_disclosure_required`(带 C 与 S),什么都不删(含建议作业行)、成员关系不变;
+    - 什么都没删(C=0 且 S=0)→ 204,成员关系结束(或本来就不在);
+    - 删完、收尾成功 → 200 `{"deleted_memory_count": d, "deleted_suggestion_count": s}`,
+      都是本次请求实际删除的条数(只有建议、没有你的记忆时也返回 200);
+    - 期间又保存了记忆、或把某条建议采纳了(r 条)→ 收尾什么都不删、仍是成员:删过
+      d>0 条时 409 `exit_incomplete`(带 d、r),一条都没删时 409
+      `exit_disclosure_required`(带 r 与剩下的建议数);
     - 中途失败 → 503 `exit_incomplete`(带 d、r,d 可以为 0),仍是成员,已删的不会恢复,
       可以重试(重试从重新告知条数开始)。
+    `exit_incomplete` 里的 `deleted_suggestion_count` 恒为 0:建议只在收尾成功时删除。
     客户端断开不影响结果:每一步各自提交,下一次告知如实报告剩下的条数。"""
     try:
-        deleted = memory_membership_service().leave_notebook(
+        outcome = memory_membership_service().leave_notebook(
             notebook_id, user.id, acknowledged_memory_count
         )
     except ExitDisclosureRequired as exc:
         raise HTTPException(
             status_code=409,
-            detail={"code": "exit_disclosure_required", "memory_count": exc.memory_count},
+            detail={
+                "code": "exit_disclosure_required",
+                "memory_count": exc.memory_count,
+                "suggestion_count": exc.suggestion_count,
+            },
         )
     except MemberExitIncomplete as exc:
         raise _exit_incomplete(409, exc)
     except MemberExitFailed as exc:
         raise _exit_incomplete(503, exc)
-    if acknowledged_memory_count:
+    if acknowledged_memory_count or outcome.deleted_suggestion_count:
         return JSONResponse(
             status_code=200,
-            content=MemberExitResult(deleted_memory_count=deleted).model_dump(),
+            content=MemberExitResult(
+                deleted_memory_count=outcome.deleted_memory_count,
+                deleted_suggestion_count=outcome.deleted_suggestion_count,
+            ).model_dump(),
         )
     return Response(status_code=204)

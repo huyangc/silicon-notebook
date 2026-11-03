@@ -52,6 +52,7 @@ BUNDLE_STORE_PORTS = {
     "wishes": "WishStorePort",
     "ask_intent_handles": "AskIntentHandleStorePort",
     "answer_links": "AnswerLinkStorePort",
+    "memory_suggest": "MemorySuggestStorePort",
 }
 
 

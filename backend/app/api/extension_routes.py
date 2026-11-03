@@ -65,12 +65,13 @@ from starlette.responses import Response
 
 from app.api import deps as core_deps
 from app.api import source_routes
+from app.api.collab_marks import append_mark, committed_result, current_request
 from app.services import source_ingestion
 from app.api.task_stream import task_stream_response
 from app.api.deps import (
     get_current_user,
     mirrored_notebook_error,
-    notebook_capability_allowed,
+    notebook_capability_owner,
     notebook_mirror_fence,
     require_notebook_capability,
     require_notebook_read,
@@ -174,8 +175,12 @@ def _authorized_notebook(capability: str, notebook_id: str) -> str:
     user = get_request_user()
     if user is None:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    if not notebook_capability_allowed(capability, notebook_id, user.id):
+    owner_id = notebook_capability_owner(capability, notebook_id, user.id)
+    if owner_id is None:
         raise HTTPException(status_code=404, detail="Notebook not found")
+    request = current_request()
+    if request is not None:
+        append_mark(request, notebook_id, capability, owner_id, user, source="guard")
     # The target-end write fence (docs/incremental-sync-design.md section 5),
     # applied in the same order the decorator guards use: authorization first
     # (denial is still 404 and still discloses nothing), then the resource's own
@@ -286,6 +291,8 @@ class _UrlSourceImportAdapter:
                 get_settings().url_import_trusted_proxy_hosts
             ),
         )
+        if result.created:
+            committed_result(current_request(), notebook_id, _URL_IMPORT_CAPABILITY, result)
         return PluginUrlImportResult(
             created=tuple(
                 PluginImportedSource(

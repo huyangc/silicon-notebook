@@ -154,7 +154,15 @@ RUNTIME_ATTRIBUTES = [
     "wishes",
     "ask_intent_handles",
     "answer_links",
+    "memory_suggest_store",
+    "memory_suggest_trigger",
+    "memory_suggest_job",
+    "memory_suggest_service",
 ]
+
+# Attached by wire_source_ingestion after the eager domain mounts. Keep this
+# post-composition seat separate from __init__'s frozen explicit mount set.
+WIRED_RUNTIME_ATTRIBUTES = ["_collaboration_publisher"]
 
 
 def _runtime_tree() -> ast.Module:
@@ -171,6 +179,83 @@ def _init_node(tree: ast.Module) -> ast.FunctionDef:
                 if isinstance(member, ast.FunctionDef) and member.name == "__init__":
                     return member
     raise AssertionError("RepositoryRuntime.__init__ not found")
+
+
+def _mount_nodes(tree: ast.Module) -> list[ast.FunctionDef]:
+    """``RepositoryRuntime._mount_*`` methods: pure seat-mounting helpers the
+    composition root calls (each statement ``self.<seat> = <param>.<field>``)."""
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "RepositoryRuntime":
+            return [
+                member for member in node.body
+                if isinstance(member, ast.FunctionDef) and member.name.startswith("_mount_")
+            ]
+    raise AssertionError("RepositoryRuntime not found")
+
+
+def test_mount_helpers_only_mount_seats():
+    """A ``_mount_*`` helper is the composition root's own mounting moved out
+    for length, not a place to build anything: after its docstring, every
+    statement is one ``self.<seat> = <param>.<field>`` assignment."""
+
+    helpers = _mount_nodes(_runtime_tree())
+    assert helpers, "the runtime mounts its persistence seats through a helper"
+    for helper in helpers:
+        params = _parameter_names(helper)
+        body = helper.body[1:] if ast.get_docstring(helper) else helper.body
+        assert body, helper.name
+        for statement in body:
+            assert isinstance(statement, (ast.Assign, ast.AnnAssign)), (
+                helper.name, ast.dump(statement)[:80])
+            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            assert len(targets) == 1, helper.name
+            target, value = targets[0], statement.value
+            assert isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+            assert target.value.id == "self", helper.name
+            assert isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name)
+            assert value.value.id in params[1:], (helper.name, value.value.id)
+
+
+# ``_PersistenceSeats`` fields the helper deliberately does not mount, each
+# with where it goes instead.
+_SEATS_NOT_MOUNTED_BY_THE_HELPER = {
+    # Consumed only by the domain builders (source pipeline, reports); the
+    # runtime itself never reads it.
+    "catalog_store",
+    # Mounted from the ask domain (``self.global_ask_store =
+    # ask.global_ask_store``), which wraps it first.
+    "global_ask_store",
+}
+
+
+def test_persistence_mount_helper_mounts_every_seat_field_exactly_once():
+    """``_mount_persistence_seats`` mounts exactly the fields of
+    ``_PersistenceSeats`` (less the declared builder-only ones): a seat added
+    to the dataclass but never mounted, or a mount of a field that no longer
+    exists, fails here rather than at the first call reaching the missing
+    attribute."""
+
+    tree = _runtime_tree()
+    fields = next(
+        [
+            statement.target.id
+            for statement in node.body
+            if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name)
+        ]
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "_PersistenceSeats"
+    )
+    (helper,) = [
+        node for node in _mount_nodes(tree) if node.name == "_mount_persistence_seats"
+    ]
+    mounted = [
+        statement.value.attr
+        for statement in helper.body
+        if isinstance(statement, (ast.Assign, ast.AnnAssign))
+    ]
+    assert _SEATS_NOT_MOUNTED_BY_THE_HELPER <= set(fields)
+    assert sorted(mounted) == sorted(set(fields) - _SEATS_NOT_MOUNTED_BY_THE_HELPER)
+    assert len(mounted) == len(set(mounted))
 
 
 def _builders(tree: ast.Module) -> list[ast.FunctionDef]:
@@ -284,7 +369,9 @@ def test_the_composition_root_only_orchestrates():
     unexpected = sorted(
         name
         for name in called
-        if not name.startswith("_build_") and name not in {"threading.Lock"}
+        if not name.startswith("_build_")
+        and not name.startswith("self._mount_")
+        and name not in {"threading.Lock"}
     )
     assert unexpected == [], (
         f"RepositoryRuntime.__init__ must only call domain builders: {unexpected}"
@@ -299,11 +386,12 @@ def test_every_runtime_attribute_is_mounted_by_an_explicit_line():
     identical while making "which line owns this seat" unanswerable.
     """
 
-    init = _init_node(_runtime_tree())
+    tree = _runtime_tree()
     mounted = sorted(
         {
             target.attr
-            for node in ast.walk(init)
+            for root in (_init_node(tree), *_mount_nodes(tree))
+            for node in ast.walk(root)
             for target in (
                 node.targets
                 if isinstance(node, ast.Assign)
@@ -320,7 +408,7 @@ def test_every_runtime_attribute_is_mounted_by_an_explicit_line():
 
 
 def test_a_live_runtime_exposes_exactly_the_frozen_attribute_set(runtime):
-    assert sorted(vars(runtime)) == sorted(RUNTIME_ATTRIBUTES)
+    assert sorted(vars(runtime)) == sorted(RUNTIME_ATTRIBUTES + WIRED_RUNTIME_ATTRIBUTES)
 
 
 def test_the_shared_instances_the_domains_hand_around_stay_shared(runtime):

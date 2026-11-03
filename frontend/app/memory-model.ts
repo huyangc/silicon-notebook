@@ -1,4 +1,4 @@
-import type { MemoryOrigin, MemoryPromotionState, MemoryStatus } from "./workspace-model";
+import type { AnswerMemoryState, MemoryOrigin, MemoryOriginFilter, MemoryPromotionState, MemoryStatus } from "./workspace-model";
 import { label, EVIDENCE_LEVEL } from "./vocabulary.ts";
 import { ASK_MODES } from "./ask-modes.ts";
 
@@ -7,6 +7,8 @@ const ASK_MODE_LABELS: Record<string, string> = Object.fromEntries(
 );
 
 export type MemoryScope = "global" | "notebook";
+
+export const MEMORY_PAGE_SIZE = 20;
 
 export const MEMORY_INPUT_LIMITS = {
   titleMaxChars: 80,
@@ -230,17 +232,25 @@ export function subscribeMemorySessionAbort(
   return () => signal.removeEventListener("abort", abortRequests);
 }
 
+export type AnswerMemoryFlag = true | "suggested";
+
 export async function collectSavedAnswerFlags(
   batches: string[][],
-  loadBatch: (answerIds: string[]) => Promise<{ links: Record<string, string> }>,
+  loadBatch: (answerIds: string[]) => Promise<{ links: Record<string, string>; states?: Record<string, AnswerMemoryState> }>,
   signal: AbortSignal,
-): Promise<Record<string, boolean> | null> {
+): Promise<Record<string, AnswerMemoryFlag> | null> {
   if (signal.aborted) return null;
   const results = await Promise.all(batches.map((batch) => loadBatch(batch)));
   if (signal.aborted) return null;
-  return Object.fromEntries(
+  const flags: Record<string, AnswerMemoryFlag> = Object.fromEntries(
     results.flatMap((result) => Object.keys(result.links).map((answerId) => [answerId, true])),
   );
+  for (const result of results) {
+    for (const [answerId, state] of Object.entries(result.states ?? {})) {
+      if (!flags[answerId] && state.suggested && state.status === "candidate") flags[answerId] = "suggested";
+    }
+  }
+  return flags;
 }
 
 export function memoryListPath({
@@ -255,7 +265,7 @@ export function memoryListPath({
   scope: MemoryScope;
   notebookId: string | null;
   status: MemoryStatus | "all";
-  origin: MemoryOrigin | "all";
+  origin: MemoryOriginFilter | "all";
   query: string;
   offset: number;
   limit: number;

@@ -185,11 +185,12 @@ PR-3 要求每条建议附「与本轮引用资料是否矛盾」标记并显示
 
 ### 4.1 触发：提问完成观察者第四个端口
 
-**SDK 契约改动（仓库外插件可见，全部是追加、带默认值）**
+**核心与 SDK 的追加契约（带默认值，核心私有字段不投影到插件）**
 - `domain/extensions.py`：新能力常量 `ASK_MEMORY_SUGGEST_COMPLETED_ACCESS_CAPABILITY = "ask:memory_suggest_completed_access"`；
   新端口协议 `MemorySuggestAskCompletedPort`；`AskCompletedObserverCallContext` 末尾追加 `memory_suggest`（默认 `None`）；
   `CompletedAskNotification` 末尾追加 `submitted_via: str = ""`、`had_clarification: bool = False`、`ask_job_id: str = ""`（不透明 id，用于初始化游标，§4.2）。
 - `extension_sdk/ask.py`、`extension_sdk/__init__.py` 导出新常量。
+- 新能力给插件的仍只是 opaque `access.notify()`，没有 actor / notebook 身份或参与库列表；三个通知事实是核心字段，不进 SDK context。实施期私有 `skip_builtin_memory_suggest:bool=False` 也不进 SDK，只能跳过精确核心内建项。
 - `extensions/ask.py:41` `_OBSERVER_ACCESS_CAPABILITIES` 加入新常量。
 - `extensions/builtin/ask_completion.py` 加一个内置观察者 bundle，**在内置观察者中注册在最后**：宿主串行、共用截止时刻，预算紧时最后一个最先被 `break`——
   记忆建议是四条里最不要紧的。注意「最后」只对内置观察者成立：部署装的仓库外插件观察者按注册顺序可能排在它后面，它们的预算不受本特性保护，也不会因本特性变差（本观察者自身只做一次主键读与一次 upsert）。
@@ -197,8 +198,8 @@ PR-3 要求每条建议附「与本轮引用资料是否矛盾」标记并显示
 
 **端口内的判定（答案交付之后，fail-open）**
 1. `scope != "notebook"` 或 `submitted_via != "web"` → 返回。MCP 与全局提问**根本不计数**，不存在 MCP 引起的空跑。
-2. 主键读 `memory_suggest_users(owner_id)`；行不存在或 `enabled = false` → 返回。**默认用户到此为止，零写入**；不读 `user_profiles`、不需要为它加索引。
-3. `_member_can_read` 同款复核（复用 `SharingStorePort.user_can_read_notebook`，同样 fail-open）——防止退出后才到达的完成通知重建 job 行。
+2. 实施期为满足原噪声验收优化：认证刚从数据库读到的本人 `manual`、且前后进程代次仍稳定时，免去额外开关 SQL；唯一模式 writer 在 I/O 前与提交 / 回滚后失效提示，重建 store 也失效。只有这个精确内建观察者可被跳过，第三方端口不变。缺失、过期、身份不符、或认证复用旧画像而未重签的提示回退主键读 `memory_suggest_users(owner_id)`，行不存在或 `enabled=false` 返回；开启用户始终实时读。无逐用户缓存，零写入，不加画像索引。
+3. 同款实时读权复核与下一步 upsert 合在同一写事务，先锁读授权，再锁开关与 job，复核开关和读权后写，防止退出后才到达的完成通知重建 job 行（实施计划 B9、B11）。
 4. upsert `memory_suggest_jobs(notebook_id, owner_id)`：**行不存在时**以本次的 `ask_job_id` 对应提问作游标起点（含它本身，§4.2 第 3 步）；`pending_signal += 1`；
    达阈值（建议 5 次）或 `had_clarification`（§14 D3(x)）才交给轻活池（队列 put，不等待）。
 
@@ -210,7 +211,7 @@ PR-3 要求每条建议附「与本轮引用资料是否矛盾」标记并显示
    退出群组、被移出后读不到的库都在这里落 `skipped`；已有的草稿留在原处（看不到），照常按 30 天过期。
 2. **零调用闸**：本人在本库「未采纳的系统建议」待确认数 ≥ 积压上限（建议 5）；部署开关关闭。
 3. **取样**（§6.1 的谓词）：`ask_jobs` 中 `created_by=本人 ∧ notebook_id=本库 ∧ status='done' ∧ submitted_via='web' ∧ output='answer' ∧ report_id=''
-   ∧ (created_at, id) ≥ 游标`；回答只投影 `payload->'intent'->'clarification_answers'`、歧义行的 `id/options`，以及选优需要的 `evidence_level`。
+   ∧ (created_at, id) ≥ 游标`；回答只投影 `payload->'intent'->'clarification_answers'` 的 `{id,question,answer}`，以及选优需要的 `evidence_level`。完成后的 intent 不保留 `options`，短答使用对应澄清问题补词基（实施计划 B2）。
    **游标与采样窗口的语义**：job 行的生命周期就是采样窗口。行在一次通知里被创建时，游标起点 = 触发这次创建的那条提问（含）；
    关闭开关、自行退出、被移出、取消链接分享都会删除 job 行（§5.4），所以重新开启或重新加入之后，第一次网页提问重新建行，起点自然落在那之后——
    **不回溯开启前、关闭期间、或上次成员身份期间的提问**（§14 D14）。`ask_job_id` 为空（极少数没有 job 行的入口）时起点取建行时刻。
@@ -246,13 +247,13 @@ PR-3 要求每条建议附「与本轮引用资料是否矛盾」标记并显示
 
 | 终态 | 游标 | 说明 |
 | --- | --- | --- |
-| 成功（含部分项被判否/判重） | 前移到本轮已送出的最后一个信号项所在提问 | 判否/判重的项已进负缓存 |
-| `no_signal` | 前移到本轮扫描到的最新提问 | 不占额度 |
+| 成功（含部分项被判否/判重） | 前移到升序扫描末尾；澄清项输入截断或模型保留但超额时，停在首个超额项上并包含它 | 判否/判重已进负缓存，已写草稿有指纹，重扫不重复；反复类截断不挡升序游标（B13） |
+| `no_signal` | 同样前移到升序扫描末尾，遵守未处理澄清项与窗口内更早未完成提问的守卫 | 不占额度 |
 | `skipped:*`、零调用闸（积压、部署关闭）、`daily_cap` | 不动 | 条件恢复后从原处继续 |
 | `model_rejected`、`model_unavailable`、`failed:*` | 不动，`consecutive_failures += 1` | 下次达阈值时重试同一批 |
-| 同一批连续失败满 3 次 | 前移越过这一批，`consecutive_failures` 归零，记 `gave_up` 事件 | 防止畸形输出每天耗掉额度、把这个库永远卡在同一批上 |
+| 同一批连续失败满 3 次 | 前移越过这一批，`consecutive_failures` 归零，运行事件记 `model_status="gave_up"` | 不是新增 outcome；崩溃中断恢复也计一次失败，防止同一批永久卡住 |
 
-每次失败都消耗一次每日额度，所以最坏情况是同一批 3 次调用、跨 1–3 天后放弃；成功一轮即把 `consecutive_failures` 归零。
+已尝试模型调用消耗预占的每日额度；未送模的失败不能一概算调用。成功一轮即把 `consecutive_failures` 归零。窗口内本人更早发起但仍未完成的合格提问使游标停在该问（含），它完成后再取；不把窗口回退到上一次成员身份。截断的反复类簇可能需等新提问才再出现。
 
 **每轮外部调用**：至多 1 次 chat + 1 次批量 embedding（≤8 条文本）。
 
@@ -260,7 +261,7 @@ PR-3 要求每条建议附「与本轮引用资料是否矛盾」标记并显示
 
 | 项 | 建议值 | 说明 |
 | --- | --- | --- |
-| 热路径模型调用 / 新增等待 | 0 / 0 | 端口在交付之后；默认用户多一次 `memory_suggest_users` 主键读（行不存在） |
+| 热路径模型调用 / 新增等待 | 0 / 0 | 端口在交付之后；认证新鲜且代次稳定的 manual 提示零额外 SQL，不能证明时回退开关主键读 |
 | 触发 | 本人在本库每 5 次网页提问，或带澄清答复的提问（D3(x)） | |
 | 每轮 | ≤1 chat + ≤1 次批量 embedding | |
 | 每轮输入 | ≤8 项；每项问题 ≤500、澄清 ≤500、回答节选 ≤1,500 字符；合计 ≤8,000 字符 | 截断走同一个 `Settings` 字段 |
@@ -272,7 +273,7 @@ PR-3 要求每条建议附「与本轮引用资料是否矛盾」标记并显示
 ### 4.4 失败与降级
 
 - 新工作负载未绑定：严格模式下启动即拒（#779 规则，§12 升级说明）；放行档下 job 终态 `model_unavailable`，开关旁就地提示「记忆建议暂不可用：管理员尚未配置模型」。
-- 任意异常：job 落 `failed:<异常类名>`，不重试本批。端口层异常不影响已交付答案（`ask_execution.py:464` 同理）。
+- 任意异常：job 落 `failed:<异常类名>`，不即时重试；之后触发按 §4.2 的失败计数重试 / 放弃，端口层异常不影响已交付答案（实施计划 G24）。
 
 ---
 
@@ -293,7 +294,7 @@ PR-3 要求每条建议附「与本轮引用资料是否矛盾」标记并显示
   - 用例：declined → proposed 升级；proposed 上再写 declined 不变；declined 上再写 declined 只延期。
 - **指纹的算法**：
   - 澄清类：`sha256("clarified" | notebook_id | 答复关键词基集合排序)`；若答复关键词基少于 2 个（「前者」「都要」「2024」），把该歧义行的
-    `options` 关键词基并入集合再哈希——短答复离开选项就没有意义，单看答复会跨主题撞指纹。仍不足 2 个词的不登记 `proposed`（只可能被判否进负缓存）。
+    `clarification_answers[*].question` 关键词基并入集合再哈希——完成后的 intent 未持久化 options，单看短答复会跨主题撞指纹（实施计划 B2）。仍不足 2 个词的不登记 `proposed`（只可能被判否进负缓存）。
   - 反复类：簇内**每个成员问题**各算 `sha256("repeated" | notebook_id | 该问题关键词基集合排序)`，全部登记（每簇 ≤10 个）。新簇**过半成员**的指纹已存在才算命中；
     原样重问一次只贡献一票，不会把一个新话题簇整个压掉；窗口滑动后的同一话题簇通常过半成员仍在，或由近邻与模型兜底。
 - **措辞**：本设计只保证「**同一指纹不重提**」；换了说法的同一件事由近邻 + 模型 `duplicate_of` 兜底，不作保证。

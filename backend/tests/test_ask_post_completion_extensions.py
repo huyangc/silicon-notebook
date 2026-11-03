@@ -4,8 +4,11 @@ from dataclasses import dataclass, replace
 from types import SimpleNamespace
 import time
 
+import pytest
+
 from app.domain.extensions import (
     ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
+    ASK_MEMORY_SUGGEST_COMPLETED_ACCESS_CAPABILITY,
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY,
     ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     AskCompletedObserverCallContext,
@@ -29,6 +32,7 @@ from app.extension_sdk import (
 )
 from app.extensions.ask import AskCompletedObserverHost
 from app.extensions.bootstrap import build_extension_runtime, default_extension_runtime
+from app.extensions.registry import ExtensionRegistryError
 from app.services.repository_runtime import RepositoryRuntime
 
 
@@ -560,6 +564,7 @@ def test_repository_runtime_supplies_its_call_scoped_content_free_event_sink():
         note_ask_completed=lambda: None
     )
     runtime.search_profile_jobs = SimpleNamespace(note_ask_completed=lambda *_: None)
+    runtime.memory_suggest_trigger = SimpleNamespace(has_fresh_manual_hint=lambda _owner: False)
     runtime.database = _ConnectionProbe()
     runtime.event_log = SimpleNamespace(emit=emitted.append)
     runtime.settings = SimpleNamespace(
@@ -585,6 +590,12 @@ def _runtime_for_global(host):
     )
     runtime.search_profile_jobs = SimpleNamespace(
         note_ask_completed=lambda uid: calls.append(("search", uid))
+    )
+    runtime.memory_suggest_trigger = SimpleNamespace(
+        has_fresh_manual_hint=lambda _owner: False,
+        note_ask_completed=lambda notification: calls.append(
+            ("memory_suggest", notification.notebook_id)
+        )
     )
     runtime.database = _ConnectionProbe()
     runtime.event_log = SimpleNamespace(emit=lambda *_: None)
@@ -680,7 +691,9 @@ def test_global_ask_completion_without_a_host_calls_the_three_chains_directly(ca
     calls.clear()
     with caplog.at_level("WARNING", logger="silicon_notebook.repository_runtime"):
         runtime._note_ask_completed("nb-a", "user-1", "reasoning")
-    assert calls == [("experience", "nb-a"), ("search", "user-1")]
+    assert calls == [
+        ("experience", "nb-a"), ("search", "user-1"), ("memory_suggest", "nb-a"),
+    ]
     _assert_content_free_failure_log(caplog, "secret /private/path")
 
 
@@ -752,3 +765,228 @@ def test_global_notification_projects_scope_to_every_observer_and_participants_o
     contexts.clear(); calls.clear()
     runtime.ask_completed_observers.observe_application(_call_context(calls, mode_id="chunk"))
     assert contexts["agent"].scope == "notebook" and contexts["agent"].notebooks == ()
+
+
+# ---------------------------------------------------------------------------
+# Auto user-memory suggestions: the fourth core port (design 2026-10-28 §4.1).
+# ---------------------------------------------------------------------------
+
+
+def _memory_context(calls: list[str], **notification_fields) -> AskCompletedObserverCallContext:
+    notification = CompletedAskNotification(
+        "user-1", "notebook-1", "reasoning", **notification_fields
+    )
+    return replace(
+        _call_context(calls),
+        notification=notification,
+        memory_suggest=_Port("memory_suggest", calls),
+    )
+
+
+def test_the_host_admits_exactly_four_core_notification_capabilities():
+    from app.extensions.ask import _OBSERVER_ACCESS_CAPABILITIES
+
+    assert _OBSERVER_ACCESS_CAPABILITIES == frozenset({
+        ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
+        ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY,
+        ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
+        ASK_MEMORY_SUGGEST_COMPLETED_ACCESS_CAPABILITY,
+    })
+    assert len(_OBSERVER_ACCESS_CAPABILITIES) == 4
+    # Public through the SDK under the same name.
+    from app import extension_sdk
+
+    assert (
+        extension_sdk.ASK_MEMORY_SUGGEST_COMPLETED_ACCESS_CAPABILITY
+        == "ask:memory_suggest_completed_access"
+    )
+
+
+def test_an_observer_requesting_memory_suggest_and_another_capability_is_rejected():
+    class Observer:
+        def observe(self, _context):
+            raise AssertionError("never frozen")
+
+    bundle = _bundle(
+        "obs.greedy", ASK_COMPLETED_OBSERVER_POINT, ContributionKind.OBSERVER, Observer(),
+        requires=(
+            ASK_MEMORY_SUGGEST_COMPLETED_ACCESS_CAPABILITY,
+            ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
+        ),
+    )
+    with pytest.raises(ExtensionRegistryError, match="multiple core notification"):
+        build_extension_runtime(
+            (bundle,),
+            capability_decisions={
+                ASK_MEMORY_SUGGEST_COMPLETED_ACCESS_CAPABILITY: lambda _c: Availability.available(),
+                ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY: lambda _c: Availability.available(),
+            },
+        )
+
+
+def test_memory_suggest_observer_runs_last_among_builtins():
+    runtime = default_extension_runtime()
+    host = runtime.ask_completed_observers
+    builtin_ask_observers = [
+        frozen.registered.contribution.declaration.id
+        for frozen in host._observers
+        if frozen.registered.plugin_id.startswith("builtin.")
+    ]
+    assert builtin_ask_observers == [
+        "builtin.ask_agent_profile",
+        "builtin.ask_retrieval_experience",
+        "builtin.ask_search_profile",
+        "builtin.ask_user_memory_suggest",
+    ]
+    calls: list[str] = []
+    host.observe_application(_memory_context(calls, submitted_via="web"))
+    assert calls == ["agent", "retrieval", "search", "memory_suggest"]
+
+
+def test_budget_exhausted_breaks_before_memory_suggest_first_three_ran():
+    """The shared deadline is spent while the third observer runs: the host
+    ``break``s at the fourth (memory suggestions) -- the one a tight budget
+    is meant to drop first -- after the other three already ran."""
+    runtime = default_extension_runtime()
+    host = runtime.ask_completed_observers
+    now = [100.0]
+    calls: list[str] = []
+    events: list[dict] = []
+
+    class _SpendingPort(_Port):
+        def notify(self) -> None:
+            super().notify()
+            now[0] = 1_000.0
+
+    context = replace(
+        _memory_context(calls, submitted_via="web"),
+        search_profile=_SpendingPort("search", calls),
+        deadline_monotonic=200.0,
+    )
+    original = host._clock
+    host._clock = lambda: now[0]
+    try:
+        host.observe_application(context, event_sink=events.append)
+    finally:
+        host._clock = original
+    assert calls == ["agent", "retrieval", "search"]
+    assert [
+        (event["contribution_id"], event["reason_code"])
+        for event in events
+        if event["contribution_id"] == "builtin.ask_user_memory_suggest"
+    ] == [("builtin.ask_user_memory_suggest", "extension_point_budget_exhausted")]
+
+
+def test_old_notification_constructor_still_valid():
+    """The three fields are appended with defaults: every pre-existing
+    positional and keyword construction (and the six-field call context) is
+    still accepted by the host, unchanged."""
+    notification = CompletedAskNotification("user-1", "notebook-1", "reasoning")
+    assert (
+        notification.submitted_via,
+        notification.had_clarification,
+        notification.ask_job_id,
+    ) == ("", False, "")
+    positional = CompletedAskNotification(
+        "user-1", "notebook-1", "chunk", ("notebook-1",), "global"
+    )
+    assert positional.scope == "global" and positional.ask_job_id == ""
+    calls: list[str] = []
+    context = AskCompletedObserverCallContext(
+        notification, _Port("agent", calls), _Port("retrieval", calls),
+        _Port("search", calls), _ConnectionProbe(), _deadline(),
+    )
+    assert context.memory_suggest is None
+    default_extension_runtime().ask_completed_observers.observe_application(context)
+    assert calls == ["agent", "retrieval", "search"]
+
+
+@pytest.mark.parametrize("fields", [
+    {"submitted_via": None},
+    {"submitted_via": 1},
+    {"had_clarification": "yes"},
+    {"had_clarification": 1},
+    {"had_clarification": None},
+    {"ask_job_id": None},
+    {"ask_job_id": 7},
+])
+def test_invalid_new_notification_fields_rejected(fields):
+    """``_valid_notification`` holds the three appended fields to their exact
+    types (``type(x) is str/bool``): an ill-typed notification is dropped
+    before any observer, core port or event runs."""
+    calls: list[str] = []
+    events: list[dict] = []
+    context = _memory_context(calls)
+    context = replace(context, notification=replace(context.notification, **fields))
+    default_extension_runtime().ask_completed_observers.observe_application(
+        context, event_sink=events.append
+    )
+    assert calls == [] and events == []
+
+
+def test_a_global_notification_never_reaches_the_memory_suggest_port():
+    """Notebook-scope Asks only: even a call context that (wrongly) seats the
+    port for a global Ask gets it withheld by the host."""
+    calls: list[str] = []
+    events: list[dict] = []
+    context = _memory_context(
+        calls, notebook_ids=("notebook-1",), scope="global", submitted_via="web"
+    )
+    default_extension_runtime().ask_completed_observers.observe_application(
+        context, event_sink=events.append
+    )
+    assert "memory_suggest" not in calls
+    assert [
+        event["reason_code"] for event in events
+        if event["contribution_id"] == "builtin.ask_user_memory_suggest"
+    ] == ["ask_completed_access_unavailable"]
+
+
+@pytest.mark.parametrize("extra_capability", [False, True])
+def test_core_manual_skip_preserves_third_party_ports_availability_and_events(extra_capability):
+    from app.extensions.builtin.ask_completion import ASK_MEMORY_SUGGEST_COMPLETED_BUNDLE
+
+    observations, contexts, calls, events = [], [], [], []
+    capability = ASK_MEMORY_SUGGEST_COMPLETED_ACCESS_CAPABILITY
+    extra = "test:independent_access"
+
+    class Plugin:
+        def observe(self, context):
+            contexts.append(context)
+            return context.access.notify()
+
+    def available(context):
+        observations.append(context)
+        return Availability.available()
+
+    runtime = build_extension_runtime(
+        (ASK_MEMORY_SUGGEST_COMPLETED_BUNDLE,
+         _bundle("plugin.memory", ASK_COMPLETED_OBSERVER_POINT, ContributionKind.OBSERVER, Plugin(),
+                 requires=(capability,extra) if extra_capability else (capability,), availability=available)),
+        capability_decisions={capability:available,extra:available},
+    )
+    host = runtime.ask_completed_observers
+    host._clock = lambda: 0.0
+    context = _memory_context(calls,submitted_via="web")
+    host.observe_application(context,event_sink=events.append)
+    old_events = [event for event in events if event["contribution_id"]=="plugin.memory"]
+    old_contexts = list(contexts)
+    old_availability = [value for value in observations if value.contribution_id=="plugin.memory"]
+    assert calls == ["memory_suggest","memory_suggest"]
+    observations.clear(); contexts.clear(); calls.clear(); events.clear()
+    host.observe_application(replace(context,skip_builtin_memory_suggest=True),event_sink=events.append)
+    assert calls == ["memory_suggest"]
+    assert len(contexts) == len(old_contexts) == 1
+    assert contexts[0].access is not None and old_contexts[0].access is not None
+    assert replace(contexts[0],access=None) == replace(old_contexts[0],access=None)
+    assert [value for value in observations if value.contribution_id=="plugin.memory"] == old_availability
+    assert events == old_events
+    assert all(not hasattr(value,"skip_builtin_memory_suggest") for value in contexts)
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true"])
+def test_core_manual_skip_attestation_is_strict_bool(value):
+    calls, events = [], []
+    context = replace(_memory_context(calls),skip_builtin_memory_suggest=value)
+    default_extension_runtime().ask_completed_observers.observe_application(context,event_sink=events.append)
+    assert calls == [] and events == []

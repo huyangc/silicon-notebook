@@ -101,3 +101,15 @@ test("挂了公共知识库：按钮可点，旁边不多一句", async () => {
   expect(await screen.findByRole("button", { name: "贡献到公共知识库" })).toBeEnabled();
   expect(screen.queryByRole("button", { name: "挂载公共知识库" })).toBeNull();
 });
+
+test("建议卡片的原回答入口就是理由句中的动作", async () => {
+  const onOpenAnswer = vi.fn(async () => true);
+  const suggestion = { ...memory, suggested_signal: "clarified", provenance: { conversation_id: "conversation-1", answer_id: "answer-1" } };
+  vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(JSON.stringify({ ...page, items: [suggestion] }), { status: 200 }))));
+  render(<MemoryPanel scope="notebook" notebookId="notebook-1" sessionSignal={new AbortController().signal} onOpenAnswer={onOpenAnswer} />);
+  const action = await screen.findByRole("button", { name: "查看原回答" });
+  expect(action).toHaveClass("link-button", "inline-action");
+  expect(action.parentElement).toHaveTextContent("你在问题理解时确认了这一点");
+  await userEvent.setup().click(action);
+  expect(onOpenAnswer).toHaveBeenCalledWith({ notebookId: "notebook-1", conversationId: "conversation-1", answerId: "answer-1" });
+});

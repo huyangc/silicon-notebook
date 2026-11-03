@@ -1170,17 +1170,25 @@ def test_a_completed_ask_signals_the_asking_member_after_the_terminal_row(
 
     monkeypatch.setattr(ask_execution_module.queue, "Queue", _RecordingQueue)
 
+    facts: list = []
     coordinator = _ask_coordinator(
         calls, runner=_response,
-        noted=lambda nb, uid, mode_id="chunk": noted.append(("note", nb, uid)) or calls.append(("note",)),
+        noted=lambda nb, uid, mode_id="chunk", **kw: (
+            noted.append(("note", nb, uid)) or facts.append(kw) or calls.append(("note",))
+        ),
     )
 
     _drain(coordinator.start(
         "nb-t5", AskRequest(question="Q?", mode="chunk"), ASK_MODES["chunk"],
-        user_id=USER_A,
+        user_id=USER_A, submitted_via="web",
     ))
 
     assert noted == [("note", "nb-t5", USER_A)]
+    # Auto user-memory facts: this job's id, its entry point, and no
+    # clarification (the response carries no intent).
+    assert facts == [{
+        "ask_job_id": "askjob-t5", "submitted_via": "web", "had_clarification": False,
+    }]
     # finish the durable job → queue the "final" event → THEN signal the
     # overlay chain. Neither "note" nor "put_final" may lead "finish", and
     # "note" specifically must trail "put_final" (not just "finish").
@@ -1206,7 +1214,7 @@ def test_post_completion_observers_run_after_the_final_event():
         coordinator = _ask_coordinator(
             calls,
             runner=_response,
-            noted=lambda notebook_id, user_id, mode_id: calls.append(
+            noted=lambda notebook_id, user_id, mode_id, **_facts: calls.append(
                 ("observe", notebook_id, user_id, mode_id)
             ),
         )
@@ -1226,6 +1234,29 @@ def test_post_completion_observers_run_after_the_final_event():
         ("observe", "nb-t5", USER_A, "chunk"),
         ("sentinel",),
     ]
+
+
+def test_a_streaming_ask_with_clarification_answers_reports_it():
+    """``had_clarification`` = the finalized understanding the response carries
+    (``response.intent.clarification_answers``, what the answer payload
+    persists) is non-empty -- the auto user-memory trigger's D3(x) input."""
+    from app.models.ask import QueryIntentContract
+
+    facts: list = []
+    clarified = _response().model_copy(update={"intent": QueryIntentContract(
+        objective="o", resolved_question="q",
+        clarification_answers=[{"id": "a1", "question": "which?", "answer": "this"}],
+    )})
+    _drain(_ask_coordinator(
+        [], runner=lambda: clarified,
+        noted=lambda nb, uid, mode_id, **kw: facts.append(kw),
+    ).start(
+        "nb-t5", AskRequest(question="Q?", mode="chunk"), ASK_MODES["chunk"],
+        user_id=USER_A, submitted_via="web",
+    ))
+    assert facts == [{
+        "ask_job_id": "askjob-t5", "submitted_via": "web", "had_clarification": True,
+    }]
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("engine down")])
@@ -2128,6 +2159,7 @@ def test_direct_constructor_completion_compat_fans_out_to_three_chains():
                 "self.agent_profile_jobs.note_ask_completed",
                 "self.retrieval_experience_jobs.note_ask_completed",
                 "self.search_profile_jobs.note_ask_completed",
+                "self.memory_suggest_trigger.note_ask_completed",
             ):
                 owning_try.setdefault(chain, block)
                 call_args.setdefault(chain, len(node.args))
@@ -2160,6 +2192,19 @@ def test_direct_constructor_completion_compat_fans_out_to_three_chains():
     assert call_args["self.agent_profile_jobs.note_ask_completed"] == 2
     assert call_args["self.retrieval_experience_jobs.note_ask_completed"] == 1
     assert call_args["self.search_profile_jobs.note_ask_completed"] == 1
+    # 第四条(自动用户记忆,设计 2026-10-28 §4.1)同样独占一个 try,只收整条通知
+    # (它要读入口、澄清与 job id,判定全在 trigger 里)。
+    memory_try = owning_try.get("self.memory_suggest_trigger.note_ask_completed")
+    assert memory_try is not None, "第四条链的触发调用不在任何 try 块内,或已丢失"
+    assert all(
+        memory_try is not owning_try[chain]
+        for chain in (
+            "self.agent_profile_jobs.note_ask_completed",
+            "self.retrieval_experience_jobs.note_ask_completed",
+            "self.search_profile_jobs.note_ask_completed",
+        )
+    )
+    assert call_args["self.memory_suggest_trigger.note_ask_completed"] == 1
 
 
 def test_the_host_seat_hands_the_distillation_trigger_its_notebook():
@@ -2299,6 +2344,40 @@ def test_the_runtime_completion_lambda_accepts_the_coordinator_arity():
         "runtime 的 note_ask_completed 接线 lambda 必须接受 mode_id——"
         "少参的 TypeError 会被协调器 fail-open 吞掉,两条后台链静默死亡"
     )
+    # 自动用户记忆:协调器另带三个关键字参数(ask_job_id/submitted_via/
+    # had_clarification)。lambda 不收 ``**`` 就是同一种静默死亡——四条链一起。
+    assert "**" in lambda_head, (
+        "runtime 的 note_ask_completed 接线 lambda 必须收下并透传关键字参数"
+    )
+
+
+def test_only_the_notebook_completion_seats_the_memory_suggest_port():
+    """设计 2026-10-28 §4.1:第四个端口只给 notebook 范围的提问。生产路径
+    (observer host)上 ``_note_ask_completed`` 恰有一个 ``memory_suggest=`` 座位、
+    闭包里调 trigger;``_note_global_ask_completed`` 一个都没有(全局问答不计数,
+    宿主拿到 ``None`` 就把这个观察者记为不可用)。"""
+    import ast
+
+    from app.services import repository_runtime as rr
+
+    tree = ast.parse(Path(rr.__file__).read_text(encoding="utf-8"))
+
+    def _seats(name: str) -> list[ast.keyword]:
+        function = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        )
+        return [
+            node for node in ast.walk(function)
+            if isinstance(node, ast.keyword) and node.arg == "memory_suggest"
+        ]
+
+    (seat,) = _seats("_note_ask_completed")
+    assert any(
+        isinstance(node, ast.Attribute) and node.attr == "memory_suggest_trigger"
+        for node in ast.walk(seat.value)
+    )
+    assert _seats("_note_global_ask_completed") == []
 
 
 def test_the_usage_section_total_respects_the_documented_cap():
@@ -2412,15 +2491,19 @@ class _SyncAskDouble:
         self.event_log = SimpleNamespace(
             logger=SimpleNamespace(exception=lambda *a, **k: None)
         )
+        # The auto user-memory facts each notification carried (keyword-only).
+        self.facts: list = []
         if notify_boom is None:
             self.note_ask_completed = (
-                lambda nb, uid, mode_id: noted.append((nb, uid, mode_id))
+                lambda nb, uid, mode_id, **kw: noted.append((nb, uid, mode_id))
+                or self.facts.append(kw)
             )
         else:
-            def _raise(nb, uid, mode_id):
+            def _raise(nb, uid, mode_id, **kw):
                 noted.append((nb, uid, mode_id))
                 raise notify_boom
             self.note_ask_completed = _raise
+        self.response = SimpleNamespace(answer_id="ans-sync")
 
     def current_user_id(self):
         return USER_A
@@ -2439,7 +2522,7 @@ class _SyncAskDouble:
             on_trace=None):
         if self._boom is not None:
             raise self._boom
-        return SimpleNamespace(answer_id="ans-sync")
+        return self.response
 
     def finish_job(self, job_id, status, *, answer_id="", error=""):
         self.finished.append(status)
@@ -2451,7 +2534,7 @@ class _SyncAskDouble:
     _durable_trace_sink = AskService._durable_trace_sink
 
 
-def _run_sync_ask(monkeypatch, double, *, mode="graph", submit=None):
+def _run_sync_ask(monkeypatch, double, *, mode="graph", submit=None, submitted_via=""):
     """跑真的 `ask_current`。
 
     默认把 `background_jobs.submit` 换成**同线程**执行并记下 job 名:这一组用例
@@ -2471,7 +2554,7 @@ def _run_sync_ask(monkeypatch, double, *, mode="graph", submit=None):
             return None
     monkeypatch.setattr(background_jobs, "submit", submit)
     return ask_service_module.AskService.ask_current(
-        double, NOTEBOOK_ID, SimpleNamespace(mode=mode)
+        double, NOTEBOOK_ID, SimpleNamespace(mode=mode), submitted_via=submitted_via
     )
 
 
@@ -2516,6 +2599,26 @@ def test_a_synchronous_ask_signals_the_chain_with_the_normalised_engine_id(
     # 后台 job 带名字提交:没名字它在诊断里就是一条匿名 `background_job`,
     # 而 `_SAFE_ASK_JOB_NAMES` 那张表存在的理由正是「提问路径的 job 不许匿名」。
     assert double.submitted == ["ask-completed-reasoning"]
+    # 自动用户记忆的三个事实:这一行的 job id、入口(此处未传 = "")、无澄清。
+    assert double.facts == [
+        {"ask_job_id": "askjob-sync", "submitted_via": "", "had_clarification": False}
+    ]
+
+
+def test_a_synchronous_ask_passes_its_entry_point_and_clarification(monkeypatch):
+    """同步面把建行时的入口字面量与「定稿理解带非空澄清答复」原样交给钩子。"""
+    noted: list = []
+    double = _SyncAskDouble(noted)
+    double.response = SimpleNamespace(
+        answer_id="ans-sync",
+        intent=SimpleNamespace(clarification_answers=[{"id": "a", "answer": "x"}]),
+    )
+
+    _run_sync_ask(monkeypatch, double, submitted_via="mcp")
+
+    assert double.facts == [
+        {"ask_job_id": "askjob-sync", "submitted_via": "mcp", "had_clarification": True}
+    ]
 
 
 def test_a_synchronous_ask_notifies_after_the_terminal_job_row(monkeypatch):
@@ -2526,7 +2629,7 @@ def test_a_synchronous_ask_notifies_after_the_terminal_job_row(monkeypatch):
     double.finish_job = lambda job_id, status, *, answer_id="", error="": (
         order.append(("finish", status))
     )
-    double.note_ask_completed = lambda nb, uid, mode_id: order.append(("note",))
+    double.note_ask_completed = lambda nb, uid, mode_id, **_kw: order.append(("note",))
 
     _run_sync_ask(monkeypatch, double)
 
@@ -2586,7 +2689,7 @@ def test_the_completion_notification_never_runs_on_the_request_thread(
     noted: list = []
     double = _SyncAskDouble(noted)
 
-    def _note(nb, uid, mode_id):
+    def _note(nb, uid, mode_id, **_kw):
         assert released.wait(timeout=5)
         ran_on.append(threading.get_ident())
         noted.append((nb, uid, mode_id))

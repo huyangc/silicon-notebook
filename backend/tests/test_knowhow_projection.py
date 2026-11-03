@@ -309,6 +309,55 @@ def _insert_legacy_ko(repo, source_id: str, notebook_id: str, table_id: str,
 # ---------------------------------------------------------------------------
 
 
+def test_projection_terminal_publishes_after_sync_and_observer_failure_is_isolated(repo, projector, table_id, notebook_id, embedder):
+    columns = _cols_by_name(repo, table_id)
+    row = repo._runtime.knowhow_store.add_knowhow_row(table_id, {columns["违例类型"]: "过冲"})
+    observed = []
+
+    def terminal(*args):
+        observed.append((args, _row_projection_status(repo, table_id, row)))
+        raise RuntimeError("hint unavailable")
+
+    projector._collab_touch = terminal
+    assert projector.project_table(table_id) == notebook_id
+    assert [item[0] for item in observed] == [(notebook_id, ("knowhow", "knowledge", "kg", "notebook"), None, None)]
+    assert all(item[1] == "synced" for item in observed)
+
+
+@pytest.mark.parametrize("outcome", ["published", "post_commit_failure", "target_gone"])
+def test_projection_terminal_announces_derived_surfaces_and_never_resurrects_target(repo, projector, table_id, notebook_id, embedder, monkeypatch, outcome):
+    store = repo._runtime.knowhow_store
+    columns = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {columns["违例类型"]: "过冲"})
+    source_id = projector.ensure_hidden_source(table_id)
+    touched = []
+
+    def terminal(nb, kinds, *args):
+        touched.append((nb, kinds))
+        repo._runtime.collaboration.touch_for_job(nb, kinds, "owner", "提交人")
+
+    monkeypatch.setattr(projector, "_collab_touch", terminal)
+    if outcome == "target_gone":
+        state = _delete_table_after_row_work_before_terminal_kg_write(repo, projector, table_id, source_id, monkeypatch)
+    if outcome == "post_commit_failure":
+        monkeypatch.setattr(store, "bump_knowhow_mutation_seq", lambda table_id: (_ for _ in ()).throw(RuntimeError("after commit")))
+        with pytest.raises(RuntimeError, match="after commit"):
+            projector.project_table(table_id)
+    else:
+        projector.project_table(table_id)
+    assert touched == [(notebook_id, ("knowhow", "knowledge", "kg", "notebook"))]
+    assert [row["kind"] for row in repo._runtime.collaboration.pulse.recent_owner_changes(notebook_id, "owner")] == ["knowhow"]
+    with repo._connect() as db:
+        objects = db.execute("SELECT COUNT(*) c FROM knowledge_objects WHERE source_id=?", (source_id,)).fetchone()["c"]
+    if outcome == "target_gone":
+        assert state["injected"]
+        assert objects == 0
+        with pytest.raises(KeyError):
+            store.get_knowhow_table(table_id)
+    else:
+        assert objects > 0
+
+
 def test_ensure_hidden_source_is_idempotent(repo, projector, table_id):
     source_id_1 = projector.ensure_hidden_source(table_id)
     source_id_2 = projector.ensure_hidden_source(table_id)

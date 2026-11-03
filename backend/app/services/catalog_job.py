@@ -60,6 +60,7 @@ terminal state IN, and paying for more model calls on its behalf would be
 pure waste.
 """
 from __future__ import annotations
+from app.services.collab_jobs import pulse_touch_for_job
 
 import itertools
 import json
@@ -718,6 +719,7 @@ class CommandCatalogService:
     callable, so it lives on the neutral repository runtime rather than being
     built twice per backend.
     """
+    _collab_touch = None
 
     def __init__(
         self,
@@ -1770,6 +1772,7 @@ class CommandCatalogService:
         except KeyError:
             return
         self._emit("catalog_job_finished", job, **extra)
+        pulse_touch_for_job(self._collab_touch, job["notebook_id"], "catalog", job.get("created_by") or None)
 
     # ------------------------------------------------------------------- run
     def run(self, job_id: str) -> dict:

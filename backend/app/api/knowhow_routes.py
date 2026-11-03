@@ -13,12 +13,17 @@ from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.api.download_headers import attachment_content_disposition
+from app.api.collab_marks import committed_result, guarded_owner
 from app.api.deps import (
     content_overview_service,
     get_current_user,
     mirrored_notebook_error,
     notebook_access_repository as _kh_access,
-    notebook_capability_allowed,
+    notebook_capability_level,
+    notebook_capability_owner,
+    mark_pulse,
+    record_committed_pulse,
+    notebook_edit_without_admin,
     notebook_mirror_fence,
     repository,
     require_notebook_capability,
@@ -27,6 +32,7 @@ from app.api.deps import (
 )
 from app.core.audit_actor import session_audit_principal
 from app.domain.knowhow_transfer import MEMORY_SOURCE, KnowhowTransferRefused
+from app.domain.collaboration import KNOWHOW_TERMINAL_PULSE_KINDS
 from app.models.identity import UserProfile
 from app.models.knowhow import (
     VALID_ORIGINS,
@@ -54,6 +60,7 @@ from app.models.knowhow import (
     KnowhowTableSummary,
     KnowhowTransferRequest,
 )
+from app.repositories.knowhow_guarded_result import GROUP_CHANGED, guarded_conflict
 from app.repositories.sqlite.knowhow_history_store import (
     HistoryInconsistent,
     HistoryStale,
@@ -188,10 +195,33 @@ def get_knowhow_table(notebook_id: str, table_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Table not found")
 
 
+async def _refuse_named_editor(
+    notebook_id: str, user: UserProfile = Depends(get_current_user), request: Request = None,
+) -> None:
+    """The destructive Knowhow actions a named editor may not take (share-edit
+    P1, decision D14): deleting a whole table, pruning its history. Hung on
+    those routes after the capability guard (which already let the caller in,
+    ``knowhow:write``): this fresh lookup admits only the owner and admins.
+    The caller may have lost editing rights since the first guard; a remaining
+    read-only membership must never admit a destructive action. Refusals use
+    the 404 a missing table gets. A dependency rather than a body call, so the route
+    functions keep their signatures for in-process callers."""
+    if request is not None and guarded_owner(request, notebook_id, user.id):
+        return
+    access = await run_in_threadpool(
+        _kh_access().notebook_access_level, notebook_id, user.id
+    )
+    if access is None or access.level not in {"owner", "admin"}:
+        raise HTTPException(status_code=404, detail="Table not found")
+
+
 @router.delete(
     "/notebooks/{notebook_id}/knowhow/{table_id}",
     status_code=204,
-    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
+    dependencies=[
+        Depends(require_notebook_capability("knowhow:write")),
+        Depends(_refuse_named_editor),
+    ],
 )
 def delete_knowhow_table(notebook_id: str, table_id: str) -> None:
     """Cascade-delete (task brief: "连投影产物+隐藏源"). Ordering: fetch+
@@ -202,7 +232,11 @@ def delete_knowhow_table(notebook_id: str, table_id: str) -> None:
     ONLY THEN the store's own cascade delete (columns/rows/cells via ON DELETE
     CASCADE). Projection-teardown-first so a crash BETWEEN the two phases
     leaves a still-deletable table whose projection is already clean, rather
-    than an orphaned hidden source with no table left to trigger its cleanup."""
+    than an orphaned hidden source with no table left to trigger its cleanup.
+
+    A named editor may not delete a whole table (share-edit P1, decision D14):
+    it is a hard delete, its change history goes with it and nothing can bring
+    it back -- the same 404 a missing table gets."""
     repo = repository()
     try:
         detail = knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)
@@ -493,6 +527,41 @@ def delete_knowhow_row(
     knowhow_api.get_scheduler(repo).schedule(table_id)
 
 
+#: The structured 409 of a guarded cell write (share-edit P1, decision D7,
+#: plan PD-1). ``reason`` tells the editor what it can offer: ``content_changed``
+#: shows the other version next to the cell with "overwrite with mine" (``current``
+#: is every target's stored content read in the refused transaction, the new
+#: ``expected_before`` for that overwrite); ``group_changed`` offers no overwrite
+#: -- the rows the save aimed at moved, the user reloads. The frontend lists the
+#: code in ``TRUSTED_STRUCTURED_FAILURES`` (``frontend/app/errors.ts``), so it is
+#: never swallowed into a generic status message.
+KNOWHOW_CELL_CONFLICT_CODE = "knowhow_cell_conflict"
+_CELL_CONFLICT_MESSAGES = {
+    "content_changed": "内容已被其他人修改，请刷新后重试",
+    "group_changed": "这一组已被重新分组，请刷新后再编辑",
+}
+
+
+def _cell_conflict(result: dict) -> HTTPException:
+    reason = str(result.get("reason") or "content_changed")
+    return HTTPException(status_code=409, detail={
+        "code": KNOWHOW_CELL_CONFLICT_CODE,
+        "reason": reason,
+        "message": _CELL_CONFLICT_MESSAGES[reason],
+        "current": list(result.get("current") or []),
+    })
+
+
+def _stored_cell_results(result: dict) -> list:
+    """The guarded write's own post-write values (``stored``, read in its write
+    transaction): the response never re-reads the table after commit, where a
+    later writer's value could already sit and become the caller's baseline."""
+    return [
+        {key: item[key] for key in ("row_id", "column_id", "content_md", "projection_status", "mutation_seq")}
+        for item in result["stored"]
+    ]
+
+
 @router.patch(
     "/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}",
     response_model=KnowhowCellPatchResult,
@@ -502,7 +571,7 @@ def patch_knowhow_cell(
     notebook_id: str, table_id: str, row_id: str, column_id: str, body: KnowhowCellPatch,
     user: UserProfile = Depends(get_current_user),
 ) -> dict:
-    """Returns {row_id,column_id,content_md,projection_status} so the caller
+    """Returns {row_id,column_id,content_md,projection_status,mutation_seq} so the caller
     can refresh just this row's sync badge without re-fetching the whole
     table. row_id/column_id validity is checked twice, deliberately: the
     table-scoped membership check (belongs to THIS table_id, not merely SOME
@@ -524,19 +593,28 @@ def patch_knowhow_cell(
         not any(row["id"] == row_id for row in table["rows"])
         or not any(column["id"] == column_id for column in table["columns"])
     ):
+        if body.expected_before is not None:
+            raise _cell_conflict(guarded_conflict(GROUP_CHANGED))
         raise user_error(400, "格子定位不合法")
     try:
         repo.validate_cell_target(row_id, column_id)
     except ValueError as exc:
+        if body.expected_before is not None:
+            raise _cell_conflict(guarded_conflict(GROUP_CHANGED))
         raise HTTPException(status_code=400, detail=str(exc))
     # Concurrency P1 (fix b): when the caller supplies expected_before (the
     # batch-reformat save path), the write must be a SERVER-SIDE atomic
     # compare-and-write — the whole point is to close the client-side TOCTOU the
     # old preflight-fetch-then-PATCH left open. Route it through the guarded store
     # method (one entry); a stale baseline → 409 with a friendly message, nothing
-    # written. When expected_before is None (the manual cell editor), keep the
-    # existing last-write-wins path unchanged — a human actively editing this
-    # cell should not have their save refused by their own earlier snapshot.
+    # written. Since share-edit P1 (decision D7) the browser's manual editor
+    # sends expected_before too, under four rules that keep one person from
+    # refusing themselves: the baseline is the STORED value (the response below
+    # returns it from the write transaction), a merged cell sends per-row
+    # baselines plus the anchor guard, the compare is byte-exact, and tabs of one
+    # browser share saved values (BroadcastChannel). The 409 is structured
+    # (``_cell_conflict``). When expected_before is None (an API client that
+    # never read the cell) the last-write-wins path below is unchanged.
     if body.expected_before is not None:
         # F2: the guarded (compare-and-write) branch must run the SAME newly-
         # dangling-asset guard the legacy branch below runs — otherwise a guarded
@@ -558,7 +636,9 @@ def patch_knowhow_cell(
         except ValueError:
             raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
         if result["conflict"]:
-            raise user_error(409, "内容已被其他人修改，请刷新后重试")
+            raise _cell_conflict(result)
+        knowhow_api.get_scheduler(repo).schedule(table_id)
+        return _stored_cell_results(result)[0]
     else:
         # Refuse to persist a NEWLY dangling asset:// link (the image was reclaimed
         # while it lived only in this browser draft). We cannot restore the file, but
@@ -570,7 +650,7 @@ def patch_knowhow_cell(
             current_row.get("cells", {}).get(column_id, ""), body.content_md
         )
         try:
-            repo.update_knowhow_cell(
+            mutation_seq = repo.update_knowhow_cell(
                 row_id, column_id, body.content_md,
                 require_assets=added_assets, actor=principal.audit_label,
                 origin=body.origin,
@@ -578,13 +658,12 @@ def patch_knowhow_cell(
         except ValueError:
             raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
     knowhow_api.get_scheduler(repo).schedule(table_id)
-    updated = repo.get_knowhow_table(table_id)
-    row = next(r for r in updated["rows"] if r["id"] == row_id)
     return {
         "row_id": row_id,
         "column_id": column_id,
-        "content_md": row["cells"].get(column_id, ""),
-        "projection_status": row["projection_status"],
+        "content_md": body.content_md,
+        "projection_status": "pending",
+        "mutation_seq": mutation_seq,
     }
 
 
@@ -597,9 +676,9 @@ def patch_knowhow_cell(
 # whose ONE `with self.database.write() as db:` block makes it all-or-
 # nothing at the SQL layer. Validation still happens BEFORE any write, same
 # as patch_knowhow_cell above (belt-and-suspenders: table-scoped membership
-# here, then validate_cell_target's same-table pairing) — so a single bad
-# row_id 400s the ENTIRE request and update_knowhow_cells is never called at
-# all, meaning the other, valid rows in the batch don't get written either.
+# here, then validate_cell_target's same-table pairing). A stale guarded target
+# returns group_changed for inline recovery; an invalid legacy target returns
+# 400. Both refuse the entire batch, leaving its valid rows untouched.
 @router.patch(
     "/notebooks/{notebook_id}/knowhow/{table_id}/cells",
     response_model=List[KnowhowCellPatchResult],
@@ -625,16 +704,28 @@ def patch_knowhow_cells_batch(
     principal = session_audit_principal(user)
     table = _require_table(repo, notebook_id, table_id)
     row_ids = body.row_ids
+    if body.expected_before is not None:
+        if len(body.expected_before) != len(row_ids):
+            raise HTTPException(status_code=400, detail="expected_before length must match row_ids")
+        if (
+            body.anchor_column_id is not None and body.expected_anchor is not None
+            and len(body.expected_anchor) != len(row_ids)
+        ):
+            raise HTTPException(status_code=400, detail="expected_anchor length must match row_ids")
     valid_row_ids = {row["id"] for row in table["rows"]}
     if (
         not all(row_id in valid_row_ids for row_id in row_ids)
         or not any(column["id"] == body.column_id for column in table["columns"])
     ):
+        if body.expected_before is not None:
+            raise _cell_conflict(guarded_conflict(GROUP_CHANGED))
         raise user_error(400, "格子定位不合法")
     try:
         for row_id in row_ids:
             repo.validate_cell_target(row_id, body.column_id)
     except ValueError as exc:
+        if body.expected_before is not None:
+            raise _cell_conflict(guarded_conflict(GROUP_CHANGED))
         raise HTTPException(status_code=400, detail=str(exc))
     # Concurrency P1 (fix b): with per-row expected_before (the batch-reformat
     # fan-out save), write the WHOLE group through the guarded atomic store method
@@ -642,12 +733,6 @@ def patch_knowhow_cells_batch(
     # refuses the entire concept group (409, nothing written) rather than a
     # half-written group. expected_before is positionally parallel to row_ids.
     if body.expected_before is not None:
-        if len(body.expected_before) != len(row_ids):
-            # Client contract error (the UI always sends matching lengths); an
-            # API/MCP client that gets it wrong sees the generic 400 Chinese copy.
-            raise HTTPException(
-                status_code=400, detail="expected_before length must match row_ids"
-            )
         updates = [
             (table_id, row_id, body.column_id, expected, body.content_md)
             for row_id, expected in zip(row_ids, body.expected_before)
@@ -662,10 +747,6 @@ def patch_knowhow_cells_batch(
         anchor_column_id = None
         expected_anchor = None
         if body.anchor_column_id is not None and body.expected_anchor is not None:
-            if len(body.expected_anchor) != len(row_ids):
-                raise HTTPException(
-                    status_code=400, detail="expected_anchor length must match row_ids"
-                )
             anchor_column_id = body.anchor_column_id
             expected_anchor = body.expected_anchor
         # F2: same newly-dangling-asset guard as the single-cell guarded branch —
@@ -695,7 +776,10 @@ def patch_knowhow_cells_batch(
         except ValueError:
             raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
         if result["conflict"]:
-            raise user_error(409, "内容已被其他人修改，请刷新后重试")
+            raise _cell_conflict(result)
+        if row_ids:
+            knowhow_api.get_scheduler(repo).schedule(table_id)
+        return _stored_cell_results(result)
     else:
         # Same newly-dangling-asset guard as the single-cell route above. It cannot
         # be skipped here just because this path is "internal": the editor saves
@@ -714,7 +798,7 @@ def patch_knowhow_cells_batch(
             }
         )
         try:
-            repo.update_knowhow_cells(
+            mutation_seq = repo.update_knowhow_cells(
                 row_ids, body.column_id, body.content_md,
                 require_assets=added_assets, actor=principal.audit_label,
                 origin=body.origin,
@@ -723,14 +807,13 @@ def patch_knowhow_cells_batch(
             raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
     if row_ids:
         knowhow_api.get_scheduler(repo).schedule(table_id)
-    updated = repo.get_knowhow_table(table_id)
-    rows_by_id = {r["id"]: r for r in updated["rows"]}
     return [
         {
             "row_id": row_id,
             "column_id": body.column_id,
-            "content_md": rows_by_id[row_id]["cells"].get(body.column_id, ""),
-            "projection_status": rows_by_id[row_id]["projection_status"],
+            "content_md": body.content_md,
+            "projection_status": "pending",
+            "mutation_seq": mutation_seq,
         }
         for row_id in row_ids
     ]
@@ -796,6 +879,7 @@ async def append_knowhow_rows(
     file: UploadFile = File(...),
     mode: str = Form("preview"),
     user: UserProfile = Depends(get_current_user),
+    request: Request = None,
 ) -> dict:
     """Excel append import (design doc §② 路B): matches the uploaded file's
     header BY COLUMN NAME against the table's existing columns (never by
@@ -827,7 +911,7 @@ async def append_knowhow_rows(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     knowhow_api.get_scheduler(repo).schedule(table_id)
-    return {"added": added}
+    return committed_result(request, notebook_id, "knowhow:write", {"added": added})
 
 
 # --- knowhow-tables PR-2+3 Task 8: LLM cell rewrite (design doc §③, explicit
@@ -1425,7 +1509,10 @@ def delete_knowhow_milestone(notebook_id: str, table_id: str, milestone_id: str)
 
 @router.post(
     "/notebooks/{notebook_id}/knowhow/{table_id}/history/prune",
-    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
+    dependencies=[
+        Depends(require_notebook_capability("knowhow:write")),
+        Depends(_refuse_named_editor),
+    ],
 )
 def prune_knowhow_history(
     notebook_id: str, table_id: str, body: KnowhowHistoryPruneRequest,
@@ -1439,7 +1526,9 @@ def prune_knowhow_history(
     §7.1 的已知代价在这里兑现：被清理掉的历史很可能是某些图片在库里唯一还
     "活着"的引用来源，删完之后这些图片才终于可能被判定为孤儿——所以清理
     完成后主动触发一次绕过节流的资产清扫（``min_interval=0``），而不是干等
-    下一次自然节流窗口才释放磁盘；后台执行，不拖慢这次清理请求本身的响应。"""
+    下一次自然节流窗口才释放磁盘；后台执行，不拖慢这次清理请求本身的响应。
+
+    点名编辑者不能清理历史（分享编辑 P1，决策 D14）：被清掉的版本无从恢复。"""
     repo = repository()
     _require_table(repo, notebook_id, table_id)
     cutoff_iso = (
@@ -1464,6 +1553,7 @@ def transfer_knowhow_table(
     table_id: str,
     payload: KnowhowTransferRequest,
     user: UserProfile = Depends(get_current_user),
+    request: Request = None,
 ) -> dict:
     if payload.target_notebook_id == notebook_id:
         raise user_error(400, "源与目标不能是同一个笔记本")
@@ -1479,18 +1569,22 @@ def transfer_knowhow_table(
     # P1/P2 翻转 knowhow:write 时 move/目标库判定自动跟随——否则会出现
     # 「组管理员能改每个格子、却复制/移动不了整张表」的半翻转，且报的还是
     # 与「库不存在」同码的 404。读半（copy 的源库）沿用 user_can_read_notebook。
-    source_ok = (
-        access.user_can_read_notebook(notebook_id, principal.identity_id)
-        if payload.mode == "copy"
-        else notebook_capability_allowed(
+    # move 那一半拿带级别的判定(一条语句,与 notebook_capability_allowed 同):点名
+    # 编辑者不能把整张表移出这本库(分享编辑 P1,决策 D14——移走等于从源库删掉),
+    # 与「不存在」同一个 404;copy 不动源库,照旧只要读权。
+    if payload.mode == "copy":
+        source_ok = access.user_can_read_notebook(notebook_id, principal.identity_id)
+    else:
+        source_access = notebook_capability_level(
             "knowhow:write", notebook_id, principal.identity_id
         )
-    )
+        source_ok = source_access is not None and not notebook_edit_without_admin(
+            source_access
+        )
     if not source_ok:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    if not notebook_capability_allowed(
-        "knowhow:write", payload.target_notebook_id, principal.identity_id
-    ):
+    target_owner = notebook_capability_owner("knowhow:write", payload.target_notebook_id, principal.identity_id)
+    if target_owner is None:
         raise HTTPException(status_code=404, detail="Notebook not found")
     # 镜像写入围栏(设计文档 docs/incremental-sync-design.md §5)。两端各判一次,
     # 而且判据不同:
@@ -1538,6 +1632,9 @@ def transfer_knowhow_table(
             "这次操作没有做任何改动，请联系管理员检查。",
         )
     except _kh_transfer.SourceCleanupFailed as exc:
+        record_committed_pulse(request, payload.target_notebook_id, "knowhow:write", target_owner, user, KNOWHOW_TERMINAL_PULSE_KINDS)
+        if exc.source_projection_started:
+            record_committed_pulse(request, notebook_id, "knowhow:write", source_access.owner_id, user, KNOWHOW_TERMINAL_PULSE_KINDS, activity=False)
         # 复制已提交、清理源(拆投影/删源表)失败：副本已在目标存在，源仍在——
         # 结构化 409 让前端能诚实地告诉用户"重复不丢失"，而不是裸 500 诱导用户
         # 盲目重试(会在目标侧越堆越多重复副本)。见 A3 评审附加需求。
@@ -1567,4 +1664,7 @@ def transfer_knowhow_table(
                 "message": message,
             },
         )
+    mark_pulse(request, payload.target_notebook_id, "knowhow:write", target_owner, user)
+    if payload.mode == "move":
+        mark_pulse(request, notebook_id, "knowhow:write", source_access.owner_id, user)
     return {"new_table_id": new_table_id}

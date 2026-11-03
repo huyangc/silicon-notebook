@@ -124,6 +124,8 @@ def test_deep_copy_of_a_notebook_with_memories_carries_none_of_them(pg_app):
     new = repo._runtime.sharing.copy_notebook(cases.NOTEBOOK, new_owner_id="user-deep-copy")
 
     view = cases.read_copy(fetch, "%s", new.id)
+    assert fetch("SELECT 1 FROM memory_suggest_read_fences WHERE notebook_id=%s", (new.id,)) == []
+    assert fetch("SELECT 1 FROM memory_suggest_read_fences WHERE notebook_id=%s", (cases.NOTEBOOK,))
     cases.assert_copy_has_no_memory(view)
     cases.assert_kept_rows_lost_only_the_lent_evidence(view)
     repo._runtime.sharing_store.validate_copy(cases.NOTEBOOK, new.id)

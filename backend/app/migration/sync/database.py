@@ -668,6 +668,10 @@ class _TableQuery:
     key_columns: tuple[str, ...]
     # ORDER BY list, already alias-qualified.
     order_by: str
+    # Extra boolean SQL every scanned row must satisfy (the manifest's
+    # ``row_filter``, alias-qualified); empty for an unfiltered scan. Set by
+    # the full export only -- ``_table_query`` itself never sets it.
+    row_filter: str = ""
 
 
 def _table_query(
@@ -724,6 +728,8 @@ def _scan(
     """
     placeholders = ",".join("?" for _ in batch)
     where = f"{query.filtered} IN ({placeholders})"
+    if query.row_filter:
+        where += f" AND {query.row_filter}"
     keys = ", ".join(f"t0.{_quoted(name)}" for name in query.key_columns)
     cursor: tuple[Any, ...] | None = None
     while True:

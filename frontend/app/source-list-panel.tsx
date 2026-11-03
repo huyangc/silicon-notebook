@@ -22,6 +22,8 @@ import { SOURCES_PAGE_SIZE, type SourceSummary } from "./workspace-model.ts";
  * 状态与在途请求纪律（AbortController / owner 世代守卫 / sourcesPageLoading 的开合）
  * 全部留在 use-source-library.ts；这里只呈现，命令一律经显式回调交回工作区编排层。
  */
+const ALWAYS = () => true;
+
 export function SourceListPanel({
   sources,
   uiMode,
@@ -40,6 +42,7 @@ export function SourceListPanel({
   onToggleSource,
   onOpenSource,
   onDeleteSource,
+  canDeleteSource = ALWAYS,
   onPage,
   onAddSource,
   focusSearchRequested = false,
@@ -62,6 +65,9 @@ export function SourceListPanel({
   onToggleSource: (sourceId: string) => void;
   onOpenSource: (source: SourceSummary) => void;
   onDeleteSource: (source: SourceSummary) => void;
+  /** 这一篇给不给删除按钮(分享编辑 P1,D14:编辑者只能删本人上传的)。宿主按
+   *  `sourceDeleteAllowed` 判;缺省全给 = 本参数出现之前的行为(仍受 readOnlyWorkspace 约束)。 */
+  canDeleteSource?: (source: SourceSummary) => boolean;
   onPage: (page: number) => void;
   /** 空列表那句「添加来源」的动作（与来源栏顶部那颗按钮同一个入口）。 */
   onAddSource: () => void;
@@ -207,7 +213,7 @@ export function SourceListPanel({
                     <ExternalLink size={13} />
                   </a>
                 ) : null}
-                {!readOnlyWorkspace && (
+                {!readOnlyWorkspace && canDeleteSource(source) && (
                   <button
                     className="source-delete-button"
                     disabled={deletingSource}

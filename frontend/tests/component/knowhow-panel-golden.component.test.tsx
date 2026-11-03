@@ -131,7 +131,8 @@ const EDIT_FLOW_REQUESTS: Record<Mode, RecordedRequest[]> = {
     LIST,
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
     { method: "GET", path: "/agent/knowhow/rows/r1" },
-    { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-fix", body: { content_md: "检查电源并复位" } },
+    // D7: a manual save carries the stored value the editor opened on as expected_before.
+    { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-fix", body: { content_md: "检查电源并复位", expected_before: "检查电源" } },
     { method: "GET", path: "/agent/knowhow/rows/r1" },
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-two" },
   ],
@@ -140,7 +141,8 @@ const EDIT_FLOW_REQUESTS: Record<Mode, RecordedRequest[]> = {
     LIST,
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
     { method: "GET", path: "/agent/knowhow/rows/r1" },
-    { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-fix", body: { content_md: "检查电源并复位" } },
+    // D7: a manual save carries the stored value the editor opened on as expected_before.
+    { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-fix", body: { content_md: "检查电源并复位", expected_before: "检查电源" } },
     { method: "GET", path: "/agent/knowhow/rows/r1" },
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-two" },
   ],

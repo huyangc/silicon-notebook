@@ -229,6 +229,14 @@ export function failAcceptCurrent(state: RowOptimizeQueueState, message: string)
   return replaceCurrent(state, { status: "error", errorMessage: message });
 }
 
+// 「接受」撞上别人的改动（409，分享编辑 P1 决策 D7）：进行中 -> 建议就绪（游标不动）。
+// 不算出错——建议本身还在，用户要在就地出现的双版本里选「用我的覆盖」或「放弃我的」。
+export function reopenAcceptCurrent(state: RowOptimizeQueueState): RowOptimizeQueueState {
+  const current = currentRowOptimizeItem(state);
+  if (!current || current.status !== "in_progress") return state;
+  return replaceCurrent(state, { status: "ready" });
+}
+
 // 「跳过」：允许从「建议就绪」或「出错」发起（出错时跳过=放弃这一格、继续
 // 队列——一次失败不该永久卡住整行）；等待/进行中/已经决定过的格子点「跳过」
 // 是无操作。

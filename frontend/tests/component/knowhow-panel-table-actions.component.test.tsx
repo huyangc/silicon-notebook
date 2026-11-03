@@ -171,9 +171,9 @@ const NOTEBOOKS = [
   { id: "nb-2", name: "目标笔记本", access: "owner" },
 ];
 
-async function openTransfer(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole("button", { name: "复制/移动到…" }));
-  const picker = await screen.findByRole("dialog", { name: "复制/移动表：排障记录" });
+async function openTransfer(user: ReturnType<typeof userEvent.setup>, canMove = true) {
+  await user.click(await screen.findByRole("button", { name: canMove ? "复制/移动到…" : "复制到…" }));
+  const picker = await screen.findByRole("dialog", { name: canMove ? "复制/移动表：排障记录" : "复制表：排障记录" });
   await within(picker).findByRole("option", { name: "目标笔记本" });
   await user.selectOptions(within(picker).getByRole("combobox"), "nb-2");
   return picker;
@@ -199,6 +199,54 @@ test("copy shows a notice and keeps the table open", async () => {
     { method: "GET", path: "/notebooks" },
     { method: "POST", path: "/notebooks/nb-1/knowhow/t-rec/transfer", body: { target_notebook_id: "nb-2", mode: "copy" } },
   ]);
+});
+
+// Share-edit P1 (D14): a named editor writes rows, columns and cells but may not
+// delete the whole table, move it out or prune its history -- the backend answers
+// 404 for all three. The panel does not offer those controls (canDestroyTables).
+test("a named editor gets no 删除表, no 移动 and no 历史管理; copy and row-level management stay", async () => {
+  const server = suite.server();
+  routeTable(server, "nb-1", recordDetail());
+  server.on("GET", "/notebooks", { json: NOTEBOOKS });
+  server.on("POST", "/notebooks/nb-1/knowhow/t-rec/transfer", { json: { new_table_id: "t-copy" } });
+  const user = userEvent.setup();
+  renderPanel({ initialTableId: "t-rec", canDestroyTables: false });
+
+  await screen.findByRole("heading", { name: "排障记录" });
+  expect(screen.queryByTitle("删除表")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "重新同步" })).toBeInTheDocument();
+
+  expect(screen.queryByRole("button", { name: /移动/ })).not.toBeInTheDocument();
+  const picker = await openTransfer(user, false);
+  expect(within(picker).queryByRole("radio", { name: /移动/ })).not.toBeInTheDocument();
+  await user.click(within(picker).getByRole("button", { name: "确认" }));
+  expect(await screen.findByText("已复制到目标笔记本")).toBeInTheDocument();
+  expect(server.log).toContainEqual({
+    method: "POST", path: "/notebooks/nb-1/knowhow/t-rec/transfer",
+    body: { target_notebook_id: "nb-2", mode: "copy" },
+  });
+
+  await user.click(screen.getByRole("button", { name: "管理" }));
+  const manage = await screen.findByRole("dialog", { name: "表管理：排障记录" });
+  expect(within(manage).queryByRole("heading", { name: "历史管理" })).not.toBeInTheDocument();
+  expect(within(manage).getByRole("textbox", { name: "列名：处理方法" })).toBeEnabled();
+  expect(within(manage).getAllByRole("button", { name: "删除行" })[0]).toBeEnabled();
+});
+
+test("owner and group admin keep 删除表, 移动 and 历史管理 (canDestroyTables defaults on)", async () => {
+  const server = suite.server();
+  routeTable(server, "nb-1", recordDetail());
+  server.on("GET", "/notebooks", { json: NOTEBOOKS });
+  const user = userEvent.setup();
+  renderPanel({ initialTableId: "t-rec" });
+
+  expect(await screen.findByTitle("删除表")).toBeInTheDocument();
+  const picker = await openTransfer(user);
+  expect(within(picker).getByRole("radio", { name: /移动/ })).toBeInTheDocument();
+  await user.click(within(picker).getByRole("button", { name: "取消" }));
+  await user.click(screen.getByRole("button", { name: "管理" }));
+  const manage = await screen.findByRole("dialog", { name: "表管理：排障记录" });
+  expect(within(manage).getByRole("heading", { name: "历史管理" })).toBeInTheDocument();
 });
 
 test("move returns to the list and reloads it", async () => {
@@ -329,7 +377,7 @@ function oneRowDetail(): KnowhowTableDetail {
   });
 }
 
-function routeReformat(detail: KnowhowTableDetail) {
+function routeReformat(detail: KnowhowTableDetail, staleDetail: unknown = "stale") {
   const server = suite.server();
   routeTable(server, "nb-1", detail);
   server.on("GET", "/model-services/status", { json: { services: [] } });
@@ -342,7 +390,7 @@ function routeReformat(detail: KnowhowTableDetail) {
   server.on("PATCH", "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-title", {
     json: wirePatchResult("r1", "c-title", "供电异常（已规整）"),
   });
-  server.on("PATCH", "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-fix", { status: 409, json: { detail: "stale" } });
+  server.on("PATCH", "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-fix", { status: 409, json: { detail: staleDetail } });
   return server;
 }
 
@@ -390,6 +438,23 @@ test("a 409 while saving marks the unit stale-skipped; closing the modal reloads
   await waitFor(() => expect(screen.queryByRole("dialog", { name: /一键规整整表/ })).not.toBeInTheDocument());
   await settle();
   expect(server.log).toEqual([LIST, DETAIL, ...REFORMAT_RUN, ...REFORMAT_SAVE, DETAIL]);
+});
+
+test("the structured knowhow_cell_conflict 409 (share-edit P1, D7) is still a stale skip", async () => {
+  // The skip keys on the status code only; the new detail shape must not turn
+  // it into a save failure.
+  routeReformat(oneRowDetail(), {
+    code: "knowhow_cell_conflict",
+    reason: "content_changed",
+    message: "内容已被其他人修改，请刷新后重试",
+    current: [{ row_id: "r1", column_id: "c-fix", content_md: "别人改的" }],
+  });
+  const user = userEvent.setup();
+  renderPanel({ initialTableId: "t-rec" });
+
+  const dialog = await runAndSave(user);
+  expect(within(dialog).getByText(/已完成保存。/)).toHaveTextContent("已完成保存。 1 个已保存，1 个已跳过");
+  expect(within(dialog).getByText(/内容已被其他人修改，已跳过——请重新运行规整/)).toBeInTheDocument();
 });
 
 test("打开格子 after a stale skip reloads first, opens the cell, and the close does not reload again", async () => {
@@ -447,7 +512,9 @@ test("row optimisation: accept saves and advances; error → retry; skip; abort;
     DETAIL,
     { method: "GET", path: "/agent/knowhow/rows/r1" },
     { method: "POST", path: optimizePath("c-title") },
-    { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-title", body: { content_md: "供电电压异常" } },
+    // D7: accepting a row-optimisation suggestion carries the cell's stored value from
+    // when the modal opened as expected_before.
+    { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-title", body: { content_md: "供电电压异常", expected_before: "供电异常" } },
     { method: "GET", path: "/agent/knowhow/rows/r1" },
     { method: "POST", path: optimizePath("c-fix") },
     { method: "POST", path: optimizePath("c-fix") },
@@ -492,7 +559,9 @@ test("Escape cannot close the row-optimisation modal while an accepted suggestio
     DETAIL,
     { method: "GET", path: "/agent/knowhow/rows/r1" },
     { method: "POST", path: optimizePath("c-title") },
-    { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-title", body: { content_md: "供电电压异常" } },
+    // D7: accepting a row-optimisation suggestion carries the cell's stored value from
+    // when the modal opened as expected_before.
+    { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-title", body: { content_md: "供电电压异常", expected_before: "供电异常" } },
     { method: "GET", path: "/agent/knowhow/rows/r1" },
     { method: "POST", path: optimizePath("c-fix") },
   ]);

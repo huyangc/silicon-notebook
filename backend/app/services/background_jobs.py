@@ -35,6 +35,7 @@ from typing import Callable
 
 from app.core import diagnostics_runtime as diagnostics
 from app.core.request_context import request_user_id
+from app.services.collab_jobs import submission_context
 from app.services.pending_bus import pending_bus
 
 _log = logging.getLogger("silicon_notebook.jobs")
@@ -45,6 +46,8 @@ _SAFE_JOB_PREFIXES = (
     ("conflictresolve-", "conflictresolve"),
     ("agentprofile-", "agentprofile"),
     ("retrievalexperience-", "retrievalexperience"),
+    # 自动用户记忆的一轮建议(``memory_suggest_job.MemorySuggestJob``)。
+    ("memorysuggest-", "memorysuggest"),
     # 一次提问交付之后的三条记忆链路通知(同步/MCP 面从 ask_current 交出来的)。
     # 只为了让它在诊断里有名字:这个 operation 不在任何池的集合里,所以和别的
     # 非维护 job 一样走每任务 daemon 线程,不进闸。
@@ -141,6 +144,9 @@ _LIGHT_MAINTENANCE_OPERATIONS = frozenset({
     # 与它的 P1 兄弟同量级、同理由进**轻活**池。它比 agentprofile 更该待在这里
     # ——全库只有这一条链,进重活池被全库重建饿死就等于整个特性永不生效。
     "retrievalexperience",
+    # 自动用户记忆的一轮建议:每 (笔记本, 用户) 单飞,一次有界 chat + 一次批量
+    # embedding + 几条按人收窄的有界读,与 agentprofile 同量级、同理由进**轻活**池。
+    "memorysuggest",
     "knowhow-project",
     "knowhow-legacy-reproject",
     "knowhow-asset-sweep",
@@ -535,7 +541,7 @@ def submit(fn: Callable, *args, name: str | None = None,
     返回句柄保留原 ``Thread`` 的 ``join`` / ``is_alive`` / ``name`` / ``daemon``
     观察契约。非维护 job 沿用原有每任务 daemon-thread 语义。
     """
-    ctx = contextvars.copy_context()
+    ctx = submission_context()
     try:
         diagnostic_name = _diagnostic_job_name(fn, name)
     except Exception:  # noqa: BLE001 — diagnostics metadata is best-effort only

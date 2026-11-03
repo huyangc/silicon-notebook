@@ -364,9 +364,14 @@ export interface KnowhowManageModalProps {
   /** 任一写操作成功后触发：面板据此重拉表详情与表列表，modal 拿到新 detail
    * prop 原地刷新（不关闭，用户常连续做多个管理动作）。 */
   onChanged: () => void;
+  /** 「历史管理」（清理变更历史）这一节。分享编辑 P1（D14）：点名编辑者清不了历史（后端 404），
+   *  为 false 时整节不渲染。缺省 true = 本参数出现之前的行为。 */
+  canPruneHistory?: boolean;
 }
 
-export function KnowhowManageModal({ notebookId, detail, onClose, onChanged }: KnowhowManageModalProps) {
+export function KnowhowManageModal({
+  notebookId, detail, onClose, onChanged, canPruneHistory = true,
+}: KnowhowManageModalProps) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -611,20 +616,22 @@ export function KnowhowManageModal({ notebookId, detail, onClose, onChanged }: K
             </section>
 
             {/* --- 历史管理（Task 17：清理历史，释放变更流水占用的空间）--- */}
-            <section className="knowhow-manage-section">
-              <h3>历史管理</h3>
-              <ManageHistorySection
-                pending={pending}
-                lastRemoved={historyPruneRemoved}
-                onPrune={(beforeDays) =>
-                  run(async () => {
-                    setHistoryPruneRemoved(null);
-                    const result = await pruneKnowhowHistory(notebookId, detail.id, beforeDays);
-                    setHistoryPruneRemoved(result.removed);
-                  })
-                }
-              />
-            </section>
+            {canPruneHistory && (
+              <section className="knowhow-manage-section">
+                <h3>历史管理</h3>
+                <ManageHistorySection
+                  pending={pending}
+                  lastRemoved={historyPruneRemoved}
+                  onPrune={(beforeDays) =>
+                    run(async () => {
+                      setHistoryPruneRemoved(null);
+                      const result = await pruneKnowhowHistory(notebookId, detail.id, beforeDays);
+                      setHistoryPruneRemoved(result.removed);
+                    })
+                  }
+                />
+              </section>
+            )}
           </div>
         </>
       )}

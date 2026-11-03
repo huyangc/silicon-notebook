@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 
 import {
   appSourceModules,
+  callSitesIn,
   callsIn,
   controlFlowIn,
   declarations,
@@ -50,6 +51,28 @@ test("独立群组页面与「共享给群组」都真的挂在 page 上,不是�
   // 库从脚下抽走。只刷清单的话 `currentNotebook` 一动不动,人继续待在一本已经读不到的
   // 库里,整屏毫无反应,只能手动刷新(2026-08-20 用户反馈)。
   assert.match(pages[0].bindings.onChanged ?? "", /refreshAfterAccessChange\(\)/);
+});
+
+// 分享编辑 P1-T13:「点名共享」一节挂在分享弹窗的链接区与群组区之间,门是恒 owner 的
+// `canManageCollaborators`(组件内按它整节不渲染、不请求,组件测试钉那一侧)。这里钉挂载点:
+// 只挂一次、能力位原样传入、对外只有 onChanged 一个回调——结果与忙碌都在本节内联,
+// 没有任何通往页面顶部状态条(statusText / toast)的通道。
+test("「点名共享」挂在分享弹窗的链接区与群组区之间,门是 canManageCollaborators", () => {
+  const sections = jsxElements(page, "NotebookCollaboratorsShare");
+  assert.equal(sections.length, 1, "「点名共享」必须恰好挂在分享弹窗里一次");
+  const bindings = sections[0].bindings ?? {};
+  assert.equal(bindings.canManageCollaborators, "capabilities.canManageCollaborators");
+  assert.equal(bindings.notebookId, "currentNotebook.id");
+  assert.match(bindings.onChanged ?? "", /handleSharingChanged\(\)/);
+  assert.deepEqual(
+    Object.keys(bindings).filter((name) => name !== "key").sort(),
+    ["canManageCollaborators", "notebookId", "onChanged"],
+    "「点名共享」不该拿到通往页面状态条的回调",
+  );
+  const linkSection = pageText.indexOf("开启链接分享");
+  const named = pageText.indexOf("<NotebookCollaboratorsShare");
+  const groups = pageText.indexOf("<NotebookGroupShare");
+  assert.ok(linkSection >= 0 && named > linkSection && groups > named, "顺序应为 链接分享 → 点名共享 → 共享给群组");
 });
 
 // 「退出共享」早就有这套对账(退掉之后跳走),群组那条路直到 2026-08-20 才补上。两条
@@ -444,4 +467,47 @@ test("远端撤销:标签页重新可见时复用同一条对账路径", () => {
     ifConditionsIn(collectionHook).some((condition) => /!actorId/.test(condition)),
     "访问权复核的监听没有同时门控已登录用户,会装在登录页上并触发 401 重载",
   );
+});
+
+// 分享编辑 P1-T12:只存在于 page.tsx 的接线。组件与 hook 各自有组件测试,这里钉「真的接上了」。
+test("编辑者工作区的接线:退出入口带当前用户 id、来源删除逐篇判、推送事件触发访问对账", () => {
+  const compact = (text) => (text ?? "").replace(/\s+/g, "");
+  // 两个退出入口都要把当前用户 id 交进去——点名授权那条出口的地址里要它,缺了那几颗按钮不出。
+  for (const name of ["ReaderNotebookBadge", "NotebookMenuActions"]) {
+    const elements = jsxElements(page, name);
+    assert.equal(elements.length, 1, name);
+    assert.equal(compact(elements[0].bindings?.selfUserId), 'currentUser?.id??""', `${name} 没拿到当前用户 id`);
+  }
+  // 两处退出都把按钮给的计划原样交给流程(否则所有按钮都退成员关系)。
+  const leaveShared = findFunction(page, "handleLeaveShared");
+  assert.ok(leaveShared);
+  assert.ok(callSitesIn(leaveShared).some((call) => call.target === "notebookExit.start" && call.arguments.at(-1) === "plan"));
+  assert.match(pageText, /notebookExit\.start\(notebookId, anchor, \(\) => loadNotebookCollection\(\), plan\);/);
+
+  // 来源删除(D14):列表逐篇判据与详情窗口的两颗删除按钮都经 sourceDeleteAllowed。
+  const lists = jsxElements(page, "SourceListPanel");
+  assert.equal(lists.length, 1);
+  assert.match(compact(lists[0].bindings?.canDeleteSource), /sourceDeleteAllowed\(capabilities,source\)/);
+  assert.equal((pageText.match(/sourceDeleteAllowed\(capabilities, sourceDetail\)/g) ?? []).length, 2);
+  // 图谱分析问题上的「删除来源…」同一判据(编辑者只对本人上传的)。
+  const analyses = jsxElements(page, "KgAnalysisView");
+  assert.equal(analyses.length, 1);
+  assert.equal(analyses[0].bindings?.canDeleteAnySource, "capabilities.canDeleteAnySource");
+  // Knowhow 整表删除 / 移动 / 清理历史(D14):编辑者不渲染,判据同一处能力表。
+  const knowhow = jsxElements(page, "KnowhowPanel");
+  assert.equal(knowhow.length, 1);
+  assert.equal(knowhow[0].bindings?.canDestroyTables, "capabilities.canDestroyKnowhowTables");
+
+  // 「我分享的」卡片:点名协作者(人数小标 + 名单)挂在每一张卡片上、读这一行的 collaborators。
+  // 只因点名共享而出现的行没有链接、没有群组,少了这两处它就是一张空卡片。
+  for (const name of ["ShareOverviewCollaboratorsChip", "ShareOverviewCollaborators"]) {
+    const elements = jsxElements(page, name);
+    assert.equal(elements.length, 1, `${name} 没挂在「我分享的」卡片上`);
+    assert.equal(elements[0].bindings?.collaborators, "item.collaborators", `${name} 没读这一行的 collaborators`);
+  }
+
+  // 「被添加为编辑者」的推送:usePendingActions 的第二个参数走 refreshAfterAccessChange。
+  const pendingCall = callSitesIn(page).find((call) => call.target === "usePendingActions");
+  assert.ok(pendingCall, "缺 usePendingActions 调用");
+  assert.match(pendingCall.arguments[1] ?? "", /notebookCollection\.refreshAfterAccessChange\(\)/);
 });

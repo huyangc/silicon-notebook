@@ -118,6 +118,8 @@ const EXPECTED_NO_VIEW_FIELDS = new Set([
   // `cond ? x : []` hidden-view fallback; logging out resets it through
   // `leaveActor` with fresh state, not a returned literal.
   "use-notebook-transfer.ts",
+  // This commit bridge returns only the `open` command, no state/view fields.
+  "use-memory-source-session.ts",
 ]);
 
 // Parameters here are deliberately *not* named `node` (this repo's

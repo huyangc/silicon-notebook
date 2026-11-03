@@ -79,6 +79,13 @@ class SystemConfiguration(BaseModel):
     # 弹窗在选择文件时提前拒绝超限文件,并提示请管理员用命令行处理;服务端的流式
     # 413 仍是权威校验。
     notebook_transfer_max_bytes: int = Field(gt=0)
+    # 自动用户记忆：记忆页「系统建议」开关的能力位，取自唯一判据
+    # memory_suggest_wiring.memory_suggest_wiring_active（部署开关开且至少一类信号开）。
+    # 关闭时前端整段不渲染开关；旧后端缺字段时前端按 false 处理。
+    auto_memory_suggest_enabled: bool
+    # `memory_suggest` 工作负载是否绑定了模型：false 时开关旁就地提示
+    # 「管理员尚未配置模型」（规格 §4.4，计划 G5）。
+    auto_memory_suggest_model_ready: bool
 
 
 class SystemExtensionContribution(BaseModel):

@@ -38,6 +38,7 @@ _BUILTIN_PLUGIN_IDS = (
     "builtin.ask_agent_profile",
     "builtin.ask_retrieval_experience",
     "builtin.ask_search_profile",
+    "builtin.ask_user_memory_suggest",
     "builtin.report_agent_profile",
     "builtin.report_markdown_exporter",
     "parser.builtin",
@@ -51,6 +52,7 @@ _BUILTIN_POINTS = {
         "builtin.ask_agent_profile",
         "builtin.ask_retrieval_experience",
         "builtin.ask_search_profile",
+        "builtin.ask_user_memory_suggest",
     ],
     "report.completed_observer": ["builtin.report_agent_profile"],
     "report.exporter": ["builtin.report_markdown"],
@@ -1869,7 +1871,7 @@ def test_capability_merge_manifest_provides_iteration_raising_is_sanitized():
 
 
 def _builtin_bundles() -> tuple[object, ...]:
-    """The exact ten bundles the composition root ships, by their own names."""
+    """The exact eleven bundles the composition root ships, by their own names."""
 
     from app.extensions import builtin
 
@@ -1877,6 +1879,7 @@ def _builtin_bundles() -> tuple[object, ...]:
         builtin.ASK_AGENT_PROFILE_COMPLETED_BUNDLE,
         builtin.ASK_RETRIEVAL_EXPERIENCE_COMPLETED_BUNDLE,
         builtin.ASK_SEARCH_PROFILE_COMPLETED_BUNDLE,
+        builtin.ASK_MEMORY_SUGGEST_COMPLETED_BUNDLE,
         builtin.REPORT_AGENT_PROFILE_COMPLETED_BUNDLE,
         builtin.REPORT_MARKDOWN_EXPORTER_BUNDLE,
         builtin.PARSER_BUILTIN_BUNDLE,

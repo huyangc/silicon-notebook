@@ -12,6 +12,13 @@ import {
   type AnswerImagePreviewRequest,
 } from "./image-preview";
 import { MemoryPanel, MemorySaveDialog } from "./memory-panel";
+import { useMemorySuggestMode } from "./use-memory-suggest-mode";
+import { useMemorySuggestionReview } from "./use-memory-suggestion-review";
+import { observeAnswerMemoryFlags } from "./answer-memory-refresh";
+import { MemorySuggestionAdoptionModal } from "./memory-suggestion-card";
+import type { SuggestionAnswerTarget } from "./memory-suggestion-model";
+import { navigateMemorySuggestionAnswer, type MemorySourceAnswerTarget } from "./memory-suggestion-navigation";
+import { useMemorySourceSession } from "./use-memory-source-session";
 import { KnowhowPanel } from "./knowhow-panel";
 import { ContentOverviewCards } from "./content-overview-cards";
 import { NotebookQuestionSuggestions } from "./notebook-question-suggestions";
@@ -34,7 +41,7 @@ import {
 import { AnomalyBadge } from "./anomaly-badge";
 import {
   answerIdBatches,
-  collectSavedAnswerFlags,
+  type AnswerMemoryFlag,
   memoryHash,
   notebookHash,
   parseMemoryHash,
@@ -54,6 +61,9 @@ import { formatRelativeTime } from "./relative-time.ts";
 import { KgAnalysisView } from "./kg-analysis-view";
 import type { KgDeleteOutcome, KgReparsePhase, KgSourceActionTarget } from "./kg-analysis-findings";
 import { AgentProfilePanel } from "./agent-profile-panel";
+import { CollabBar } from "./collab-bar";
+import { useCollabPulse } from "./use-collab-pulse";
+import type { CollabKind } from "./collab-api";
 import { kgBandTarget, kgBandVelocity, kgTypeBandTargets } from "./kg-layout";
 import {
   groupOf, groupLabel,
@@ -69,7 +79,7 @@ import { UNSHARE_LINK_LABEL, unshareLinkConfirmation } from "./unshare-link-conf
 import { usePromotionQueue } from "./use-promotion-queue";
 import { useReleaseNotes } from "./use-release-notes";
 import { PromotionTargetModal } from "./promotion-target-modal";
-import { setNotebookTier, tierActionState } from "./notebook-tier";
+import { canChangeNotebookTier, setNotebookTier, tierActionState } from "./notebook-tier";
 import {
   groupMountable,
   mergeMountCandidates,
@@ -132,7 +142,7 @@ import { useReportWorkspace } from "./use-report-workspace.ts";
 import { useKgWorkspace } from "./use-kg-workspace.ts";
 import { useNotebookCollection, type NotebookEditorPatch } from "./use-notebook-collection.ts";
 import { useNotebookTitleDraft } from "./use-notebook-title-draft.ts";
-import { anchorAt, anchorOf, useNotebookExit, type ExitAnchor } from "./use-notebook-exit.ts";
+import { anchorAt, anchorOf, useNotebookExit, type ExitAnchor, type ExitPlan } from "./use-notebook-exit.ts";
 import { ToastRegion, TOAST_DEFAULT_MS, TOAST_EXIT_MS } from "./toast-region";
 import { NotebookExitPanel } from "./notebook-exit-panel";
 import {
@@ -182,7 +192,12 @@ import { importUrlSources, listSources, fetchCheckup, reparseSources, backfillVe
 import { useSourceIntake } from "./use-source-intake.ts";
 import { SourceIntakePanel } from "./source-intake-panel";
 import { SourceListPanel } from "./source-list-panel";
-import { requestReparse, type ReparseOutcome } from "./source-reparse-request.ts";
+import {
+  REPARSE_ALL_BUSY_TEXT,
+  reparseSkippedBusyText,
+  requestReparse,
+  type ReparseOutcome,
+} from "./source-reparse-request.ts";
 import { compactSourceTitle, SUPPORTED_SOURCE_EXT_GROUP } from "./source-title.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, checkupNotices, checkupHasRepairableIssue, hasRepairAction, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { askQuestionLimitHint, fetchAnswerMemoryLinks } from "./ask-api";
@@ -226,6 +241,8 @@ import { consumeLoginEntrance } from "./login-entrance";
 import { AccountMenu } from "./account-menu";
 import { GroupsPage } from "./groups-page";
 import { NotebookGroupShare, BORROWED_BASE_SHARE_WARNING } from "./notebook-group-share";
+import { NotebookCollaboratorsShare } from "./notebook-collaborators-share";
+import { ShareOverviewCollaborators, ShareOverviewCollaboratorsChip } from "./share-overview-collaborators";
 import {
   joinGroupInvite,
   groupsHash,
@@ -323,6 +340,7 @@ import {
   mirrorSourcesNotice,
   notebookIsMirror,
   openMemoryDeepLink,
+  sourceDeleteAllowed,
   workspaceCapabilities,
   workspaceRequestIsCurrent,
 } from "./workspace-transitions";
@@ -643,6 +661,9 @@ function accountInitials(username: string): string {
   return (compact.slice(0, 2) || "SN").toUpperCase();
 }
 
+/** 体检「处理」按钮旁那句「正在解析」说明停留多久。 */
+const CHECKUP_BUSY_NOTICE_HOLD_MS = 5000;
+
 export default function Home() {
   // 提问模式的显示名唯一真源是 ask-modes.ts —— 散文提到它时插值引用本常量,
   // 不写死中文字面量(改名只改注册表;ask-modes.test.mjs 的散落守卫强制这一点)。
@@ -705,6 +726,8 @@ export default function Home() {
   // 一个 PATCH 端点不存在的入口;system-api 对缺失字段也归一成 false,两侧同向。
   const [userSearchProfileEnabled, setUserSearchProfileEnabled] = useState(false);
   const [userActivityViewEnabled, setUserActivityViewEnabled] = useState(false);
+  const [autoMemorySuggestEnabled, setAutoMemorySuggestEnabled] = useState(false);
+  const [autoMemorySuggestModelReady, setAutoMemorySuggestModelReady] = useState(false);
   // Workspace identity remains shell-owned. The source hook receives explicit
   // prepare/commit transitions so opening a notebook can keep the existing stable
   // getNotebook + listSources snapshot instead of adding an effect-driven request.
@@ -721,6 +744,7 @@ export default function Home() {
     currentUser?.role ?? "",
     currentNotebook?.can_manage_content ?? false,
     currentNotebook?.sync_origin ?? "",
+    currentNotebook?.can_manage_notebook ?? false,
   ).canWriteNotebook;
   const workspaceExtensions = useWorkspaceExtensions(
     currentUser?.id ?? null,
@@ -863,7 +887,8 @@ export default function Home() {
   const [titleSaveInFlight, setTitleSaveInFlight] = useState(false);
   const titleSaveOperationRef = useRef<object | null>(null);
   const [memoryAnswerId, setMemoryAnswerId] = useState<string | null>(null);
-  const [memorySavedAnswers, setMemorySavedAnswers] = useState<Record<string, boolean>>({});
+  const [memorySavedAnswers, setMemorySavedAnswers] = useState<Record<string, AnswerMemoryFlag>>({});
+  const [memoryLinksSaveRevision, setMemoryLinksSaveRevision] = useState(0);
   // 会话公开分享弹窗：null=未打开，否则是正在分享的那条会话（按 id 作 key 重挂，
   // 切会话即重置弹窗态，避免把上一条的分享态按到新会话头上）。
   // 会话分享弹窗的目标。**不是**裸 ConversationSummary:每条回答下面的分享按钮要求把
@@ -919,6 +944,7 @@ export default function Home() {
     currentUser?.role ?? "",
     currentNotebook?.can_manage_content ?? false,
     currentNotebook?.sync_origin ?? "",
+    currentNotebook?.can_manage_notebook ?? false,
   );
   const kgWorkspace = useKgWorkspace({
     actorId: currentUser?.id ?? null,
@@ -1085,6 +1111,8 @@ export default function Home() {
   const [backfillingMeta, setBackfillingMeta] = useState(false);
   const [buildingScaleIndex, setBuildingScaleIndex] = useState(false);
   const [scaleIndexStatus, setScaleIndexStatus] = useState<ScaleIndexStatus | null>(null);
+  const [knowhowCollabRevision, setKnowhowCollabRevision] = useState(0);
+  const [understandingCollabRevision, setUnderstandingCollabRevision] = useState(0);
   const scaleIndexDoneRequestRef = useRef(0);
   const [cancelingScaleIndex, setCancelingScaleIndex] = useState(false);
   // 「索引与构建」面板(看板弹窗)的三系统聚合状态——openAnalytics 打开时经 fetchIndexStatus
@@ -1105,7 +1133,11 @@ export default function Home() {
   const modelStatusRequestRef = useRef(0);
   const modelTestCoordinatorRef = useRef(new ModelTestCoordinator());
   // Subscribe only after /me has established a business user.
-  const pending = usePendingActions(Boolean(authChecked && currentUser));
+  // 「被添加为编辑者」之类改变访问权的推送:重取清单并对账工作区(分享编辑 P1),与群组页、
+  // 退出共享共用同一条收口。
+  const pending = usePendingActions(Boolean(authChecked && currentUser), () => {
+    notebookCollection.refreshAfterAccessChange().catch(reportError);
+  });
   // 删除通知数据:铃铛里的删除通知集合一变(推送)、或笔记本列表的条数一变
   // (删除 / 撤销之后的刷新),就重新拉取一次。
   const deletionNoticeKey = pending.snapshot.items
@@ -1552,8 +1584,14 @@ export default function Home() {
   // 请求、提示与刷新的先后都在 source-reparse-request.ts:请求在路上时切了笔记本或账号
   // (`stillOwned` 不再成立),回来的结果属于被放弃的工作区——不弹提示、不报错、不刷新、
   // 不开轮询窗口,回 "abandoned"。
-  const reparseOutcome = (nb: string, sourceIds: string[], stillOwned: () => boolean): Promise<ReparseOutcome> => (
+  const reparseOutcome = (
+    nb: string,
+    sourceIds: string[],
+    stillOwned: () => boolean,
+    skippedBusy?: (count: number) => void,
+  ): Promise<ReparseOutcome> => (
     requestReparse(nb, sourceIds, stillOwned, {
+      skippedBusy,
       reparse: reparseSources,
       toast: setToast,
       refresh: () => {
@@ -1564,9 +1602,27 @@ export default function Home() {
       reportError,
     })
   );
-  const runReparse = async (nb: string, sourceIds: string[], stillOwned: () => boolean): Promise<boolean> => (
-    (await reparseOutcome(nb, sourceIds, stillOwned)) === "started"
-  );
+  // 体检的批量重新解析:一篇都没排上、因为它们正在解析(D8 的 skipped_busy)时,原因写在那一组
+  // 的「处理」按钮旁(checkupBusyNotice),自带计时消失,不走顶部状态条。
+  const [checkupBusyNotice, setCheckupBusyNotice] = useState<{ key: string; text: string } | null>(null);
+  useEffect(() => {
+    if (!checkupBusyNotice) return undefined;
+    const timer = window.setTimeout(() => setCheckupBusyNotice(null), CHECKUP_BUSY_NOTICE_HOLD_MS);
+    return () => window.clearTimeout(timer);
+  }, [checkupBusyNotice]);
+  const runReparse = async (
+    nb: string,
+    sourceIds: string[],
+    stillOwned: () => boolean,
+    groupKey: string,
+  ): Promise<boolean> => {
+    // 部分跳过(D8):排上的照常开始,跳过的篇数同样写在这一组的「处理」旁,不只靠 toast。
+    const outcome = await reparseOutcome(nb, sourceIds, stillOwned, (count) => {
+      setCheckupBusyNotice({ key: groupKey, text: reparseSkippedBusyText(count) });
+    });
+    if (outcome === "busy") setCheckupBusyNotice({ key: groupKey, text: REPARSE_ALL_BUSY_TEXT });
+    return outcome === "started";
+  };
   // H4/H5 修复:后台补齐该 notebook 缺失的检索向量(只补缺失、幂等)。
   const runBackfillVectors = async (nb: string, stillOwned: () => boolean): Promise<boolean> => {
     try {
@@ -1597,6 +1653,30 @@ export default function Home() {
   const [sourceSearchFocusRequested, setSourceSearchFocusRequested] = useState(false);
   const memoryLinksAbortRef = useRef<AbortController | null>(null);
   const memorySessionAbortRef = useRef(new AbortController());
+  const collabPulse = useCollabPulse({
+    actorId: currentUser?.id ?? null,
+    notebookId: currentNotebookId,
+    notebook: currentNotebook,
+    sessionSignal: memorySessionAbortRef.current.signal,
+    effects: {
+      isMounted: collabPanelIsMounted,
+      canRefresh: collabCanRefresh,
+      refresh: refreshCollabKind,
+      accessLost: () => { notebookCollection.refreshAfterAccessChange().catch(reportError); },
+    },
+  });
+  const memorySuggestionReview = useMemorySuggestionReview({ actorId: currentUser?.id ?? null, sessionSignal: memorySessionAbortRef.current.signal, modals: rootModals });
+  const memorySourceSession = useMemorySourceSession({ actorId: currentUser?.id ?? null, notebookId: currentNotebookId, sessionSignal: memorySessionAbortRef.current.signal, workspaceEpoch: workspaceEpochRef.current, currentNotebookId: () => activeNotebookIdRef.current, currentEpoch: () => workspaceEpochRef.current, openSession: openAskSession, reportError });
+  const [memorySourceAnswerTarget, setMemorySourceAnswerTarget] = useState<MemorySourceAnswerTarget | null>(null);
+  const memorySuggestMode = useMemorySuggestMode({
+    modals: rootModals,
+    user: currentUser,
+    sessionSignal: memorySessionAbortRef.current.signal,
+    onUserChanged: (updated) => {
+      if (workspaceActorIdRef.current !== updated.id) return;
+      setCurrentUser((current) => current?.id === updated.id ? { ...current, memory_mode: updated.memory_mode } : current);
+    },
+  });
   const sessionPopoverRef = useRef<HTMLDivElement | null>(null);
   const kgCanvasRef = useRef<HTMLDivElement | null>(null);
   const kgDetailRef = useRef<HTMLElement | null>(null);
@@ -1963,6 +2043,71 @@ export default function Home() {
     setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
   }
 
+  function collabCanRefresh(kind: CollabKind): boolean {
+    if (!activeNotebookIdRef.current) return false;
+    // Draft owners retain their state. The two independently editing panels
+    // receive a revision and apply their own local safe-refresh gate.
+    if (rootModals.view("source-add").open || rootModals.view("notebook-editor").open) return false;
+    switch (kind) {
+      case "sources": return (!sourcesCollapsed || Boolean(sourceDetail && sourceDetail.notebook_id === activeNotebookIdRef.current))
+        && !reparsingSource && deletingSourceIds.size === 0 && !rootModals.view("catalog-review").open;
+      case "knowhow": return knowhowNavigation.isOpen;
+      case "knowledge": return chatMode === "rules" && !kgKnowledge.busyId;
+      case "kg": return kgGraph.open && !kgGraph.reviewBusy && !kgGraph.decidingMerge;
+      case "catalog": return Boolean(sourceDetail) && !rootModals.view("catalog-review").open;
+      case "understanding": return rootModals.view("understanding").open;
+      case "scale_index": return true;
+      case "notebook": return titleDraft === currentNotebook?.name && !titleSaveInFlight;
+    }
+  }
+
+  function collabPanelIsMounted(kind: CollabKind): boolean {
+    switch (kind) {
+      case "sources": return !sourcesCollapsed || Boolean(sourceDetail && sourceDetail.notebook_id === activeNotebookIdRef.current);
+      case "knowhow": return knowhowNavigation.isOpen;
+      case "knowledge": return chatMode === "rules";
+      case "kg": return kgGraph.open;
+      case "catalog": return Boolean(sourceDetail);
+      case "understanding": return rootModals.view("understanding").open;
+      case "scale_index":
+      case "notebook": return true;
+    }
+  }
+
+  async function refreshCollabKind(kind: CollabKind, isCurrent: () => boolean): Promise<void | "delegated"> {
+    const nb = activeNotebookIdRef.current;
+    if (!nb || !isCurrent()) return;
+    switch (kind) {
+      case "sources":
+        if (!await sourceLibrary.refreshForCollaboration(() => isCurrent()
+          && !rootModals.view("source-add").open && !rootModals.view("notebook-editor").open
+          && !rootModals.view("catalog-review").open)) throw new Error("collaboration source refresh superseded");
+        break;
+      case "notebook": {
+        const fresh = await getNotebook(nb);
+        if (isCurrent() && activeNotebookIdRef.current === nb) {
+          setCurrentNotebook((current) => current?.id === nb ? fresh : current);
+          kgWorkspace.observeNotebook(fresh);
+        }
+        break;
+      }
+      case "kg":
+        if (!await kgWorkspace.refreshForCollaboration()) throw new Error("collaboration graph refresh superseded");
+        break;
+      case "knowledge":
+        if (!await kgWorkspace.refreshKnowledgeForCollaboration()) throw new Error("collaboration knowledge refresh unconfirmed");
+        break;
+      case "knowhow": setKnowhowCollabRevision((revision) => revision + 1); return "delegated";
+      case "catalog": setCatalogReviewSeq((revision) => revision + 1); return "delegated";
+      case "understanding": setUnderstandingCollabRevision((revision) => revision + 1); return "delegated";
+      case "scale_index": {
+        const status = await fetchScaleIndexStatus(nb);
+        if (isCurrent() && activeNotebookIdRef.current === nb) setScaleIndexStatus(status);
+        break;
+      }
+    }
+  }
+
   // 共享面变更(加/撤群组授权、开启/取消链接分享)之后的统一刷新。
   //
   // ⚠ **两份都要刷,不能只刷集合列表**:这类变更会翻转「未共享门」——本笔记本一旦被
@@ -2068,6 +2213,7 @@ export default function Home() {
         currentUser?.role ?? "",
         currentNotebook?.can_manage_content ?? false,
         currentNotebook?.sync_origin ?? "",
+        currentNotebook?.can_manage_notebook ?? false,
       ).canManageReports,
       creationDisabled: sourceScopeBlocked,
       sourceScope: currentSourceScope,
@@ -2117,6 +2263,7 @@ export default function Home() {
     reportWorkspace.activateActor(actorId);
     askSession.activateActor(actorId);
     sourceLibrary.activateActor(actorId);
+    collabPulse.activateActor(actorId);
   }
 
   function leaveWorkspaceOwners(): void {
@@ -2125,6 +2272,7 @@ export default function Home() {
     askSession.leaveWorkspace();
     reportWorkspace.leaveWorkspace();
     kgWorkspace.leaveWorkspace();
+    collabPulse.leaveWorkspace();
   }
 
   function leaveActorOwners(): void {
@@ -2135,6 +2283,7 @@ export default function Home() {
     askSession.abortForLogout();
     reportWorkspace.leaveWorkspace();
     kgWorkspace.leaveWorkspace();
+    collabPulse.leaveWorkspace();
   }
 
   useEffect(() => {
@@ -2216,6 +2365,7 @@ export default function Home() {
 
   // Answer→Memory 的批量派生仍由跨域 shell 拥有。Ask hook 只发布 turns，不取得
   // Memory API/状态；切用户、切库或切会话时沿用 workspace epoch 丢弃迟到结果。
+  const followAnswerSuggestions = currentUser?.memory_mode === "suggest" && chatMode === "ask";
   useEffect(() => {
     memoryLinksAbortRef.current?.abort();
     const activeNotebook = currentNotebookId;
@@ -2230,30 +2380,32 @@ export default function Home() {
       return;
     }
     const workspaceEpoch = workspaceEpochRef.current;
+    const actorId = currentUser?.id;
     const controller = new AbortController();
     memoryLinksAbortRef.current = controller;
-    collectSavedAnswerFlags(
+    observeAnswerMemoryFlags({
       batches,
-      (batch) => fetchAnswerMemoryLinks(activeNotebook, batch, controller.signal),
-      controller.signal,
-    )
-      .then((savedFlags) => {
+      loadBatch: (batch) => fetchAnswerMemoryLinks(activeNotebook, batch, controller.signal),
+      signal: controller.signal,
+      followSuggestions: followAnswerSuggestions,
+      publish: (savedFlags) => {
         if (
-          savedFlags === null
-          || controller.signal.aborted
+          controller.signal.aborted
+          || workspaceActorIdRef.current !== actorId
           || activeNotebookIdRef.current !== activeNotebook
           || workspaceEpochRef.current !== workspaceEpoch
         ) return;
         setMemorySavedAnswers(savedFlags);
-      })
-      .catch((error) => {
+      },
+      reportError: (error) => {
         if (!isAbortError(error)) reportError(error);
-      })
-      .finally(() => {
-        if (memoryLinksAbortRef.current === controller) memoryLinksAbortRef.current = null;
-      });
-    return () => controller.abort();
-  }, [currentNotebookId, turns]);
+      },
+    });
+    return () => {
+      controller.abort();
+      if (memoryLinksAbortRef.current === controller) memoryLinksAbortRef.current = null;
+    };
+  }, [currentUser?.id, currentNotebookId, conversationId, turns, followAnswerSuggestions, memoryLinksSaveRevision, memorySuggestionReview.view.revision, memorySuggestMode.view.deletedRevision]);
 
   useEffect(() => {
     const element = chatBodyRef.current;
@@ -2591,6 +2743,8 @@ export default function Home() {
       setSourceImagesEnabled(systemConfiguration.source_images_enabled);
       setUserSearchProfileEnabled(systemConfiguration.user_search_profile_enabled);
       setUserActivityViewEnabled(systemConfiguration.user_activity_view_enabled);
+      setAutoMemorySuggestEnabled(systemConfiguration.auto_memory_suggest_enabled);
+      setAutoMemorySuggestModelReady(systemConfiguration.auto_memory_suggest_model_ready);
     }
     if (docTypeOptions.length === 0) {
       fetchDocumentTypes()
@@ -2710,6 +2864,11 @@ export default function Home() {
           ticket,
           outcome !== null,
         ),
+      }),
+      transitionStep({
+        name: "collab-pulse",
+        begin: () => collabPulse.beginNotebookTransition(owner),
+        settle: (ticket, outcome) => collabPulse.finishNotebookTransition(ticket, outcome?.notebook ?? null),
       }),
     ];
   }
@@ -2995,6 +3154,8 @@ export default function Home() {
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     setMemorySavedAnswers((previous) => ({ ...previous, [savedAnswerId]: true }));
+    // Cancel stale reads without ending observation of other answers after this committed save.
+    if (currentUser?.memory_mode === "suggest") setMemoryLinksSaveRevision((previous) => previous + 1);
     rootModals.requestClose("memory-save", "button");
     setToast("已保存到记忆");
     await loadNotebookCollection();
@@ -3148,7 +3309,7 @@ export default function Home() {
   }
 
   function leaveMenuNotebook(notebookId: string, position: { left: number; top: number }) {
-    return () => {
+    return (plan: ExitPlan) => {
       // 菜单一点就关,菜单项随之消失;面板以打开菜单的那颗「⋮」为落点(它还在),
       // 找不到它时才退到菜单原来的位置。
       const trigger = menuTriggerRef.current;
@@ -3156,7 +3317,7 @@ export default function Home() {
         ? anchorOf(trigger)
         : anchorAt(position.left, position.top - 8);
       notebookCollection.closeMenu();
-      notebookExit.start(notebookId, anchor, () => loadNotebookCollection());
+      notebookExit.start(notebookId, anchor, () => loadNotebookCollection(), plan);
     };
   }
 
@@ -3275,7 +3436,7 @@ export default function Home() {
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     try {
-      await askSession.openSession(id, workspaceEpoch);
+      return await askSession.openSession(id, workspaceEpoch);
     } finally {
       const actorId = currentUser?.id ?? "";
       const notebookId = activeNotebookIdRef.current;
@@ -3285,6 +3446,32 @@ export default function Home() {
       );
     }
   }
+
+  async function openMemorySourceAnswer(target: SuggestionAnswerTarget): Promise<boolean> {
+    const destination = await navigateMemorySuggestionAnswer(target, {
+      actorId: workspaceActorIdRef.current,
+      signal: memorySessionAbortRef.current.signal,
+      currentActorId: () => workspaceActorIdRef.current,
+      currentNotebookId: () => activeNotebookIdRef.current,
+      currentEpoch: () => workspaceEpochRef.current,
+      openNotebook: (id, actorId) => openNotebook(id, "push", actorId, { coalesce: false, intent: "memory-source-answer" }),
+      openSession: (id) => memorySourceSession.open(target.notebookId, id),
+    });
+    if (!destination) return false;
+    switchChatMode("ask");
+    setMemorySourceAnswerTarget(destination);
+    return true;
+  }
+
+  useEffect(() => {
+    const target = memorySourceAnswerTarget;
+    if (!target) return;
+    if (workspaceActorIdRef.current !== target.actorId || workspaceEpochRef.current !== target.epoch || activeNotebookIdRef.current !== target.notebookId) { setMemorySourceAnswerTarget(null); return; }
+    if (conversationId !== target.conversationId) return;
+    const index = turns.findIndex((turn) => turn.response.answer_id === target.answerId);
+    if (index >= 0) document.getElementById(chatTurnDomId(index))?.scrollIntoView({ block: "center" });
+    setMemorySourceAnswerTarget(null);
+  }, [memorySourceAnswerTarget, conversationId, turns]);
 
   function startNewAskSession() {
     const workspaceEpoch = ++workspaceEpochRef.current;
@@ -3757,7 +3944,7 @@ export default function Home() {
 
   // --- Two-tier federation: mark notebook base / personal -----------------
   async function handleTierAction() {
-    if (!currentNotebook) return;
+    if (!currentNotebook || !canChangeNotebookTier(currentUser?.role, capabilities.canManageNotebook)) return;
     const state = tierActionState(currentNotebook);
     const target = state.action === "unset" ? "personal" : "base";
     const notebookId = currentNotebook.id;
@@ -4020,7 +4207,7 @@ export default function Home() {
     }
   }
 
-  function handleLeaveShared(anchor: ExitAnchor) {
+  function handleLeaveShared(anchor: ExitAnchor, plan: ExitPlan) {
     if (!currentNotebook) return;
     const navEpoch = workspaceEpochRef.current;
     // 退出成功之后走同一条收口:重取、请求世代闸、对账都别再抄一份(抄一份就会漏掉其中
@@ -4029,6 +4216,7 @@ export default function Home() {
       currentNotebook.id,
       anchor,
       () => notebookCollection.refreshAfterAccessChange(navEpoch),
+      plan,
     );
   }
 
@@ -4274,6 +4462,12 @@ export default function Home() {
       case "memory-save":
         setMemoryAnswerId(null);
         return;
+      case "memory-suggest-close":
+        memorySuggestMode.commands.clearConfirmation();
+        return;
+      case "memory-suggestion-adopt":
+        memorySuggestionReview.commands.clear();
+        return;
       case "catalog-review":
         setCatalogReview(null);
         setCatalogReviewLease(null);
@@ -4458,6 +4652,7 @@ export default function Home() {
     currentUser?.role ?? "",
     currentNotebook?.can_manage_content ?? false,
     currentNotebook?.sync_origin ?? "",
+    currentNotebook?.can_manage_notebook ?? false,
   );
   // 卡片操作菜单打开的那一行(不一定是当前工作区这本)的能力位。同样只走
   // workspaceCapabilities 一处判据,不在菜单组件里第二次拼 access/sync_origin。
@@ -4467,6 +4662,7 @@ export default function Home() {
     currentUser?.role ?? "",
     notebookCollection.menu.notebook?.can_manage_content ?? false,
     notebookCollection.menu.notebook?.sync_origin ?? "",
+    notebookCollection.menu.notebook?.can_manage_notebook ?? false,
   );
   // 「贡献到公共知识库」因没挂公共库而禁用时,按钮旁那半句由谁来挂:同样只走
   // workspaceCapabilities 一处判据。全局记忆页里一条记忆可能来自任意一本库,按行判;
@@ -4479,6 +4675,7 @@ export default function Home() {
       currentUser?.role ?? "",
       row.can_manage_content ?? false,
       row.sync_origin ?? "",
+      row.can_manage_notebook ?? false,
     );
     if (rowCapabilities.canMountBases) return "self";
     return rowCapabilities.mirrored ? "none" : "owner";
@@ -4881,6 +5078,9 @@ export default function Home() {
         <main className="page memory-view">
           <MemoryPanel
             scope="global"
+            suggestionReview={memorySuggestionReview}
+            onOpenAnswer={openMemorySourceAnswer}
+            memorySuggest={{ enabled: autoMemorySuggestEnabled, modelReady: autoMemorySuggestModelReady, view: memorySuggestMode.view, onSetMode: memorySuggestMode.commands.setMode, modalView: rootModals.view("memory-suggest-close"), onOpenConfirmation: memorySuggestMode.commands.openConfirmation, onCloseConfirmation: memorySuggestMode.commands.closeConfirmation }}
             notebookId={null}
             notebookBases={notebookBasesById}
             sessionSignal={memorySessionAbortRef.current.signal}
@@ -4927,7 +5127,9 @@ export default function Home() {
                 {isReader ? (
                   <ReaderNotebookBadge
                     notebook={currentNotebook}
+                    selfUserId={currentUser?.id ?? ""}
                     leaveBusy={notebookExit.isBusy(currentNotebook.id)}
+                    leaveBusyLabel={notebookExit.flow?.notebookId === currentNotebook.id ? notebookExit.flow.label : ""}
                     onLeave={handleLeaveShared}
                     // 组管理员(can_manage_content)可在顶栏改名(PATCH-only,notebook:manage)。
                     // 徽章按 can_manage_content 才渲染成可编辑;纯只读成员传了也只显示 h1。
@@ -4996,7 +5198,7 @@ export default function Home() {
                     sections: baseNames.length ? [["本笔记本的参考库", baseNames] as [string, string[]]] : undefined,
                     actions: [
                       ...(currentUser?.role === "admin" ? [{ label: "内容审核", desc: "审核待收录进公共知识库的内容（管理员）", action: () => promotionQueue.openPromoQueue().catch(reportError) }] : []),
-                      ...(currentUser?.role === "admin" ? [{ label: tier.label, desc: "把当前笔记本设为公共知识库，供其他笔记本挂为参考库（管理员）", run: () => handleTierAction() }] : []),
+                      ...(canChangeNotebookTier(currentUser?.role, capabilities.canManageNotebook) ? [{ label: tier.label, desc: "把当前笔记本设为公共知识库，供其他笔记本挂为参考库（管理员）", run: () => handleTierAction() }] : []),
                       // 检索索引的立即/空闲时重建已收敛进「看板 → 索引与构建」面板(检索索引行,
                       // 与 tier 解耦、大库亦可建)，此处不再重复列出，避免同一动作多处入口各自确认。
                       { label: "关系审核队列", desc: "审核知识图谱中待人工确认的实体关联", action: () => edgeReview.openEdgeReviewQueue(currentNotebookId).catch(reportError) }
@@ -5051,6 +5253,7 @@ export default function Home() {
             </div>
           </section>
 
+          <CollabBar key={`${currentUser?.id}:${currentNotebook.id}`} view={collabPulse.view} onRefresh={collabPulse.refreshPending} notebookId={currentNotebook.id} canReadActivity={currentNotebook.access !== "reader" || Boolean(currentNotebook.can_manage_content)} sessionSignal={memorySessionAbortRef.current.signal} />
           <section className={`workspace-grid${sourcesCollapsed ? " sources-collapsed" : ""}${sessionSidebar ? " has-session-sidebar" : ""}${sourceSidebar.dragging ? " sources-resizing" : ""}`} style={sourceSidebar.style}>
             <aside className="workspace-panel sources-panel" ref={sourceSidebar.panelRef} inert={sourcesCollapsed && wideWorkspace || undefined}>
               {wideWorkspace && !sourcesCollapsed && <div className="sources-resize-handle" {...sourceSidebar.resizeProps} />}
@@ -5219,6 +5422,11 @@ export default function Home() {
                     }}
                   />
                 )}
+                {/* 「整理」没能开始的原因(别人发起的分析正在运行,D8):挨着上面的整理入口,
+                    自带计时消失,不进顶部状态条。 */}
+                {kgGraph.busyNoticeAction === "build" && (
+                  <p className="kg-busy-notice" role="status">{kgGraph.busyNotice}</p>
+                )}
                 {currentNotebook?.kg_build && (
                   <div
                     className={`kg-build-status kg-build-tone-${currentKgBuildView.tone}`}
@@ -5377,6 +5585,16 @@ export default function Home() {
                     SourceListPanel（PR-5 分片 2）。它返回 Fragment：两个 div 仍是
                     .sources-body 的直接子节点，滚动算术与扩展点「固定区在列表之前」
                     那条不变量都靠这层直接父子关系。 */}
+                {!sourcesCollapsed && (sourceLibrary.sourceListRefreshPending || sourceLibrary.sourceListRefreshNotice) && (
+                  <div className="collab-refresh-notice">
+                    {sourceLibrary.sourceListRefreshPending && (
+                      <span>有新的改动 · <button type="button" className="link-button inline-action"
+                        disabled={sourcesPageLoading} onClick={() => { void sourceLibrary.refreshSourceList(); }}
+                      >{sourcesPageLoading ? "正在刷新…" : "刷新"}</button></span>
+                    )}
+                    {sourceLibrary.sourceListRefreshNotice && <span role="status">{sourceLibrary.sourceListRefreshNotice}</span>}
+                  </div>
+                )}
                 <SourceListPanel
                   sources={sources}
                   uiMode={uiMode}
@@ -5395,6 +5613,7 @@ export default function Home() {
                   onToggleSource={(sourceId) => sourceLibrary.toggleSource(sourceId)}
                   onOpenSource={(source) => { openSourceDetail(source).catch(reportError); }}
                   onDeleteSource={(source) => confirmDeleteSource(source)}
+                  canDeleteSource={(source) => sourceDeleteAllowed(capabilities, source)}
                   onPage={(p) => { if (currentNotebookId) loadSourcesPage(currentNotebookId, { page: p, q: sourceQuery }).catch(reportError); }}
                   onAddSource={sourceIntake.commands.openFiles}
                   focusSearchRequested={sourceSearchFocusRequested}
@@ -5585,7 +5804,9 @@ export default function Home() {
                               title: sessions.find((session) => session.id === conversationId)?.title || "",
                               throughAnswerId: answerId,
                             })) : undefined}
-                            memorySaved={Boolean(memorySavedAnswers[turn.response.answer_id])}
+                            memorySaved={memorySavedAnswers[turn.response.answer_id] === true}
+                            memorySuggested={memorySavedAnswers[turn.response.answer_id] === "suggested"}
+                            memorySuggestionsEnabled={currentUser.memory_mode === "suggest"}
                             onImportGapSuggestion={readOnlyWorkspace ? undefined : importGapSuggestion}
                             // 站外来源建议导入复用「添加来源」弹窗同一份 docCapacity 判据
                             // （红线：确认上传前必须把批次计入文档上限，超额时按钮直接置灰
@@ -5731,6 +5952,9 @@ export default function Home() {
                 {chatMode === "memory" && currentNotebookId && (
                   <MemoryPanel
                     scope="notebook"
+                    memorySuggest={{ enabled: autoMemorySuggestEnabled, modelReady: autoMemorySuggestModelReady, view: memorySuggestMode.view, onSetMode: memorySuggestMode.commands.setMode, modalView: rootModals.view("memory-suggest-close"), onOpenConfirmation: memorySuggestMode.commands.openConfirmation, onCloseConfirmation: memorySuggestMode.commands.closeConfirmation }}
+                    suggestionReview={memorySuggestionReview}
+                    onOpenAnswer={openMemorySourceAnswer}
                     notebookId={currentNotebookId}
                     bases={notebookPromotionBases}
                     sessionSignal={memorySessionAbortRef.current.signal}
@@ -5871,6 +6095,7 @@ export default function Home() {
         >
           <NotebookMenuActions
             notebook={notebookCollection.menu.notebook}
+            selfUserId={currentUser?.id ?? ""}
             canManageNotebook={menuNotebookCapabilities.canManageNotebook}
             canDeleteNotebook={menuNotebookCapabilities.canDeleteNotebook}
             // 说明文案由这一侧给:今天两位为假的**唯一**原因是镜像,将来若有别的原因把
@@ -5900,7 +6125,7 @@ export default function Home() {
               <div>
                 <h2>分享「{currentNotebook.name}」</h2>
                 <p>{capabilities.canConfigureNotebook
-                  ? "两种方式：发一条链接给具体的人，或者共享给一个群组（随成员进出自动生效与失效）。"
+                  ? "三种方式：发一条链接给具体的人、按用户名添加编辑者，或者共享给一个群组（随成员进出自动生效与失效）。"
                   : "共享给一个群组（随成员进出自动生效与失效）。链接分享由库主管理。"}</p>
               </div>
               <button className="icon-button" onClick={() => rootModals.requestClose("notebook-share", "button")} title="关闭">×</button>
@@ -5955,6 +6180,15 @@ export default function Home() {
                 </div>
               </>)}
               </>)}
+              {/* 「点名共享」(分享编辑 P1-T13):编辑者名单只归库主(notebook:collaborate,
+                  恒 owner),组管理员打开这个弹窗只看到下面的群组区。它挂在链接区与群组区之间,
+                  结果都落在本节按钮旁,不经页面顶部的状态条。 */}
+              <NotebookCollaboratorsShare
+                key={currentNotebook.id}
+                canManageCollaborators={capabilities.canManageCollaborators}
+                notebookId={currentNotebook.id}
+                onChanged={() => { handleSharingChanged().catch(reportError); }}
+              />
               <NotebookGroupShare
                 notebookId={currentNotebook.id}
                 onChanged={() => { handleSharingChanged().catch(reportError); }}
@@ -6067,6 +6301,7 @@ export default function Home() {
                             <Users size={12} /> 共享给 {item.group_count} 个群组
                           </span>
                         )}
+                        <ShareOverviewCollaboratorsChip collaborators={item.collaborators} />
                       </header>
                       {item.share_token && (
                         <div className="share-overview-channel is-link">
@@ -6129,6 +6364,9 @@ export default function Home() {
                           </p>
                         </div>
                       )}
+                      {/* 点名共享(分享编辑 P1):只因点名共享而出现的行(无链接、无群组)靠这一节
+                          才不是一张空卡片。名单与角色是事实,增删在这本笔记本的「分享」里。 */}
+                      <ShareOverviewCollaborators collaborators={item.collaborators} />
                     </article>
                   ))}
                 </div>
@@ -6165,6 +6403,8 @@ export default function Home() {
         />
       )}
 
+      <MemorySuggestionAdoptionModal review={memorySuggestionReview} modalView={rootModals.view("memory-suggestion-adopt")} />
+
       {rootModals.view("notebook-editor").open && notebookCollection.editor?.target && (
         <section className="utility-modal" role="dialog" aria-modal={rootModals.view("notebook-editor").topmost} aria-hidden={!rootModals.view("notebook-editor").topmost} inert={rootModals.view("notebook-editor").topmost ? undefined : true} style={{ zIndex: rootModals.view("notebook-editor").zIndex }}>
           <FloatingModalCard storageKey="notebook.edit.window" className="utility-modal-card notebook-edit-card">
@@ -6174,7 +6414,9 @@ export default function Home() {
                 <h2>笔记本设置</h2>
                 <p>{notebookCollection.editor?.canMountBases
                   ? "编辑当前笔记本的信息、索引管线与参考库。模型服务由系统统一管理。"
-                  : "编辑当前笔记本的信息与索引管线。参考库挂载仍由库主配置。"}
+                  : notebookCollection.editor?.canManageNotebook
+                    ? "编辑当前笔记本的信息与索引管线。参考库挂载仍由库主配置。"
+                    : "选择当前笔记本的索引管线。笔记本信息与参考库挂载由库主管理。"}
                 </p>
               </div>
               {/* 关闭入口在保存期间**不禁用**:这个 slot 不接 Escape、也不接遮罩点击
@@ -6187,10 +6429,15 @@ export default function Home() {
             </div>
             <form className="edit-form notebook-settings-form" onSubmit={submitNotebookEditor}>
               <section className="settings-section">
-                <div className="settings-section-head"><h3>基本信息</h3></div>
-                <label>标题<input name="name" defaultValue={notebookCollection.editor?.target?.name} maxLength={80} required /></label>
-                <label>描述<textarea name="purpose" defaultValue={notebookCollection.editor?.target?.purpose} rows={3} maxLength={260} /></label>
-                <label>领域关键词<input name="primary_domain" defaultValue={notebookCollection.editor?.target?.primary_domain} maxLength={80} /></label>
+                <div className="settings-section-head">
+                  <h3>基本信息</h3>
+                  {/* 编辑者(分享编辑 P1):画像是管理档(notebook:manage),这里只读展示;
+                      保存时也不发 PATCH(saveEditor 按冻结的 canManageNotebook 跳过)。 */}
+                  {!notebookCollection.editor?.canManageNotebook && <p>笔记本信息由库主管理，这里只能查看。</p>}
+                </div>
+                <label>标题<input name="name" defaultValue={notebookCollection.editor?.target?.name} maxLength={80} required readOnly={!notebookCollection.editor?.canManageNotebook} /></label>
+                <label>描述<textarea name="purpose" defaultValue={notebookCollection.editor?.target?.purpose} rows={3} maxLength={260} readOnly={!notebookCollection.editor?.canManageNotebook} /></label>
+                <label>领域关键词<input name="primary_domain" defaultValue={notebookCollection.editor?.target?.primary_domain} maxLength={80} readOnly={!notebookCollection.editor?.canManageNotebook} /></label>
               </section>
               <section className="settings-section">
                 <div className="settings-section-head">
@@ -6364,18 +6611,19 @@ export default function Home() {
               <section className="settings-section">
                 <div className="settings-section-head"><h3>更多信息</h3></div>
                 <div className="settings-grid-2">
-                  <label>目标用户<input name="target_users" defaultValue={notebookCollection.editor?.target?.target_users ?? ""} maxLength={120} /></label>
-                  <label>访问范围<input name="access_scope" defaultValue={notebookCollection.editor?.target?.access_scope ?? ""} maxLength={80} /></label>
+                  <label>目标用户<input name="target_users" defaultValue={notebookCollection.editor?.target?.target_users ?? ""} maxLength={120} readOnly={!notebookCollection.editor?.canManageNotebook} /></label>
+                  <label>访问范围<input name="access_scope" defaultValue={notebookCollection.editor?.target?.access_scope ?? ""} maxLength={80} readOnly={!notebookCollection.editor?.canManageNotebook} /></label>
                 </div>
-                <label>预期问题（每行/逗号一条）<textarea name="expected_questions" defaultValue={(notebookCollection.editor?.target?.expected_questions ?? []).join("\n")} rows={2} /></label>
-                <label>来源类型（每行/逗号一条）<input name="source_types" defaultValue={(notebookCollection.editor?.target?.source_types ?? []).join(", ")} /></label>
-                <label>分类（每行/逗号一条）<input name="taxonomy" defaultValue={(notebookCollection.editor?.target?.taxonomy ?? []).join(", ")} /></label>
+                <label>预期问题（每行/逗号一条）<textarea name="expected_questions" defaultValue={(notebookCollection.editor?.target?.expected_questions ?? []).join("\n")} rows={2} readOnly={!notebookCollection.editor?.canManageNotebook} /></label>
+                <label>来源类型（每行/逗号一条）<input name="source_types" defaultValue={(notebookCollection.editor?.target?.source_types ?? []).join(", ")} readOnly={!notebookCollection.editor?.canManageNotebook} /></label>
+                <label>分类（每行/逗号一条）<input name="taxonomy" defaultValue={(notebookCollection.editor?.target?.taxonomy ?? []).join(", ")} readOnly={!notebookCollection.editor?.canManageNotebook} /></label>
               </section>
               {notebookCollection.editor?.target && workspaceCapabilities(
                 notebookCollection.editor.target.access,
                 currentUser?.role ?? "",
                 notebookCollection.editor.target.can_manage_content ?? false,
                 notebookCollection.editor.target.sync_origin ?? "",
+                notebookCollection.editor.target.can_manage_notebook ?? false,
               ).canExportNotebook && (
                 <NotebookExportSection notebookId={notebookCollection.editor.target.id} />
               )}
@@ -6541,6 +6789,10 @@ export default function Home() {
                   </span>
                 ) : !readOnlyWorkspace && sourceDetailManageable(sourceDetail.type) ? (
                 <div className="source-detail-actions">
+                  {/* 重新解析被拒(另一位协作者刚提交了同一篇,409):原因挨着这颗按钮。 */}
+                  {sourceLibrary.reparseBusyText && (
+                    <span className="collaborator-result is-neutral" role="status">{sourceLibrary.reparseBusyText}</span>
+                  )}
                   {sourceDetailReparsable(sourceDetail.type) && (
                   <button
                     className="icon-button subtle-icon"
@@ -6554,6 +6806,8 @@ export default function Home() {
                       : <ExternalLink size={23} />}
                   </button>
                   )}
+                  {/* D14:编辑者对他人上传的来源不给删除(后端恒 404)。 */}
+                  {sourceDeleteAllowed(capabilities, sourceDetail) && (
                   <button
                     className="icon-button subtle-icon danger-icon"
                     disabled={reparsingSource || sourceDetailDeleting}
@@ -6565,12 +6819,24 @@ export default function Home() {
                       ? <Loader2 size={20} className="busy-spin" aria-hidden="true" />
                       : <Trash2 size={20} />}
                   </button>
+                  )}
                 </div>
                 ) : null}
               </div>
               {sourceDetailReparseQueued ? (
                 <p className="tool-hint source-detail-reparse-note" role="status">已提交重新解析，等待完成</p>
               ) : null}
+              {(sourceLibrary.sourceDetailRefreshPending || (!sourceDetailBaseId && collabPulse.view.pending.includes("sources")) || sourceLibrary.sourceDetailRefreshNotice) && (
+                <div className="collab-refresh-notice">
+                  {(sourceLibrary.sourceDetailRefreshPending || (!sourceDetailBaseId && collabPulse.view.pending.includes("sources"))) && (
+                    <span>有新的改动 · <button type="button" className="link-button inline-action"
+                      disabled={collabPulse.view.busy || sourceElementsLoading || reparsingSource || deletingSourceIds.size > 0}
+                      onClick={() => { void collabPulse.refreshPending(); }}
+                    >{collabPulse.view.busy || sourceElementsLoading ? "正在刷新…" : "刷新"}</button></span>
+                  )}
+                  {sourceLibrary.sourceDetailRefreshNotice && <span role="status">{sourceLibrary.sourceDetailRefreshNotice}</span>}
+                </div>
+              )}
               <section className="source-guide-card">
                 <div className="source-guide-heading">
                   <Sparkles size={26} fill="currentColor" />
@@ -6646,6 +6912,7 @@ export default function Home() {
                       >
                         {reparsingSource ? "重新解析中…" : sourceDetailReparseQueued ? "已提交重新解析，等待完成" : "重新解析"}
                       </button>
+                      {sourceDeleteAllowed(capabilities, sourceDetail) && (
                       <button
                         type="button"
                         className="button secondary source-pdf-fallback-delete"
@@ -6655,6 +6922,7 @@ export default function Home() {
                       >
                         {sourceDetailDeleting ? "删除中…" : "删除来源"}
                       </button>
+                      )}
                     </div>
                   )}
                 </section>
@@ -6888,7 +7156,7 @@ export default function Home() {
                         const stillOwned = () => owner !== null && sourceLibrary.captureOwner() === owner;
                         let started = false;
                         try {
-                          if (g.fix === "reparse") started = await runReparse(nb, g.sample, stillOwned);
+                          if (g.fix === "reparse") started = await runReparse(nb, g.sample, stillOwned, g.key);
                           else if (g.fix === "backfill_vectors") started = await runBackfillVectors(nb, stillOwned);
                         } finally {
                           // 忙碌位是按笔记本记的(切库时整张表清空):只在仍是发起时那本时撤销这一组,
@@ -6928,6 +7196,9 @@ export default function Home() {
                                   ? label(CHECKUP_FIX_BUSY, g.fix, "处理中…")
                                   : label(CHECKUP_FIX, g.fix, "处理")}
                               </button>
+                              {checkupBusyNotice?.key === g.key && (
+                                <span className="kg-busy-notice" role="status">{checkupBusyNotice.text}</span>
+                              )}
                             </div>
                           )}
                         </div>
@@ -7035,6 +7306,11 @@ export default function Home() {
                           <div className="index-sub">
                             {kgGraph.deleting ? "后台进行，完成后自动更新" : view.detail}
                           </div>
+                          {/* 整理 / 全部重新分析 / 补上关联被占用时的点名说明(D8),挨着这一行的按钮。 */}
+                          {(kgGraph.busyNoticeAction === "build" || kgGraph.busyNoticeAction === "rebuild_all"
+                            || kgGraph.busyNoticeAction === "relink") && (
+                            <div className="index-sub kg-busy-notice" role="status">{kgGraph.busyNotice}</div>
+                          )}
                         </div>
                         {!busy && !readOnlyWorkspace && (
                           <div className="index-ctas">
@@ -7098,6 +7374,10 @@ export default function Home() {
                             <span className="tag" style={{ color }}>{stateLabel}{tsSuffix}</span>
                           </div>
                           <div className="index-sub">跨文档概念聚类；重算并刷新图谱索引（不重新分析来源）</div>
+                          {/* 「重新合并」被占用时的点名说明(D8),挨着这一行的按钮。 */}
+                          {kgGraph.busyNoticeAction === "merge" && (
+                            <div className="index-sub kg-busy-notice" role="status">{kgGraph.busyNotice}</div>
+                          )}
                         </div>
                         {!busy && !readOnlyWorkspace && (
                           <div className="index-ctas">
@@ -7296,8 +7576,9 @@ export default function Home() {
                   标题从已加载的来源列表解析(`display_title` 与引用卡、清单卡同一
                   份服务端命名),查不到就由面板退回 id。 */}
               <AgentProfilePanel
-                key={currentNotebookId}
+                key={`${currentUser?.id}:${currentNotebookId}`}
                 notebookId={currentNotebookId}
+                collabRevision={understandingCollabRevision}
                 onOpenSource={(sourceId) => onOpenSourceElement(sourceId)}
                 resolveSourceTitle={(sourceId) =>
                   sources.find((item) => item.id === sourceId)?.display_title || ""
@@ -7364,6 +7645,8 @@ export default function Home() {
               dataInvalidating={kgGraph.deleting}
               interactive={rootModals.view("kg-analysis").topmost}
               zIndex={rootModals.view("kg-analysis").zIndex}
+              canDeleteAnySource={capabilities.canDeleteAnySource}
+              relinkBusyNotice={kgGraph.busyNoticeAction === "relink" ? kgGraph.busyNotice : ""}
               onAnalyze={confirmGenerateKgAnalysis}
               onClose={closeKgAnalysis}
               // 失效令牌:来源内容变了(删除、重新解析的状态推进)或补上关联起止时,问题清单
@@ -7389,9 +7672,14 @@ export default function Home() {
 
       {knowhowNavigation.isOpen && currentNotebookId && (
         <KnowhowPanel
+          key={`${currentUser?.id}:${currentNotebookId}:${workspaceEpochRef.current}`}
           notebookId={currentNotebookId}
+          collabRevision={knowhowCollabRevision}
+          collaboration={{ view: collabPulse.view, onRefresh: collabPulse.refreshPending, canReadActivity: currentNotebook?.access !== "reader" || Boolean(currentNotebook?.can_manage_content), sessionSignal: memorySessionAbortRef.current.signal }}
           apiBase={API_BASE}
           canEdit={!readOnlyWorkspace}
+          // D14:点名编辑者删不了整张表、移不走、清不了历史——这三颗入口不渲染。
+          canDestroyTables={capabilities.canDestroyKnowhowTables}
           onClose={closeKnowhow}
           initialTableId={knowhowNavigation.jumpTarget?.tableId}
           initialRowId={knowhowNavigation.jumpTarget?.rowId}

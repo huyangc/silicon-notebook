@@ -37,11 +37,6 @@
       "reason": "生产登录刻意合成一个写事务(login_with_password);拆开的验密 / 建会话只给用例摆会话与核对口令"
     },
     {
-      "member": "backend/app/repositories/postgres/identity_store.py::IdentityStore.create_session",
-      "category": "test-observation",
-      "reason": "生产登录刻意合成一个写事务(login_with_password);拆开的验密 / 建会话只给用例摆会话与核对口令"
-    },
-    {
       "member": "backend/app/repositories/postgres/knowhow_store.py::KnowhowStore.source_asset_ids",
       "category": "test-observation",
       "reason": "来源资产行观察点(生产走 delete_source_asset_rows)"
@@ -102,6 +97,11 @@
       "reason": "直写 Memory 行的构造点"
     },
     {
+      "member": "backend/app/repositories/postgres/memory_suggest_store.py::MemorySuggestStore.write_fingerprints",
+      "category": "test-observation",
+      "reason": "指纹优先级的直写构造点(生产只经建议写事务写指纹)"
+    },
+    {
       "member": "backend/app/repositories/postgres/retrieval_experience_store.py::RetrievalExperienceStore.read_experience",
       "category": "test-observation",
       "reason": "按 id 读一条检索经验的观察点"
@@ -133,11 +133,6 @@
     },
     {
       "member": "backend/app/repositories/sqlite/identity_store.py::IdentityStore.authenticate_user",
-      "category": "test-observation",
-      "reason": "生产登录刻意合成一个写事务(login_with_password);拆开的验密 / 建会话只给用例摆会话与核对口令"
-    },
-    {
-      "member": "backend/app/repositories/sqlite/identity_store.py::IdentityStore.create_session",
       "category": "test-observation",
       "reason": "生产登录刻意合成一个写事务(login_with_password);拆开的验密 / 建会话只给用例摆会话与核对口令"
     },
@@ -210,6 +205,11 @@
       "member": "backend/app/repositories/sqlite/memory_store.py::MemoryStore.update_fields",
       "category": "test-observation",
       "reason": "直写 Memory 行的构造点"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/memory_suggest_store.py::MemorySuggestStore.write_fingerprints",
+      "category": "test-observation",
+      "reason": "指纹优先级的直写构造点(生产只经建议写事务写指纹)"
     },
     {
       "member": "backend/app/repositories/sqlite/retrieval_experience_store.py::RetrievalExperienceStore.read_experience",
@@ -287,6 +287,11 @@
       "reason": "直接写成员行的构造点(生产入会走分享令牌 join_shared),大量用例借它摆成员关系"
     },
     {
+      "member": "backend/app/services/notebook_sharing.py::NotebookSharingService.remove_member",
+      "category": "test-observation",
+      "reason": "模拟其他执行者撤权并验证覆盖层清理的接缝;生产本人退出经 Memory store 原子删边后调用 forget_member_state"
+    },
+    {
       "member": "backend/app/services/pending_bus.py::PendingBus._buffered_count",
       "category": "test-observation",
       "reason": "缓冲区条数观察点,测 TTL 与出队"
@@ -315,6 +320,11 @@
       "member": "backend/app/services/report_memory_use.py::RetrievalSourceLog.watches",
       "category": "test-observation",
       "reason": "断言端口已被记录包装的观察点"
+    },
+    {
+      "member": "backend/app/services/repository_facade.py::RepositoryFacade.answer_memory_links",
+      "category": "test-observation",
+      "reason": "旧 links 纯读投影的兼容观察根:用例核对读权、未采纳建议排除及 PostgreSQL 计划对照;生产 HTTP 路径用一次返回 links/states 的 answer_memory_link_view。下游 service、port 与两种 adapter 随此根保活,不另登记"
     },
     {
       "member": "backend/app/services/repository_facade.py::RepositoryFacade.rebuild_notebook_kg",

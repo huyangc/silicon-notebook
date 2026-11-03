@@ -32,11 +32,19 @@ from app.models.identity import (
     AgentTokenIssued,
     AgentTokenSummary,
 )
+from app.domain.memory_suggest_contracts import (
+    LIFECYCLE_SUGGESTION_CREATED,
+    LIFECYCLE_SUGGESTION_EXPIRED,
+)
 from app.models.memory import (
+    MemberExitCompletion,
+    MemberExitCounts,
+    MemberExitOutcome,
     MemoryWrite,
     MemoryRecord,
     MemoryUpdate,
     PaginatedMemories,
+    SuggestionWriteResult,
 )
 from app.repositories.identity_errors import (
     AgentAnswerLinksNeedAskError,
@@ -50,6 +58,7 @@ from app.repositories.ports import (
     DeleteWindowClosedError,
     DeleteWindowTransferInProgressError,
     MemoryStorePort,
+    MemorySuggestStorePort,
     NotebookAccessRepository,
     NotInDeleteWindowError,
 )
@@ -83,6 +92,9 @@ _PURGE_PAGE = 200
 # the export's size.
 _EXPORT_PAGE = 200
 _ORIGIN_LABELS = {"ask_answer": "问答保存", "external_agent": "Agent 提议"}
+# The export's type of an ADOPTED system suggestion (design §9.2): where it
+# came from does not change with adoption. Unadopted ones are never exported.
+_ADOPTED_SUGGESTION_LABEL = "系统建议（已采纳）"
 _STATUS_LABELS = {
     "candidate": "候选（尚未确认）",
     "confirmed": "已确认",
@@ -151,6 +163,16 @@ class _TransferRejected(ValueError):
     def __init__(self, message: str, *, error_code: str) -> None:
         super().__init__(message)
         self.error_code = error_code
+
+
+def _open_suggestion(item: MemoryRecord | None) -> bool:
+    """An unadopted system suggestion still waiting for the user (§5.3 row 1)."""
+    return item is not None and bool(item.suggested_signal) and item.status == "candidate"
+
+
+def _dismissed_suggestion(item: MemoryRecord | None) -> bool:
+    """A system suggestion the user dismissed or that expired (§5.3 row 2)."""
+    return item is not None and bool(item.suggested_signal) and item.status == "rejected"
 
 
 def _one_line(value: Any) -> str:
@@ -255,10 +277,16 @@ def _self_contained_markdown(markdown: str) -> str:
     return text
 
 
+def _export_type_label(item: MemoryRecord) -> str:
+    if item.suggested_signal:
+        return _ADOPTED_SUGGESTION_LABEL
+    return _ORIGIN_LABELS.get(item.origin, item.origin)
+
+
 def _export_section(index: int, item: MemoryRecord) -> str:
     lines = [
         f"\n---\n\n## {index}. {_one_line(item.title) or '（无标题）'}\n",
-        f"- 类型：{_ORIGIN_LABELS.get(item.origin, item.origin)}",
+        f"- 类型：{_export_type_label(item)}",
         f"- 状态：{_STATUS_LABELS.get(item.status, item.status)}",
         f"- 创建时间：{item.created_at}",
         f"- 更新时间：{item.updated_at}",
@@ -277,24 +305,38 @@ class ExitDisclosureRequired(Exception):
     Nothing was deleted and the membership is unchanged. ``memory_count`` is
     the server-side count at the moment of the check (0 when the caller is
     no longer a member or keeps reading through a grant): the client shows
-    it and asks again. HTTP 409 ``exit_disclosure_required``."""
+    it and asks again. HTTP 409 ``exit_disclosure_required``.
 
-    def __init__(self, memory_count: int) -> None:
-        super().__init__(f"exit would delete {memory_count} Memory items")
+    ``memory_count`` is "your memories" -- the one number an acknowledgement
+    is compared with; ``suggestion_count`` the unadopted system suggestions
+    the exit would delete besides (G10), for the disclosure's extra line."""
+
+    def __init__(self, memory_count: int, suggestion_count: int = 0) -> None:
+        super().__init__(
+            f"exit would delete {memory_count} Memory items"
+            f" and {suggestion_count} suggestions"
+        )
         self.memory_count = memory_count
+        self.suggestion_count = suggestion_count
 
 
 class _MemberExitNotFinished(Exception):
     """The purge ran, the exit did not finish: the leaver is still a member,
-    ``deleted_memory_count`` Memories are gone for good (counted by the
-    server, this request only) and ``memory_count`` remain."""
+    ``deleted_memory_count`` of "your memories" and
+    ``deleted_suggestion_count`` unadopted suggestions are gone for good
+    (counted by the server, this request only) and ``memory_count`` of
+    "your memories" remain."""
 
-    def __init__(self, deleted_memory_count: int, memory_count: int) -> None:
+    def __init__(
+        self, deleted_memory_count: int, memory_count: int,
+        deleted_suggestion_count: int = 0,
+    ) -> None:
         super().__init__(
             f"exit incomplete: {deleted_memory_count} deleted, {memory_count} remain"
         )
         self.deleted_memory_count = deleted_memory_count
         self.memory_count = memory_count
+        self.deleted_suggestion_count = deleted_suggestion_count
 
 
 class MemberExitIncomplete(_MemberExitNotFinished):
@@ -355,8 +397,6 @@ class _PurgeCleanupFailed(Exception):
 class MembershipExitPort(Protocol):
     """What the self-exit needs from the sharing service."""
 
-    def remove_member(self, notebook_id: str, user_id: str) -> None: ...
-
     def forget_member_state(self, notebook_id: str, user_id: str) -> None: ...
 
 
@@ -376,8 +416,16 @@ class MemoryService:
         *,
         membership: MembershipExitPort,
         export_max_bytes: int = 256 * 1024 * 1024,
+        memory_suggest_store: MemorySuggestStorePort | None = None,
+        suggestion_expiry_days: int = 30,
     ) -> None:
         self.store = store
+        # Auto memory suggestions' store (the expiry sweep's
+        # ``expire_overdue``); None = not wired, ``expire_suggestions`` is a
+        # no-op. ``suggestion_expiry_days`` is
+        # ``AUTO_MEMORY_SUGGEST_EXPIRY_DAYS``.
+        self.memory_suggest_store = memory_suggest_store
+        self.suggestion_expiry_days = int(suggestion_expiry_days)
         # Content cap of one export's in-memory snapshot (``MEMORY_EXPORT_MAX_BYTES``).
         self.export_max_bytes = int(export_max_bytes)
         self.ask_state = ask_state
@@ -1018,6 +1066,103 @@ class MemoryService:
         self._event("memory_lifecycle", item, action="candidate_created")
         return item
 
+    def create_suggestions(
+        self,
+        *,
+        notebook_id: str,
+        owner_id: str,
+        claim_token: str,
+        writes: Sequence[MemoryWrite],
+        proposed_fingerprints: Sequence[str],
+        declined_fingerprints: Sequence[str] = (),
+        declined_expires_at: str | None = None,
+        now: str | None = None,
+    ) -> SuggestionWriteResult:
+        """Write one run's system suggestions (design §4.2 step 8): the
+        store's single write transaction re-checks read access, the owner's
+        switch and the run's claim, writes the ``proposed`` fingerprints, the
+        ``declined`` negative cache (expiring ``declined_expires_at``) and
+        each candidate with its provenance and ``suggested`` revision.
+        ``SuggestionRevoked`` propagates unchanged (nothing was written; the
+        job abandons the whole batch); malformed ``writes`` raise
+        ``ValueError``. One content-free ``memory_lifecycle`` event
+        (``suggestion_created``, with the signal) per created row. A draft
+        gets no vector and no KG extraction: both happen at adoption
+        (``_after_adoption``)."""
+        result = self.store.create_suggestions_with_initial_revision(
+            notebook_id=notebook_id,
+            owner_id=owner_id,
+            claim_token=claim_token,
+            writes=list(writes),
+            proposed_fingerprints=list(proposed_fingerprints),
+            declined_fingerprints=list(declined_fingerprints),
+            declined_expires_at=declined_expires_at,
+            now=now or self.now(),
+        )
+        for item in result.created:
+            self._event(
+                "memory_lifecycle", item, action=LIFECYCLE_SUGGESTION_CREATED,
+                suggested_signal=item.suggested_signal,
+            )
+        return result
+
+    def expire_suggestions(
+        self,
+        *,
+        now: str,
+        limit: int,
+        owner_id: str | None = None,
+        notebook_id: str | None = None,
+    ) -> int:
+        """Move open system suggestions older than
+        ``suggestion_expiry_days`` to ``rejected`` (revision reason
+        ``expired``; design §5.4), at most ``limit`` oldest first, optionally
+        only one owner's / one notebook's. Deliberately blind to the
+        deployment switch (G11): with it off, drafts still expire. One
+        ``memory_lifecycle`` event (``suggestion_expired``, with the signal)
+        per row; returns how many moved. 0 when the suggestion store is not
+        wired."""
+        if self.memory_suggest_store is None:
+            return 0
+        current = _parse_time(now)
+        if current.tzinfo is None or current.utcoffset() is None:
+            current = current.replace(tzinfo=timezone.utc)
+        cutoff = (
+            current.astimezone(timezone.utc)
+            - timedelta(days=self.suggestion_expiry_days)
+        ).isoformat()
+        expired = self.memory_suggest_store.expire_overdue(
+            now=now, cutoff=cutoff, limit=limit,
+            owner_id=owner_id, notebook_id=notebook_id,
+        )
+        for row in expired:
+            self.event_log.emit({
+                "kind": "memory_lifecycle",
+                "memory_id": row["id"],
+                "notebook_id": row["notebook_id"],
+                "owner_id": row["owner_id"],
+                "origin": "ask_answer",
+                "status": "rejected",
+                "action": LIFECYCLE_SUGGESTION_EXPIRED,
+                "suggested_signal": row["suggested_signal"],
+            })
+        return len(expired)
+
+    def _after_adoption(
+        self, item: MemoryRecord, extract_kg: bool, *, action: str
+    ) -> MemoryRecord:
+        """The one tail of every adoption of a candidate (design §5.3): the
+        memory page's ``confirm`` and the save-from-answer CAS of an open
+        suggestion. The revision and the D15(a) children re-send already
+        happened in the store's transaction; here: the ``memory_lifecycle``
+        event, the KG extraction the checkbox asks for, the vector."""
+        extra = (
+            {"suggested_signal": item.suggested_signal} if item.suggested_signal else {}
+        )
+        self._event("memory_lifecycle", item, action=action, **extra)
+        self._maybe_schedule_kg(item, extract_kg)
+        return self._schedule_embed(item)
+
     def create_from_answer(
         self,
         notebook_id: str,
@@ -1036,15 +1181,38 @@ class MemoryService:
         was deleted. A Memory made before answers were author-checked (from
         another member's answer) is therefore still returned to its creator, and
         to nobody else. A NEW Memory needs the author check that follows.
+
+        An existing row that is a system suggestion takes the design §5.3
+        table instead of the plain return: an open one (``candidate``) is
+        adopted in one CAS with the submitted title / body / tags and gets
+        exactly ``confirm``'s tail (``_after_adoption``); a dismissed or
+        expired one (``rejected``, D16) is replaced by a plain saved memory --
+        a new row, so it goes the new-save way below, author check included.
+        Any other existing row comes back as it is; so does the row a
+        concurrent save of the same answer landed first (no-op, no error).
         """
         title = normalize_title(title)
         content_md = normalize_content(content_md)
         tags = normalize_tags(tags)
         self._require_notebook(notebook_id, user_id)
         existing = self.store.memory_by_answer(user_id, answer_id)
-        if existing is not None:
-            if existing.notebook_id != notebook_id:
+        if existing is not None and existing.notebook_id != notebook_id:
+            raise KeyError(answer_id)
+        if _open_suggestion(existing):
+            adopted = self.store.adopt_suggestion_from_answer(
+                notebook_id, user_id, answer_id,
+                fields={"title": title, "content_md": content_md, "tags": list(tags)},
+                changed_by=user_id, reason="confirmed",
+            )
+            if adopted is not None:
+                return self._after_adoption(adopted, extract_kg, action="confirmed")
+            # The CAS lost (dismissed, expired, adopted or deleted meanwhile):
+            # take the table row of what is there now.
+            existing = self.store.memory_by_answer(user_id, answer_id)
+            if existing is not None and existing.notebook_id != notebook_id:
                 raise KeyError(answer_id)
+        replaces = _dismissed_suggestion(existing)
+        if existing is not None and not replaces:
             return existing
         # An answer is its author's record: notebook read access is not enough.
         # Checked BEFORE the answer is loaded so a foreign, creatorless and
@@ -1087,9 +1255,27 @@ class MemoryService:
                 )
             },
         )
-        item = self.store.create_answer_with_initial_revision(
-            write, user_id, "created"
+        save = (
+            self.store.replace_rejected_suggestion_with_answer
+            if replaces
+            else self.store.create_answer_with_initial_revision
         )
+        try:
+            item = save(write, user_id, "created")
+        except ValueError:
+            # PostgreSQL: a concurrent save of the same answer aborts this
+            # serializable transaction (a ValueError, 409). The other one
+            # landed: no-op, return its row (§5.3 last row). Nothing landed
+            # (or only the dismissed draft is still there): the conflict
+            # stands.
+            landed = self.store.memory_by_answer(user_id, answer_id)
+            if (
+                landed is None
+                or landed.notebook_id != notebook_id
+                or _dismissed_suggestion(landed)
+            ):
+                raise
+            return landed
         if item.id != write.id:
             return item
         self._event("memory_lifecycle", item, action="answer_confirmed")
@@ -1150,10 +1336,11 @@ class MemoryService:
             fields=values,
             changed_by=user_id,
             reason=reason or "confirmed",
+            # An adopted suggestion re-sends its provenance and revisions
+            # (D15(a)); the store does nothing for any other candidate.
+            resync_children=True,
         )
-        self._event("memory_lifecycle", item, action="confirmed")
-        self._maybe_schedule_kg(item, extract_kg is not False)
-        return self._schedule_embed(item)
+        return self._after_adoption(item, extract_kg is not False, action="confirmed")
 
     def reject(self, memory_id: str, user_id: str) -> MemoryRecord:
         item = self.store.transition_with_revision(
@@ -1251,6 +1438,23 @@ class MemoryService:
             raise _PurgeCleanupFailed(deleted) from exc
         return deleted
 
+    def delete_open_suggestions(self, user_id: str, memory_ids: Sequence[str]) -> int:
+        """Delete those of ``memory_ids`` that are the caller's OPEN system
+        suggestions at the moment of deletion (the store judges the locked
+        row, so one adopted or dismissed meanwhile stays); audited per
+        notebook like ``bulk_delete``. Open suggestions carry no derived rows
+        (embedding and KG only follow adoption). Returns how many went."""
+        refs = dict(self.store.owned_memory_refs(user_id, memory_ids))
+        deleted = self.store.delete_open_suggestions(user_id, list(refs))
+        per_notebook: dict[str, int] = {}
+        for memory_id in deleted:
+            notebook_id = refs.get(memory_id)
+            if notebook_id is not None:
+                per_notebook[notebook_id] = per_notebook.get(notebook_id, 0) + 1
+        for notebook_id, count in sorted(per_notebook.items()):
+            self._audit_purge("delete_open_suggestions", notebook_id, user_id, count)
+        return len(deleted)
+
     def _audit_purge(
         self, action: str, notebook_id: str, user_id: str, count: int
     ) -> None:
@@ -1299,13 +1503,18 @@ class MemoryService:
         return deleted
 
     # ------------------------------------------------------------ self-exit
-    def exit_disclosure(self, notebook_id: str, user_id: str) -> int:
-        """How many of the caller's own Memory items leaving this notebook
-        would delete (every status). Zero when the caller is not a member, or
-        would keep reading it as its owner or through a grant."""
-        return self.store.member_exit_snapshot(
-            notebook_id, user_id, claim=False
-        ).memory_count
+    def exit_disclosure(self, notebook_id: str, user_id: str) -> MemberExitCounts:
+        """What leaving this notebook would delete of the caller's own Memory:
+        ``memory_count`` of "your memories" (every status except unadopted
+        system suggestions -- the number the exit acknowledges) and
+        ``suggestion_count`` unadopted system suggestions besides (G10). Both
+        zero when the caller is not a member, or would keep reading it as its
+        owner or through a grant."""
+        snapshot = self.store.member_exit_snapshot(notebook_id, user_id, claim=False)
+        return MemberExitCounts(
+            memory_count=snapshot.memory_count,
+            suggestion_count=snapshot.suggestion_count,
+        )
 
     def group_exit_preview(
         self, group_id: str, user_id: str
@@ -1324,51 +1533,58 @@ class MemoryService:
         return sorted(rows, key=lambda row: (row["name"], row["notebook_id"]))
 
     def leave_notebook(
-        self,
-        notebook_id: str,
-        user_id: str,
-        acknowledged_memory_count: int | None,
-    ) -> int:
-        """The member's own exit: delete their Memory here, then end the
-        membership. The one path that deletes a member's Memory. Returns how
-        many Memories THIS call deleted (counted here, never the client's
-        number); every other outcome is a typed exception carrying the
-        server's numbers.
+        self, notebook_id: str, user_id: str, acknowledged_memory_count: int | None,
+    ) -> MemberExitOutcome:
+        """Leave only this edge, counting personal Memory and suggestions apart.
 
-        1. Claim, under the membership row lock: the exact Memory ids the exit
-           deletes now, count C (0 when the caller is not a member or keeps
-           reading through ownership or a grant). An acknowledgement that
-           differs from C — absent while C > 0, or ANY number but 0 while C
-           is 0 — raises ``ExitDisclosureRequired(C)``: nothing touched.
-        2. C = 0: end the membership (or find it already gone); nobody's
-           Memory is deleted — a caller who keeps reading through a grant
-           keeps every Memory. Returns 0.
-        3. C > 0: purge those ids page by page (``_purge_page``) — the rows
-           and every row derived from them — counting what was deleted (d).
-           A failure part-way raises ``MemberExitFailed(d, r)``: still a
-           member, d gone for good, r counted now; a retry is safe.
-        4. Finish, under the membership row lock again: end the membership
-           this exit claimed (same ``added_at`` — never one re-created while
-           the purge ran) only if none of the leaver's Memory is left there. A Memory saved
-           while the purge ran is never deleted unacknowledged: the
-           membership stays, and the caller learns both numbers —
-           ``MemberExitIncomplete(d, r)``, or ``ExitDisclosureRequired(r)``
-           when d is 0 (nothing happened). A failure here is
-           ``MemberExitFailed(d, r)``.
+        The claim writes nothing. Finish rechecks surviving authority under the
+        common member/grant locks; adoption after claim keeps that memory and
+        prevents any further deletion. Cleanup follows only a last-edge exit.
+        """
+        return self._leave(
+            notebook_id, user_id, acknowledged_memory_count,
+            snapshot=self.store.member_exit_snapshot(notebook_id, user_id, claim=True),
+            finish=lambda token, allow: self.store.finish_member_exit(
+                notebook_id, user_id, token, allow_suggestion_delete=allow
+            ),
+            disclosure=self.exit_disclosure,
+        )
 
-        Correctness does not depend on the caller still listening: every
-        step commits on its own and the next disclosure reports what is
-        left. The per-member overlay/observation cleanup follows the
-        membership end; its failure no longer changes the outcome (the
-        membership has ended and the Memories are deleted — that is what is
-        reported) and is logged instead."""
-        snapshot = self.store.member_exit_snapshot(notebook_id, user_id, claim=True)
-        claimed = snapshot.memory_count
+    def collaboration_exit_disclosure(self, notebook_id: str, user_id: str) -> MemberExitCounts:
+        """The caller's named-grant exit disclosure, under the same count rules."""
+        snapshot = self.store.grant_exit_snapshot(notebook_id, user_id, claim=False)
+        return MemberExitCounts(snapshot.memory_count, snapshot.suggestion_count)
+
+    def leave_collaboration(
+        self, notebook_id: str, user_id: str, acknowledged_memory_count: int | None,
+    ) -> MemberExitOutcome:
+        """Leave only this edge, counting personal Memory and suggestions apart.
+
+        The claim writes nothing. Finish rechecks surviving authority under the
+        common member/grant locks; adoption after claim keeps that memory and
+        prevents any further deletion. Cleanup follows only a last-edge exit.
+        """
+        return self._leave(
+            notebook_id, user_id, acknowledged_memory_count,
+            snapshot=self.store.grant_exit_snapshot(notebook_id, user_id, claim=True),
+            finish=lambda token, allow: self.store.finish_grant_exit(
+                notebook_id, user_id, token, allow_suggestion_delete=allow
+            ),
+            disclosure=self.collaboration_exit_disclosure,
+        )
+
+    def _leave(
+        self, notebook_id: str, user_id: str, acknowledged_memory_count: int | None, *,
+        snapshot: Any,
+        finish: Callable[[Any, bool], MemberExitCompletion],
+        disclosure: Callable[[str, str], MemberExitCounts],
+    ) -> MemberExitOutcome:
+        """Shared acknowledged purge; only a successful last-edge finish deletes drafts."""
+        claimed, suggestions = snapshot.memory_count, snapshot.suggestion_count
         if (acknowledged_memory_count or 0) != claimed:
-            raise ExitDisclosureRequired(claimed)
-        if not snapshot.is_member or snapshot.keeps_access:
-            self.membership.remove_member(notebook_id, user_id)
-            return 0
+            raise ExitDisclosureRequired(claimed, suggestions)
+        if not snapshot.is_member:
+            return MemberExitOutcome(0, 0)
         deleted = 0
         refs = [(memory_id, notebook_id) for memory_id in snapshot.memory_ids]
         try:
@@ -1376,38 +1592,40 @@ class MemoryService:
                 deleted += self._purge_page(user_id, refs[offset:offset + _PURGE_PAGE])
         except Exception as exc:
             if isinstance(exc, _PurgeCleanupFailed):
-                deleted += exc.deleted  # committed before the cleanup failed
-            self._audit_exit(notebook_id, user_id, deleted, finished=False)
-            raise MemberExitFailed(
-                deleted, self._remaining_after_failure(notebook_id, user_id, claimed - deleted)
-            ) from exc
+                deleted += exc.deleted
+            raise self._exit_failed(notebook_id, user_id, deleted, claimed, disclosure) from exc
         try:
-            remaining, ended = self.store.finish_member_exit(
-                notebook_id, user_id, snapshot.membership_token
-            )
+            # A zero-deletion claim that retained access cannot silently turn
+            # into deleting newly disclosed drafts when the other edge exits.
+            allow = not snapshot.keeps_access or acknowledged_memory_count is not None
+            completed = finish(snapshot.membership_token, allow)
         except Exception as exc:
-            self._audit_exit(notebook_id, user_id, deleted, finished=False)
-            raise MemberExitFailed(
-                deleted, self._remaining_after_failure(notebook_id, user_id, claimed - deleted)
-            ) from exc
-        self._audit_exit(notebook_id, user_id, deleted, finished=not remaining)
-        if remaining:
+            raise self._exit_failed(notebook_id, user_id, deleted, claimed, disclosure) from exc
+        drafts = completed.deleted_suggestion_count
+        remaining = completed.memory_count
+        self._audit_exit(notebook_id, user_id, deleted + drafts, finished=completed.ended)
+        if remaining or (not completed.ended and completed.remaining_suggestion_count):
             if deleted:
-                raise MemberExitIncomplete(deleted, remaining)
-            raise ExitDisclosureRequired(remaining)
-        if not ended:
-            # The claimed membership was ended by someone else meanwhile (the
-            # owner removed the member — and may have added them back: that
-            # new membership is theirs to keep). Its per-member state was
-            # cleaned by that removal.
-            return deleted
+                raise MemberExitIncomplete(deleted, remaining, drafts)
+            raise ExitDisclosureRequired(remaining, completed.remaining_suggestion_count)
+        outcome = MemberExitOutcome(deleted, drafts, ended=completed.ended)
+        if completed.keeps_access or not completed.ended:
+            return outcome
         try:
             self.membership.forget_member_state(notebook_id, user_id)
-        except Exception as exc:  # noqa: BLE001 - the exit itself has finished
-            self.event_log.logger.warning(
-                "member exit overlay cleanup failed (%s)", type(exc).__name__
-            )
-        return deleted
+        except Exception as exc:
+            self.event_log.logger.warning("member exit overlay cleanup failed (%s)", type(exc).__name__)
+        return outcome
+
+    def _exit_failed(
+        self, notebook_id: str, user_id: str, deleted: int, claimed: int,
+        disclosure: Callable[[str, str], MemberExitCounts],
+    ) -> "MemberExitFailed":
+        """Only a committed finish deletes drafts; a failed purge reports exact personal deletions."""
+        self._audit_exit(notebook_id, user_id, deleted, finished=False)
+        return MemberExitFailed(
+            deleted, self._remaining_after_failure(notebook_id, user_id, claimed - deleted, disclosure),
+        )
 
     def _audit_exit(
         self, notebook_id: str, user_id: str, deleted: int, *, finished: bool
@@ -1417,25 +1635,22 @@ class MemoryService:
             self._audit_purge(action, notebook_id, user_id, deleted)
 
     def _remaining_after_failure(
-        self, notebook_id: str, user_id: str, fallback: int
+        self, notebook_id: str, user_id: str, fallback: int,
+        disclosure: Callable[[str, str], MemberExitCounts] | None = None,
     ) -> int:
-        """The leaver's Memory count after a failed purge or finish, read the
-        way the disclosure reads it. When even that read fails (the database
-        is what failed), the claim's own arithmetic — claimed minus deleted —
-        is the best the server knows."""
+        """Read the same edge's remaining personal count, or known purge arithmetic on DB failure."""
         try:
-            return self.exit_disclosure(notebook_id, user_id)
-        except Exception as exc:  # noqa: BLE001 - reporting path of a failure
-            self.event_log.logger.warning(
-                "member exit remaining count failed (%s)", type(exc).__name__
-            )
+            return (disclosure or self.exit_disclosure)(notebook_id, user_id).memory_count
+        except Exception as exc:
+            self.event_log.logger.warning("member exit remaining count failed (%s)", type(exc).__name__)
             return max(fallback, 0)
 
     # ---------------------------------------------------------------- export
     def export_markdown(self, notebook_id: str, user_id: str) -> "MemoryExport":
         """The caller's own Memory in one notebook as a Markdown document,
-        yielded in pieces. Every status is included (candidates are marked —
-        leaving deletes them too); nothing of other users.
+        yielded in pieces. Manual/Agent records and adopted system suggestions
+        are included across statuses (candidates are marked). Unadopted system
+        suggestions are omitted and counted separately; nothing of other users.
 
         Everything is read NOW, before the first piece exists: the read check
         and every item in one snapshot read (``memory_export_snapshot``: one
@@ -1463,7 +1678,8 @@ class MemoryService:
         return MemoryExport(
             title=snapshot.title,
             pieces=self._export_pieces(
-                snapshot.items, snapshot.title, snapshot.delete_after
+                snapshot.items, snapshot.title, snapshot.delete_after,
+                omitted_suggestions=snapshot.omitted_suggestion_count,
             ),
         )
 
@@ -1477,6 +1693,8 @@ class MemoryService:
         items: Sequence[MemoryRecord],
         notebook_title: str,
         delete_after: str | None = None,
+        *,
+        omitted_suggestions: int = 0,
     ) -> Iterator[str]:
         now = self.now()
         yield (
@@ -1486,6 +1704,9 @@ class MemoryService:
             "退出这本共享笔记本时，这里列出的全部记忆都会被永久删除；"
             "退出群组不会删除它们。\n"
         )
+        if omitted_suggestions > 0:
+            # Drafts are not exported (design §6.3); the header says so.
+            yield f"\n另有 {omitted_suggestions} 条未处理的系统建议未导出。\n"
         if delete_after is not None:
             yield (
                 "\n这本笔记本已被所有者删除，"
@@ -1531,6 +1752,21 @@ class MemoryService:
             raise ValueError("answer_ids may contain at most 200 unique values")
         self._require_notebook(notebook_id, user_id)
         return self.store.answer_memory_links(notebook_id, user_id, unique_ids)
+
+    def answer_memory_link_view(
+        self, notebook_id: str, user_id: str, answer_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """``POST /notebooks/{id}/answer-memory-links`` in one read (design
+        §5.3, G15): ``links`` (answer -> memory id, unadopted suggestions left
+        out, exactly ``answer_memory_links``) and ``states`` (answer ->
+        ``{memory_id, status, suggested}``, drafts included)."""
+        unique_ids = list(
+            dict.fromkeys(str(answer_id) for answer_id in answer_ids if answer_id)
+        )
+        if len(unique_ids) > 200:
+            raise ValueError("answer_ids may contain at most 200 unique values")
+        self._require_notebook(notebook_id, user_id)
+        return self.store.answer_memory_link_rows(notebook_id, user_id, unique_ids)
 
     def transfer_out_of_delete_window(
         self, user_id: str, notebook_id: str, target_notebook_id: str,

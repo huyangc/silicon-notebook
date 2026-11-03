@@ -1,7 +1,32 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { setNotebookTier, tierActionState } from "../../app/notebook-tier.ts";
+import { canChangeNotebookTier, setNotebookTier, tierActionState } from "../../app/notebook-tier.ts";
+import { workspaceCapabilities } from "../../app/workspace-transitions.ts";
+import { callSitesIn, findFunction, ifConditionsIn, parseModule } from "../../test-support/semantic-source.mjs";
+
+test("公共知识库切换要求系统管理员和当前笔记本的管理权", () => {
+  for (const role of [undefined, "user", "admin"]) {
+    for (const canManage of [false, true]) {
+      assert.equal(canChangeNotebookTier(role, canManage), role === "admin" && canManage);
+    }
+  }
+  const invitedAdmin = workspaceCapabilities("reader", "admin", true, "", false);
+  assert.equal(invitedAdmin.canWriteNotebook, true);
+  assert.equal(canChangeNotebookTier("admin", invitedAdmin.canManageNotebook), false);
+});
+
+test("级别菜单与发送操作共同使用当前管理权", async () => {
+  const page = await parseModule("page.tsx");
+  const calls = callSitesIn(page).filter(({ target }) => target === "canChangeNotebookTier");
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    assert.deepEqual(call.arguments, ["currentUser?.role", "capabilities.canManageNotebook"]);
+  }
+  assert.ok(ifConditionsIn(findFunction(page, "handleTierAction")).includes(
+    "!currentNotebook || !canChangeNotebookTier(currentUser?.role, capabilities.canManageNotebook)",
+  ));
+});
 
 function withFetchStub(run) {
   const calls = [];

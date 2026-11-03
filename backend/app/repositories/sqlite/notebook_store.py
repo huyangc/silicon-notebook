@@ -14,8 +14,9 @@ from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.notebook_delete_job_store import NotebookDeleteJobStore
 from app.repositories.sqlite.mount_sql import (
-    MOUNT_BASE_NOT_LIVE_EXPR, MOUNT_EFFECTIVE_FOR_VIEWER, MOUNT_GATE_CLOSED_EXPR,
-    MOUNT_JOIN, MOUNT_ORDER, MOUNT_ORIGIN_COLUMN, MOUNT_VALID_EXPR, MOUNT_VIEWER_JOIN,
+    MOUNT_BASE_NOT_LIVE_EXPR, MOUNT_CLOSES_WHEN_SHARED_EXPR, MOUNT_EFFECTIVE_FOR_VIEWER,
+    MOUNT_GATE_CLOSED_EXPR, MOUNT_JOIN, MOUNT_ORDER, MOUNT_ORIGIN_COLUMN, MOUNT_VALID_EXPR,
+    MOUNT_VIEWER_JOIN,
 )
 
 # Knowledge-object statuses that count as "usable" for retrieval and the
@@ -27,6 +28,7 @@ from app.domain.knowledge_contracts import USABLE_STATUSES  # noqa: F401
 from app.repositories.sqlite.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 from app.repositories.sqlite.memory_sql import memory_source_type_predicate
 from app.domain.memory_kg_isolation import NotebookHoldsMemory
+from app.repositories.ports import NotebookHasEditors
 
 # 「这本笔记本里有 Memory 来源」:发布为公共库的拒绝条件(M1,E4-3)。一个参数:笔记本 id。
 # A notebook import that never published, handed to the delete job by
@@ -39,6 +41,13 @@ _ABANDONED_IMPORT_SQL = (
 _HOLDS_MEMORY_SQL = (
     "SELECT 1 FROM sources hm WHERE hm.notebook_id = ? "
     f"AND {memory_source_type_predicate('hm.source_type')} LIMIT 1"
+)
+
+# 这本库还有点名编辑者(分享编辑 P1,PD-8):公共库对所有人只读,不能带着编辑者
+# 发布。与 `_HOLDS_MEMORY_SQL` 一样写进发布那条 UPDATE 自己的 NOT EXISTS。
+_HAS_EDITORS_SQL = (
+    "SELECT 1 FROM notebook_grants eg WHERE eg.notebook_id = ? "
+    "AND eg.principal_type = 'user' AND eg.role = 'editor' LIMIT 1"
 )
 
 
@@ -158,7 +167,8 @@ class NotebookStore:
 
     @staticmethod
     def list_mount_edges(
-        db: sqlite3.Connection, notebook_id: str, viewer_id: str | None = None
+        db: sqlite3.Connection, notebook_id: str, viewer_id: str | None = None,
+        *, with_closes_when_shared: bool = False,
     ) -> list[dict]:
         """全部挂载边(含失效的)。失效边保留展示 + 置灰,不能假装它还在工作。
 
@@ -167,14 +177,22 @@ class NotebookStore:
         (新 owner / 原 owner)改的新名字也该继续流向这个已经无权访问的挂载方
         ——那是一条持续的信息泄露通道,不是一次性的。仅当失效边就是本笔记本
         owner 自己的库(比如自挂,后来因别的原因失效)时才照常显示真实名字,
-        因为库主本就看得到自己的库,没有泄露可言。"""
+        因为库主本就看得到自己的库,没有泄露可言。
+
+        `with_closes_when_shared` 只有库主的 `/bases` 投影传 True(授予编辑者前的
+        警告要读它);检索路径读同一批边时不传,语句与不带这一列时逐字相同。"""
+        closes = (
+            MOUNT_CLOSES_WHEN_SHARED_EXPR + " AS closes_when_shared, "
+            if with_closes_when_shared else ""
+        )
         rows = db.execute(
             "SELECT b.id AS id, b.name AS name, b.tier AS tier, "
             "b.status AS base_status, b.created_by AS base_owner, "
             + MOUNT_VALID_EXPR + " AS ok, "
             + MOUNT_GATE_CLOSED_EXPR + " AS gate_closed, "
             + MOUNT_BASE_NOT_LIVE_EXPR + " AS base_not_live, "
-            "(b.created_by = a.created_by) AS same_owner "
+            + closes
+            + "(b.created_by = a.created_by) AS same_owner "
             + MOUNT_JOIN + MOUNT_ORDER,
             (notebook_id,),
         ).fetchall()
@@ -182,12 +200,16 @@ class NotebookStore:
         return [mount_edge_view(row, viewer_id) for row in rows]
 
     def list_mount_edges_for_notebook(
-        self, notebook_id: str, viewer_id: str | None = None
+        self, notebook_id: str, viewer_id: str | None = None,
+        *, with_closes_when_shared: bool = False,
     ) -> list[dict]:
         """self-connecting 版 list_mount_edges —— facade 一跳委托用(不外传 db)。
         `viewer_id` 是谁在看:失效原因按查看者给(见 app/domain/mount_edges.py)。"""
         with self.database.connect() as db:
-            return self.list_mount_edges(db, notebook_id, viewer_id)
+            return self.list_mount_edges(
+                db, notebook_id, viewer_id,
+                with_closes_when_shared=with_closes_when_shared,
+            )
 
     @staticmethod
     def mounted_by_count(db: sqlite3.Connection, notebook_id: str) -> int:
@@ -400,13 +422,15 @@ class NotebookStore:
                 return
             cur = db.execute(
                 "UPDATE notebooks SET tier=?, updated_at=? WHERE id=? "
-                f"AND NOT EXISTS ({_HOLDS_MEMORY_SQL})",
-                (tier, now, notebook_id, notebook_id),
+                f"AND NOT EXISTS ({_HOLDS_MEMORY_SQL}) "
+                f"AND NOT EXISTS ({_HAS_EDITORS_SQL})",
+                (tier, now, notebook_id, notebook_id, notebook_id),
             )
-            if cur.rowcount == 0 and db.execute(
-                _HOLDS_MEMORY_SQL, (notebook_id,)
-            ).fetchone() is not None:
-                raise NotebookHoldsMemory()
+            if cur.rowcount == 0:
+                if db.execute(_HOLDS_MEMORY_SQL, (notebook_id,)).fetchone() is not None:
+                    raise NotebookHoldsMemory()
+                if db.execute(_HAS_EDITORS_SQL, (notebook_id,)).fetchone() is not None:
+                    raise NotebookHasEditors(notebook_id)
 
     def indexing_pipeline_state(self, notebook_id: str) -> dict[str, str]:
         with self.database.connect() as db:

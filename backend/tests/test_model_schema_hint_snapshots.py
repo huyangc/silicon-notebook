@@ -133,6 +133,8 @@ _LITERAL_HINTS: tuple[tuple[str, str, str | None, tuple[str, ...]], ...] = (
      'model_response_15809580e3191fe9', ('blocks',)),
     ('services/prompts.py', '{"entries":[{"op":"ADD|UPDATE","situation":"s0","action":"exact_lookup","polarity":"good|bad","rationale":""}]}',
      'model_response_59266bcf3a6b4911', ('entries',)),
+    ('services/prompts.py', '{"items":[{"item_id":"","keep":true,"kind":"term|fact|correction","title":"","content":"","tags":[""],"duplicate_of":"","refines":"","conflicts_with_sources":false}]}',
+     'model_response_761d664dbc6a3a7d', ('items',)),
     ('services/repository_facade.py', '{"relevant_ids": [""]}',
      'model_response_801678e3ad61661b', ('relevant_ids',)),
     ('services/source_ingestion.py', '{"summary": ""}',

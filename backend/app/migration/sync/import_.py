@@ -331,6 +331,25 @@ _IMPORT_FINAL_STATUS = "draft"
 _GROUP_PRINCIPAL_TYPES = frozenset({"group", "group_admins"})
 _GRANTS_TABLE = "notebook_grants"
 
+# Named grants (``principal_type='user'``) are never seeded into a mirror
+# (share-edit decision D16). Grants are seed-only: a revocation at the source
+# would never reach the mirror, so a named editor removed at the source would
+# keep reading here, keep the mirror's unshared gate closed and block that
+# account's merge -- and on a mirror every content write is fenced anyway, so
+# the "editor" there could edit nothing. The target manages its own named
+# shares; group and everyone grants still travel.
+_USER_PRINCIPAL_TYPE = "user"
+_USER_GRANT_SKIP_REASON = (
+    "named (principal_type='user') grants are not seeded into a mirror; the "
+    "target manages its own named shares"
+)
+
+
+def _is_user_grant(table: str, row: Mapping[str, Any]) -> bool:
+    return table == _GRANTS_TABLE and str(row.get("principal_type") or "") == (
+        _USER_PRINCIPAL_TYPE
+    )
+
 # A user created by ``--create-missing-users``: no credentials, and the same
 # placeholder email shape a unified-auth account creation mints
 # (``AuthStore.create`` in ``app/repositories/auth_store.py``). Bytes, not
@@ -782,6 +801,9 @@ class ImportReport:
     # because the target is deep-copying their notebook.
     deletes_folded_into_notebook_deletion: int = 0
     deletes_skipped_for_copying: int = 0
+    # ``notebook_grants`` rows with ``principal_type='user'`` this run left out
+    # (decision D16, ``_is_user_grant``); each is also one of ``skipped_rows``.
+    skipped_user_grants: int = 0
     # Rows of a SOURCE-AUTHORITATIVE table (§5) that this environment had
     # created itself and that collided, on a secondary unique key, with a row
     # the window carries. Incremental only: the source owns those tables for
@@ -824,6 +846,7 @@ class ImportReport:
             },
             "skipped_rows": [row.as_json() for row in self.skipped_rows],
             "skipped_row_total": self.skipped_row_total,
+            "skipped_user_grants": self.skipped_user_grants,
             "user_mapping": self.user_mapping.as_json(),
             "files_copied": self.files_copied,
             "warnings": list(self.warnings),
@@ -839,6 +862,7 @@ class _Ledger:
         self.tables: dict[str, TableOutcome] = {}
         self.skipped_rows: list[SkippedRow] = []
         self.skipped_row_total = 0
+        self.skipped_user_grants = 0
         self.files_copied = 0
         self.warnings: list[str] = []
         self.missing_files: list[str] = []
@@ -897,6 +921,7 @@ def _report(
         tables=MappingProxyType(dict(sorted(ledger.tables.items()))),
         skipped_rows=tuple(ledger.skipped_rows),
         skipped_row_total=ledger.skipped_row_total,
+        skipped_user_grants=ledger.skipped_user_grants,
         user_mapping=mapping,
         files_copied=ledger.files_copied,
         warnings=tuple(warnings),
@@ -1555,6 +1580,12 @@ def _map_row(
         else:
             principal = str(row.get("principal_type") or "")
             if principal == "user":
+                # Unreachable for notebook_grants today: the write loop drops a
+                # named grant before mapping it (_is_user_grant, decision D16).
+                # Kept on purpose: without it a 'user' principal would fall
+                # through to the verbatim branch below and carry a SOURCE user
+                # id across, the moment that skip were lifted or another table
+                # gained a principal column.
                 resolved = context.users.get(value)
             elif principal in _GROUP_PRINCIPAL_TYPES:
                 resolved = context.groups.get(value)
@@ -2858,8 +2889,14 @@ def _referenced_users(
             column for column, ref in spec.optional_refs if ref == "notebooks"
         ]
         for row in _iter_lines(context.package_dir / rows_path(table)):
+            if _is_user_grant(table, row):
+                # never written (decision D16): its principal and creator are
+                # nobody this import needs
+                continue
             values = [row.get(column) for column in user_columns]
             if str(row.get("principal_type") or "") == "user":
+                # Unreachable for notebook_grants today (skipped just above);
+                # kept in step with _map_row's defensive 'user' branch.
                 values.extend(row.get(column) for column in principal_columns)
             ids = tuple(value for value in values if isinstance(value, str) and value)
             if not ids:
@@ -5300,6 +5337,13 @@ def _apply_table(
         prepared: list[dict[str, Any]] = []
         for raw in batch:
             decoded = decode_row(raw)
+            if _is_user_grant(table, decoded):
+                skipped += 1
+                context.ledger.skipped_user_grants += 1
+                context.ledger.skip(
+                    table, _row_key(decoded, primary_key), _USER_GRANT_SKIP_REASON
+                )
+                continue
             row, reason = _map_row(table, dict(decoded), context)
             if row is None:
                 skipped += 1

@@ -179,6 +179,19 @@ def test_no_bare_chinese_4xx_http_exception():
 # 写清楚为什么它仍然满足「中文用户文案」这个契约、以及谁在覆盖它。
 # 键用「文件::函数名」而不是行号——行号会被无关改动推移。
 ALLOWED_DYNAMIC_USER_ERROR = {
+    "app/api/kg_routes.py::_named_busy": (
+        "分享编辑 P1(规格 §5):占着知识图谱维护槽的动作是别人发起的时,409 带发起人。"
+        "模板是同函数内的中文 f-string「{名字}发起的{动作}正在运行，请等它完成」;"
+        "动作只取自同文件中文字面量表 _HOLDER_ACTIONS(重新合并/补上关联/删除知识图谱/"
+        "知识冲突检测),名字是发起请求用户的显示名(为空回落用户名),不拼异常原文。"
+        "tests/test_editor_concurrency.py 覆盖真实 409。"
+    ),
+    "app/api/kg_routes.py::_kg_analysis_busy": (
+        "分享编辑 P1(规格 §5):持久分析作业是别人发起的时,409 为中文 f-string"
+        "「{名字}发起的知识图谱分析正在运行」,名字取 running 作业行 created_by 用户的"
+        "显示名(为空回落用户名);发起人是自己或查不到时退回同函数内的中文字面量。"
+        "tests/test_editor_concurrency.py 覆盖真实 409。"
+    ),
     "app/api/memory_routes.py::issue_agent_token": (
         "唯一的动态实参是 app/domain/agent_tools.py 的中文模块常量 OWNER_ONLY_TIERS_MESSAGE(签发/修改 token 勾了「管理」「删除」而白名单里没有自己拥有的笔记本),AgentOwnerOnlyTierError 也只用它构造;另一个动态实参是同文件的中文模块常量 ANSWER_LINKS_REQUIRE_ASK_MESSAGE(开了「允许签发回答链接」却没有问答档),AgentAnswerLinksNeedAskError 只用它构造;都不拼异常原文。tests/test_agent_tools_vocabulary.py 对它们跑词汇守卫;tests/test_agent_tokens.py 覆盖签发与修改两条 422。"
     ),
@@ -286,8 +299,8 @@ ALLOWED_DYNAMIC_USER_ERROR = {
     ),
     "app/api/source_routes.py::_enforce_document_capacity": (
         "detail 是 document_capacity_message(current, limit, adding) 的返回值——同文件内"
-        "的纯中文模板 f-string，只插入这三个整数（「该笔记本最多可添加 N 篇文档，当前"
-        "已有 X 篇，无法再添加 K 篇。」），无内部黑话、只说「文档」。抽成函数是因为 MCP "
+        "的纯中文模板 f-string，只插入这三个整数（「已达到这本笔记本的文档上限：最多 N 篇，"
+        "当前已有 X 篇，无法再添加 K 篇。」），无内部黑话、只说「文档」。抽成函数是因为 MCP "
         "的 Agent 建源工具要复用同一句话（那条路抛 ValueError，不经 user_error）。"
         "真实响应由 tests/test_document_limit.py 的 import/upload/url 三端点 409 用例"
         "覆盖(断言 X-User-Message 头 + 「文档」文案)。"

@@ -30,7 +30,11 @@ from app.models.kg_analysis import (
     KgAnalysisResponse,
     SourceProfilePageResponse,
 )
-from app.repositories.ports import KgBuildAlreadyRunning, KgMaintenanceAlreadyRunning
+from app.repositories.ports import (
+    KgBuildAlreadyRunning,
+    KgCandidateAlreadyDecided,
+    KgMaintenanceAlreadyRunning,
+)
 from app.services import background_jobs
 from app.services.knowledge_contracts import (
     COMMUNITY_OVERVIEW_MAX,
@@ -51,17 +55,46 @@ router = APIRouter()
 # 用词与按钮上的界面词逐字一致;每条都是中文字面量而不是查一张表,好让
 # test_user_error 的 AST 守卫能直接看见它们(动态实参那条路要登记进 allowlist,
 # 为省三行重复而换来一条豁免不划算)。
-def _kg_maintenance_busy(exc: KgMaintenanceAlreadyRunning) -> HTTPException:
+#
+# 分享编辑 P1(规格 §5):占着的动作是**别人**发起的时,文案带上发起人显示名——两个
+# 人一起维护一本库,知道「是谁在跑」才知道该等还是该去问。发起人是自己时照旧(不说
+# 「你自己发起的……」)。名字来自槽登记时记下的请求用户(维护槽,零读取)或持久分析
+# 作业行的 created_by(只在这个 409 上多一次按主键读)。
+_HOLDER_ACTIONS = {
+    "rebuild": "重新合并",
+    "relink": "补上关联",
+    "delete": "删除知识图谱",
+    "conflicts": "知识冲突检测",
+}
+
+
+def _named_busy(name: str, action: str) -> HTTPException:
+    return user_error(409, f"{name}发起的{action}正在运行，请等它完成")
+
+
+def _kg_analysis_busy(notebook_id: str, user: UserProfile) -> HTTPException:
+    """The durable analysis job holds the notebook: name its initiator when
+    that is someone else."""
+    initiator = repository()._runtime.kg_build_jobs.running_initiator(notebook_id)
+    if initiator is not None and initiator[0] != user.id and initiator[1]:
+        return user_error(409, f"{initiator[1]}发起的知识图谱分析正在运行")
+    return user_error(409, "当前笔记本已有知识图谱分析任务正在运行")
+
+
+def _kg_maintenance_busy(
+    exc: KgMaintenanceAlreadyRunning, notebook_id: str, user: UserProfile
+) -> HTTPException:
+    if exc.holder == "buildkg":
+        return _kg_analysis_busy(notebook_id, user)
+    action = _HOLDER_ACTIONS.get(exc.holder)
+    if action is not None and exc.actor_name and exc.actor_id != user.id:
+        return _named_busy(exc.actor_name, action)
     if exc.holder == "rebuild":
         return user_error(409, "当前笔记本正在重新合并，请等它完成")
     if exc.holder == "relink":
         return user_error(409, "当前笔记本正在补上关联，请等它完成")
     if exc.holder == "delete":
         return user_error(409, "当前笔记本正在删除知识图谱，请等它完成")
-    if exc.holder == "buildkg":
-        # 批 3·W2 §2.1:维护动作被在飞的分析作业闸住——文案与 build 侧
-        # 409 逐字同款,用户等的是同一件事。
-        return user_error(409, "当前笔记本已有知识图谱分析任务正在运行")
     return user_error(409, "当前笔记本正在整理知识图谱，请等它完成")
 
 
@@ -87,7 +120,7 @@ def kg_search(
 
 
 @router.post("/notebooks/{notebook_id}/kg/build", dependencies=[Depends(require_notebook_capability("kg:write"))])
-def build_kg(notebook_id: str) -> dict:
+def build_kg(notebook_id: str, user: UserProfile = Depends(get_current_user)) -> dict:
     """按需触发该 notebook 的 KG 建图(后台线程,幂等)。
     已有 knowledge_objects 的 source 会跳过。需 LLM 已配置,否则 409。"""
     repo = repository()
@@ -102,11 +135,11 @@ def build_kg(notebook_id: str) -> dict:
             notebook_id, "incremental", retry_partial=True
         )
     except KgBuildAlreadyRunning:
-        raise user_error(409, "当前笔记本已有知识图谱分析任务正在运行")
+        raise _kg_analysis_busy(notebook_id, user)
     except KgMaintenanceAlreadyRunning as exc:
         # 批 3·W2 §2.1 的另一向:build 被在飞的维护动作(重新合并/补上
         # 关联)闸住——按 holder 点名,不落 500(评审 P1)。
-        raise _kg_maintenance_busy(exc)
+        raise _kg_maintenance_busy(exc, notebook_id, user)
     try:
         background_jobs.submit(
             repo.execute_notebook_kg_job,
@@ -128,7 +161,7 @@ def build_kg(notebook_id: str) -> dict:
 
 
 @router.post("/notebooks/{notebook_id}/kg/rebuild", dependencies=[Depends(require_notebook_capability("kg:write"))])
-def rebuild_kg(notebook_id: str) -> dict:
+def rebuild_kg(notebook_id: str, user: UserProfile = Depends(get_current_user)) -> dict:
     """Full re-extract: clears all KG artefacts then re-extracts ALL sources
     (background thread). Requires LLM configured (409 if not), 404 if notebook
     missing — same guards as build_kg."""
@@ -142,9 +175,9 @@ def rebuild_kg(notebook_id: str) -> dict:
     try:
         job = repo.prepare_notebook_kg_job(notebook_id, "rebuild")
     except KgBuildAlreadyRunning:
-        raise user_error(409, "当前笔记本已有知识图谱分析任务正在运行")
+        raise _kg_analysis_busy(notebook_id, user)
     except KgMaintenanceAlreadyRunning as exc:
-        raise _kg_maintenance_busy(exc)
+        raise _kg_maintenance_busy(exc, notebook_id, user)
     try:
         background_jobs.submit(
             repo.execute_notebook_kg_job,
@@ -165,7 +198,7 @@ def rebuild_kg(notebook_id: str) -> dict:
 
 
 @router.post("/notebooks/{notebook_id}/kg/relink", dependencies=[Depends(require_notebook_capability("kg:write"))])
-def relink_kg(notebook_id: str) -> dict:
+def relink_kg(notebook_id: str, user: UserProfile = Depends(get_current_user)) -> dict:
     """Deterministic reconnection of isolated KG nodes (background thread, no LLM).
 
     Same shape as build/rebuild above. It runs off the request thread because the
@@ -183,7 +216,7 @@ def relink_kg(notebook_id: str) -> dict:
     try:
         job = repo.start_notebook_relink(notebook_id)
     except KgMaintenanceAlreadyRunning as exc:
-        raise _kg_maintenance_busy(exc)
+        raise _kg_maintenance_busy(exc, notebook_id, user)
     try:
         background_jobs.submit(
             repo.run_notebook_relink_job,
@@ -220,7 +253,7 @@ def relink_kg_status(notebook_id: str) -> dict:
 
 
 @router.post("/notebooks/{notebook_id}/kg/delete", dependencies=[Depends(require_notebook_capability("kg:write"))])
-def delete_kg(notebook_id: str) -> dict:
+def delete_kg(notebook_id: str, user: UserProfile = Depends(get_current_user)) -> dict:
     """「删除知识图谱」(background thread). Same shape as kg/relink above.
 
     Deletes the notebook's source-derived KG (objects, relations, concept
@@ -241,7 +274,7 @@ def delete_kg(notebook_id: str) -> dict:
     try:
         job = repo.start_kg_delete(notebook_id)
     except KgMaintenanceAlreadyRunning as exc:
-        raise _kg_maintenance_busy(exc)
+        raise _kg_maintenance_busy(exc, notebook_id, user)
     try:
         background_jobs.submit(
             repo.run_kg_delete_job,
@@ -285,7 +318,7 @@ def delete_kg_status(notebook_id: str) -> dict:
 
 
 @router.post("/notebooks/{notebook_id}/unified-kg/rebuild", dependencies=[Depends(require_notebook_capability("kg:write"))])
-def rebuild_unified_kg(notebook_id: str) -> dict:
+def rebuild_unified_kg(notebook_id: str, user: UserProfile = Depends(get_current_user)) -> dict:
     """「重新合并」(background thread). Same shape as kg/relink above.
 
     It runs off the request thread for the same reason relink does: the work is
@@ -314,7 +347,7 @@ def rebuild_unified_kg(notebook_id: str) -> dict:
     try:
         job = repo.start_unified_kg_rebuild(notebook_id)
     except KgMaintenanceAlreadyRunning as exc:
-        raise _kg_maintenance_busy(exc)
+        raise _kg_maintenance_busy(exc, notebook_id, user)
     try:
         background_jobs.submit(
             repo.run_unified_kg_rebuild_job,
@@ -520,7 +553,7 @@ def reject_merge(notebook_id: str, candidate_id: str) -> dict:
 
 
 @router.post("/notebooks/{notebook_id}/kg/conflicts/resolve", dependencies=[Depends(require_notebook_capability("kg:write"))])
-def resolve_conflicts(notebook_id: str) -> dict:
+def resolve_conflicts(notebook_id: str, user: UserProfile = Depends(get_current_user)) -> dict:
     """Trigger background conflict resolution for a notebook's KG.
 
     Mirrors kg/build: 409 if LLM not configured, 404 if notebook missing,
@@ -548,7 +581,9 @@ def resolve_conflicts(notebook_id: str) -> dict:
         raise user_error(409, "当前笔记本知识图谱规模过大，暂不支持自动冲突检测")
     try:
         job = repo.start_conflict_resolution(notebook_id)
-    except KgMaintenanceAlreadyRunning:
+    except KgMaintenanceAlreadyRunning as exc:
+        if exc.actor_name and exc.actor_id != user.id:
+            raise _named_busy(exc.actor_name, _HOLDER_ACTIONS["conflicts"])
         raise user_error(409, "当前笔记本正在检测知识冲突，请等它完成")
     try:
         background_jobs.submit(
@@ -584,6 +619,10 @@ def confirm_conflict(notebook_id: str, candidate_id: str) -> dict:
         return repository().confirm_conflict(notebook_id, candidate_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Conflict candidate not found")
+    except KgCandidateAlreadyDecided:
+        # 两个人同时处理同一条冲突(分享编辑 P1,规格 §5):后到的一方看到它
+        # 已被处理,而不是一句内部英文。
+        raise user_error(409, "这一项已被处理")
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
@@ -596,6 +635,8 @@ def reject_conflict(notebook_id: str, candidate_id: str) -> dict:
         return {"status": "rejected", "candidate_id": candidate_id}
     except KeyError:
         raise HTTPException(status_code=404, detail="Conflict candidate not found")
+    except KgCandidateAlreadyDecided:
+        raise user_error(409, "这一项已被处理")
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
@@ -738,14 +779,17 @@ def kg_analysis_findings(
     zone: Literal["open", "passed", "dismissed"] = Query("open"),
     limit: int = Query(50, ge=1, le=KG_FINDINGS_PAGE_MAX),
     offset: int = Query(0, ge=0),
+    user: UserProfile = Depends(get_current_user),
 ) -> FindingsPageResponse:
     """问题清单的一页:``open`` 待处理(含「已处理,更新后核验」)/ ``passed``(用户已判定
     不是同一个的 F4、补上关联已无可补的 F5)/ ``dismissed``(已标为正常)。每行带读侧
-    派生的 ``status`` 与涉及来源此刻的样子(主键点查,≤ 一页)。与 /sources 一样不记忆化。"""
+    派生的 ``status`` 与涉及来源此刻的样子(主键点查,≤ 一页),其中 ``uploaded_by_me``
+    按请求者整形(D14:编辑者只能删本人上传的)。与 /sources 一样不记忆化。"""
     return FindingsPageResponse(
         **asdict(
             kg_analysis_service().findings_page(
-                notebook_id, zone=zone, limit=limit, offset=offset
+                notebook_id, zone=zone, limit=limit, offset=offset,
+                viewer_user_id=user.id,
             )
         )
     )

@@ -197,7 +197,7 @@ The user-usage page sorts the complete `GET /api/admin/users` result before pagi
 | `questions_30d` | Notebook/global Ask submissions, including retained records, in the trailing 30 days. |
 | `questions_failed` / `reports_failed` | Only `status='failed'`, including retained activity and global Ask; cancelled is excluded. |
 | `kg_builds` | User-created KG jobs in every status; not retained after notebook deletion. |
-| `memory_count` | User's Memory in live notebooks, excluding `rejected`. |
+| `memory_count` | User's Memory in live notebooks, excluding `rejected` and unadopted system suggestions. |
 | `knowhow_tables` | Tables created by the user in live notebooks, including deep-copy replicas attributed to the copier. |
 | `joined_notebooks` / `groups` | Membership in other users' live shared notebooks / groups. |
 | `conversations` | Deprecated compatibility field; includes the user's global conversations. |
@@ -1063,7 +1063,8 @@ mechanism.
   owner remains an admin. The owner cannot be demoted, removed, or leave until
   ownership is transferred. `created_by` remains immutable creation audit.
 - An **authorization edge** is `(notebook, principal, role)` with `principal ∈
-  {user, group, group_admins, everyone}` and `role ∈ {viewer, admin}`. Every row
+  {user, group, group_admins, everyone}` and `role ∈ {viewer, admin, editor}`
+  (`editor` only on `user` principals; see "Named sharing: editors" below). Every row
   in the table is a *live* grant — the decision predicate applies no status
   filter at all, so there is no "forgot to exclude pending" failure mode. The
   notebook's owner (`created_by`) remains the implicit highest authority.
@@ -1146,7 +1147,7 @@ credential whose owner may have been granted admin long after it was issued, and
 the MCP write tools' blast radius (deleting documents) is what that owner gate was
 created for. The browser HTTP surface widened to admin while the Agent token surface
 did not; that is a deliberate divergence, not an oversight, so group-admin write
-authority exists in the browser UI only.
+authority exists in the browser UI only; the same holds for named editors (share-edit P1, D5).
 
 Administrators additionally hold an **operations bypass on the group dimension**
 — they may read any group's detail and manage any group's members and edges
@@ -1160,6 +1161,205 @@ without the bypass would be a table whose every row 404s. The bypass does **not*
 cover self-service leave (leaving presupposes actually being a member), does not
 fabricate membership (`my_role` still reports empty truthfully), and relaxes no
 notebook-dimension read or write guard.
+
+### Named sharing: editors (share-edit P1)
+
+The owner can add a person by username as an **editor**: one `(user, editor)` grant, effective at once
+(no acceptance step, no "editable link"). Group grants do not offer `editor` (`GRANT_ROLES` unchanged).
+
+**What an editor may do**: change *what is in* the notebook, not *who can see it, what it is called, or
+whether and where it exists*.
+
+- The edit predicate `access_sql.NOTEBOOK_EDIT_SQL` = owner ∪ live grants with `role IN ('admin','editor')`
+  (never `everyone`); containment is write ⊆ admin ⊆ edit ⊆ read. The admin predicate is unchanged, so an
+  `editor` never reaches the admin tier.
+- The capability table gains an `edit` tier: `sources:write`, `kg:write`, `scale_index:write`,
+  `knowhow:write`, `knowledge:write`, `catalog:write`, `agent_profile:write` move from admin to edit -- a group
+  admin's capability set is unchanged cell by cell. New `notebook:collaborate` (always owner, fence False)
+  manages the editor list. `notebook:manage`, `notebook:grant`, `notebook:configure`, `notebook:mount`,
+  `notebook:export`, `notebook:delete` answer an editor 404.
+- Four narrowings (D14): an editor may delete only sources **they uploaded** (an unattributed historical
+  source is 404 too); may `copy` a Knowhow table out but not `move` it; may not delete a whole Knowhow table;
+  may not prune Knowhow history. Row/column/cell deletes, reverts, graph delete/rebuild and clearing
+  retrieval experience stay allowed (history-revertible or rebuildable).
+- Browser-session writes of Knowhow code attachments follow `knowhow:write` (D6, reversing the earlier
+  "session write is owner-only" trade-off): group admins and editors may write, readers get 404.
+- **The Agent/MCP surface is unchanged** (D5): like group admins, an editor's write access exists only in
+  the browser; MCP manage/delete tiers remain owner-only.
+
+| Method | Path | Guard and semantics |
+| --- | --- | --- |
+| `GET` | `/notebooks/{id}/collaborators` | Read guard. The owner gets `{view:"owner", items:[…]}`: every `user`-principal grant (`editor`, legacy `viewer`/`admin` as stored) with username, display name, granter and time; a caller holding a `(user, editor)` grant gets `{view:"editor", editors:[{username, display_name}]}` (D17: editors' names only); anyone else 404 |
+| `PUT` | `/notebooks/{id}/collaborators/{user_id}` | `notebook:collaborate`. **Sets** editor: `(user, viewer)` is upgraded and a legacy `(user, admin)` **downgraded** to editor, id unchanged; already an editor is idempotent (`changed:false`, nobody notified again). Returns `{grant, changed, previous_role}`; a real change rings the user's bell (`notebook_collaborator_granted`). Public library 409, invalid target (missing/disabled/the owner) 400 |
+| `DELETE` | `/notebooks/{id}/collaborators/{user_id}` | Someone else: `notebook:collaborate`, whatever the role; if that user thereby loses all read access their understanding overlay and observations are cleared (as on member removal), otherwise they are only downgraded; Memory is never deleted. Yourself (`user_id` is the caller) = **leaving the collaboration**, exactly the `DELETE /notebooks/{id}/membership` contract (`acknowledged_memory_count`, 204 / 200 `{deleted_memory_count, deleted_suggestion_count}` / 409 `exit_disclosure_required` / 409·503 `exit_incomplete`), and equally idempotent: without a named grant there (already left, never had one, notebook gone) it is 204, or 409 with `memory_count: 0` when Memory was acknowledged -- the same answer for any notebook id, so it discloses nothing |
+| `GET` | `/notebooks/{id}/collaborators/{user_id}/exit-disclosure` | Read guard, the caller only: `memory_count` for personal Memory and `suggestion_count` for unadopted system suggestions; both zero when another read path survives or no named grant exists |
+
+- **Completeness**: `GET /grants` (group / everyone rows) and `GET /collaborators` (all `user` rows) together
+  cover every `notebook_grants` row exactly once, each revocable through its endpoint; `DELETE /grants/{grant_id}`
+  on a `user` row is the same 404 as a missing one. So `user` rows left by sync seeding, history or manual
+  repair are visible to and removable by the owner.
+- **TOCTOU**: PUT locks the notebook row in its write transaction (PG `FOR SHARE`), re-checking owner,
+  liveness and non-public, then upserts. `POST /notebooks/{id}/tier` to `base` while editors exist answers
+  409 「请先移除这本笔记本的编辑者」, mutually exclusive with granting (the same row-lock pairing).
+- **Two exits**: someone who is both a read-only member and an editor leaves the collaboration by dropping
+  only the grant (back to read-only member, Memory kept) and leaves the share by dropping only the membership
+  row (still an editor, Memory kept); only the later of the two discloses and deletes Memory.
+  Both entrances revalidate the last read path under the same lock order. An unacknowledged,
+  initially non-destructive request that newly discovers Memory or drafts after the other exit
+  returns fresh disclosure without writes. Named-grant revocation also clears lost-read
+  suggestion jobs in its own transaction; surviving readers retain their sampling window.
+- **Borrowed mounts (D13)**: the first editor makes a grant row exist, so the notebook's **borrowed**
+  reference libraries stop working for everyone (including the owner's own questions in it); revoking the last
+  editor (with no other members or grants) restores them. Each `GET /notebooks/{id}/bases` item gains
+  `closes_when_shared`: true for an edge valid now only through the borrowed arm (false for same-owner, public,
+  everyone-readable, or already-closed edges); the share dialog lists those and asks for confirmation first.
+- **Projections**: `NotebookSummary.can_manage_content` now means "has edit access"; new `can_manage_notebook`
+  (owner or admin grant), `collaborator_role` (the caller's named-grant role: `"editor"`, or a legacy `"viewer"`/`"admin"`;
+  `""` without a named grant; when non-empty the caller leaves through `DELETE /collaborators/{me}`) and
+  `collaborator_is_member` (whether the caller also has a membership row -- the two-exits cross state; computed
+  only when `collaborator_role` is non-empty, at no extra statement).
+  An editor's notebook enters the notebook list through the `user` branch of `granted_notebook_rows`
+  (`granted_via` empty); `is_shared` and the shared-by-me scope include `user` grants, and
+  `SharedByMeItem.collaborators` lists `[{username, display_name, role, user_id}]` (one statement per owner).
+  Source projections gain `uploaded_by_me` (shaped per caller; the uploader id never goes on the wire), and so
+  does each `live_sources[]` item (`FindingLiveSource`) of `GET /notebooks/{id}/kg-analysis/findings`: true only
+  for the requester's own upload of this notebook (an unattributed source, one outside the notebook or a deleted
+  one is false), so a finding offers an editor 「删除来源…」 only on their own uploads.
+- **Concurrency**: a single `POST /sources/{id}/parse` while that source is being parsed answers 409
+  「这份来源正在解析，请等它完成」 (D8); the batch `POST /notebooks/{id}/sources/reparse` skips busy sources and
+  returns them in `skipped_busy: [source_id]`. When the graph analysis or a maintenance pass was started by
+  **someone else**, the 409 names them by display name (username fallback), e.g. 「张三发起的知识图谱分析正在运行」;
+  your own job keeps the old wording. A conflict-review item already decided answers 409 「这一项已被处理」. The
+  document limit counts against the notebook owner (an editor's upload uses the owner's quota) and its refusal
+  reads 「已达到这本笔记本的文档上限：…」. The browser shows each of these answers beside the button that was
+  refused, never in the page status bar: the named KG 409 beside 整理 / 全部重新分析 / 补上关联 / 重新合并 (in the
+  workspace, the index rows, the KG view sidebar and the findings row), 「这份来源正在解析，请等它完成」 beside the
+  source's 重新解析, and a checkup batch's skipped sources beside its 处理 (「这些来源正在解析，请等它们完成」 when
+  none started, 「另有 N 篇正在解析，已跳过」 when some did).
+- **Knowhow cell optimistic edits (D7)**: the browser's manual saves (plain cell, merged shared cell, accepting
+  a row optimisation) send `expected_before` (per row for a merged cell, plus the anchor guard), compared byte
+  for byte with the stored value. The success response is the stored value from the write transaction (no
+  re-read after commit) and becomes the next baseline; a conflict is 409
+  `{"code":"knowhow_cell_conflict","reason":"content_changed"|"group_changed","message":…,"current":[{row_id,column_id,content_md,mutation_seq}]}`:
+  with `content_changed`, `current` holds every target's stored value read in that transaction (the baseline
+  for "overwrite with mine"); `group_changed` (rows/table gone, anchor designation or group membership moved)
+  offers no overwrite. A never-written cell compares as `""`. Tabs of one browser share saved values over
+  `BroadcastChannel("knowhow-cell:<table_id>")`, so nobody is refused by their own earlier save; a value that
+  arrives while that tab's table read is in flight waits and is merged with the read's reply by commit order.
+  Every cell-save response and conflict value carries the table's persistent `mutation_seq`, captured inside
+  the write transaction; table details return their revision and cells from one consistent read snapshot.
+  Broadcasts carry `[row_id,column_id,content_md,mutation_seq]`. Ordering is per cell: a later reply/message
+  for an older commit cannot replace a newer value or baseline, while an earlier commit to a different cell
+  still applies. An older browser commit matching a newer snapshot may advance only the open editor's
+  baseline; background reads themselves never advance it. Legacy unversioned values cannot replace a
+  versioned value (refresh older tabs to restore cross-tab sharing after an upgrade). A successful local
+  reply from an older server without a saved revision triggers a fresh read: matching values confirm only
+  those cells' baselines, an unexplained change uses the existing conflict controls, and a failed read
+  reports that saving completed but current content could not be confirmed, preserving the draft.
+  Versioned saves do not add that read. 「用我的覆盖」 is a
+  save: on success the cell editor closes like a plain save. API writes without `expected_before` stay last-write-wins.
+- **Cross-environment sync (D16)**: the importer skips the source's `user`-principal grants (editor grants
+  included), counted as `skipped_user_grants`; named grants on a mirror are the target owner's decision.
+- **Account merge (D18)**: an account holding an editor grant (any `user`-principal grant) is `blocking`, so
+  the merge is refused; the owner revokes first and re-grants the kept account after the merge.
+
+### Collaboration pulse
+
+Only `GET /api/notebooks/{id}` sets `collab_pulse` and `pulse_cursor` on
+`NotebookSummary`; other responses leave them null. Null retains the browser's
+last known eligibility. A true detail starts polling with that detail's cursor,
+captured in memory before reading the detail; later detail refreshes do not replace
+an active polling cursor. Private single-user notebooks and readers whose only
+access is public-library or `everyone` access do not start polling. Owners and
+writers remain eligible on public notebooks. This is a refresh hint, not a new
+content read channel or a simultaneous text editor.
+
+`POST /api/notebooks/{id}/pulse` accepts `{since:"epoch:rev"|"", visible:bool}`.
+After session authentication it performs one access-level lookup, otherwise uses
+only process memory. A missing or revoked read path returns 404. The response is
+`{cursor,reset,changes:[{kind,actor_name,at}],viewers:[{user_id,display_name,role}],
+other_reader_count,next_interval_s}`. Writer roles are `owner|admin|editor`;
+readers' identities are absent from presence, including when a reader polls.
+Session and job actors use the user's display name, falling back to username;
+MCP write-tool hints use the token owner's id and Agent profile name.
+`other_reader_count` counts present collaborating readers, not every public reader.
+Changes identify affected areas only: `sources|kg|knowhow|knowledge|catalog|notebook|
+understanding|scale_index`. A kind changed solely by the viewer is omitted while
+the cursor still advances; coalesced peer changes remain visible.
+Source processing settles `sources`, `knowledge`, `kg` and `notebook` hints;
+Knowhow projection settles `knowhow`, `knowledge`, `kg` and `notebook`, covering
+their derived objects and notebook profile. Each area still refreshes through its
+own mounted-view and draft guards.
+Synchronous source deletion (including MCP) and Knowhow table deletion or transfer
+publish the same affected-area sets for each changed notebook. One HTTP action
+still enqueues only its primary activity record per affected notebook. KG maintenance settles `kg`,
+`knowledge` and `notebook`; durable KG builds also settle `sources` extraction
+status, while conflict review remains `kg` only.
+A partially failed table move still notifies its explicitly committed target.
+If source projection cleanup started, source hints conservatively reconcile its
+affected areas without claiming a successful source move. Ordinary failed or
+rolled-back writes emit no hints.
+
+The cursor uses a process epoch and global monotone revision. Reset is required
+for a missing/malformed cursor, a different epoch, a future revision, lost ring
+history, or an eviction after the supplied revision when this notebook's entry
+was not continuously retained. A cold notebook's first change alone is not a
+reset. Hidden tabs stop polling; becoming visible sends one immediate request.
+Requests are single-flight and cancelled or discarded after actor/notebook changes.
+Same-kind refreshes debounce, and only mounted, unedited areas refresh automatically.
+An open current-notebook source detail also mounts the source area when its sidebar
+is collapsed. Refresh preserves the current source-page query and the expanded
+original-text window; an authoritative missing-source response closes the detail,
+while a temporary failure retains the known view with an inline retry. Borrowed
+source details are not refreshed by an unrelated current-notebook hint. With no
+such detail open, the collapsed sidebar performs no source reads; reopening it
+reads the current page. A confirmed source invalidation advances existing content
+consumers even when the visible page's summary metadata is unchanged.
+Editing keeps its draft and offers the inline `有新的改动 · 刷新` control. The second
+consecutive reset requires that explicit refresh; a normal response restores normal
+handling. An epoch returning after a different epoch stops polling and displays
+`协作同步暂不可用`, with a content-free diagnostic event. A 404 stops polling and
+uses the existing access reconciliation path.
+
+`GET /api/notebooks/{id}/activity` requires `notebook:activity` (edit level,
+mirror fence false, pulse kind `none`) and returns `{items:[{id,notebook_id,kind,capability,
+actor_id,actor_name,target,created_at}]}`. It merges bounded recent process-local
+owner changes with persisted non-owner changes. Owner primary activities have a
+separate process-local projection bounded by `NOTEBOOK_ACTIVITY_PANEL_LIMIT` per
+notebook and evicted with that notebook's pulse state. A dependent-area hint does
+not consume another activity slot or overwrite the primary action through
+coalescing. The browser labels this `最近改动`;
+readers have no entry. This is not compliance auditing. Owner writes add no SQL;
+non-owner writes enqueue one short independent insert without delaying the response.
+The dedicated writer has a bounded queue; full queues or failures lose hints and
+emit content-free diagnostics. Actor identity is retained without a users foreign
+key (`audit_kept`); notebook deletion cascades. History is local to the deployment,
+excluded from notebook copying and cross-environment sync.
+
+This table owns the exact settings and protocol rails. All integer settings are
+positive; slow intervals and pool-wait thresholds must be strictly increasing.
+
+| Control | Setting / protocol | Default / invariant |
+| --- | --- | --- |
+| Poll interval | `COLLAB_PULSE_INTERVAL_SECONDS` | 15 seconds |
+| Slower intervals | `COLLAB_PULSE_SLOW_INTERVALS` | `30,60` seconds, above the normal interval |
+| Pool-wait thresholds | `COLLAB_PULSE_POOL_WAIT_SLOW_MS`, `COLLAB_PULSE_POOL_WAIT_VERY_SLOW_MS` | 50 / 200 ms, nonnegative |
+| Per-notebook ring / notebook LRU | `COLLAB_PULSE_RING_SIZE`, `COLLAB_PULSE_MAX_NOTEBOOKS` | 64 changes / 2000 notebooks |
+| Persistent retention / panel limit | `NOTEBOOK_ACTIVITY_RETENTION_DAYS`, `NOTEBOOK_ACTIVITY_PANEL_LIMIT` | 90 days / 50 items |
+| Writer queue | `NOTEBOOK_ACTIVITY_QUEUE_SIZE` | 256 waiting records, one worker |
+| Pool observation / presence TTL | Protocol | rolling 10 seconds / 3 times the response interval |
+| Server coalescing / client same-kind debounce / local result receipt | Protocol | 1 / 2 / 3 seconds |
+
+Touching a notebook is memory-only and unconditional, even without viewers.
+Coalescing moves the latest record to the tail with a greater revision and retains
+all actors. Successful unsafe writes are classified by a closed route inventory:
+capability rules consume guard marks, branch rules consume only explicit committed
+write marks, and `none` ignores both. Previews, private reports and export jobs do
+not publish content changes. Background terminal transitions and successful MCP
+source/build tools also publish hints, fail-open. Job submission captures names;
+only recovered contexts without a name perform a primary-key fallback lookup.
+Offline CLI writes are not observed. Single-process deployment is required;
+restart/epoch reset and opening a notebook provide bounded reconciliation.
 
 ### Group workspace
 
@@ -1221,7 +1421,7 @@ endpoints), plus one read-only addition on the notebook router.
 | `POST /groups/{id}/invite-link/rotate` | group admin (admin recovery bypass) | atomically replace the token; the old link stops resolving immediately |
 | `POST /group-invites/{token}/join` | signed in | atomically join as `member`; idempotently preserves an existing role; invalid/revoked/deleted tokens are 404 |
 | `GET /users/resolve?username=` | any signed-in user | exact username lookup, returns id/username/display name only |
-| `GET /notebooks/{id}/grants` | `notebook:grant` | every edge on the library, all four principal types |
+| `GET /notebooks/{id}/grants` | `notebook:grant` | the library's group and everyone edges (named `user` grants are listed by `GET /notebooks/{id}/collaborators`; together the two cover every row exactly once) |
 | `POST /notebooks/{id}/grants` | `notebook:grant` **and** group admin | only `group` / `group_admins` principals |
 | `DELETE /notebooks/{id}/grants/{grant_id}` | `notebook:grant` | notebook-side revocation |
 | `GET /groups/{id}/shared-notebooks` | group member (admin bypass) | member-visible inventory of libraries shared with this group |
@@ -1929,7 +2129,9 @@ For a UI-to-CLI operational walkthrough and a runnable official-client example, 
 [Agent MCP and Memory onboarding SOP](./agent-mcp-memory-sop.md). This section remains the
 authoritative product/API contract; the SOP owns day-one setup and verification steps.
 
-Memory is manual opt-in, creator-private, and always bound to exactly one notebook. From
+Memory requires the user's explicit confirmation before entering formal Ask,
+search or reports, is creator-private, and is always bound to exactly one notebook. Opt-in system suggestions
+may prepare candidates, as described below. From
 an Ask answer, choose **Save to Memory**: the backend prepares a title/body/tag preview,
 the user may edit it, and only the final confirmation writes a `confirmed` Memory. If the
 preview model is unavailable or fails, the preview deterministically uses the question as
@@ -1944,6 +2146,41 @@ only the signed-in user's records; a notebook's count and Memory tab are the sam
 filtered to that notebook. Its owner-wide total and pending counts do not change when
 status, search, or notebook filters change; the notebook selector comes from a bounded
 owner aggregate rather than per-notebook queries.
+
+**Suggestion review in the browser.** The notebook Memory panel and account-menu
+`私有记忆` page share one actor-wide `记忆建议` switch, including for read-only
+members. Deployment-disabled wiring hides it; an unavailable model explains why
+enabling is disabled beside the control. Closing opens a coordinated confirmation
+whose candidate-only deletion checkbox starts unchecked, counts across readable
+notebooks independently of list filters, and reports actual deletions.
+
+Suggested records keep a `系统建议` source badge after adoption. The source filter
+adds that value; cards show the signal reason, existing title/body/tag editing,
+per-item `采纳` / `忽略`, and `查看原回答` when local conversation provenance can
+be resolved under current authority. Cross-notebook navigation opens the existing
+session only after the target workspace commits. Adoption defaults eligible KG
+extraction on; retiring the referenced older Memory starts unchecked. A temporary
+read failure offers an independent retry while allowing adoption alone. Adoption
+commits first; a retirement failure reports that partial result and retries only
+retirement. Each completed phase refreshes the list and counters.
+Before retrying retirement the browser re-reads the same owner's Memory in the
+same notebook: an already deprecated record completes that phase without another
+transition request; a confirmed record retries retirement. Unreadable or mismatched
+records keep the retry available without claiming success.
+
+The owner-wide line `系统建议：已采纳 N、已忽略 M（含过期）` uses list totals:
+confirmed plus deprecated suggestions are adopted; rejected includes expiry.
+Pending bound suggestions show `有建议` beside answers while preserving their save
+action. For opted-in users viewing Ask, the answer-Memory lookup additionally
+checks unresolved answers after delays of 1, 3 and 10 seconds, then stops. Returning
+to Ask or making the browser document visible performs a fresh lookup, so a job
+finishing after that finite window is observable too. Hidden documents issue no
+suggestion follow-up reads. Owner, notebook and conversation transitions abort
+the old observer and discard late results. Only opted-in users who mark an unsaved
+answer useful see the inline
+`存为记忆` hint; default/manual answer markup and requests are unchanged. Both
+self-exit dialogs separately disclose unadopted suggestions, including a
+suggestions-only exit, offer no draft export/transfer, and report actual cleanup.
 
 That hidden source and its elements are as private as the Memory itself. `GET
 /api/sources/{id}`, its `/elements` and `/elements-page`, the three active-notebook reads
@@ -2013,6 +2250,180 @@ return 422; MCP/internal calls use the same service validation. Nested NaN or po
 infinity is rejected before persistence, while legitimate JSON null round-trips unchanged.
 The MCP proposal envelope uses these exact Core limits and does not impose narrower duplicates.
 The raw tag list is capped before trimming/deduplication, and blank tags are rejected.
+
+### Automatic user-memory suggestions
+
+`UserProfile.memory_mode` defaults to `manual`; unknown stored values also read as
+`manual`. Only `PATCH /api/me/memory-mode` changes the caller's mode. Its body is
+`{"memory_mode":"suggest","delete_unadopted":false}` (`manual` turns it off), and its response is
+`{"user":UserProfile,"deleted_suggestion_count":N}`. Invalid modes return 422.
+Enabling while deployment wiring is disabled (including all signal classes being
+disabled) returns 409 `detail.code="memory_suggest_unavailable"`, with no write.
+`GET /api/system/config` exposes `auto_memory_suggest_enabled` and
+`auto_memory_suggest_model_ready` separately from the personal choice.
+
+The mode transaction updates profile and switch together; turning off removes the
+owner's jobs. Optional deletion runs after commit and deletes only still-candidate
+system suggestions, across notebooks the owner **currently reads**. The count uses
+the same list scope. Adoption between listing and deletion preserves that row.
+Rejected/expired, adopted, manual and Agent rows stay; inaccessible drafts expire
+normally. The response reports actual deletions.
+
+Only the owner's completed notebook-scoped web Ask jobs with `output="answer"` and
+no report are sampled: global/MCP Ask, reports, other users and unfinished answers
+are excluded. `clarified` uses clarification replies; `repeated` clusters related
+questions and chooses a grounded answer, preferring the owner's latest useful
+feedback. `corrected` pairs adjacent turns in the owner's same notebook web
+conversation: the raw immediately preceding turn must independently qualify, so
+an intervening MCP, failed, foreign, other-notebook, report or evidence-only turn cannot be skipped.
+The preceding turn must be within this job's window. Both turns must be strictly
+after the owner's last read loss for this notebook, excluding equality with that boundary.
+The preceding answer's valid save-entry
+timestamp must be no later than the later Ask's creation timestamp; missing or invalid
+timestamps exclude the pair. This is a necessary causal filter, not proof that the
+earlier answer was committed, delivered or read before the follow-up.
+Bounded questions, clarification question/reply pairs, answer excerpts and
+private neighbors are untrusted model input. Runs create only candidates, never
+confirmed Memory or vectors. `suggested_signal` is nullable `clarified|repeated|corrected`;
+stored `origin` remains `ask_answer`. `GET /api/memories?origin=suggested` selects
+suggestions; `origin=ask_answer` excludes them, with or without search. No bulk
+adoption or rejection is added.
+
+Suggestion provenance keeps `question`, `answer_id`, `conversation_id`, `mode` and
+`evidence_level`, plus `suggestion:{signal,kind,answer_ids,cluster_size,refines,conflicts_with_sources}`.
+`kind` is `term|fact|correction`; `refines` is a confirmed neighbor's id or null.
+Repeated suggestions also preserve that owner's answer `citations` and `anchors`.
+These snapshots are private; a stored id does not bypass live navigation authority.
+Every returned model item must include a JSON boolean `conflicts_with_sources`;
+missing, null, numeric or string values reject the whole batch. Shared provider
+schema hints may allow nullable nested scalars; domain validation remains authoritative.
+The marker concerns a contradiction with cited-source claims explicitly present in
+the supplied excerpts; false does not establish that the proposal agrees with every source.
+Corrected provenance records both answer ids in `suggestion.answer_ids`, with
+top-level `answer_id` pointing to the later answer for navigation. Its
+`source_answer_id` is NULL, preserving both answers' manual-save uniqueness slots.
+
+Cards explain corrected suggestions with 「你在追问中纠正了回答」. Only a
+`corrected` row whose `provenance.suggestion.conflicts_with_sources` is the boolean
+`true` displays 「与资料不一致」, including after adoption; other signals and
+legacy/malformed values do not.
+The user still reviews and adopts each proposal before it enters formal retrieval.
+
+This table owns the numeric rails. Budget rows are validated deployment settings;
+algorithm rows are protocol constants.
+
+| Budget / algorithm | Setting or constant | Default / invariant |
+| --- | --- | --- |
+| Deployment / clarified / repeated / corrected gates | `AUTO_MEMORY_SUGGEST_ENABLED`, `AUTO_MEMORY_SUGGEST_CLARIFIED_ENABLED`, `AUTO_MEMORY_SUGGEST_REPEATED_ENABLED`, `AUTO_MEMORY_SUGGEST_CORRECTED_ENABLED` | Each `true`; personal mode stays `manual` |
+| Ask trigger / candidate backlog stop | `AUTO_MEMORY_SUGGEST_TRIGGER`, `AUTO_MEMORY_SUGGEST_BACKLOG_MAX` | 5 / 5 per owner and notebook; clarification replies trigger directly while their class is on |
+| UTC daily calls / signals per run / new candidates per run | `AUTO_MEMORY_SUGGEST_DAILY_CAP`, `AUTO_MEMORY_SUGGEST_ITEMS_PER_RUN`, `AUTO_MEMORY_SUGGEST_CANDIDATES_PER_RUN` | 3 across notebooks / 8 / 3; at most 9 new suggestions per owner per day at defaults |
+| Question / clarification / answer excerpt / total input characters | `AUTO_MEMORY_SUGGEST_QUESTION_MAX_CHARS`, `AUTO_MEMORY_SUGGEST_CLARIFICATION_MAX_CHARS`, `AUTO_MEMORY_SUGGEST_ANSWER_EXCERPT_MAX_CHARS`, `AUTO_MEMORY_SUGGEST_INPUT_MAX_CHARS` | 500 / 500 / 1,500 / 8,000; one shared projection budget |
+| Output tokens | `AUTO_MEMORY_SUGGEST_OUTPUT_MAX_TOKENS` | 1,024 |
+| Candidate expiry / negative-cache lifetime / expiry page | `AUTO_MEMORY_SUGGEST_EXPIRY_DAYS`, `AUTO_MEMORY_SUGGEST_DECLINED_TTL_DAYS`, `AUTO_MEMORY_SUGGEST_EXPIRY_SWEEP_LIMIT` | 30 days / 30 days / 500 rows |
+| External calls per run | Protocol | At most one chat and one batched embedding call; lexical-only neighbors if embedding is unavailable |
+| Repeated clustering | `REPEATED_JACCARD_MIN`, `REPEATED_MIN_CLUSTER_SIZE`, `REPEATED_WINDOW_DAYS`, `REPEATED_WINDOW_LIMIT` | 0.6 / 3 questions / 30 days / latest 40 eligible asks |
+| Clarified and corrected scans / fingerprint basis / cluster fingerprints | `CLARIFIED_SCAN_MAX`, `FINGERPRINT_MIN_TERMS`, `CLUSTER_FINGERPRINT_MAX` | Each scan: 40 ascending asks / 2 terms / 10 |
+| Neighbors per side / vector scan / consecutive failures | `NEIGHBOR_K`, `NEIGHBOR_VECTOR_SCAN_MAX`, `MAX_CONSECUTIVE_FAILURES` | 3 / latest 500 / 3 |
+| Mature adoption deprecation observation | Statistics protocol | 30 days after adoption; deleted rows cannot be counted retrospectively |
+| Signal-class evaluation exit (D11) | Per-class operational review | After at least 100 proposals in a class, adoption below 30% requires disabling that class |
+
+D11 uses the statistics funnel's adoption rate: adopted divided by adopted,
+ignored and expired decisions, excluding pending rows. Establish cumulative
+proposal volume from retained aggregate evidence; deleted rows cannot be
+reconstructed from the current snapshot. Disabling a class is an operator decision.
+
+The job row's lifetime defines the window, starting at its triggering Ask inclusive,
+but never before the current opt-in instant. An older Ask that finishes after
+enabling starts at that boundary, without replaying manual-mode questions.
+Idempotent enabling keeps the same opt-in; disabling then re-enabling starts a new one.
+Sampling and cursor comparisons order UTC instants at full microsecond precision,
+then Ask id only; different timestamp spellings never break an instant tie.
+Successful and `no_signal` runs advance through the common prefix of the ascending
+scans. Clarified and corrected items share ascending Ask order before repeated
+items; truncated or model-kept over-cap items in those ascending classes hold
+the cursor **on the first omitted item,
+inclusive**. Fingerprints prevent duplicate drafts on rescans. An earlier unfinished
+eligible Ask within the cursor window also holds it: read this bound before any
+sampling scan and retain it even if the Ask finishes between reads. Apply the cursor
+predicate before selecting the earliest unfinished Ask, so older out-of-window
+requests cannot hide eligible ones. Truncated repeated clusters do not
+hold this cursor and may need a new question to reappear. `skipped`, `backlog`,
+`disabled` and `daily_cap` do not advance. `model_rejected`, `model_unavailable` and
+`failed` count failures; at the failure threshold the cursor passes the batch and
+the run emits `model_status="gave_up"` (not a new outcome). Startup recovery counts
+an interrupted batch as a failed attempt. Retries wait for a later trigger; attempted
+calls consume reserved quota, while `no_signal` consumes none.
+
+Fingerprints contain hashes only. Proposed fingerprints never expire and survive
+dismissal, expiry and deletion; only the **same fingerprint** is guaranteed not to
+reappear. Short clarification replies incorporate their paired question's keywords,
+and remain separate when their content cannot register a proposed fingerprint.
+Within one batch, matching registrable clarification content is offered once;
+independent content retains its own candidate and cursor/write-cap position.
+No nonexistent persisted options are read. Declined fingerprints expire, cannot downgrade
+proposed ones, and are written after access/switch/claim checks in the same candidate
+transaction. Candidates expire to `rejected` with revision reason `expired`.
+Readiness-following startup, the periodic sweep and claimed jobs run bounded expiry;
+deployment/class switches do not stop hygiene. Rejected rows stay until explicitly
+deleted. Adoption alone schedules vectors and optional KG extraction; `confirm`
+and saving a bound candidate share revision, embedding, KG, lifecycle and sync
+catch-up. Saving a rejected bound suggestion replaces it with manual Memory in one
+transaction, retaining fingerprints. Clarified and corrected suggestions do not occupy
+the answer uniqueness slot. A corrected fingerprint hashes the signal class, notebook,
+sorted keyword basis of the later question and preceding answer id. `refines` never
+edits the older Memory automatically.
+
+`POST /api/notebooks/{id}/answer-memory-links` retains
+`links:{answer_id:memory_id}`, excluding unadopted suggestions, and adds
+`states:{answer_id:{memory_id,status,suggested}}`, including drafts. Both maps choose
+the same row, adopted first if malformed historical duplicates exist. Candidate MCP
+hits add `suggested_by_system:true` only for unadopted suggestions; Agents cannot
+adopt or dismiss them.
+
+| Reader | Unadopted system suggestions (`candidate` or `rejected`) |
+| --- | --- |
+| Formal Ask/search/reports and confirmed probes | Excluded by confirmed-only selection |
+| Own review list, answer states and candidate-capable MCP | Included under existing ownership/access gates |
+| Notebook overview/recent Memory, group-exit preview, delete-window notices, administrator usage | Excluded; count subtraction is in one SQL statement |
+| Content export/count | Excluded; the internal `omitted_suggestion_count` becomes an omission line in nonempty Markdown exports |
+| Exit acknowledgement | Excluded from `memory_count`, separate `suggestion_count`; claimed ids/cleanup cover all states |
+| Generic counts, delete audience and notebook deletion | Existing all-state/superset semantics retained |
+| Cross-environment sync | Adopted (including deprecated) only; children follow the parent, with adoption catch-up |
+
+Exit disclosure and its 409 add `suggestion_count`; completion, incomplete and failure
+bodies add `deleted_suggestion_count`. A zero-memory fast 204 also requires zero
+suggestions; suggestions-only deletion can return 200. Acknowledgement still compares
+only `memory_count`. Adoption after claim is retained and makes exit incomplete;
+an acknowledgement mismatch changes nothing.
+
+Read loss clears relevant jobs after access changes: removal, link unsharing,
+self-exit, grant/bulk revocation, group deletion/exit/removal and admin demotion.
+Group and link-membership mutations clean up in the same write transaction;
+overlapping PostgreSQL read-path removals serialize on the affected notebook roots
+before changing authority. Another surviving read path preserves the job, and delayed
+cleanup also preserves a new window after regrant. A local last-read-loss fence is
+recorded for opted-in readers even before their first job exists. Recreated windows
+cannot cross this fence when an old completion arrives after regrant. Removing one
+of several surviving read paths does not advance it. Reacquisition starts a new window, without replaying the old
+membership period. Other removals retain Memory/fingerprints; destructive self-exit
+clears that window and its fingerprints.
+
+The read-loss time is an open boundary: sampled Ask instants must be strictly
+later, at full microsecond precision. Personal opt-in remains inclusive. An Ask
+at exactly the loss instant is conservatively excluded even after regrant; an
+Ask one microsecond later is eligible. No fence is added while another read arm survives.
+
+The fourth built-in completion observer runs after the original three, after answer
+delivery, with their shared deadline and fail-open isolation. A fresh matching
+manual-mode authentication hint with a stable process epoch skips only this exact
+built-in, with no extra mode SQL. Mode writes invalidate before I/O and after
+commit/rollback; missing/stale or wrong-actor hints fall back to a live primary-key
+read. Reusing an old profile during authentication never re-certifies it; a valid
+fresh request hint may follow the existing copied background ContextVar.
+Enabled users always take the live read and transactional access/switch recheck.
+There is no per-user cache or change to the answer or its prompt.
+
+### Agent access and tokens
 
 The **Agent access** page (`/agents`, a first-level account-menu entry and its only entry point) creates stable Agent profiles and issues tokens. A token has an expiry, a default
 notebook, a notebook allowlist, and the smallest needed set of permission tiers — storage and
@@ -2914,22 +3325,27 @@ deletes write a content-free audit event (notebook, user, count).
 
 Leaving a shared notebook deletes the leaver's own Memory there. Of the actions that end one
 person's access, only that person's own exit deletes anything. Before leaving,
-`GET /notebooks/{id}/membership/exit-disclosure` returns `{"memory_count": N}`, the number of the
-caller's Memory items in that notebook — every status — that leaving would permanently delete now
+`GET /notebooks/{id}/membership/exit-disclosure` returns `{"memory_count": N, "suggestion_count": S}`;
+N counts the caller's Memory in that notebook, except unadopted system suggestions, and S counts
+those suggestions (candidate or rejected). These are what leaving would permanently delete now
 (0 when they are not a member, or would keep reading the notebook as its owner or through a
 direct, group or everyone grant). `DELETE /notebooks/{id}/membership[?acknowledged_memory_count=A]`
 then claims, under the membership row lock, exactly the C items the exit deletes now, and every
 outcome says what the server did, counted by the server:
 
-- C = 0 and A absent or 0: 204; the membership ends (or was already gone); nothing is deleted.
+- C = 0, S = 0 and A absent or 0: 204; the membership ends (or was already gone); nothing is deleted.
 - A ≠ C, including A > 0 when C is 0 (the caller meanwhile lost the membership, gained a grant
-  or moved the items away): 409 `{"detail": {"code": "exit_disclosure_required", "memory_count": C}}`;
+  or moved the items away): 409 `{"detail": {"code": "exit_disclosure_required", "memory_count": C, "suggestion_count": S}}`;
   nothing is deleted and the membership is unchanged.
-- A = C > 0 and the exit finishes: 200 `{"deleted_memory_count": d}`, d being what this request
-  deleted.
+- A = C and the exit finishes after a purge (including suggestions-only): 200
+  `{"deleted_memory_count": d, "deleted_suggestion_count": s}`, the actual deletion counts.
 - A = C > 0, d items were deleted, but r items the caller did not acknowledge exist (saved while
-  the exit ran): 409 `{"detail": {"code": "exit_incomplete", "deleted_memory_count": d,
-  "memory_count": r}}`; the caller is still a member, the d are gone for good, the r remain.
+  the exit ran, including a suggestion adopted after claim): 409
+  `{"detail": {"code": "exit_incomplete", "deleted_memory_count": d,
+  "deleted_suggestion_count": s, "memory_count": r}}`;
+  the caller is still a member, deleted rows are gone, the r remain. Suggestions
+  are deleted only on successful finish, so s is zero on incomplete exits; if no
+  Memory was deleted, a changed count instead returns `exit_disclosure_required`.
 - A = C > 0 and the purge failed part-way: 503 with the same `exit_incomplete` body (d may be 0);
   still a member; some Memory may already be deleted, and a retry — which starts from the
   disclosure again — continues from there.
@@ -4271,17 +4687,17 @@ The final-answer prompt demonstrates one strictly valid JSON object containing b
 
 `reasoning_agent` decisions, `ask_answer` synthesis and the four Deep Report workloads (`report_outline`, `report_sufficiency`, `report_section`, `report_summary`) are strict-JSON-first. If strict parsing fails, the shared repair seam may accept only a complete object-shaped response with recoverable syntax faults such as missing quotes/commas. The repaired object must stay within the schema example's top-level keys, actual booleans remain booleans, enum-like example values remain in vocabulary, non-finite values are refused, and every nonempty string value must still appear verbatim in the raw response. Repair restores delimiters only: the keys and scalar values read in document order must be exactly the sequence the model wrote, so a repair that drops, merges, splits, reorders or authors one is refused as `string_changed` (two adjacent strings `"A" "B",` once came back as body `A` and a key `B","grounded`, silently shortening the body; a repeated key kept only its last value). A backslash inside a string that starts no JSON escape (LaTeX such as `\mathrm{V}`, `50\%`, `\_`) is read literally before this gate for every workload (see below); when it sits next to a real syntax fault the repair reads it the same way, and a string is also verbatim when it appears in the reply's strings decoded that way, which covers an answer mixing `\n` paragraph escapes with LaTeX (deepseek-flash, 2026-09-29). Truncated objects, arrays/scalars, unknown keys, type confusion, and string reconstruction remain malformed responses. A retriever failure degrades to a terminal persisted Ask response instead of aborting the orchestration on an absent result.
 
-That scheduler exit now covers **all 29 chat workloads** in the current registry, not only Ask and Deep Report. The boundary follows the harness principle adopted on 2026-09-14: the prompt must be precise, the shared boundary tolerates the deviations a model plausibly makes, and only the domain parsers stay strict where being wrong would write bad data. Five deviations are absorbed before strict parsing, for every workload and independent of `MODEL_JSON_REPAIR_MODE`, because each has exactly one reading. First, a backslash inside a double-quoted string that starts no JSON escape (not followed by `"`, `\`, `/`, `b`, `f`, `n`, `r`, `t`, or `u` plus four hex digits — LaTeX `\mathrm{V}`, `50\%`, `\_` although the prompt asks for `\\`) has one reading, the characters written: the reply is delivered with each such backslash doubled, so it decodes to exactly those characters, and recorded as a content-free `model_json_repair` event with `status: "escaped"`, `reason: "stray_backslash"`; valid escapes keep their JSON meaning, so LaTeX commands that happen to be valid escapes (`\times`, `\frac`, `\nu`) still decode as JSON defines and only the prompt can prevent them. Second, a raw control character typed inside a string (a newline or tab in an answer) is written as its JSON escape and recorded with `status: "escaped"`, `reason: "control_char"`; whitespace between tokens is untouched. Third, an unescaped `"` inside a **value** string that is followed by text rather than JSON structure (`"所谓"恒流"模式"`, or `\"|DSML|"` with only one of the pair escaped) is read as a character of the text, escaped, and recorded with `status: "escaped"`, `reason: "inner_quote"`. A quote followed by `,`, `}`, `]` or the end closes the string, but only once the string's quotes — escaped ones and those read as text — pair up: with an odd count the closing quote may as well be the partner of the one read as text (`"这种模式叫"恒流"}`, `["a, "b"]`), and the reply keeps its rejection; a quote followed by `:`, by another quote (single or double), or by the start of any JSON value — a literal, a number, `[]`, `["`, `{"` (`["first" null "second"]`; a citation `[k1]` or LaTeX `{x}` is text) may start a key or mark a lost comma, so the reply keeps its rejection too; inside an array every quote that does not close the string is ambiguous (`["first"second"third"]` or `["a" b "c"]` may be items that lost their commas), so this reading applies to object values only, where unkeyed items are not JSON and `"the "foo" mode"` has one reading; key strings never take this reading (a key that swallowed a quote is a restarted or broken reply, not a key). This reading is tried last, because it is the only one that moves a string boundary the model wrote. Fourth, a complete top-level object followed only by stray closing punctuation (`}`, `]`, quotes, backticks, whitespace — a deepseek-flash report section once arrived as a whole valid object plus an extra `"}`), or by the same object written again (whole, repeatedly, or cut short by the token budget; whitespace between tokens may differ, whitespace inside strings must match), is delivered as that object, byte-for-byte, and recorded as a content-free `model_json_repair` event with `status: "trimmed"`, `reason: "trailing_data"`. Anything else after the object — a second object that differs anywhere, a cut copy closed into a different object, `, "key": value}` fields the model meant to include, prose — still fails as `invalid_json`. Fifth, a reply that restarted — one or more fragments, each repeated character for character (whitespace between tokens aside) by the text after it, none ending where a nested value may start (after `:`, `[` or `,`: `{"answer":{"answer":…}}` is a second reading), then a complete object: DeepSeek-V4-Flash answer syntheses arrived as `{"{"answer": …}` from 2026-10-09 and as `{"answer{"answer": …}` and `{"answer":"{"answer": …}` on 2026-10-14 — is delivered as that object, byte-for-byte apart from the escapes above, and recorded as a content-free `model_json_repair` event with `status: "trimmed"`, `reason: "duplicated_open"`. The fragments are dropped before strings are read (a stray quote in them would otherwise flip every string boundary after it), the object must share a top-level field with a non-empty schema hint, and only whitespace, quotes and at most one `}` per dropped fragment may follow it: a fragment the following text does not repeat (two different answers), a `]`, more fields, a second object, or a truncated remainder means the object is a nested value or incomplete, and the reply keeps the rejection reason it had before (`invalid_json`, or `incomplete_object` on repair workloads). The restart scan is linear: each fragment is compared only from the latest restart point and only the eight latest restart points are tried, so a reply that restarted many times is still read and one stuck repeating a fragment is rejected quickly. Concretely, after strict JSON parsing succeeds the boundary **rejects** a reply only when it is unusable to any consumer — not JSON, not an object, empty, truncated, carrying a number JSON itself cannot represent (`NaN`, `Infinity`, an overflowing exponent — a `+inf` confidence would otherwise clamp to the maximum in every numeric consumer), or an object containing none of the expected top-level fields (`{}` included). Every field-level mismatch against the schema example is handled in one of two ways and, either way, recorded as one `model_json_shape` event — except a `null` the strict projection of the same hint would accept (any nested object field, or a root field that projection treats as optional), which prompts ask for to say "unused" and which is therefore dropped without an event in either mode — (`status: "deviation"`, the workload, the safe `support_id`, and a bounded list of `path`/`reason`/`fix` entries such as `enumerate.kind: invalid_enum`; never the reply text), so a prompt whose example has drifted from what the model writes stays visible in `events.jsonl` without costing the caller its reply. A deviation with exactly one sensible reading is **absorbed** by the boundary (`fix` names it): a JSON `null` where the hint advertised a value is dropped, because absent and null mean the same thing to every consumer and a bare string conversion downstream would otherwise turn it into the literal text `None` and persist it as prose; `"true"`/`"false"` for a boolean hint and a numeric string for a number hint are coerced; one scalar where a list of scalars was advertised is wrapped into a one-item list instead of being iterated character by character; a scalar where a list of objects was advertised has no reading and is dropped, so a consumer iterating that collection sees it as absent rather than raising; a reply whose advertised fields were all `null` (or were all dropped) is treated as containing none of them and rejected. Every other mismatch — a wrong scalar type with more than one reading, a value outside an `a|b|c` enum hint, a scalar where an object was advertised, a nested object sharing no key with its example — is **delivered as written** (`fix` empty), and the domain parser applies its own tolerance (narrowing enums, dropping the one unusable item) instead of the whole reply failing. Before this change the same walk rejected on the first mismatch: one hallucinated edge type discarded a whole knowledge-graph extraction window, a `"year": null` failed paper metadata for every non-paper source, and the parsers' own tolerances were unreachable. Because these hints are examples rather than full JSON Schema documents, omitted optional fields remain allowed and this boundary never deletes provider-added fields; the JSON-repair path judges field shape by the same lenient walk and keeps strict only what repair itself could violate (a repaired string must remain verbatim in the raw reply). Every response still rejected at this shared boundary is written to the private analysis-artifact store with the complete model messages, schema hint, raw response, user question when one is explicitly available, and safe `support_id`; ordinary logs and list projections contain none of that content. Background or script calls without request-level notebook identity are still retained under `_unscoped`, so missing Notebook route context cannot make a failure disappear.
+That scheduler exit now covers **all 30 chat workloads** in the current registry, not only Ask and Deep Report. The boundary follows the harness principle adopted on 2026-09-14: the prompt must be precise, the shared boundary tolerates the deviations a model plausibly makes, and only the domain parsers stay strict where being wrong would write bad data. Five deviations are absorbed before strict parsing, for every workload and independent of `MODEL_JSON_REPAIR_MODE`, because each has exactly one reading. First, a backslash inside a double-quoted string that starts no JSON escape (not followed by `"`, `\`, `/`, `b`, `f`, `n`, `r`, `t`, or `u` plus four hex digits — LaTeX `\mathrm{V}`, `50\%`, `\_` although the prompt asks for `\\`) has one reading, the characters written: the reply is delivered with each such backslash doubled, so it decodes to exactly those characters, and recorded as a content-free `model_json_repair` event with `status: "escaped"`, `reason: "stray_backslash"`; valid escapes keep their JSON meaning, so LaTeX commands that happen to be valid escapes (`\times`, `\frac`, `\nu`) still decode as JSON defines and only the prompt can prevent them. Second, a raw control character typed inside a string (a newline or tab in an answer) is written as its JSON escape and recorded with `status: "escaped"`, `reason: "control_char"`; whitespace between tokens is untouched. Third, an unescaped `"` inside a **value** string that is followed by text rather than JSON structure (`"所谓"恒流"模式"`, or `\"|DSML|"` with only one of the pair escaped) is read as a character of the text, escaped, and recorded with `status: "escaped"`, `reason: "inner_quote"`. A quote followed by `,`, `}`, `]` or the end closes the string, but only once the string's quotes — escaped ones and those read as text — pair up: with an odd count the closing quote may as well be the partner of the one read as text (`"这种模式叫"恒流"}`, `["a, "b"]`), and the reply keeps its rejection; a quote followed by `:`, by another quote (single or double), or by the start of any JSON value — a literal, a number, `[]`, `["`, `{"` (`["first" null "second"]`; a citation `[k1]` or LaTeX `{x}` is text) may start a key or mark a lost comma, so the reply keeps its rejection too; inside an array every quote that does not close the string is ambiguous (`["first"second"third"]` or `["a" b "c"]` may be items that lost their commas), so this reading applies to object values only, where unkeyed items are not JSON and `"the "foo" mode"` has one reading; key strings never take this reading (a key that swallowed a quote is a restarted or broken reply, not a key). This reading is tried last, because it is the only one that moves a string boundary the model wrote. Fourth, a complete top-level object followed only by stray closing punctuation (`}`, `]`, quotes, backticks, whitespace — a deepseek-flash report section once arrived as a whole valid object plus an extra `"}`), or by the same object written again (whole, repeatedly, or cut short by the token budget; whitespace between tokens may differ, whitespace inside strings must match), is delivered as that object, byte-for-byte, and recorded as a content-free `model_json_repair` event with `status: "trimmed"`, `reason: "trailing_data"`. Anything else after the object — a second object that differs anywhere, a cut copy closed into a different object, `, "key": value}` fields the model meant to include, prose — still fails as `invalid_json`. Fifth, a reply that restarted — one or more fragments, each repeated character for character (whitespace between tokens aside) by the text after it, none ending where a nested value may start (after `:`, `[` or `,`: `{"answer":{"answer":…}}` is a second reading), then a complete object: DeepSeek-V4-Flash answer syntheses arrived as `{"{"answer": …}` from 2026-10-09 and as `{"answer{"answer": …}` and `{"answer":"{"answer": …}` on 2026-10-14 — is delivered as that object, byte-for-byte apart from the escapes above, and recorded as a content-free `model_json_repair` event with `status: "trimmed"`, `reason: "duplicated_open"`. The fragments are dropped before strings are read (a stray quote in them would otherwise flip every string boundary after it), the object must share a top-level field with a non-empty schema hint, and only whitespace, quotes and at most one `}` per dropped fragment may follow it: a fragment the following text does not repeat (two different answers), a `]`, more fields, a second object, or a truncated remainder means the object is a nested value or incomplete, and the reply keeps the rejection reason it had before (`invalid_json`, or `incomplete_object` on repair workloads). The restart scan is linear: each fragment is compared only from the latest restart point and only the eight latest restart points are tried, so a reply that restarted many times is still read and one stuck repeating a fragment is rejected quickly. Concretely, after strict JSON parsing succeeds the boundary **rejects** a reply only when it is unusable to any consumer — not JSON, not an object, empty, truncated, carrying a number JSON itself cannot represent (`NaN`, `Infinity`, an overflowing exponent — a `+inf` confidence would otherwise clamp to the maximum in every numeric consumer), or an object containing none of the expected top-level fields (`{}` included). Every field-level mismatch against the schema example is handled in one of two ways and, either way, recorded as one `model_json_shape` event — except a `null` the strict projection of the same hint would accept (any nested object field, or a root field that projection treats as optional), which prompts ask for to say "unused" and which is therefore dropped without an event in either mode — (`status: "deviation"`, the workload, the safe `support_id`, and a bounded list of `path`/`reason`/`fix` entries such as `enumerate.kind: invalid_enum`; never the reply text), so a prompt whose example has drifted from what the model writes stays visible in `events.jsonl` without costing the caller its reply. A deviation with exactly one sensible reading is **absorbed** by the boundary (`fix` names it): a JSON `null` where the hint advertised a value is dropped, because absent and null mean the same thing to every consumer and a bare string conversion downstream would otherwise turn it into the literal text `None` and persist it as prose; `"true"`/`"false"` for a boolean hint and a numeric string for a number hint are coerced; one scalar where a list of scalars was advertised is wrapped into a one-item list instead of being iterated character by character; a scalar where a list of objects was advertised has no reading and is dropped, so a consumer iterating that collection sees it as absent rather than raising; a reply whose advertised fields were all `null` (or were all dropped) is treated as containing none of them and rejected. Every other mismatch — a wrong scalar type with more than one reading, a value outside an `a|b|c` enum hint, a scalar where an object was advertised, a nested object sharing no key with its example — is **delivered as written** (`fix` empty), and the domain parser applies its own tolerance (narrowing enums, dropping the one unusable item) instead of the whole reply failing. Before this change the same walk rejected on the first mismatch: one hallucinated edge type discarded a whole knowledge-graph extraction window, a `"year": null` failed paper metadata for every non-paper source, and the parsers' own tolerances were unreachable. Because these hints are examples rather than full JSON Schema documents, omitted optional fields remain allowed and this boundary never deletes provider-added fields; the JSON-repair path judges field shape by the same lenient walk and keeps strict only what repair itself could violate (a repaired string must remain verbatim in the raw reply). Every response still rejected at this shared boundary is written to the private analysis-artifact store with the complete model messages, schema hint, raw response, user question when one is explicitly available, and safe `support_id`; ordinary logs and list projections contain none of that content. Background or script calls without request-level notebook identity are still retained under `_unscoped`, so missing Notebook route context cannot make a failure disappear.
 
 The admin issue projection classifies each stable workload id into seven areas. A shared workload invoked inside report execution is classified as Report rather than by its default area:
 
-| Model area | Current chat workloads (29 total) |
+| Model area | Current chat workloads (30 total) |
 | --- | --- |
 | Ask `ask` | `ask_answer`, `plugin_engine`, `reasoning_agent`, `query_rewrite`, `gap_consult_query`, `external_evidence_answer`, `evidence_refine` |
 | Deep Report `report` | `report_outline`, `report_sufficiency`, `report_section`, `report_summary`, `report_context_compress` |
 | Source processing `source` | `source_summary`, `notebook_metadata`, `paper_metadata`, `chunk_question_generation` |
 | Knowledge `knowledge` | `kg_extract`, `kg_refine`, `kg_glean`, `kg_merge_review`, `kg_concept_description`, `kg_conflict_review`, `schema_induction` |
-| Memory and library understanding `memory` | `memory_preview`, `agent_profile_consolidate` |
+| Memory and library understanding `memory` | `memory_preview`, `agent_profile_consolidate`, `memory_suggest` |
 | Knowhow `knowhow` | `knowhow_optimize`, `knowhow_reformat`, `knowhow_complete` |
 | Retrieval optimization `retrieval` | `retrieval_experience_distill` |
 
@@ -5428,7 +5844,7 @@ The provider returns Markdown plus an ordered tuple of issued handles. Core admi
 
 Deployment plugins may contribute notebook-scoped indexing pipelines whose ids are namespaced under their plugin id and whose descriptors expose only label, description, version, and the two override flags. Parser routing stays on the startup-frozen ProviderChain; users choose only the indexing pipeline, never a parser. `GET /api/notebooks/{id}/indexing-pipeline` is reader-visible and returns the sanitized current selection plus the notebook-local option list and booleans such as `available`, `missing`, and `pending`; it never leaks plugin paths, capability names, stack traces, or loader reasons. `PATCH /api/notebooks/{id}/indexing-pipeline` is admitted by `kg:write`, so owners and group content-managers may switch the desired pipeline while pure readers remain read-only.
 
-The notebook settings surface is intentionally split. Owners and content-managers may edit notebook metadata and switch the indexing pipeline, but only owners may load or mutate mounted reference libraries — reading mounts is `notebook:configure`, changing them is `notebook:mount`, and both remain owner-only. Pure readers still get a read-only settings view that shows the current pipeline and status. Any pipeline change requires an explicit full-rebuild confirmation. PATCH first commits desired `(pipeline_id, version, opaque generation)`, then claims the existing durable `kg_build_jobs` rebuild single-flight and returns `pending` plus its `job_id`; the worker performs the bounded whole-notebook chunk plan, optional core-owned KG run, and eligible scale rebuild. A late worker can publish only while its exact generation still owns the selection. A failed/oversized plan leaves the desired generation pending; GET projects `rebuild_status=failed`, and notebook settings offers both same-pipeline retry and one-click builtin recovery. **Large libraries are locked out of switching to a custom pipeline (batch-3-W3, decision D3)**: when a notebook's active-object count exceeds `INDEXING_PIPELINE_SWITCH_MAX_OBJECTS` (default 200k — a dedicated threshold at the WR-2 failure scale, deliberately not the tiny copy threshold), `begin()` refuses any **non-builtin** target before persisting intent (409 with explicit copy, nothing saved, the current index unaffected). **Reverting to builtin stays allowed** — a large notebook stuck on an absent/failed custom selection has every write fail-closed by `require_write_admission`, and the builtin revert is its only self-service exit; a recovery rebuild that fails again merely returns to the retryable state. An unchanged clean-state save still short-circuits to 200 (a stuck-pending state never matches the unchanged fast path — its revert goes through the exemption instead). GET carries the server truth as `large_library_locked`; the settings panel disables only the custom-pipeline options and the same-pipeline retry button, keeps builtin recovery clickable, and explains inline. The full restructure (per-source transactions + generation-pointer publish) is deferred until real demand.
+The notebook settings surface follows the permission tiers. Owners and group administrators may edit notebook metadata; named editors may only view it. Owners, group administrators, and named editors may switch the indexing pipeline. Only owners may load or mutate mounted reference libraries — reading mounts is `notebook:configure`, changing them is `notebook:mount`, and both remain owner-only. Pure readers still get a read-only settings view that shows the current pipeline and status. Any pipeline change requires an explicit full-rebuild confirmation. PATCH first commits desired `(pipeline_id, version, opaque generation)`, then claims the existing durable `kg_build_jobs` rebuild single-flight and returns `pending` plus its `job_id`; the worker performs the bounded whole-notebook chunk plan, optional core-owned KG run, and eligible scale rebuild. A late worker can publish only while its exact generation still owns the selection. A failed/oversized plan leaves the desired generation pending; GET projects `rebuild_status=failed`, and notebook settings offers both same-pipeline retry and one-click builtin recovery. **Large libraries are locked out of switching to a custom pipeline (batch-3-W3, decision D3)**: when a notebook's active-object count exceeds `INDEXING_PIPELINE_SWITCH_MAX_OBJECTS` (default 200k — a dedicated threshold at the WR-2 failure scale, deliberately not the tiny copy threshold), `begin()` refuses any **non-builtin** target before persisting intent (409 with explicit copy, nothing saved, the current index unaffected). **Reverting to builtin stays allowed** — a large notebook stuck on an absent/failed custom selection has every write fail-closed by `require_write_admission`, and the builtin revert is its only self-service exit; a recovery rebuild that fails again merely returns to the retryable state. An unchanged clean-state save still short-circuits to 200 (a stuck-pending state never matches the unchanged fast path — its revert goes through the exemption instead). GET carries the server truth as `large_library_locked`; the settings panel disables only the custom-pipeline options and the same-pipeline retry button, keeps builtin recovery clickable, and explains inline. The full restructure (per-source transactions + generation-pointer publish) is deferred until real demand.
 
 While `pending`, ordinary source upload/reparse, manual KG build, and scale rebuild writes fail closed. The worker validates bounded chunk proposals for every user-visible ingestion source, computes embeddings outside any publication transaction, and persists each source's chunks, reverse rows, vectors, KG payload, source facts, and extraction outcome into an invisible durable notebook stage. Hidden Memory/Knowhow synthetic products are core-owned, actor-scoped at read time, excluded from the selectable strategy, and never enter that stage. A malformed per-source chunk proposal degrades that source to the builtin chunker with a stable content-free warning; a whole-notebook bound breach writes no live product. A missing or unavailable selected plugin exposes a revert-to-builtin path without preventing ordinary reads of the previously published artifacts.
 
@@ -5673,7 +6089,7 @@ projection for administrators, and never exposes its physical path or source has
 the API.
 
 The same private artifact store also owns `model_output` records. Whenever any of the current
-29 structured chat workloads fails the scheduler's shared JSON syntax/shape contract, the
+30 structured chat workloads fails the scheduler's shared JSON syntax/shape contract, the
 system creates a new immutable case. The list projection contains only its model area, stable
 workload id/display label, failure kind, timestamps, `support_id`, and any available actor,
 notebook, and parent-work linkage. Complete messages, the schema hint, raw response, and an
@@ -5782,10 +6198,10 @@ Explicitly not yet built (a phased sequencing choice, not a silent gap): correla
 - Cross-document concept merge uses deterministic alias normalization plus bounded top-k vector candidates (scales past thousands of concepts); optional LLM pre-review (`POST /notebooks/{id}/unified-kg/merges/review`) confirms/rejects high-confidence near-synonym merges in small batches.
 - LLM-backed KG extraction requires the `kg_extract` workload to be bound in the system model-service TOML; offline smoke tests seed KG objects explicitly when retrieval/governance assertions are needed.
 - Two-tier federation is early: marking a notebook `base`/`personal` (via `POST /notebooks/{id}/tier`), the edge-trust review queue, and promotion (personal→base) all now have dedicated front-end controls in the analysis toolbar; publishing a notebook as a public knowledge base only makes it mountable — tier-aware federation and the base-wins conflict rule activate only for notebooks that explicitly mount it as a reference library.
-- Notebook sharing is link-based copy, read-only membership, or group sharing — not live collaborative editing. Group members may ask questions and write their own deep reports; content management (sources, graph, authorization edges) stays with the owner, and the group-admin write tier is P2.
+- Notebook sharing supports link-based copy, read-only membership, group sharing, and named editors. Named editors can manage notebook content within the editor permissions above; group administrators retain their management permissions. Only the owner can manage named editors or delete the notebook. Knowhow cell edits use persistent-version optimistic conflict checks and synchronize values across tabs in the same browser. The collaboration pulse provides cross-browser presence, recent changes, and safe refresh under the single-API-process contract above; drafts are preserved and unsafe refreshes remain explicit actions.
 - PostgreSQL is the default deployment choice for development and production; SQLite/PostgreSQL selection is direct and atomic through the repository factory. Changing `DATABASE_URL` does not synchronize existing rows; cutover and rollback therefore require stopped writers, verified backups, an external data migration when data already exists, and post-start consistency checks.
 - The `off`-mode PDF fallback uses PyMuPDF4LLM page-chunked Markdown to retain headings, multi-column reading order and reconstructed tables; pypdf is only the last resort if that parser is unavailable or errors. MinerU still provides the authoritative high-fidelity formula/image/complex-scan path. A cloud URL/file parse that fails after retries uses the same local fallback and returns an extracted source with `parse_quality_warning=true`; the source detail explains the risk and offers reparse/delete actions. A later successful MinerU reparse clears the warning. See [PDF parsing with MinerU](./operations.md#pdf-parsing-with-mineru).
-- User memory remains manual opt-in only; no automatic memory behavior has been added.
+- Formal Memory still requires explicit user confirmation; opt-in system suggestions prepare private candidates only (see Automatic user-memory suggestions).
 - A PostgreSQL query cancellation (`psycopg.errors.QueryCanceled` — statement timeout or an administrative cancel) that reaches the top of the request stack on a non-streaming response returns a structured `503` (`detail` plus a machine-readable `code: "query_timeout"`) and emits a `query_timeout` event carrying the paired `kind=http` row's request id, method/path and, when the route names one, `notebook_id` — instead of falling through to a bare, unobservable `500`. On a streaming response that has already started, no status code can be rewritten — the stream aborts, but the same `query_timeout` event (marked `streaming: true`) is still emitted from an outermost ASGI observer. The frontend still shows its existing generic 5xx "service unavailable" copy (no new user-facing text ships; `frontend/app/errors.ts` deliberately generalizes every 5xx). The pre-existing savepoint-bounded probes (e.g. the chunk lexical-recall budget in `knowledge_store.py`) are unaffected — they catch and convert their own `QueryCanceled` into a domain-specific exception before it ever reaches this handler.
 
 

@@ -99,11 +99,94 @@ def test_committed_gold_has_zero_tolerance_leakage_and_quality_floor():
     metrics = run_fixed_gold()
 
     assert metrics["candidate_to_notebook_leaks"] == 0
+    assert metrics["unadopted_suggestion_leaks"] == 0
     assert metrics["cross_user_leaks"] == 0
     assert metrics["cross_notebook_leaks"] == 0
+    # wrong-but-adopted suggestions never out-rank the right memory; the case
+    # count keeps a zero from being vacuous (the gold must keep carrying them)
+    assert metrics["distractor_cases"] >= 2
+    assert metrics["distractor_displacements"] == 0
     assert metrics["recall_at_5"] >= 0.8
     assert metrics["mrr"] >= 0.8
     assert metrics["ndcg"] >= 0.8
+
+
+def test_unadopted_suggestions_are_leaks_in_the_formal_plane_by_stored_metadata():
+    """A candidate or rejected system suggestion is a draft: in the formal
+    plane (``("confirmed",)``) it counts as a leak whether the hit says so
+    itself or only the stored row does; an ADOPTED suggestion is not a leak."""
+    scope = {
+        "draft": {"created_by": "alice", "notebook_id": "nb-a",
+                  "status": "candidate", "suggested_signal": "clarified"},
+        "dismissed": {"created_by": "alice", "notebook_id": "nb-a",
+                      "status": "rejected", "suggested_signal": "repeated"},
+        "adopted": {"created_by": "alice", "notebook_id": "nb-a",
+                    "status": "confirmed", "suggested_signal": "repeated"},
+    }
+
+    def case(hit_ids):
+        return [{
+            "expected": [], "user_id": "alice", "notebook_id": "nb-a",
+            "plane": "notebook", "returned": [_hit(i, "confirmed", 0.5) for i in hit_ids],
+        }]
+
+    assert evaluate_cases(case(["adopted"]), item_scope=scope)[
+        "unadopted_suggestion_leaks"
+    ] == 0
+    assert evaluate_cases(case(["adopted"]), item_scope=scope)[
+        "candidate_to_notebook_leaks"
+    ] == 0
+    # the hit claims "confirmed" but the stored row is an unadopted draft
+    for leaked in ("draft", "dismissed"):
+        metrics = evaluate_cases(case([leaked]), item_scope=scope)
+        assert metrics["candidate_to_notebook_leaks"] == 1, leaked
+        assert metrics["unadopted_suggestion_leaks"] == 1, leaked
+    # a hit that is itself a candidate, identified as a suggestion
+    candidate_hit = [{
+        "expected": [], "user_id": "alice", "notebook_id": "nb-a", "plane": "notebook",
+        "returned": [_hit("draft", "candidate", 0.9)],
+    }]
+    metrics = evaluate_cases(candidate_hit, item_scope=scope)
+    assert metrics["candidate_to_notebook_leaks"] == 1
+    assert metrics["unadopted_suggestion_leaks"] == 1
+
+
+def test_distractor_ranked_ahead_of_expected_memory_is_a_displacement():
+    def run(order):
+        return evaluate_cases([{
+            "expected": ["right"], "distractors": ["wrong"], "plane": "notebook",
+            "user_id": "alice", "notebook_id": "nb-a",
+            "returned": [_hit(i, "confirmed", 0.5) for i in order],
+        }])
+
+    assert run(["right", "wrong"])["distractor_displacements"] == 0
+    assert run(["wrong", "right"])["distractor_displacements"] == 1
+    # the right memory is absent while the distractor made the list
+    assert run(["wrong"])["distractor_displacements"] == 1
+    assert run(["right"])["distractor_displacements"] == 0
+    assert run(["right"])["distractor_cases"] == 1
+
+
+def test_leak_detector_bites_when_candidates_enter_the_formal_plane():
+    """Self-test of the committed gold's probes: serve the formal-plane cases
+    from the candidate-inclusive plane and the unadopted suggestion that
+    matches best shows up and is counted (so a zero above is not a blind
+    detector)."""
+    from app.eval.memory_retrieval import _fixture_retriever
+
+    retriever, scope = _fixture_retriever()
+    hits = retriever.agent_memory_hits(
+        "carol", "clock",
+        "include clock uncertainty margin setup analysis suggestion dismissed",
+        True, 5,
+    )
+    metrics = evaluate_cases([{
+        "expected": ["memory-clock-correct"], "user_id": "carol",
+        "notebook_id": "clock", "plane": "notebook", "returned": hits,
+    }], item_scope=scope)
+
+    assert metrics["candidate_to_notebook_leaks"] >= 1
+    assert metrics["unadopted_suggestion_leaks"] >= 1
 
 
 def test_fixed_gold_invokes_real_memory_retriever(monkeypatch):

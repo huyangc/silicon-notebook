@@ -1,8 +1,8 @@
-import { act, cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { SchemaWriteOutcome } from "../../app/schema-manager.tsx";
 
-import type { NotebookSummary, PendingMerge, UnifiedGraphResp } from "../../app/workspace-model";
+import type { ConceptDetailResp, KgNeighborsResp, NodeContext, NotebookSummary, PendingMerge, UnifiedGraphResp } from "../../app/workspace-model";
 
 const knowledgeApi = vi.hoisted(() => ({
   createNotebookObjectSchema: vi.fn(),
@@ -55,6 +55,9 @@ vi.mock("../../features/kg-maintenance/kg-api.ts", async (importOriginal) => ({
 }));
 
 import { useKgWorkspace } from "../../app/use-kg-workspace";
+import { useCollabPulse } from "../../app/use-collab-pulse";
+import { KG_BUSY_NOTICE_HOLD_MS } from "../../app/use-kg-graph";
+import { humanizedError } from "../../app/errors";
 import {
   KG_DELETE_BUSY_MESSAGE,
   KG_DELETE_FAILED_MESSAGE,
@@ -152,6 +155,15 @@ function deleteStatus(
 
 function graph(vizBuilding = false): UnifiedGraphResp {
   return { nodes: [], edges: [], viz_building: vizBuilding };
+}
+
+async function expandNeighborhood(nodeId: string, neighborhood: KgNeighborsResp): Promise<void> {
+  const held = deferred<KgNeighborsResp>();
+  kgApi.fetchKgNeighbors.mockReturnValueOnce(held.promise);
+  let selecting!: Promise<void>;
+  act(() => { selecting = value!.selectNode(nodeId); });
+  // A real network reply arrives after the selected-id ref commits.
+  await act(async () => { held.resolve(neighborhood); await selecting; });
 }
 
 function candidate(id = "merge-a"): PendingMerge {
@@ -268,6 +280,343 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   cleanup();
+  vi.unstubAllGlobals();
+});
+
+test("collaboration graph refresh retains range, filters and selection while updating graph, pending reviews and node reads", async () => {
+  kgApi.fetchUnifiedGraph.mockResolvedValue({ ...graph(), nodes: [
+    { id: "node-a", object_type: "entity", payload: { name: "A" } },
+    { id: "node-b", object_type: "concept", payload: { name: "B" } },
+  ] });
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchKgDeleteStatus).toHaveBeenCalledOnce());
+  await act(async () => value!.openGraph());
+  await act(async () => value!.changeRange(160));
+  act(() => value!.toggleType("entity"));
+  await act(async () => value!.selectNode("node-a"));
+  const nodeReads = kgApi.fetchKgNeighbors.mock.calls.length;
+  kgApi.fetchPendingMerges.mockResolvedValue([candidate("from-colleague")]);
+  let refreshed = false;
+  await act(async () => { refreshed = await value!.refreshForCollaboration(); });
+  expect(refreshed).toBe(true);
+  expect(value!.graph.rangeLimit).toBe(160);
+  expect(value!.graph.selectedNodeId).toBe("node-a");
+  expect(value!.graph.selectedTypes).toEqual(["entity"]);
+  expect(value!.graph.pendingMerges[0]?.id).toBe("from-colleague");
+  expect(kgApi.fetchUnifiedGraph).toHaveBeenLastCalledWith("notebook-a", 160);
+  expect(kgApi.fetchKgNeighbors.mock.calls.length).toBe(nodeReads + 1);
+});
+
+function selectedConceptDetail(name: string): ConceptDetailResp {
+  return { canonical_id: "node-a", canonical_name: name, members: [], attached: [],
+    evidence: [{ source_id: "source-a", source_title: name, element_id: "element-a", element_type: "text", location_label: "1", quoted_span: name, confidence: 1 }],
+    member_total: 0, next_cursor: null };
+}
+
+function selectedNodeContext(name: string): NodeContext {
+  return { id: "node-a", object_type: "concept", name, section_path: "", definition: `${name} definition`,
+    steps: [{ name: `${name} step`, element_text: `${name} evidence` }], occurrences: [] };
+}
+
+async function openSelectedConcept() {
+  const nodes = ["node-a", "node-b"].map((id) => ({ id, object_type: "concept", payload: { name: id } }));
+  kgApi.fetchUnifiedGraph.mockResolvedValue({ ...graph(), nodes });
+  kgApi.fetchConceptDetail.mockResolvedValue(selectedConceptDetail("known"));
+  kgApi.fetchNodeContext.mockResolvedValue(selectedNodeContext("known"));
+  const panel = render(<Harness />);
+  await act(async () => value!.openGraph());
+  await expandNeighborhood("node-a", { nodes, edges: [] });
+  expect(value!.graph.conceptDetail?.canonical_name).toBe("known");
+  expect(value!.graph.nodeContext?.definition).toBe("known definition");
+  return panel;
+}
+
+test.each(["detail", "context", "both"] as const)("collaboration %s 503 preserves selected content and the real pulse retry receipt", async (failure) => {
+  await openSelectedConcept();
+  const known = value!.graph;
+  kgApi.fetchConceptDetail.mockResolvedValue(selectedConceptDetail("fresh"));
+  kgApi.fetchNodeContext.mockResolvedValue(selectedNodeContext("fresh"));
+  if (failure !== "context") kgApi.fetchConceptDetail.mockRejectedValueOnce(humanizedError("稍后重试", 503));
+  if (failure !== "detail") kgApi.fetchNodeContext.mockRejectedValueOnce(humanizedError("稍后重试", 503));
+  const reads = kgApi.fetchUnifiedGraph.mock.calls.length;
+  // The real pulse owner must defer dirty editors, then retain its receipt
+  // when this graph owner cannot confirm the selected detail snapshot.
+  let safe = false;
+  const snapshot = { ...notebook("notebook-a"), collab_pulse: true, pulse_cursor: "epoch:1" };
+  const sessionSignal = new AbortController().signal;
+  const refresh = vi.fn(async () => {
+    if (!await value!.refreshForCollaboration()) throw new Error("unconfirmed graph");
+  });
+  vi.useFakeTimers();
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ cursor: "epoch:2", reset: false,
+    changes: [{ kind: "kg", actor_name: "同事", at: "now" }], viewers: [], other_reader_count: 0, next_interval_s: 15 })));
+  const pulse = renderHook(() => useCollabPulse({ actorId: "user-a", notebookId: snapshot.id, notebook: snapshot,
+    sessionSignal, effects: { isMounted: () => true, canRefresh: () => safe, refresh, accessLost: vi.fn() } }));
+  act(() => {
+    const ticket = pulse.result.current.beginNotebookTransition({ actorId: "user-a", notebookId: snapshot.id, workspaceEpoch: 1 });
+    pulse.result.current.finishNotebookTransition(ticket!, snapshot);
+  });
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  expect(pulse.result.current.view.pending).toEqual(["kg"]);
+  expect(refresh).not.toHaveBeenCalled();
+  expect(kgApi.fetchUnifiedGraph).toHaveBeenCalledTimes(reads);
+  expect(value!.graph.conceptDetail).toBe(known.conceptDetail);
+  safe = true;
+  await act(async () => { await pulse.result.current.refreshPending(); });
+  expect(pulse.result.current.view.pending).toEqual(["kg"]);
+  expect(value!.graph.conceptDetail).toBe(known.conceptDetail);
+  expect(value!.graph.nodeContext).toBe(known.nodeContext);
+  expect(value!.graph.graph).toBe(known.graph);
+  expect(value!.graph.selectedNodeId).toBe("node-a");
+  expect(value!.graph.rangeBusy).toBe(false);
+  expect(refresh).toHaveBeenCalledTimes(1);
+  await act(async () => { await pulse.result.current.refreshPending(); });
+  expect(pulse.result.current.view.pending).toEqual([]);
+  expect(value!.graph.conceptDetail?.canonical_name).toBe("fresh");
+  expect(value!.graph.nodeContext?.definition).toBe("fresh definition");
+  expect(value!.graph.nodeContext?.steps?.[0].element_text).toBe("fresh evidence");
+  expect(refresh).toHaveBeenCalledTimes(2);
+  expect(kgApi.fetchUnifiedGraph).toHaveBeenCalledTimes(reads + 2);
+});
+
+test.each(["neither", "detail", "context", "both"] as const)("collaboration confirms selected content with authoritative absence in %s", async (absent) => {
+  await openSelectedConcept();
+  kgApi.fetchConceptDetail.mockResolvedValue(selectedConceptDetail("fresh"));
+  kgApi.fetchNodeContext.mockResolvedValue(selectedNodeContext("fresh"));
+  if (absent === "detail" || absent === "both") kgApi.fetchConceptDetail.mockRejectedValueOnce(humanizedError("此项已不存在", 404));
+  if (absent === "context" || absent === "both") kgApi.fetchNodeContext.mockRejectedValueOnce(humanizedError("此项已不存在", 404));
+  await act(async () => { expect(await value!.refreshForCollaboration()).toBe(true); });
+  expect(value!.graph.selectedNodeId).toBe("node-a");
+  expect(value!.graph.conceptDetail?.canonical_name ?? null).toBe(absent === "detail" || absent === "both" ? null : "fresh");
+  expect(value!.graph.nodeContext?.definition ?? null).toBe(absent === "context" || absent === "both" ? null : "fresh definition");
+});
+
+test("collaboration clears selected concept detail when the selected node was deleted", async () => {
+  await openSelectedConcept();
+  const detailReads = kgApi.fetchConceptDetail.mock.calls.length;
+  const contextReads = kgApi.fetchNodeContext.mock.calls.length;
+  kgApi.fetchUnifiedGraph.mockResolvedValue(graph());
+  kgApi.fetchKgNeighbors.mockRejectedValueOnce(humanizedError("此项已不存在", 404));
+  await act(async () => { expect(await value!.refreshForCollaboration()).toBe(true); });
+  expect(value!.graph.selectedNodeId).toBeNull();
+  expect(value!.graph.conceptDetail).toBeNull();
+  expect(value!.graph.nodeContext).toBeNull();
+  expect(kgApi.fetchConceptDetail).toHaveBeenCalledTimes(detailReads);
+  expect(kgApi.fetchNodeContext).toHaveBeenCalledTimes(contextReads);
+});
+
+test("a KG delete completing during collaboration detail reads invalidates their commit", async () => {
+  await openSelectedConcept();
+  const held = deferred<NodeContext>();
+  kgApi.fetchNodeContext.mockReturnValueOnce(held.promise);
+  let updating!: Promise<boolean>;
+  act(() => { updating = value!.refreshForCollaboration(); });
+  await waitFor(() => expect(kgApi.fetchNodeContext).toHaveBeenCalledTimes(2));
+  vi.useFakeTimers();
+  await act(async () => value!.startKgDelete("notebook-a"));
+  kgApi.fetchUnifiedGraph.mockResolvedValue(graph());
+  kgApi.fetchKgDeleteStatus.mockResolvedValue(deleteStatus("succeeded", { job_id: "delete-a" }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(value!.graph.deleting).toBe(false);
+  await act(async () => { held.resolve(selectedNodeContext("stale")); expect(await updating).toBe(false); });
+  expect(value!.graph.selectedNodeId).toBeNull();
+  expect(value!.graph.conceptDetail).toBeNull();
+  expect(value!.graph.nodeContext).toBeNull();
+  expect(value!.graph.graph?.nodes).toEqual([]);
+});
+
+test.each(["selection", "actor", "notebook", "ABA"] as const)("late collaboration detail cannot overwrite a newer %s owner", async (change) => {
+  const panel = await openSelectedConcept();
+  const held = deferred<NodeContext>();
+  kgApi.fetchNodeContext.mockReturnValueOnce(held.promise);
+  kgApi.fetchConceptDetail.mockResolvedValue(selectedConceptDetail("stale"));
+  let updating!: Promise<boolean>;
+  act(() => { updating = value!.refreshForCollaboration(); });
+  await waitFor(() => expect(kgApi.fetchNodeContext).toHaveBeenCalledTimes(2));
+  if (change === "actor") panel.rerender(<Harness actorId="user-b" />);
+  if (change === "notebook" || change === "ABA") panel.rerender(<Harness notebookId="notebook-b" />);
+  if (change === "ABA") panel.rerender(<Harness />);
+  if (change !== "selection") await act(async () => value!.openGraph());
+  kgApi.fetchConceptDetail.mockResolvedValue(selectedConceptDetail("current"));
+  kgApi.fetchNodeContext.mockResolvedValue(selectedNodeContext("current"));
+  await expandNeighborhood(change === "selection" ? "node-b" : "node-a", { nodes: [], edges: [] });
+  await act(async () => {
+    held.resolve(selectedNodeContext("stale"));
+    expect(await updating).toBe(false);
+  });
+  expect(value!.graph.selectedNodeId).toBe(change === "selection" ? "node-b" : "node-a");
+  expect(value!.graph.conceptDetail?.canonical_name).toBe("current");
+  expect(value!.graph.nodeContext?.definition).toBe("current definition");
+});
+
+test("collaboration reloads expanded knowledge context while keeping the page and filter", async () => {
+  render(<Harness />);
+  await act(async () => value!.enterKnowledge());
+  await act(async () => value!.selectKnowledgeStatus("reviewed"));
+  await act(async () => value!.goToKnowledgePage(2));
+  kgApi.fetchNodeContext.mockResolvedValue({ id: "knowledge-a", object_type: "procedure", name: "old context", section_path: "", definition: null, steps: [], occurrences: [] });
+  await act(async () => value!.loadKnowledgeContext("knowledge-a"));
+  expect(value!.knowledge.contexts["knowledge-a"]?.name).toBe("old context");
+  kgApi.fetchNodeContext.mockResolvedValue({ id: "knowledge-a", object_type: "procedure", name: "fresh context", section_path: "", definition: null, steps: [{ name: "new step", element_text: "fresh evidence" }], occurrences: [] });
+  let refreshed = false;
+  await act(async () => { refreshed = await value!.refreshKnowledgeForCollaboration(); });
+  expect(refreshed).toBe(true);
+  expect(value!.knowledge.contexts["knowledge-a"]?.name).toBe("fresh context");
+  expect(value!.knowledge.page).toBe(2);
+  expect(value!.knowledge.statusFilter).toBe("reviewed");
+  expect(knowledgeApi.listKnowledge).toHaveBeenLastCalledWith("notebook-a", "concept", "reviewed", 100, 50);
+});
+
+test("a late expanded context cannot overwrite the context reloaded by collaboration", async () => {
+  render(<Harness />);
+  await act(async () => value!.enterKnowledge());
+  const old = deferred<Awaited<ReturnType<typeof kgApi.fetchNodeContext>>>();
+  kgApi.fetchNodeContext.mockReturnValueOnce(old.promise);
+  let oldRead!: Promise<void>;
+  act(() => { oldRead = value!.loadKnowledgeContext("knowledge-a"); });
+  const oldSignal = kgApi.fetchNodeContext.mock.calls.at(-1)?.[3] as AbortSignal;
+  const fresh = { id: "knowledge-a", object_type: "concept", name: "fresh", section_path: "", definition: null, steps: null, occurrences: [] };
+  kgApi.fetchNodeContext.mockResolvedValue(fresh);
+  await act(async () => { await value!.refreshKnowledgeForCollaboration(); });
+  expect(oldSignal.aborted).toBe(true);
+  expect(value!.knowledge.contexts["knowledge-a"]?.name).toBe("fresh");
+  await act(async () => { old.resolve({ ...fresh, name: "stale" }); await oldRead; });
+  expect(value!.knowledge.contexts["knowledge-a"]?.name).toBe("fresh");
+});
+
+test("failed expanded context refresh stays retryable and unopened knowledge stays lazy", async () => {
+  render(<Harness />);
+  await act(async () => value!.enterKnowledge());
+  await act(async () => { await value!.refreshKnowledgeForCollaboration(); });
+  expect(kgApi.fetchNodeContext).not.toHaveBeenCalled();
+  await act(async () => value!.loadKnowledgeContext("knowledge-a"));
+  kgApi.fetchNodeContext.mockRejectedValueOnce(new Error("temporary"));
+  let refreshed = true;
+  await act(async () => { refreshed = await value!.refreshKnowledgeForCollaboration(); });
+  expect(refreshed).toBe(false);
+  expect(value!.knowledge.contexts["knowledge-a"]?.name).toBe("");
+  await act(async () => { refreshed = await value!.refreshKnowledgeForCollaboration(); });
+  expect(refreshed).toBe(true);
+  expect(value!.knowledge.contexts["knowledge-a"]?.name).toBe("A");
+});
+
+test("expanded context refreshed for another owner cannot repopulate the next account", async () => {
+  const panel = render(<Harness />);
+  await act(async () => value!.enterKnowledge());
+  await act(async () => value!.loadKnowledgeContext("knowledge-a"));
+  const pending = deferred<Awaited<ReturnType<typeof kgApi.fetchNodeContext>>>();
+  kgApi.fetchNodeContext.mockReturnValueOnce(pending.promise);
+  let refresh!: Promise<boolean>;
+  act(() => { refresh = value!.refreshKnowledgeForCollaboration(); });
+  await waitFor(() => expect(kgApi.fetchNodeContext).toHaveBeenCalledTimes(2));
+  panel.rerender(<Harness actorId="user-b" />);
+  let refreshed = true;
+  await act(async () => {
+    pending.resolve({ id: "knowledge-a", object_type: "concept", name: "old account", section_path: "", definition: null, steps: null, occurrences: [] });
+    refreshed = await refresh;
+  });
+  expect(refreshed).toBe(false);
+  expect(value!.knowledge.contexts).toEqual({});
+});
+
+test("collaboration knowledge refresh retains the user's page and reports refused stale owners", async () => {
+  render(<Harness />);
+  await act(async () => value!.enterKnowledge());
+  await act(async () => value!.goToKnowledgePage(2));
+  expect(value!.knowledge.page).toBe(2);
+  let refreshed = false;
+  await act(async () => { refreshed = await value!.refreshKnowledgeForCollaboration(); });
+  expect(refreshed).toBe(true);
+  expect(value!.knowledge.page).toBe(2);
+  expect(knowledgeApi.listKnowledge).toHaveBeenLastCalledWith("notebook-a", "concept", "", 100, 50);
+  const late = deferred<UnifiedGraphResp>();
+  await act(async () => value!.openGraph());
+  kgApi.fetchUnifiedGraph.mockReturnValueOnce(late.promise);
+  let promise!: Promise<boolean>;
+  act(() => { promise = value!.refreshForCollaboration(); });
+  act(() => value!.leaveWorkspace());
+  await act(async () => { late.resolve(graph()); refreshed = await promise; });
+  expect(refreshed).toBe(false);
+  expect(value!.graph.open).toBe(false);
+});
+
+test.each(["success", "failure"] as const)("collaboration %s releases the range busy window it supersedes", async (outcome) => {
+  render(<Harness />);
+  await act(async () => value!.openGraph());
+  const heldRange = deferred<UnifiedGraphResp>();
+  kgApi.fetchUnifiedGraph.mockReturnValueOnce(heldRange.promise);
+  let changing!: Promise<void>;
+  act(() => { changing = value!.changeRange(160); });
+  expect(value!.graph.rangeBusy).toBe(true);
+  if (outcome === "failure") kgApi.fetchUnifiedGraph.mockRejectedValueOnce(new Error("synthetic read failure"));
+  await act(async () => { await value!.refreshForCollaboration().catch(() => false); });
+  await act(async () => { heldRange.resolve(graph()); await changing; });
+  expect(value!.graph.rangeBusy).toBe(false);
+  expect(value!.graph.rangeLimit).toBe(160);
+});
+
+test("an older collaboration completion cannot release a newer manual range request", async () => {
+  render(<Harness />);
+  await act(async () => value!.openGraph());
+  const heldCollab = deferred<UnifiedGraphResp>();
+  const heldRange = deferred<UnifiedGraphResp>();
+  kgApi.fetchUnifiedGraph.mockReturnValueOnce(heldCollab.promise).mockReturnValueOnce(heldRange.promise);
+  let updating!: Promise<boolean>;
+  let changing!: Promise<void>;
+  act(() => { updating = value!.refreshForCollaboration(); });
+  act(() => { changing = value!.changeRange(320); });
+  await act(async () => { heldCollab.resolve(graph()); await updating; });
+  expect(value!.graph.rangeBusy).toBe(true);
+  await act(async () => { heldRange.resolve(graph()); await changing; });
+  expect(value!.graph.rangeBusy).toBe(false);
+  expect(value!.graph.rangeLimit).toBe(320);
+});
+
+test("collaboration replaces an out-of-range selected neighborhood's payload and removes its vanished nodes and edges", async () => {
+  const outside = { id: "outside", object_type: "entity", payload: { name: "old name" } };
+  const gone = { id: "gone-neighbor", object_type: "entity", payload: { name: "removed" } };
+  const fresh = { id: "new-neighbor", object_type: "entity", payload: { name: "new" } };
+  render(<Harness />);
+  await act(async () => value!.openGraph());
+  await expandNeighborhood(outside.id, { nodes: [outside, gone], edges: [{ source_object_id: outside.id, target_object_id: gone.id, edge_type: "uses", support_count: 1 }] });
+  expect(value!.graph.merged?.nodes.find((node) => node.id === outside.id)?.payload.name).toBe("old name");
+  kgApi.fetchKgNeighbors.mockResolvedValueOnce({ nodes: [{ ...outside, payload: { name: "updated name" } }, fresh], edges: [{ source_object_id: outside.id, target_object_id: fresh.id, edge_type: "uses", support_count: 4 }] });
+  await act(async () => value!.refreshForCollaboration());
+  expect(value!.graph.merged?.nodes.find((node) => node.id === outside.id)?.payload.name).toBe("updated name");
+  expect(value!.graph.merged?.nodes.some((node) => node.id === gone.id)).toBe(false);
+  expect(value!.graph.merged?.edges).toEqual([{ source_object_id: outside.id, target_object_id: fresh.id, edge_type: "uses", support_count: 4 }]);
+  expect(value!.graph.selectedNodeId).toBe(outside.id);
+});
+
+test.each(["empty", "404"] as const)("collaboration removes a deleted out-of-range selection and its ghosts on %s", async (outcome) => {
+  const outside = { id: "outside", object_type: "entity", payload: { name: "removed" } };
+  render(<Harness />);
+  await act(async () => value!.openGraph());
+  await expandNeighborhood(outside.id, { nodes: [outside], edges: [] });
+  expect(value!.graph.merged?.nodes.some((node) => node.id === outside.id)).toBe(true);
+  if (outcome === "404") kgApi.fetchKgNeighbors.mockRejectedValueOnce(humanizedError("此项已不存在", 404));
+  else kgApi.fetchKgNeighbors.mockResolvedValueOnce({ nodes: [], edges: [] });
+  await act(async () => value!.refreshForCollaboration());
+  expect(value!.graph.merged?.nodes.some((node) => node.id === outside.id)).toBe(false);
+  expect(value!.graph.selectedNodeId).toBeNull();
+  expect(value!.graph.nodeContext).toBeNull();
+});
+
+test.each(["success", "failure"] as const)("collaboration %s only supersedes an older pending selection when its fresh snapshot commits", async (outcome) => {
+  render(<Harness />);
+  await act(async () => value!.openGraph());
+  const held = deferred<KgNeighborsResp>();
+  kgApi.fetchKgNeighbors.mockReturnValueOnce(held.promise);
+  let selecting!: Promise<void>;
+  act(() => { selecting = value!.selectNode("outside"); });
+  const old = { id: "outside", object_type: "entity", payload: { name: "original selection" } };
+  const fresh = { ...old, payload: { name: "fresh selection" } };
+  if (outcome === "failure") kgApi.fetchUnifiedGraph.mockRejectedValueOnce(new Error("synthetic read failure"));
+  else kgApi.fetchKgNeighbors.mockResolvedValueOnce({ nodes: [fresh], edges: [] });
+  await act(async () => { await value!.refreshForCollaboration().catch(() => false); });
+  await act(async () => { held.resolve({ nodes: [old], edges: [] }); await selecting; });
+  expect(value!.graph.merged?.nodes.find((node) => node.id === "outside")?.payload.name).toBe(outcome === "success" ? "fresh selection" : "original selection");
+  expect(value!.graph.rangeBusy).toBe(false);
 });
 
 test("content reads stay lazy while owner recovery only probes maintenance status", async () => {
@@ -661,6 +1010,7 @@ test("relink also re-claims its slot before a retry POST that follows an all-idl
   await act(async () => value!.startRelink());
   expect(kgApi.relinkKg).toHaveBeenCalledTimes(2);
   expect(value!.graph.relinking).toBe(true);
+  expect(value!.graph.busyNotice).toBe("");
 });
 
 test("rebuild also re-claims its slot before a retry POST that follows an all-idle adoption", async () => {
@@ -672,6 +1022,7 @@ test("rebuild also re-claims its slot before a retry POST that follows an all-id
   await act(async () => value!.startRebuild());
   expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(2);
   expect(value!.graph.rebuilding).toBe(true);
+  expect(value!.graph.busyNotice).toBe("");
 });
 
 async function refusedDeleteWithUnknownAdoption() {
@@ -1211,4 +1562,78 @@ test("owner-hidden knowledge/graph view fields stay referentially stable across 
     expect(later.graph.selectedTypes).toBe(first.graph.selectedTypes);
     expect(later.graph.pendingMerges).toBe(first.graph.pendingMerges);
   }
+});
+
+// 分享编辑 P1(D8):别人发起的知识图谱分析正在运行时,「整理」被服务端 409 拒绝并点名占用者。
+// 那是这颗按钮的结果:落在按钮旁(graph.busyNotice)、自带计时消失,不经 reportError / 状态条。
+test("整理撞上 409:点名文案落在按钮旁并按自己的计时消失,不报错", async () => {
+  vi.useFakeTimers();
+  kgApi.buildKg.mockRejectedValueOnce(humanizedError("张三发起的知识图谱分析正在运行", 409));
+  render(<Harness />);
+  await act(async () => value!.startKgBuild());
+  expect(value!.graph.busyNotice).toBe("张三发起的知识图谱分析正在运行");
+  // 说明只画在被挡下的那一颗旁边:标明是「整理」(不是全部重新分析 / 补上关联 / 重新合并)。
+  expect(value!.graph.busyNoticeAction).toBe("build");
+  expect(value!.graph.buildingKg).toBe(false);
+  expect(effects.reportError).not.toHaveBeenCalled();
+  await act(async () => { await vi.advanceTimersByTimeAsync(KG_BUSY_NOTICE_HOLD_MS + 50); });
+  expect(value!.graph.busyNotice).toBe("");
+  expect(value!.graph.busyNoticeAction).toBeNull();
+});
+
+test("全部重新分析撞上 409:说明标给「全部重新分析」那一颗", async () => {
+  vi.useFakeTimers();
+  kgApi.rebuildKg.mockRejectedValueOnce(humanizedError("李四发起的知识图谱分析正在运行", 409));
+  render(<Harness />);
+  await act(async () => value!.startKgBuild(true));
+  expect(value!.graph.busyNotice).toBe("李四发起的知识图谱分析正在运行");
+  expect(value!.graph.busyNoticeAction).toBe("rebuild_all");
+  expect(effects.reportError).not.toHaveBeenCalled();
+});
+
+test.each(["relink", "rebuild"] as const)("%s 的忙碌原因先就地显示，随后领养仍在运行的作业", async (kind) => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchRelinkStatus).toHaveBeenCalledOnce());
+  await waitFor(() => expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledOnce());
+  const probe = deferred<{
+    job_id: string; notebook_id: string; status: "running"; running: true;
+  }>();
+  const message = "王五发起的知识图谱分析正在运行";
+  const submit = kind === "relink" ? kgApi.relinkKg : kgApi.rebuildUnifiedKg;
+  const read = kind === "relink" ? kgApi.fetchRelinkStatus : kgApi.fetchUnifiedKgRebuildStatus;
+  submit.mockRejectedValueOnce(humanizedError(message, 409));
+  read.mockReturnValueOnce(probe.promise);
+
+  let pending!: Promise<unknown>;
+  await act(async () => {
+    pending = kind === "relink" ? value!.startRelink() : value!.startRebuild();
+  });
+  expect(value!.graph.busyNotice).toBe(message);
+  expect(value!.graph.busyNoticeAction).toBe(kind === "relink" ? "relink" : "merge");
+  await act(async () => {
+    probe.resolve({ job_id: "another-writer", notebook_id: "notebook-a", status: "running", running: true });
+    await pending;
+  });
+  expect(submit).toHaveBeenCalledOnce();
+  expect(kind === "relink" ? value!.graph.relinking : value!.graph.rebuilding).toBe(true);
+  expect(value!.graph.busyNotice).toBe(message);
+  expect(effects.reportError).not.toHaveBeenCalled();
+});
+
+test.each(["relink", "rebuild"] as const)("%s 在忙碌后的重试失败时清除旧忙碌原因", async (kind) => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchRelinkStatus).toHaveBeenCalledOnce());
+  await waitFor(() => expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledOnce());
+  const failure = new Error("gateway unavailable");
+  const submit = kind === "relink" ? kgApi.relinkKg : kgApi.rebuildUnifiedKg;
+  submit.mockRejectedValueOnce(humanizedError("王五发起的知识图谱分析正在运行", 409))
+    .mockRejectedValueOnce(failure);
+  await act(async () => {
+    await (kind === "relink" ? value!.startRelink() : value!.startRebuild());
+  });
+  expect(submit).toHaveBeenCalledTimes(2);
+  expect(effects.reportError).toHaveBeenCalledWith(failure);
+  expect(value!.graph.busyNotice).toBe("");
+  expect(value!.graph.busyNoticeAction).toBeNull();
+  expect(kind === "relink" ? value!.graph.relinking : value!.graph.rebuilding).toBe(false);
 });

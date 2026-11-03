@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 from app.repositories.ports import AskRequestKeyConflict
 from app.services.cancellation import AskCancelled
+from app.services.memory_suggest_trigger import had_clarification_answers
 # 待确认中心「进行中的提问」的推送入口。模块级 import 是安全的:``pending_bus``
 # 是叶子模块(只依赖 asyncio/threading/time),不会与本模块构成 import SCC。
 from app.services.pending_bus import publish_snapshot
@@ -158,7 +159,7 @@ class AskExecutionCoordinator:
         job_submitter: BackgroundJobSubmitter,
         event_log: "EventLogger",
         ask: "Callable[[], AskServicePort]",
-        note_ask_completed: "Callable[[str, str, str], None] | None" = None,
+        note_ask_completed: "Callable[..., None] | None" = None,
         follow_poll_seconds: float = 0.5,
     ) -> None:
         self.ask_state = ask_state
@@ -311,7 +312,11 @@ class AskExecutionCoordinator:
                 # event. Only the ``done`` path signals: a cancelled or
                 # failed ask says nothing about how this person searches, and
                 # counting it would let a broken provider drive the threshold.
-                self._note_ask_completed(notebook_id, user_id, mode_id)
+                self._note_ask_completed(
+                    notebook_id, user_id, mode_id, ask_job_id=job_id,
+                    submitted_via=submitted_via,
+                    had_clarification=had_clarification_answers(response),
+                )
             except AskCancelled:
                 self._finish(job_id, "cancelled")
                 events.put({"event": "cancelled"})
@@ -462,9 +467,15 @@ class AskExecutionCoordinator:
         return events
 
     def _note_ask_completed(
-        self, notebook_id: str, user_id: str, mode_id: str
+        self, notebook_id: str, user_id: str, mode_id: str, *,
+        ask_job_id: str = "", submitted_via: str = "", had_clarification: bool = False,
     ) -> None:
         """Signal the startup-frozen completed-observer host — fail-open.
+
+        The three keyword facts feed the auto user-memory trigger (design
+        2026-10-28 §4.1): this job's ``ask_jobs.id``, the entry point the row
+        was created with, and whether the finalized understanding carried
+        clarification answers. They are passed through verbatim.
 
         ⚠ This runs INSIDE the worker's ``try``, whose ``except Exception``
         finishes the job as *failed* and delivers an error event. An exception
@@ -497,7 +508,10 @@ class AskExecutionCoordinator:
         if self.note_ask_completed is None:
             return
         try:
-            self.note_ask_completed(notebook_id, user_id, mode_id)
+            self.note_ask_completed(
+                notebook_id, user_id, mode_id, ask_job_id=ask_job_id,
+                submitted_via=submitted_via, had_clarification=had_clarification,
+            )
         except Exception:  # noqa: BLE001 — an answer was delivered; keep it that way
             self.event_log.logger.exception(
                 "agent profile ask notification failed for notebook %s", notebook_id

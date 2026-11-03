@@ -40,6 +40,7 @@ from app.repositories.sqlite.sharing_store import SharingStore
 from app.repositories.sqlite.source_store import SourceStore
 from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
 from app.repositories.sqlite.answer_link_store import AnswerLinkStore
+from app.repositories.sqlite.memory_suggest_store import MemorySuggestStore
 from app.repositories.sqlite.ask_intent_handle_store import AskIntentHandleStore
 from app.repositories.sqlite.wish_store import WishStore
 
@@ -88,6 +89,7 @@ class SqlitePersistenceBundle(PersistenceBundle):
     wishes: WishStore
     ask_intent_handles: AskIntentHandleStore
     answer_links: AnswerLinkStore
+    memory_suggest: MemorySuggestStore
 
 
 class SqlitePersistenceBundleFactory:
@@ -167,6 +169,7 @@ class SqlitePersistenceBundleFactory:
         wishes = WishStore(database, new_id=seams.new_id, now=seams.now)
         ask_intent_handles = AskIntentHandleStore(database, now=seams.now)
         answer_links = AnswerLinkStore(database, now=seams.now)
+        memory_suggest = MemorySuggestStore(database, new_id=seams.new_id)
         return SqlitePersistenceBundle(
             database=database,
             identity=identity,
@@ -199,4 +202,5 @@ class SqlitePersistenceBundleFactory:
             wishes=wishes,
             ask_intent_handles=ask_intent_handles,
             answer_links=answer_links,
+            memory_suggest=memory_suggest,
         )

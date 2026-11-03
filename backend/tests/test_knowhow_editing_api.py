@@ -593,11 +593,13 @@ def test_patch_cell_success(tmp_path, monkeypatch):
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
+    assert body["mutation_seq"] > table["mutation_seq"]
     assert body == {
         "row_id": row["id"],
         "column_id": column_id,
         "content_md": "增加阻尼电阻",
         "projection_status": body["projection_status"],
+        "mutation_seq": body["mutation_seq"],
     }
     assert body["projection_status"] in ("pending", "syncing", "synced")
 

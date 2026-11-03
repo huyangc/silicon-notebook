@@ -12,6 +12,10 @@
 //      `exit_incomplete`(带 deleted_memory_count 与 memory_count)。客户端展示的每个数字
 //      都取自这些响应,不自己算。
 //
+// 两条出口同一份合同(分享编辑 P1,PD-11):成员关系走 `.../membership`;点名授权(编辑者,
+// 以及同步/历史留下的只读、管理权限点名授权)走 `.../collaborators/{我自己的 id}`——告知、
+// 确认数、204/200/409/503 逐一相同,两者都幂等(没有那一行时 204)。`ExitRoute` 选其一。
+//
 // 请求全部经共享 transport(api-client)。DELETE 用 `performApiRequest` 而不是
 // `requestVoid`:409/503 的正文要读出数字,而 `throwHumanizedHttpError` 会把它压平成一句
 // 泛化文案。其余失败仍走 `throwHumanizedHttpError`。
@@ -26,36 +30,54 @@ const TAG = "notebook-exit";
 const EXIT_DISCLOSURE_REQUIRED = "exit_disclosure_required";
 const MEMORY_LIST_PAGE = 100;
 
-export type ExitDisclosure = { memory_count: number };
+export type ExitDisclosure = { memory_count: number; suggestion_count: number };
 
 const membershipPath = (notebookId: string) =>
   `/notebooks/${encodeURIComponent(notebookId)}/membership`;
 
+/** 退出哪一条:成员关系,或「我自己」的点名授权。 */
+export type ExitRoute =
+  | { kind: "membership" }
+  | { kind: "collaborator"; userId: string };
+
+export const MEMBERSHIP_EXIT: ExitRoute = { kind: "membership" };
+
+const exitPath = (notebookId: string, route: ExitRoute): string =>
+  route.kind === "membership"
+    ? membershipPath(notebookId)
+    : `/notebooks/${encodeURIComponent(notebookId)}/collaborators/${encodeURIComponent(route.userId)}`;
+
 const isCount = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value >= 0;
+
+const suggestionCount = (value: unknown): number | null =>
+  value === undefined ? 0 : isCount(value) ? value : null;
 
 /** 离开这本笔记本会删掉「我自己」多少条记忆。形状不对一律当失败——不能凭一个读不懂的
  *  回答就放人退出。 */
 export async function getExitDisclosure(
   notebookId: string,
   signal?: AbortSignal,
+  route: ExitRoute = MEMBERSHIP_EXIT,
 ): Promise<ExitDisclosure> {
   const disclosure = await requestJson<ExitDisclosure>(
-    `${membershipPath(notebookId)}/exit-disclosure`,
+    `${exitPath(notebookId, route)}/exit-disclosure`,
     { tag: TAG, signal },
   );
   if (!isCount(disclosure?.memory_count)) throw new Error("malformed exit disclosure");
-  return { memory_count: disclosure.memory_count };
+  const suggestions = suggestionCount(disclosure.suggestion_count);
+  if (suggestions === null) throw new Error("malformed exit disclosure");
+  return { memory_count: disclosure.memory_count, suggestion_count: suggestions };
 }
 
 /** 一次 DELETE 的结果。每个数字都来自服务端的响应,客户端不自己算。 */
 export type LeaveOutcome =
   /** 204 或 200:成员关系已结束。`deleted` 是服务端数到的、这次请求删掉的条数(204 没删,为 0)。 */
-  | { kind: "left"; deleted: number }
+  | { kind: "left"; deleted: number; deletedSuggestions: number }
   /** 409 exit_disclosure_required:确认过的条数与服务端此刻数到的不一致。什么都没删,仍是成员。 */
-  | { kind: "disclosure"; memoryCount: number }
+  | { kind: "disclosure"; memoryCount: number; suggestionCount: number }
   /** 409 / 503 exit_incomplete:已删 `deleted` 条,没有退出成功(仍是成员),还剩 `remaining` 条。 */
-  | { kind: "incomplete"; deleted: number; remaining: number; status: 409 | 503 }
+  | { kind: "incomplete"; deleted: number; deletedSuggestions: number; remaining: number; status: 409 | 503 }
   /** 网络失败、超时、读不懂的 5xx:不知道服务端做到了哪一步,不能说「失败」。 */
   | { kind: "unknown" };
 
@@ -81,33 +103,48 @@ async function structuredDetail(response: Response): Promise<Record<string, unkn
 export async function leaveNotebook(
   notebookId: string,
   acknowledgedMemoryCount = 0,
+  route: ExitRoute = MEMBERSHIP_EXIT,
 ): Promise<LeaveOutcome> {
   const query = acknowledgedMemoryCount > 0
     ? `?acknowledged_memory_count=${acknowledgedMemoryCount}`
     : "";
   let response: Response;
   try {
-    response = await performApiRequest(`${membershipPath(notebookId)}${query}`, {
+    response = await performApiRequest(`${exitPath(notebookId, route)}${query}`, {
       method: "DELETE",
       tag: TAG,
     });
   } catch {
     return { kind: "unknown" };
   }
-  if (response.status === 204) return { kind: "left", deleted: 0 };
+  if (response.status === 204) return { kind: "left", deleted: 0, deletedSuggestions: 0 };
   if (response.ok) {
-    const body = (await response.json().catch(() => null)) as { deleted_memory_count?: unknown } | null;
-    return { kind: "left", deleted: isCount(body?.deleted_memory_count) ? body.deleted_memory_count : 0 };
+    const body: unknown = await response.json().catch(() => null);
+    if (typeof body !== "object" || body === null || Array.isArray(body)) return { kind: "unknown" };
+    const counts = body as Record<string, unknown>;
+    if (!isCount(counts.deleted_memory_count)) return { kind: "unknown" };
+    const suggestions = suggestionCount(counts.deleted_suggestion_count);
+    if (suggestions === null) return { kind: "unknown" };
+    return {
+      kind: "left",
+      deleted: counts.deleted_memory_count,
+      deletedSuggestions: suggestions,
+    };
   }
   if (response.status === 409 || response.status === 503) {
     const detail = await structuredDetail(response.clone());
     if (detail?.code === EXIT_DISCLOSURE_REQUIRED && response.status === 409 && isCount(detail.memory_count)) {
-      return { kind: "disclosure", memoryCount: detail.memory_count };
+      const suggestions = suggestionCount(detail.suggestion_count);
+      if (suggestions === null) return { kind: "unknown" };
+      return { kind: "disclosure", memoryCount: detail.memory_count, suggestionCount: suggestions };
     }
     if (detail?.code === EXIT_INCOMPLETE && isCount(detail.deleted_memory_count) && isCount(detail.memory_count)) {
+      const suggestions = suggestionCount(detail.deleted_suggestion_count);
+      if (suggestions === null) return { kind: "unknown" };
       return {
         kind: "incomplete",
         deleted: detail.deleted_memory_count,
+        deletedSuggestions: suggestions,
         remaining: detail.memory_count,
         status: response.status,
       };
@@ -120,21 +157,31 @@ export async function leaveNotebook(
 /** 退出之后服务端实际处于哪种状态(用于结果不明时核对)。 */
 export type ExitState =
   | { left: true }
-  | { left: false; remaining: number };
+  | { left: false; remaining: number; suggestionCount: number };
 
 /**
- * 重读笔记本列表与告知条数,判断此刻是「已退出」还是「仍是成员、还剩几条记忆」。
- * 列表里没有这本库,或者它只剩群组授权(退出之后靠授权继续读)都算已退出。
- * 经个人授权或「所有人」授权继续可读的库同样算已退出:笔记本列表只列自有库、成员行
- * 和群组授权(`list_for_user`),这两种授权从来不进列表,退出之后这本库就不在列表里了;
- * 仍在列表里又不是群组授权,就只能是成员行还在。
- * 任何一步读不到就抛出——调用方据此说「无法确认」,不猜。
+ * 重读笔记本列表与告知条数,判断此刻**这一条出口**是「已退出」还是「仍在、还剩几条记忆」。
+ *
+ * 判据看这本库在列表里还挂着哪条路(分享编辑 P1 起点名授权也进列表):
+ *  - 成员关系:持有点名授权时看 `collaborator_is_member`;没有点名授权时,仍在列表里又
+ *    不是群组授权,就只能是成员行还在(「所有人」授权从不进列表)。
+ *  - 点名授权:`collaborator_role` 为空即已退出。
+ * 列表里没有这本库,两条都算已退出。任何一步读不到就抛出——调用方据此说「无法确认」,不猜。
  */
-export async function readExitState(notebookId: string): Promise<ExitState> {
+export async function readExitState(
+  notebookId: string,
+  route: ExitRoute = MEMBERSHIP_EXIT,
+): Promise<ExitState> {
   const notebooks = await requestJson<NotebookSummary[]>("/notebooks", { tag: TAG });
   const entry = notebooks.find((notebook) => notebook.id === notebookId);
-  if (!entry || isGroupGranted(entry)) return { left: true };
-  return { left: false, remaining: (await getExitDisclosure(notebookId)).memory_count };
+  if (!entry) return { left: true };
+  const named = Boolean(entry.collaborator_role);
+  const stillThere = route.kind === "membership"
+    ? (named ? Boolean(entry.collaborator_is_member) : !isGroupGranted(entry))
+    : named;
+  if (!stillThere) return { left: true };
+  const disclosure = await getExitDisclosure(notebookId, undefined, route);
+  return { left: false, remaining: disclosure.memory_count, suggestionCount: disclosure.suggestion_count };
 }
 
 /** `Content-Disposition` 里的文件名(`filename*=UTF-8''…` 优先);取不到返回 null。

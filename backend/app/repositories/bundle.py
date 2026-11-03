@@ -26,6 +26,7 @@ from app.repositories.ports import (
     KnowhowTransferStorePort,
     KnowledgeStorePort,
     MemoryStorePort,
+    MemorySuggestStorePort,
     ModelStatusStorePort,
     NotebookDeleteJobStorePort,
     NotebookStorePort,
@@ -74,6 +75,7 @@ class PersistenceBundle(Protocol):
     wishes: WishStorePort
     ask_intent_handles: AskIntentHandleStorePort
     answer_links: AnswerLinkStorePort
+    memory_suggest: MemorySuggestStorePort
 
 
 class PersistenceBundleFactory(Protocol):

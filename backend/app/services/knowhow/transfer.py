@@ -312,15 +312,18 @@ class SourceCleanupFailed(Exception):
     - "source_changed"：指纹复核未命中——源在复制完成后被并发编辑，是被
       有意保留下来保护那份编辑的，不是清理失败。源仍带着这份编辑，引导
       用户删除它会连带永久丢失该编辑。
-    - "cleanup_error"：拆投影/原子删除本身抛出异常，源确实原封未动，手动
-      删除是安全的（原有行为，contract 不变）。
+    - "cleanup_error"：拆投影/原子删除本身抛出异常，源业务表仍保留，派生
+      投影可能已经部分清理；手动删除源表仍是安全的（原有 contract 不变）。
     """
 
-    def __init__(self, new_table_id: str, cause: Exception, *, reason: str) -> None:
+    def __init__(self, new_table_id: str, cause: Exception, *, reason: str, source_projection_started: bool = False) -> None:
         super().__init__(str(cause))
         self.new_table_id = new_table_id
         self.cause = cause
         self.reason = reason
+        # Internal observer fact, never part of the public error detail. The
+        # teardown uses multiple transactions and can fail after one commits.
+        self.source_projection_started = source_projection_started
 
 
 def move_table(
@@ -372,7 +375,7 @@ def move_table(
     # （源分毫未动、什么都没创建），不能被这里的包装误伤。
     #
     # round 10 P1-A：cleanup_reason 默认 "cleanup_error"（真正的拆投影/删除
-    # 操作抛出异常——源原封未动，手动删除安全），下面两处指纹复核未命中的
+    # 操作抛出异常——源业务表仍在，手动删除安全），下面两处指纹复核未命中的
     # 分支各自在 raise 之前把它扳成 "source_changed"（源被有意保留以保护一
     # 份并发编辑，绝不能引导用户删除源）。用 try 之前的局部变量而不是
     # isinstance 判某个专用异常类型：即便"扳成 source_changed 之后、真正
@@ -380,6 +383,7 @@ def move_table(
     # 依然对——源确实是因为指纹变了才被保留的，不该因为收尾工作本身失手就
     # 误判成"删除安全"的 cleanup_error。
     cleanup_reason = "cleanup_error"
+    source_projection_started = False
     try:
         if knowhow_transfer_store.table_fingerprint(source_table_id) != source_fingerprint:
             cleanup_reason = "source_changed"
@@ -395,7 +399,9 @@ def move_table(
         # 表行删掉之后就再也读不到它的 notebook_id 了，必须现在存下来。
         src_notebook_id = source_table_row["notebook_id"]
         if hidden:
-            build_projector(repo).delete_table_projection(hidden)
+            projector = build_projector(repo)
+            source_projection_started = True
+            projector.delete_table_projection(hidden)
         # P1-1（PR review round 3：check-then-act 仍是竞态）：上面那次复核本身
         # 不是原子的——它只是「读一次指纹、比一次」，和真正删表行的 DELETE 是
         # 两条独立语句，中间隔着整段拆投影（build_projector(repo).
@@ -441,7 +447,7 @@ def move_table(
         _log.exception(
             "move_table：副本 %s 已提交，但清理源表 %s 失败", new_table_id, source_table_id
         )
-        raise SourceCleanupFailed(new_table_id, exc, reason=cleanup_reason) from exc
+        raise SourceCleanupFailed(new_table_id, exc, reason=cleanup_reason, source_projection_started=source_projection_started) from exc
 
     # P1-B（PR review round 6，孤儿收尾扫描）：源表行此刻确凿已经删除、副本
     # 确凿已经在目标——上面的 try/except 只覆盖到这里为止的「读指纹+拆投影

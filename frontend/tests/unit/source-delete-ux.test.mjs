@@ -98,8 +98,25 @@ test("source page requests reject stale responses and clamp an emptied last page
   assert.equal(clampSourcePage(1, 0, 10), 0);
 
   const loadPage = findFunctionIn(sourceLibrary, "useSourceLibrary", "loadSourcesPage");
-  const calls = callSitesIn(loadPage);
+  // The public void command and collaboration's commit-result command must use
+  // the same fenced page reader. Follow that seam instead of requiring its
+  // implementation to remain inline in the compatibility wrapper.
+  assert.deepEqual(callSitesIn(loadPage), [{ target: "loadSourcesPageResult", arguments: ["input"] }]);
+  const collaboration = findFunctionIn(sourceLibrary, "useSourceLibrary", "refreshForCollaboration");
+  const collaborationRead = callSitesIn(collaboration).find((call) => call.target === "loadSourcesPageResult");
+  assert.ok(collaborationRead, "collaboration must use the guarded source page reader");
+  assert.match(collaborationRead.arguments[0], /\bpage: sourcesPageRef\.current\b/);
+  assert.match(collaborationRead.arguments[0], /\bguard\b/);
+  const readPage = findFunctionIn(sourceLibrary, "useSourceLibrary", "loadSourcesPageResult");
+  const calls = callSitesIn(readPage);
   assert.ok(calls.some((call) => call.target === "sourcePageRequestIsCurrent"));
+  const isCurrent = findFunctionIn(sourceLibrary, "loadSourcesPageResult", "isCurrent");
+  const fence = callSitesIn(isCurrent).find((call) => call.target === "sourcePageRequestIsCurrent");
+  assert.deepEqual(fence.arguments.slice(0, 4), [
+    "requestId", "pageRequestRef.current", "notebookId", 'ownerRef.current?.notebookId ?? null',
+  ]);
+  assert.match(fence.arguments[4], /\bowns\(owner\)/);
+  assert.ok(callSitesIn(isCurrent).some((call) => call.target === "input.guard"));
   assert.ok(calls.some((call) => call.target === "clampSourcePage"));
   assert.equal(calls.filter((call) => call.target === "listSources").length, 2);
 });

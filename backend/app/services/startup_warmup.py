@@ -456,9 +456,61 @@ def _start_notebook_delete_sweeper(lease: object, repo: object) -> None:
     interval = get_settings().notebook_delete_sweep_seconds
     if not interval > 0:
         return
-    stop = start_notebook_delete_sweeper(runner, interval)
+    stop = start_notebook_delete_sweeper(
+        runner, interval, tick=lambda: _sweep_notebook_maintenance(lease, repo)
+    )
     if not _record_notebook_delete_sweeper(lease, stop):
         _run_notebook_delete_sweeper_stop(stop)
+
+
+def _expire_memory_suggestions(repo: object) -> int:
+    """Age out one bounded page even when suggestion generation is disabled."""
+    service = getattr(getattr(repo, "_runtime", None), "memory_service", None)
+    expire = getattr(service, "expire_suggestions", None)
+    if not callable(expire):
+        return 0
+    try:
+        limit = repo.settings.auto_memory_suggest_expiry_sweep_limit
+        return int(expire(now=service.now(), limit=limit) or 0)
+    except Exception as exc:
+        logger.error("memory suggestion expiry sweep failed: %s", type(exc).__name__)
+        return 0
+
+
+def _sweep_notebook_maintenance(lease: object, repo: object) -> int:
+    """Keep both maintenance passes in the lifecycle's existing sweep thread.
+
+    A warming lifecycle may retry deletes, but expiry waits until readiness.
+    An old callback cannot touch a closed repository or a successor lifecycle.
+    Each pass isolates its failure so neither can starve the other.
+    """
+    with _cleanup_lock:
+        state = _active_lifecycle
+        if (
+            state is None or state.lease is not lease or state.repository is not repo
+            or state.status not in {"warming", "preloading_indexes", "ready"}
+        ):
+            return 0
+        ready = state.status == "ready"
+    runner = getattr(getattr(repo, "_runtime", None), "notebook_delete", None)
+    submitted = 0
+    try:
+        if runner is not None:
+            submitted = int(runner.sweep_once() or 0)
+    except Exception as exc:
+        logger.error("notebook delete sweep tick failed: %s", type(exc).__name__)
+    if ready:
+        # A delete pass may have waited while shutdown took ownership. Do not
+        # start another database pass against the pool it is now closing.
+        with _cleanup_lock:
+            state = _active_lifecycle
+            ready = bool(
+                state is not None and state.lease is lease
+                and state.repository is repo and state.status == "ready"
+            )
+        if ready:
+            _expire_memory_suggestions(repo)
+    return submitted
 
 
 def _record_notebook_delete_sweeper(lease: object, stop: object) -> bool:
@@ -510,6 +562,21 @@ def _sweep_agent_profile_chains(repo: object) -> None:
         return
     if swept:
         logger.info("startup: settled %d stranded understanding chain(s)", swept)
+
+
+def _sweep_memory_suggestion_jobs(repo: object) -> None:
+    """Only the owning server may settle suggestion runs from its last boot."""
+    service = getattr(getattr(repo, "_runtime", None), "memory_suggest_job", None)
+    sweep = getattr(service, "sweep_on_start", None)
+    if not callable(sweep):
+        return
+    try:
+        swept = int(sweep() or 0)
+    except Exception as exc:
+        logger.error("startup: memory suggestion job sweep failed: %s", type(exc).__name__)
+        return
+    if swept:
+        logger.info("startup: settled %d interrupted memory suggestion run(s)", swept)
 
 
 def _sweep_global_ask_jobs(repo: object) -> None:
@@ -733,6 +800,7 @@ def run_startup(lease: object | None) -> object | None:
         # an offline CLI has no right to make the "nothing else owns these
         # rows" claim while a live backend may.
         _sweep_agent_profile_chains(repo)
+        _sweep_memory_suggestion_jobs(repo)
         # Before the delete-job sweep: abandoned notebook imports become delete
         # jobs here, and that sweep is what keeps every job moving afterwards.
         _sweep_stale_notebook_imports(repo)
@@ -789,6 +857,7 @@ def run_startup(lease: object | None) -> object | None:
             _stop_admission_refresher(lease)
             _stop_notebook_delete_sweeper(lease)
             return None
+        _expire_memory_suggestions(repo)
         source_ingestion = getattr(
             getattr(repo, "_runtime", None), "source_ingestion", None
         )

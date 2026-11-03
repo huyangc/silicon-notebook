@@ -184,6 +184,9 @@ PROCESS_CACHE_INVENTORY: dict[str, str] = {
     "app.services.reasoning_retrieval:_EXPERIENCE_CACHE": OWNER_SCOPED,
     # WeakKeyDictionary keyed by repository; conftest drains it per test.
     "app.services.knowhow.api:_SCHEDULERS": OWNER_SCOPED,
+    # Weak registry of runtime-owned writers, not keyed by notebook/user id.
+    # Shared conftest/PG pre-drop teardown drains and reaps their workers.
+    "app.services.notebook_activity_writer:_writers": OWNER_SCOPED,
     # Present only while a request / run / job is in flight.
     "app.api.mcp_tools.ask:_WAITERS": RUNTIME,
     "app.api.mcp_tools.sources:_GENERATING": RUNTIME,

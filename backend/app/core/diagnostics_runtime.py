@@ -48,6 +48,8 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("analytics",),
     ("analytics", "content-overview"),
     ("checkup",),
+    ("pulse",),
+    ("activity",),
     ("memories",),
     ("memories", "from-answer"),
     # 记忆导出(退出共享前的下载):两段都是字面量,整条路径原样进诊断快照。
@@ -142,6 +144,11 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     # None 打 {id},group_id 在请求体里。少了这两条整条会落到兜底 {redacted},丢观测。
     ("share-requests",),
     ("share-requests", None),
+    # 点名共享(分享编辑 P1)。user_id 走 None 打 {id};三段那条的末段是固定字面量,
+    # 排在两段通配之后也不会被吞(段数不同)。
+    ("collaborators",),
+    ("collaborators", None),
+    ("collaborators", None, "exit-disclosure"),
     ("kg", "search"),
     ("kg", "build"),
     ("kg", "rebuild"),

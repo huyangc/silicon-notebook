@@ -15,6 +15,7 @@ import pytest
 from app.core.config import Settings
 from app.repositories.sqlite.migrations import SCHEMA_VERSION, SqliteMigrator
 from app.services.sqlite_repository import SQLiteRepository
+from tests.sqlite_migration_testkit import rollback_v106
 
 PG_MIGRATION = (
     Path(__file__).resolve().parents[1]
@@ -55,6 +56,9 @@ def test_fresh_database_has_the_output_column_on_both_tables(repo):
 def test_v89_rows_stay_answers_and_rerun_changes_nothing(repo):
     database = repo._runtime.database
     with database.write() as db:
+        # Recreate the historical shape before removing its output column;
+        # v106's newer partial index depends on that column.
+        rollback_v106(db)
         db.execute(
             "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at) "
             "VALUES('u1','u1@x','u1','user','active',?,?)", (NOW, NOW))
@@ -69,7 +73,7 @@ def test_v89_rows_stay_answers_and_rerun_changes_nothing(repo):
             (NOW, NOW))
         db.execute("PRAGMA user_version = 89")
 
-    assert SqliteMigrator(database, repo.settings).migrate() == [90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105]
+    assert SqliteMigrator(database, repo.settings).migrate() == [90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107]
     with database.connect() as db:
         assert db.execute("SELECT output FROM ask_jobs WHERE id='j1'").fetchone()[0] == "answer"
         assert _output_column(db, "retained_user_activity") == ("TEXT", 1, "'answer'")

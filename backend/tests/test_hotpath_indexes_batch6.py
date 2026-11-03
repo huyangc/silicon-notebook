@@ -117,12 +117,13 @@ def test_unique_and_include_fields_render_ddl_and_stay_inert_elsewhere():
 def test_prerequisites_are_limited_to_idempotent_add_column_form():
     """守卫:spec.prerequisites 是 (table, column, coldef) 结构化声明,由
     builder 渲染成 schema 限定的 ADD COLUMN IF NOT EXISTS(元数据级、幂等、
-    在线安全);coldef 只许「简单类型 [NOT NULL DEFAULT 常量]」——builder
+    在线安全);coldef 只许「简单类型 [COLLATE "C"] [NOT NULL DEFAULT 常量]」——builder
     不许经此演化成第二个迁移器,表/列名必须是简单标识符(schema 限定由
     渲染层负责,声明里不许自带)。"""
     ident = re.compile(r"^[a-z_][a-z0-9_]*$")
     coldef_pattern = re.compile(
         r"^(bigint|integer|text|timestamp with time zone)"
+        r'( COLLATE "C")?'
         r"( NOT NULL DEFAULT \S+)?$"
     )
     for spec in HOTPATH_INDEX_SPECS:
@@ -130,5 +131,5 @@ def test_prerequisites_are_limited_to_idempotent_add_column_form():
             assert ident.fullmatch(table) and ident.fullmatch(column), (
                 spec.name, table, column)
             assert coldef_pattern.fullmatch(coldef), (spec.name, coldef)
-        if spec.name not in _BATCH6_NAMES:
+        if spec.name not in (*_BATCH6_NAMES, "idx_ask_jobs_memory_suggest_sample"):
             assert spec.prerequisites == (), spec.name

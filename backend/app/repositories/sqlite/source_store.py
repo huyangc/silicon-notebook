@@ -19,7 +19,9 @@ from app.models.sources import (
     INDEXING_CHUNK_FALLBACK_WARNING_PREFIX,
     has_indexing_chunk_fallback_warning,
     has_pdf_python_fallback_warning,
+    carry_uploader,
     paper_meta_status,
+    source_with_uploader,
 )
 from app.domain.evidence_fingerprint import element_text_sha
 from app.domain.source_display import summary_display_title
@@ -779,13 +781,13 @@ class SourceStore:
             pm = self.paper_meta_for_sources(
                 db, [source_id], notebook_id=row["notebook_id"]).get(source_id)
             summary = self.source_from_row(db, row, paper_meta=pm)
-            return SourceDetail(
+            return carry_uploader(SourceDetail(
                 **summary.model_dump(),
                 file_path=row["file_path"],
                 error_message=row["error_message"],
                 paper_meta=self.paper_meta_model(pm),
                 updated_at=row["updated_at"] or "",
-            )
+            ), summary)
 
     def source_exists(self, source_id: str) -> bool:
         """Cheap existence probe (a single ``SELECT 1``, not the full row +
@@ -2307,7 +2309,7 @@ class SourceStore:
             return []
         marks = ",".join("?" for _ in ids)
         rows = connection.execute(
-            "SELECT id,notebook_id,source_type,file_path,"
+            "SELECT id,notebook_id,source_type,file_path,uploaded_by,"
             f"({memory_source_type_predicate()}) AS is_memory FROM sources "
             f"WHERE id IN ({marks}) ORDER BY id",
             ids,
@@ -2492,6 +2494,7 @@ class SourceStore:
             venue=pm["venue"] if pm else None,
         )
         summary.paper_meta_status = self._paper_meta_status_for(row, pm)
+        source_with_uploader(summary, row["uploaded_by"] if "uploaded_by" in row.keys() else "")
         return summary
 
     def sources_from_rows(self, db: sqlite3.Connection, rows: List[sqlite3.Row]) -> List[SourceSummary]:
@@ -2636,6 +2639,7 @@ class SourceStore:
                 venue=pm["venue"] if pm else None,
             )
             summary.paper_meta_status = self._paper_meta_status_for(row, pm)
+            source_with_uploader(summary, row["uploaded_by"] if "uploaded_by" in row.keys() else "")
             out.append(summary)
         return out
 

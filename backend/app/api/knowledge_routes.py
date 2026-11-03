@@ -2,9 +2,12 @@
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.api.deps import (
+    mark_pulse,
+    notebook_access_repository,
+    notebook_capability_admits,
     get_current_user,
     knowledge_governance_service,
     mirrored_notebook_error,
@@ -207,7 +210,7 @@ def propose_schemas(notebook_id: str) -> List[ObjectSchemaModel]:
 
 @router.patch("/notebooks/{notebook_id}/knowledge/{knowledge_id}", dependencies=[Depends(require_notebook_read)])
 def update_knowledge(notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate,
-                     user: UserProfile = Depends(get_current_user)):
+                     user: UserProfile = Depends(get_current_user), request: Request = None):
     """Two authorisation paths (user ruling 2026-10-22), the same split as the
     merge route below.
 
@@ -222,17 +225,24 @@ def update_knowledge(notebook_id: str, knowledge_id: str, payload: KnowledgeUpda
     else's object, an unknown id, any other status -- answers the 404 this
     caller got for any ``PATCH`` before. On a mirror the read path does not
     apply (the knowledge:write fence): 404 as before."""
-    if not notebook_capability_allowed("knowledge:write", notebook_id, user.id):
-        return _update_own_status(notebook_id, knowledge_id, payload, user)
+    access = notebook_access_repository().notebook_access_level(notebook_id, user.id)
+    if access is None:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    if not notebook_capability_admits("knowledge:write", access):
+        result = _update_own_status(notebook_id, knowledge_id, payload, user)
+        mark_pulse(request, notebook_id, "knowledge:write", access.owner_id, user)
+        return result
     mirrored = notebook_mirror_fence("knowledge:write", notebook_id)
     if mirrored:
         raise mirrored_notebook_error(mirrored)
     # M1: an object derived from someone else's Memory is "not found" (same
     # 404 body as an unknown id) — decided in the store's locking read.
     try:
-        return repository().update_knowledge(
+        result = repository().update_knowledge(
             notebook_id, knowledge_id, payload, actor_id=user.id
         )
+        mark_pulse(request, notebook_id, "knowledge:write", access.owner_id, user)
+        return result
     except KeyError:
         raise HTTPException(status_code=404, detail="Knowledge object not found")
     except ValueError as exc:
@@ -307,7 +317,7 @@ _MERGE_NOT_PERMITTED = "Notebook not found"
 
 @router.post("/notebooks/{notebook_id}/knowledge/{knowledge_id}/merge", dependencies=[Depends(require_notebook_read)])
 def merge_knowledge(notebook_id: str, knowledge_id: str, payload: MergeRequest,
-                    user: UserProfile = Depends(get_current_user)):
+                    user: UserProfile = Depends(get_current_user), request: Request = None):
     """Two authorisation paths (user ruling 2026-10-22).
 
     With ``knowledge:write`` (owner, notebook admin): as before -- the
@@ -324,19 +334,26 @@ def merge_knowledge(notebook_id: str, knowledge_id: str, payload: MergeRequest,
     nothing about the other object. On a mirror the read path does not apply
     (the knowledge:write fence, as for every knowledge write there): 404 as
     before. The only other answer is the PostgreSQL retry 409 of her own pair."""
-    if notebook_capability_allowed("knowledge:write", notebook_id, user.id):
+    access = notebook_access_repository().notebook_access_level(notebook_id, user.id)
+    if access is None:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    if notebook_capability_admits("knowledge:write", access):
         mirrored = notebook_mirror_fence("knowledge:write", notebook_id)
         if mirrored:
             raise mirrored_notebook_error(mirrored)
-        return _merge_with_write(notebook_id, knowledge_id, payload, user)
+        result = _merge_with_write(notebook_id, knowledge_id, payload, user)
+        mark_pulse(request, notebook_id, "knowledge:write", access.owner_id, user)
+        return result
     if notebook_mirror_fence("knowledge:write", notebook_id):
         raise HTTPException(status_code=404, detail=_MERGE_NOT_PERMITTED)
     try:
         # Straight to the governance service: the facade's frozen signature
         # stays as it is (only the write path goes through it).
-        return knowledge_governance_service().merge_knowledge(
+        result = knowledge_governance_service().merge_knowledge(
             notebook_id, knowledge_id, payload, actor_id=user.id, own_pair_only=True
         )
+        mark_pulse(request, notebook_id, "knowledge:write", access.owner_id, user)
+        return result
     except MemoryKnowledgeMergeRefused as exc:
         if exc.user_message == MEMORY_MERGE_RETRY_MESSAGE:
             raise user_error(409, exc.user_message)

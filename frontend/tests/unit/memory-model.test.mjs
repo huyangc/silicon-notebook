@@ -72,6 +72,19 @@ test("candidate labels remain distinct from confirmed", () => {
   assert.equal(memoryStatusMeta("confirmed").label, "已确认");
 });
 
+test("answer links distinguish candidate suggestions from saved memories, with saved identity winning", async () => {
+  const flags = await memoryModel.collectSavedAnswerFlags([["saved", "draft", "ignored", "expired", "legacy"]], async () => ({
+    links: { saved: "m-saved", legacy: "m-legacy" },
+    states: {
+      saved: { memory_id: "m-saved", status: "candidate", suggested: true },
+      draft: { memory_id: "m-draft", status: "candidate", suggested: true },
+      ignored: { memory_id: "m-ignored", status: "rejected", suggested: true },
+      expired: { memory_id: "m-expired", status: "rejected", suggested: true },
+    },
+  }), new AbortController().signal);
+  assert.deepEqual(flags, { saved: true, legacy: true, draft: "suggested" });
+});
+
 test("all terminal memory statuses have explicit review labels", () => {
   assert.equal(memoryStatusMeta("rejected").label, "已拒绝");
   assert.equal(memoryStatusMeta("deprecated").label, "已停用");
@@ -80,6 +93,17 @@ test("all terminal memory statuses have explicit review labels", () => {
 test("origin metadata distinguishes Ask capture from agent proposals", () => {
   assert.equal(memoryOriginMeta("ask_answer").label, "Ask 回答");
   assert.equal(memoryOriginMeta("external_agent").label, "Agent 提议");
+});
+
+test("suggested is a virtual list filter without changing the stored origin vocabulary", () => {
+  assert.equal(
+    memoryListPath({
+      scope: "global", notebookId: "nb/1", status: "candidate", origin: "suggested",
+      query: "", offset: 0, limit: 20,
+    }),
+    "/memories?status=candidate&origin=suggested&notebook_id=nb%2F1&offset=0&limit=20",
+  );
+  assert.equal(memoryOriginMeta("ask_answer").label, "Ask 回答");
 });
 
 test("memory list paths preserve pagination and encode filters", () => {

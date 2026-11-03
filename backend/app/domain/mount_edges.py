@@ -5,7 +5,9 @@ edge stays on screen, greyed out, with the reason it fails. The row carries
 the store's booleans -- ``ok`` (``MOUNT_VALID_EXPR``), ``gate_closed``
 (``MOUNT_GATE_CLOSED_EXPR``), ``base_not_live`` (``MOUNT_BASE_NOT_LIVE_EXPR``,
 derived from the same lifecycle term as ``MOUNT_VALID_EXPR``) and
-``same_owner`` -- plus ``base_status`` and ``base_owner``; ``viewer_id`` is
+``same_owner`` and ``closes_when_shared`` (``MOUNT_CLOSES_WHEN_SHARED_EXPR``:
+valid now, and only through the borrowed arm, so sharing the mounting notebook
+would close it) -- plus ``base_status`` and ``base_owner``; ``viewer_id`` is
 who is looking. The reason only states what is true now, for that viewer:
 
 * the mounted notebook is not live: being deleted (``'deleting'``) -> "it has
@@ -69,4 +71,11 @@ def mount_edge_view(row: Any, viewer_id: str | None = None) -> dict:
         "tier": row["tier"] or "personal",
         "active": active,
         "inactive_reason": reason,
+        # 此刻有效、且只靠借入臂有效:挂载方一被共享就失效(决策 D13 的授予前警告)。
+        # 只有库主的 `/bases` 投影读这一列(`with_closes_when_shared`);别的读者
+        # (检索路径)的行里没有它,这里给 False,而它们也从不读这个键。
+        "closes_when_shared": (
+            bool(row["closes_when_shared"])
+            if "closes_when_shared" in row.keys() else False
+        ),
     }

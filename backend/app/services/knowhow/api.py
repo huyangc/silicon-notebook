@@ -38,6 +38,7 @@ import re
 import threading
 import time
 import weakref
+from app.services.collab_jobs import submission_context
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -300,6 +301,7 @@ def build_projector(repo: Any) -> KnowhowProjector:
         mark_unified_dirty_in_tx=rt.kg_mutations.mark_unified_kg_dirty_in_tx,
         new_id=rt.seams.new_id,
         now=rt.seams.now,
+        collab_touch=rt._collaboration_publisher,
     )
 
 
@@ -622,6 +624,7 @@ class ProjectionScheduler:
         self._timers: dict[str, threading.Timer] = {}
         self._running: set[str] = set()
         self._rerun: set[str] = set()
+        self._contexts: dict = {}
 
     def schedule(self, table_id: str) -> None:
         """(Re)start the debounce timer for this table, cancelling whatever
@@ -630,6 +633,7 @@ class ProjectionScheduler:
         and attempt to submit a run."""
         with self._lock:
             pending = self._timers.get(table_id)
+            self._contexts[table_id] = submission_context()
             if pending is not None:
                 pending.cancel()
             timer = threading.Timer(self._debounce, self._fire, args=(table_id,))
@@ -648,7 +652,9 @@ class ProjectionScheduler:
                 self._rerun.add(table_id)
                 return
             self._running.add(table_id)
+            context = self._contexts.pop(table_id, None) or submission_context()
         self._submit(
+            context.run,
             self._run,
             table_id,
             name=f"knowhow-project-{table_id}",

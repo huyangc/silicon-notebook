@@ -294,6 +294,14 @@ export const GROUP_ROLE: Record<string, string> = {
   member: "成员",
 };
 
+// 点名共享(user 主体授权)每一行的角色。`editor` 是这套界面唯一会写出的角色;
+// `viewer` / `admin` 是同步种子或历史数据留下的点名授权,库主看得见、撤得掉。
+export const COLLABORATOR_ROLE: Record<string, string> = {
+  editor: "可编辑",
+  viewer: "只读",
+  admin: "可管理",
+};
+
 /**
  * 严格查表：命中返回映射值，未命中返回 `fallback`——永远不会是 `value` 本身。
  *

@@ -1037,6 +1037,18 @@ button.copy-result-failed:hover:not(:disabled) {
   backdrop-filter: blur(8px);
 }
 
+.notebook-view:has(> .collab-bar) { display: flex; flex-direction: column; }
+.notebook-view:has(> .collab-bar) > .workspace-header { flex: 0 0 72px; }
+.notebook-view:has(> .collab-bar) > .workspace-grid { flex: 1; height: auto; }
+.collab-bar { flex: 0 0 auto; max-height: 28vh; overflow: auto; padding: 7px 24px; border-bottom: 1px solid #dbe4e9; background: #f6faf9; color: #455c58; font-size: 12px; }
+.collab-bar-line { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.collab-bar p { margin: 5px 0 0; }
+.collab-activity { margin-top: 8px; }
+.collab-activity ul { margin: 8px 0 0; padding-left: 18px; }
+.collab-activity li { padding: 4px 0; }
+.collab-activity time { margin-left: 12px; color: #75847e; }
+.collab-refresh-notice { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0; padding: 8px 12px; background: #eef6fa; color: #355b70; font-size: 13px; }
+
 .workspace-title {
   flex: 1 1 260px;
   max-width: min(48vw, 720px);
@@ -1159,6 +1171,60 @@ button.copy-result-failed:hover:not(:disabled) {
    左右分配，并让 800px 上的工具栏开始横向滚动——为一个只读形态的边角付全局代价。 */
 .reader-badge-action {
   flex: 0 0 auto;
+}
+
+/* 交叉态(分享编辑 P1,规格 §4.4):既是经链接加入的只读成员、又是点名编辑者时,这一行挂两颗
+   退出(「退出协作（保留只读）」+「退出共享」,~292px)。实测 1440px 视口下标题被压到 14px、
+   身份徽章 22px——两样都看不见。修法是**让浮动控件让位,不动内容框**:
+   - 两颗按钮收成紧凑尺寸(13px 字、34px 高),整组 ~226px;
+   - 顶栏这一行挂着退出按钮时(单个或两个),右侧工具栏不再 `flex-grow`——它本来
+     `justify-content: flex-end`,长出来的 ~200px 是空白,让给标题区。单个退出的形态(链接
+     成员、点名编辑者)同样受益:实测 1440px 下 5 个字的库名原本被压到 109px 而省略。owner、
+     群组共享(没有退出按钮)一像素不变,上面那段「不动 `.workspace-title` 分配」的取舍照旧。
+   实测 1440px:标题与徽章都完整显示。≤1200px 退出按钮照旧随下面的规则收起(卡片菜单里都在)。 */
+.reader-badge-row:has(.reader-badge-action + .reader-badge-action) .reader-badge-action {
+  min-height: 34px;
+  padding: 0 9px;
+  font-size: 13px;
+}
+
+.workspace-header:has(.reader-badge-action) .workspace-toolbar {
+  flex-grow: 0;
+}
+
+/* 点名编辑者的身份徽章可以点开看编辑者名单(决策 D17)。外形仍是 `.reader-badge-chip`,
+   只补上按钮该有的指针与字体继承。 */
+.reader-badge-chip-button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.editor-roster-popover {
+  max-width: min(320px, calc(100vw - 32px));
+}
+
+/* 知识图谱整理被别人占用时的点名说明(D8),挨着整理按钮,自带计时消失。 */
+.kg-busy-notice {
+  margin: 0;
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 「我分享的」总览里一本库的点名协作者名单(分享编辑 P1)。 */
+.share-overview-collaborators {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.editor-roster-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 @media (max-width: 1200px) {
@@ -5468,6 +5534,13 @@ details[open] > .report-corpus-basis-head::before {
   color: var(--green);
   cursor: default;
 }
+
+.answer-memory-suggestion,
+.answer-memory-hint { color: var(--muted); font-size: 13px; }
+.answer-memory-hint { display: inline-flex; align-items: center; flex-wrap: wrap; }
+.answer-feedback:has(.answer-memory-hint),
+.answer-feedback:has(.answer-memory-suggestion),
+.answer-feedback-actions:has(.answer-memory-hint) { flex-wrap: wrap; align-items: center; }
 
 .answer-action {
   width: 34px;
@@ -14665,6 +14738,39 @@ select.group-input {
   background: var(--danger-bg);
 }
 
+/* 「点名共享」一节(分享编辑 P1-T13)。动作的结果(「已添加」「已移除」、查无此人…)
+   落在被按的按钮旁、自带计时消失;不走页面顶部的状态条。 */
+.collaborator-result {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.collaborator-result.is-ok { color: var(--green); }
+.collaborator-result.is-failed { color: var(--danger); }
+.collaborator-result.is-neutral { color: var(--muted); }
+
+/* 刚移除的那一行在结果计时内保留、变淡,结果就落在原来「移除」按钮的位置。 */
+.group-row.is-removed {
+  opacity: 0.6;
+}
+
+/* 添加前的二次确认:列出将失效的参考库,挨在「添加为编辑者」按钮下方。 */
+.collaborator-confirm {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--warning-bg);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.collaborator-confirm ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
 /* ── 独立群组工作台 ──────────────────────────────────────────────────────────
    继续使用 collection 页的留白、ink/line/muted 变量与既有按钮，不另造一套后台
    模板皮肤。左侧是群组目录，右侧是一个群组的稳定工作区；窄屏时自然折成单列。 */
@@ -15751,3 +15857,9 @@ button.transfer-toolbar-unsure {
 .transfer-job--failed {
   border-color: var(--danger-border);
 }
+/* The actor-wide memory preference and its outcome stay beside the control. */
+.memory-suggest-settings { margin-bottom: 1rem; color: var(--muted); }
+.memory-suggest-settings p { margin: .35rem 0; }
+.memory-suggest-settings label { display: flex; align-items: center; gap: 7px; }
+.memory-suggest-settings input[type="checkbox"] { accent-color: var(--blue); }
+.memory-suggest-result { margin-left: .65rem; }

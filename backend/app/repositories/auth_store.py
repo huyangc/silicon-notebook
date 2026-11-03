@@ -24,6 +24,7 @@ from app.domain.auth_provider import (
     AuthProviderHostPort,
 )
 from app.repositories.identity_errors import AccountMergeBlocked, AuthStoreError
+from app.repositories.memory_suggest_rows import ordered_job_delete_sql, ordered_read_fence_delete_sql
 from app.repositories.user_references import REFERENCE_LABEL_UNITS, USER_REFERENCE_COLUMNS
 
 AUTH_TOKEN_BYTES = 32
@@ -476,6 +477,10 @@ class AuthStore:
         if not valid_account_username(username):
             raise AuthStoreError("invalid_username")
         with self._write() as db:
+            if self.postgres:
+                from app.repositories.postgres.memory_suggest_read_period import lock_mode_read_period_on
+
+                lock_mode_read_period_on(db, exclusive=True)
             # Under the auth lock no rename or account deletion can interleave.
             found = self._execute(
                 db,"SELECT id FROM users WHERE lower(username)=? AND username<>''",(ascii_lower(username),),
@@ -502,8 +507,25 @@ class AuthStore:
             if items:
                 raise AccountMergeBlocked(items)
             for ref in USER_REFERENCE_COLUMNS:
-                if ref.kind == "scaffolding":
-                    self._execute(db,f"DELETE FROM {ref.table} WHERE {ref.column}=?",(remove["id"],))
+                if ref.kind != "scaffolding":
+                    continue
+                if self.postgres and ref.table == "memory_suggest_read_fences":
+                    db.execute(
+                        ordered_read_fence_delete_sql("memory_suggest_read_fences.owner_id = %s"),
+                        (remove["id"],),
+                    )
+                    continue
+                elif self.postgres and ref.table == "memory_suggest_jobs":
+                    # A bulk delete of these rows locks them in primary-key
+                    # order like every other one (plan B10): a per-notebook
+                    # cleanup over several notebooks could otherwise lock the
+                    # same rows in the opposite order and deadlock.
+                    db.execute(
+                        ordered_job_delete_sql("memory_suggest_jobs.owner_id = %s"),
+                        (remove["id"],),
+                    )
+                    continue
+                self._execute(db,f"DELETE FROM {ref.table} WHERE {ref.column}=?",(remove["id"],))
             # Delete first: the name is free on idx_users_username_lower only then.
             self._execute(db,"DELETE FROM users WHERE id=?",(remove["id"],))
             now = self._now()

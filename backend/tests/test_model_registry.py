@@ -49,6 +49,7 @@ _EXPECTED_WORKLOADS = {
     "knowhow_complete": ("chat", "interactive", "经验空列补全"),
     "agent_profile_consolidate": ("chat", "background", "库理解整理"),
     "retrieval_experience_distill": ("chat", "background", "检索打法总结"),
+    "memory_suggest": ("chat", "background", "记忆建议"),
     "retrieval_query_embedding": ("embedding", "interactive", "检索查询向量"),
     "source_element_embedding": ("embedding", "background", "来源元素向量"),
     "chunk_embedding": ("embedding", "background", "来源分块向量"),
@@ -174,7 +175,7 @@ def test_chat_workloads_have_an_exhaustive_analysis_area():
             "kg_conflict_review",
             "schema_induction",
         },
-        "memory": {"memory_preview", "agent_profile_consolidate"},
+        "memory": {"memory_preview", "agent_profile_consolidate", "memory_suggest"},
         "knowhow": {"knowhow_optimize", "knowhow_reformat", "knowhow_complete"},
         "retrieval": {"retrieval_experience_distill"},
     }
@@ -925,7 +926,7 @@ def test_operator_upgraded_historical_template_now_refuses_the_retired_workload(
     严格档拒启，消息点名两张表里的落点，且不带路径。"""
     baseline = _BASELINE_TEMPLATE.read_text(encoding="utf-8")
     upgraded = baseline.replace('kind = "chat"\n', 'kind = "chat"\ncontext_window_tokens = 1048576\nmax_output_tokens = 32768\n')
-    upgraded = upgraded.replace('report_summary = "general"\n', 'report_summary = "general"\nreport_context_compress = "general"\n')
+    upgraded = upgraded.replace('report_summary = "general"\n', 'report_summary = "general"\nreport_context_compress = "general"\nmemory_suggest = "general"\n')
     path = _write_config(tmp_path / "operator-upgraded-models.toml", upgraded)
 
     with caplog.at_level(logging.DEBUG, logger=_REGISTRY_LOGGER):
@@ -1072,3 +1073,75 @@ def test_product_docs_list_exactly_the_live_chat_workloads_by_area():
         ):
             listed[area] = set(re.findall(r"`([a-z_]+)`", cells))
         assert listed == expected, name
+
+
+# ---------------------------------------------------------------------------
+# 自动用户记忆(计划 T1 / G8):新 chat 工作负载 memory_suggest。注册即让缺
+# [bindings] 的部署拒启,所以部署顺序(停服 → 改配置 → 自检 → 启动)靠下面几条钉住。
+# ---------------------------------------------------------------------------
+
+
+def test_memory_suggest_workload_is_background_memory_disabled_thinking():
+    workload = WORKLOADS["memory_suggest"]
+
+    assert workload.kind == "chat"
+    assert workload.default_priority == "background"
+    assert workload.analysis_area == "memory"
+    assert workload.default_thinking_mode == "disabled"
+    assert workload.display_label == "记忆建议"
+
+
+def test_strict_load_without_memory_suggest_binding_names_it(tmp_path):
+    path = _write_config(
+        tmp_path / "models.toml",
+        _all_services() + "\n" + _bindings(omit={"memory_suggest"}),
+    )
+
+    with pytest.raises(ModelBindingGapError) as exc_info:
+        SystemModelServiceRegistry.load(_settings(path, strict=True), _ALL_KEYS)
+
+    assert "记忆建议（memory_suggest）" in exc_info.value.loggable()
+    assert "缺少绑定的工作负载" in exc_info.value.loggable()
+
+
+def test_strict_load_does_not_require_memory_suggest_thinking(tmp_path):
+    """[thinking] 可选:有这张表却没写 memory_suggest 时按目录默认 disabled 启动。"""
+    path = _write_config(
+        tmp_path / "models.toml",
+        _all_services()
+        + "\n"
+        + _bindings()
+        + '\n\n[thinking]\nask_answer = "enabled"\n',
+    )
+
+    registry = SystemModelServiceRegistry.load(
+        _settings(path, strict=True), _ALL_KEYS
+    )
+
+    assert registry.service_for("memory_suggest") is not None
+    assert registry.workload("memory_suggest").default_thinking_mode == "disabled"
+
+
+@pytest.mark.parametrize("table", ["[bindings]", "[thinking]"])
+def test_an_older_build_refuses_a_config_that_already_names_memory_suggest(
+    tmp_path, monkeypatch, table
+):
+    """「先改配置、再启动旧版本」会拒启:旧目录里没有这个 id,它是未知绑定。
+
+    部署文档与管理员发布说明据此要求回滚前先删掉 memory_suggest 那两行。
+    """
+    from app.services import model_registry
+
+    older = {k: v for k, v in WORKLOADS.items() if k != "memory_suggest"}
+    monkeypatch.setattr(model_registry, "WORKLOADS", older)
+    body = _all_services() + "\n" + _bindings(omit={"memory_suggest"})
+    if table == "[bindings]":
+        body += '\nmemory_suggest = "general"\n'
+    else:
+        body += '\n\n[thinking]\nmemory_suggest = "disabled"\n'
+    path = _write_config(tmp_path / "models.toml", body)
+
+    with pytest.raises(ModelBindingGapError) as exc_info:
+        SystemModelServiceRegistry.load(_settings(path, strict=True), _ALL_KEYS)
+
+    assert f"memory_suggest（{table}）" in exc_info.value.loggable()

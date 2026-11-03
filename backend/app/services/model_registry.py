@@ -87,6 +87,7 @@ _WORKLOAD_LABELS = MappingProxyType({
     "knowhow_complete": "经验空列补全",
     "agent_profile_consolidate": "库理解整理",
     "retrieval_experience_distill": "检索打法总结",
+    "memory_suggest": "记忆建议",
     "retrieval_query_embedding": "检索查询向量",
     "source_element_embedding": "来源元素向量",
     "chunk_embedding": "来源分块向量",
@@ -123,6 +124,7 @@ _WORKLOAD_ANALYSIS_AREAS: Mapping[str, ModelAnalysisArea] = MappingProxyType({
     "schema_induction": "knowledge",
     "memory_preview": "memory",
     "agent_profile_consolidate": "memory",
+    "memory_suggest": "memory",
     "retrieval_experience_distill": "retrieval",
     "knowhow_optimize": "knowhow",
     "knowhow_reformat": "knowhow",
@@ -175,6 +177,11 @@ _CHAT_THINKING_DEFAULTS: Mapping[
     # affects later retrieval quality; reasoning has durable leverage here.
     "agent_profile_consolidate": "enabled",
     "retrieval_experience_distill": "enabled",
+    # Auto user-memory suggestions: one bounded call per run that turns a
+    # handful of pre-selected signal items into short draft memories under a
+    # closed JSON contract — structured extraction, not planning; a human
+    # reviews every draft before it can affect retrieval.
+    "memory_suggest": "disabled",
 })
 
 
@@ -243,6 +250,9 @@ WORKLOADS = workload_map(
         # fired by a deterministic global threshold and never by a user
         # waiting on a response — "background", like its P1 sibling.
         "retrieval_experience_distill": "background",
+        # Auto user-memory suggestions: one bounded call per run, fired after
+        # the answer was delivered and never by a user waiting on it.
+        "memory_suggest": "background",
     },
     embedding={
         "retrieval_query_embedding": "interactive",

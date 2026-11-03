@@ -1,7 +1,7 @@
 import re
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from app.domain.promotion_source import PROMOTION_SOURCE_TYPE, presented_source_title
 
@@ -233,6 +233,12 @@ class SourceSummary(BaseModel):
     # 既有字段(同 display_title 先例),默认 False = 人添加的——那也正是全部存量行
     # 的取值。派生是零成本的:`SELECT *` 本来就把这一列取回来了,不加 join、不加查询。
     agent_created: bool = False
+    # 当前查看者是不是这份来源的上传人(分享编辑 P1,PD-10):点名编辑者只能删本人
+    # 上传的来源(决策 D14),前端据它决定画不画删除按钮。由路由按请求者整形
+    # (`shape_source_for`),store 只把上传人存在下面的私有属性里——上传人 id 不上
+    # wire。默认 False:没整形的投影(管理员视图等)不画这个入口。
+    uploaded_by_me: bool = False
+    _uploaded_by: str = PrivateAttr(default="")
 
     @model_validator(mode="after")
     def _present_promotion_title(self) -> "SourceSummary":
@@ -242,6 +248,27 @@ class SourceSummary(BaseModel):
         scoped detail -- both storage backends, every constructor -- passes."""
         self.title = presented_source_title(self.title, source_type=self.type)
         return self
+
+
+
+def source_with_uploader(summary: "SourceSummary", uploaded_by: Any) -> "SourceSummary":
+    """Record the uploader on a summary built from a row (server-side only)."""
+    summary._uploaded_by = str(uploaded_by or "")
+    return summary
+
+
+def carry_uploader(target: "SourceSummary", source: "SourceSummary") -> "SourceSummary":
+    """A summary rebuilt from another one's ``model_dump()`` (detail, upload
+    result) loses private attributes: carry the uploader across explicitly."""
+    target._uploaded_by = source._uploaded_by
+    return target
+
+
+def shape_source_for(user_id: str, summary: "SourceSummary") -> "SourceSummary":
+    """``uploaded_by_me`` for the caller (PD-10). An empty uploader (a row from
+    before uploads were attributed, a hidden synthetic source) is nobody's."""
+    summary.uploaded_by_me = bool(summary._uploaded_by) and summary._uploaded_by == user_id
+    return summary
 
 
 class PaginatedSources(BaseModel):
@@ -310,6 +337,14 @@ class RepairScheduledResult(BaseModel):
     accepted: bool = False
 
 
+class ReparseScheduledResult(RepairScheduledResult):
+    """``POST .../sources/reparse`` 的回执:``RepairScheduledResult`` 加一列
+    ``skipped_busy``——此刻正在解析、这次没有排入的 source_id(分享编辑 P1,决策 D8:
+    两个人同时点重新解析,第二次不再把整份管线再跑一遍)。字段只增不减。"""
+
+    skipped_busy: List[str] = []
+
+
 class SourceDetail(SourceSummary):
     file_path: str = ""
     error_message: str = ""
@@ -346,10 +381,11 @@ class ScopedSourceDetail(SourceSummary):
 
     @classmethod
     def of(cls, detail: SourceDetail) -> "ScopedSourceDetail":
-        return cls(
+        # model_dump 不带私有属性:上传人显式带过去,路由才能按请求者整形。
+        return carry_uploader(cls(
             **detail.model_dump(exclude={"file_path", "error_message"}),
             parse_failed=detail.parse_status == "failed",
-        )
+        ), detail)
 
 
 class UploadedSourceSummary(SourceSummary):

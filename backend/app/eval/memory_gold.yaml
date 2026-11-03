@@ -24,6 +24,24 @@
       "notebook_id": "power",
       "query": "power integrity",
       "expected": ["memory-bob-power"]
+    },
+    {
+      "id": "suggestion-wrong-adopted-does-not-displace",
+      "plane": "notebook",
+      "user_id": "carol",
+      "notebook_id": "clock",
+      "query": "include clock uncertainty margin setup analysis",
+      "expected": ["memory-clock-correct"],
+      "distractors": ["memory-clock-wrong-clarified", "memory-clock-wrong-repeated"]
+    },
+    {
+      "id": "suggestion-unadopted-never-reaches-formal-plane",
+      "plane": "notebook",
+      "user_id": "carol",
+      "notebook_id": "clock",
+      "query": "include clock uncertainty margin setup analysis suggestion dismissed",
+      "expected": ["memory-clock-correct"],
+      "distractors": ["memory-clock-wrong-clarified", "memory-clock-wrong-repeated"]
     }
   ]
 }

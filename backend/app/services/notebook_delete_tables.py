@@ -283,6 +283,13 @@ _GROUP_D_STANDALONE: tuple[DirectTable, ...] = (
     DirectTable("knowledge_object_sources", "two"),  # closure-external
     DirectTable("knowledge_objects", "one", pk_column="id"),
     DirectTable("knowledge_source_fact_backfills", "one", pk_column="source_id"),
+    # SQLite v106 / PostgreSQL 0087: auto user-memory suggestions' job rows
+    # and fingerprints. Both cascade with the notebook (A-class); composite
+    # primary keys led by notebook_id (form two).
+    DirectTable("memory_suggest_fingerprints", "two"),
+    DirectTable("memory_suggest_jobs", "two"),
+    DirectTable("memory_suggest_read_fences", "two"),
+    DirectTable("notebook_activity", "two"),
     DirectTable("mention_edges", "two"),
     DirectTable("merge_review_jobs", "one", pk_column="notebook_id"),
     DirectTable("notebook_assets", "one", pk_column="id"),
@@ -360,7 +367,11 @@ assert len(CURSOR_KEYS) == len(set(CURSOR_KEYS)), "PHASE_3_PLAN cursor keys must
 #
 # 70 since SQLite v104 / PostgreSQL 0085: `source_paper_cards`, an A-class table
 # (ON DELETE CASCADE from `notebooks`) cleared by form one, keyed by source_id.
-EXPECTED_PHASE_3_TABLE_COUNT = 70
+#
+# 73 since SQLite v106 / PostgreSQL 0087: `memory_suggest_jobs`,
+# `memory_suggest_fingerprints` and `memory_suggest_read_fences`, A-class form two.
+# 74 since SQLite v107 / PostgreSQL 0088: `notebook_activity`, A-class form two.
+EXPECTED_PHASE_3_TABLE_COUNT = 74
 
 
 def phase_3_table_names() -> frozenset[str]:

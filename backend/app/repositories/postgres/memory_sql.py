@@ -290,3 +290,21 @@ def no_memory_cluster(cluster_alias: str) -> str:
     """`memory_cluster` 的否定(同一对臂,两个 NOT EXISTS 以便规划成反连接)。零参数。"""
     c = _alias(cluster_alias, _CLUSTER_INNER | _CANONICAL_INNER)
     return f"(NOT {_memory_member_arm(c)} AND NOT {_memory_canonical_arm(c)})"
+
+
+#: 「未采纳的系统建议」的状态集合(自动用户记忆,设计 §6.3):系统建议的 candidate(待处理)
+#: 与 rejected(已忽略或已过期)。它的取反里带 `suggested_signal` 的行(confirmed /
+#: deprecated)是**已采纳**的,即用户自己的记忆。
+UNADOPTED_SUGGESTION_STATUSES: tuple[str, ...] = ("candidate", "rejected")
+
+
+def unadopted_suggestion(memory_alias: str) -> str:
+    """记忆行 `memory_alias` 是一条**未采纳的系统建议**。零参数。
+
+    `({a}.suggested_signal IS NOT NULL AND {a}.status IN ('candidate', 'rejected'))`——
+    与 `idx_memory_suggest_unadopted` 的部分索引谓词同形,计数类读者按「原计数 − 本片段
+    计数」在同一条语句里相减时,减项能走那条部分索引。所有排除草稿的读者都引用它,不手写。
+    """
+    a = _alias(memory_alias, frozenset())
+    statuses = ", ".join(f"'{status}'" for status in UNADOPTED_SUGGESTION_STATUSES)
+    return f"({a}.suggested_signal IS NOT NULL AND {a}.status IN ({statuses}))"

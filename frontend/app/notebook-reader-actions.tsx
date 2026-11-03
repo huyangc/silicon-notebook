@@ -1,9 +1,11 @@
 "use client";
 
-import { useRef } from "react";
+import { Fragment, useRef } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent } from "react";
 
 import { grantedViaLabel, isGroupGranted } from "./group-api.ts";
+import { EditorRosterChip } from "./notebook-editor-roster.tsx";
+import { readerBadgeWords, readerExitEntries, type ExitPlan } from "./notebook-exit-entries.ts";
 import { anchorOf, type ExitAnchor } from "./use-notebook-exit.ts";
 import type { NotebookSummary } from "./workspace-model.ts";
 
@@ -31,6 +33,14 @@ import type { NotebookSummary } from "./workspace-model.ts";
  * P2-3),但他有内容管理权。所以徽章文案按 `can_manage_content` 分岔:写着「只读」
  * 而整屏写入口都亮着,是一句当场自相矛盾的话。他仍然**不是** owner——删库仍恒 owner,
  * 所以卡片菜单只给「编辑信息」,不给「删除笔记本」。
+ *
+ * 分享编辑与协作 P1 之后还有第三条:
+ *
+ *   编辑权 ≠ 管理权,而一个人可以同时握着几条读权。
+ *
+ * 点名编辑者 `can_manage_content` 为真、`can_manage_notebook` 为假:徽章写「可编辑 · 来自
+ * {库主}」(点开看其他编辑者,D17),改名控件只认管理权。退出入口按读权来路逐格给(成员行 /
+ * 点名授权 / 群组),逐格表与「不产生假成功」的论证在 notebook-exit-entries.ts。
  */
 
 /**
@@ -54,10 +64,16 @@ type BadgeRenameProps = {
 
 type ReaderNotebookBadgeProps = {
   notebook: NotebookSummary;
+  /** 当前登录用户 id:点名授权那条出口的地址里要它(`DELETE .../collaborators/{我}`)。
+   *  缺省空串 = 不给点名授权那几颗入口(没有点名授权的库不受影响)。 */
+  selfUserId?: string;
   leaveBusy: boolean;
-  /** 按下「退出共享」。参数是确认面板的落点(这颗按钮:面板出现在它正下方并跟着它走);流程本身见 `use-notebook-exit.ts`。 */
-  onLeave: (anchor: ExitAnchor) => void;
-  /** 组管理员改名(可选);仅当 `notebook.can_manage_content` 时真正渲染成可编辑。 */
+  /** 在途那次退出的动作名(`ExitFlow.label`);两颗退出按钮并存时据此只把按下的那颗写成「退出中…」。 */
+  leaveBusyLabel?: string;
+  /** 按下某个退出入口。`anchor` 是确认面板的落点(这颗按钮:面板出现在它正下方并跟着它走),
+   *  `plan` 是这颗按钮走哪几条出口(notebook-exit-entries.ts);流程本身见 `use-notebook-exit.ts`。 */
+  onLeave: (anchor: ExitAnchor, plan: ExitPlan) => void;
+  /** 改名(可选);仅当 `notebook.can_manage_notebook`(管理权)时真正渲染成可编辑。 */
   rename?: BadgeRenameProps;
   /**
    * 镜像库的就地说明(空串 = 不是镜像,不渲染)。改名在镜像上被目标端写入围栏挡
@@ -84,9 +100,12 @@ type ReaderNotebookBadgeProps = {
  * 访问的开关本来就不在这个人手里(群组共享没有自助退出,那正是下面 `!granted` 才渲染
  * 「退出共享」的原因),把一条他按不动的操作指引常驻在标题旁边,既占地方又帮不上忙。
  */
-function badgeHint(granted: boolean, canManage: boolean): string {
-  if (!granted) return "只读，无写权限";
-  return canManage
+function badgeHint(granted: boolean, accessWord: string): string {
+  if (accessWord === "可编辑") return "你可以修改这本笔记本的内容，但它属于原作者。点开查看这本笔记本的编辑者";
+  if (!granted) {
+    return accessWord === "可管理" ? "你可以管理这本笔记本的内容，但它属于原作者" : "只读，无写权限";
+  }
+  return accessWord === "可管理"
     ? "你可以管理这本笔记本的内容，但它属于原作者"
     : "只读，无写权限。这本笔记本由组管理员共享给群组";
 }
@@ -103,17 +122,20 @@ function badgeHint(granted: boolean, canManage: boolean): string {
  */
 export function ReaderNotebookBadge({
   notebook,
+  selfUserId = "",
   leaveBusy,
+  leaveBusyLabel = "",
   onLeave,
   rename,
   mirrorNote = "",
 }: ReaderNotebookBadgeProps) {
-  const granted = isGroupGranted(notebook);
-  const canManage = Boolean(notebook.can_manage_content);
-  const accessWord = canManage ? "可管理" : "只读";
-  const badgeLabel = granted
+  const { accessWord, viaGroup } = readerBadgeWords(notebook);
+  const canManage = Boolean(notebook.can_manage_notebook);
+  const badgeLabel = viaGroup
     ? `${accessWord} · ${grantedViaLabel(notebook)}`
     : `${accessWord} · 来自 ${notebook.shared_from || "他人"}`;
+  const badgeTitle = `${badgeLabel}\n${badgeHint(viaGroup, accessWord)}`;
+  const exits = readerExitEntries(notebook, selfUserId);
   // Escape 之后紧跟的那次 blur **不提交**。`onReset()` 只是排一次 state 更新,而同一个
   // 事件里立刻调用的 `blur()` 会同步触发 onBlur——它读到的仍是本次渲染的**旧**编辑值,
   // 于是「取消」反而把已被撤销的标题 PATCH 了出去(codex #519 R1 P2)。用 ref 而不是
@@ -152,12 +174,13 @@ export function ReaderNotebookBadge({
       )}
       {/* 徽章有界(见 `.reader-badge-chip` 的 max-width),长组名会被省略,所以完整文本
           必须和身份说明一起进 tooltip——否则读者看不出这本库到底来自哪个组。 */}
-      <span
-        className="reader-badge-chip"
-        title={`${badgeLabel}\n${badgeHint(granted, canManage)}`}
-      >
-        {badgeLabel}
-      </span>
+      {notebook.collaborator_role === "editor" ? (
+        <EditorRosterChip notebookId={notebook.id} label={badgeLabel} title={badgeTitle} />
+      ) : (
+        <span className="reader-badge-chip" title={badgeTitle}>
+          {badgeLabel}
+        </span>
+      )}
       {mirrorNote && (
         // 同样戴 `.reader-badge-chip`:那个类是这一行里唯一有界(max-width + 省略)的
         // 文本槽,72px 单行顶栏的版式前提靠它(见 reader-badge-layout-guard)。再叠一个
@@ -166,16 +189,19 @@ export function ReaderNotebookBadge({
           {mirrorNote}
         </span>
       )}
-      {!granted && (
+      {exits.map((entry) => (
         <button
+          key={entry.key}
           className="sort-button reader-badge-action"
           disabled={leaveBusy}
-          title="退出该共享笔记本"
-          onClick={(event) => onLeave(anchorOf(event.currentTarget))}
+          // 仍是编辑者时「退出共享」那句补充(规格 §4.4)在 tooltip 里:顶栏固定 72px 单行,
+          // 放不下第二行;卡片菜单里同一句话写成正文。
+          title={entry.note || (entry.key === "share" ? "退出该共享笔记本" : "不再编辑这本笔记本")}
+          onClick={(event) => onLeave(anchorOf(event.currentTarget), entry.plan)}
         >
-          {leaveBusy ? "退出中…" : "退出共享"}
+          {leaveBusy && (exits.length === 1 || entry.label === leaveBusyLabel) ? "退出中…" : entry.label}
         </button>
-      )}
+      ))}
     </div>
   );
 }
@@ -204,7 +230,10 @@ type NotebookMenuActionsProps = {
    * ——入口不重复。判据由调用方按 `workspaceCapabilities` 算好传进来。
    */
   canExportFromMenu?: boolean;
-  onLeave: () => void;
+  /** 当前登录用户 id(点名授权那条出口的地址里要它);缺省同 ReaderNotebookBadge。 */
+  selfUserId?: string;
+  /** 按下某个退出入口;`plan` 见 notebook-exit-entries.ts。 */
+  onLeave: (plan: ExitPlan) => void;
   onEdit: () => void;
   onExport?: () => void;
   onDelete: (event: MouseEvent<HTMLButtonElement>) => void;
@@ -220,10 +249,13 @@ type NotebookMenuActionsProps = {
  *   (`openNotebookEditor` 连挂载配置一起拉,是 owner-only 的 notebook:mount),
  *   给组管理员画出来点了会在 listMountable 上 404。组管理员改名走**工作区顶栏**的
  *   行内输入框(PATCH-only,见 ReaderNotebookBadge.rename)——那条不碰挂载配置;
- * - 只读共享(分享链接、非群组):退出共享。
+ * - 只读共享(分享链接、非群组):退出共享;
+ * - 点名授权(编辑者、同步留下的只读点名授权):按 `readerExitEntries` 的逐格表给退出入口,
+ *   入口旁的补充句(「你仍是这本笔记本的编辑者」)在这里写成正文。
  */
 export function NotebookMenuActions({
   notebook,
+  selfUserId = "",
   canManageNotebook,
   canDeleteNotebook,
   manageDisabledNote = "",
@@ -235,9 +267,20 @@ export function NotebookMenuActions({
   onDelete,
 }: NotebookMenuActionsProps) {
   if ((notebook.access ?? "owner") === "reader") {
-    return isGroupGranted(notebook)
-      ? <span className="notebook-menu-note">由组管理员管理</span>
-      : <button className="danger" onClick={onLeave}>退出共享</button>;
+    const exits = readerExitEntries(notebook, selfUserId);
+    if (exits.length === 0) {
+      return isGroupGranted(notebook) ? <span className="notebook-menu-note">由组管理员管理</span> : null;
+    }
+    return (
+      <>
+        {exits.map((entry) => (
+          <Fragment key={entry.key}>
+            <button className="danger" onClick={() => onLeave(entry.plan)}>{entry.label}</button>
+            {entry.note && <span className="notebook-menu-note">{entry.note}</span>}
+          </Fragment>
+        ))}
+      </>
+    );
   }
   return (
     <>

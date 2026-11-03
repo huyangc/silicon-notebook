@@ -53,14 +53,14 @@ const COMPLETION = {
 // 3. Read-only members (canEdit=false)
 // ---------------------------------------------------------------------------
 
-test("read-only grid: toolbar keeps only back, copy/move and history; empty cells are inert; no retry", async () => {
+test("read-only grid: toolbar keeps only back, copy and history; empty cells are inert; no retry", async () => {
   const server = suite.server();
   routeTable(server, "nb-1", recordDetail());
   renderPanel({ canEdit: false, initialTableId: "t-rec" });
 
   expect(await screen.findByRole("heading", { name: "排障记录" })).toBeInTheDocument();
   expect(screen.getByText("结构化经验表：按行浏览与核对（只读共享，不可修改）。")).toBeInTheDocument();
-  expect(toolbarButtonLabels()).toEqual(["返回", "复制/移动到…", "历史"]);
+  expect(toolbarButtonLabels()).toEqual(["返回", "复制到…", "历史"]);
   expect(screen.getAllByText("—")).toHaveLength(2);
   expect(screen.queryByRole("button", { name: "+" })).not.toBeInTheDocument();
   expect(screen.getByText("同步失败·可重试")).toBeInTheDocument();
@@ -151,7 +151,8 @@ test("preview → edit → save patches one cell and updates the grid summary wi
     {
       method: "PATCH",
       path: "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-fix",
-      body: { content_md: "检查电源并复位" },
+      // D7: the stored value the editor opened on rides along as expected_before.
+      body: { content_md: "检查电源并复位", expected_before: "检查电源" },
     },
   ]);
 });
@@ -183,7 +184,16 @@ test("saving a merged shared cell fans out to the whole concept group in one bat
     {
       method: "PATCH",
       path: "/notebooks/nb-1/knowhow/t-anc/cells",
-      body: { column_id: "c-shared", row_ids: ["a1", "a2"], content_md: "换晶振" },
+      // D7: one stored baseline per branch row plus the anchor guard (each row's anchor
+      // value when the editor opened).
+      body: {
+        column_id: "c-shared",
+        row_ids: ["a1", "a2"],
+        content_md: "换晶振",
+        expected_before: ["检查时钟源", "检查时钟源"],
+        anchor_column_id: "c-anchor",
+        expected_anchor: ["时钟", "时钟"],
+      },
     },
   ]);
 });
@@ -215,7 +225,8 @@ test("a failed save keeps the editor open with the error inside it", async () =>
   expect(server.log).toEqual([
     LIST,
     REC,
-    { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r2/cells/c-tool", body: { content_md: "示波器" } },
+    // D7: a never-written cell's baseline is "" (what the table data shows).
+    { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r2/cells/c-tool", body: { content_md: "示波器", expected_before: "" } },
   ]);
 });
 
@@ -405,7 +416,7 @@ test("saving a cell of the open row refetches that row's code status", async () 
     { method: "GET", path: "/notebooks/nb-1/knowhow" },
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
     { method: "GET", path: "/agent/knowhow/rows/r1" },
-    { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-tool", body: { content_md: "示波器" } },
+    { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r1/cells/c-tool", body: { content_md: "示波器", expected_before: "万用表" } },
     { method: "GET", path: "/agent/knowhow/rows/r1" },
   ]);
 });

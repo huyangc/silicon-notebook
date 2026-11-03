@@ -67,12 +67,14 @@ AFTER every row has been visited). Two nuances worth flagging up front:
    as it was after the last SUCCESSFUL pass — never partially torn down.
 """
 from __future__ import annotations
+from app.services.collab_jobs import pulse_touch_for_job_kinds
 
 import hashlib
 import json
 from typing import Any, Callable, List
 
 from app.core.config import Settings
+from app.domain.collaboration import KNOWHOW_TERMINAL_PULSE_KINDS
 from app.repositories.ports import (
     ChunkWrite,
     ChunkStorePort,
@@ -206,6 +208,7 @@ class KnowhowProjector:
         mark_unified_dirty_in_tx: Callable[[Any, str], int],
         new_id: Callable[[str], str],
         now: Callable[[], str],
+        collab_touch=None,
     ) -> None:
         self.settings = settings
         self.database = database
@@ -224,6 +227,7 @@ class KnowhowProjector:
         self.mark_unified_dirty_in_tx = mark_unified_dirty_in_tx
         self.new_id = new_id
         self.now = now
+        self._collab_touch = collab_touch
 
     # ------------------------------------------------------- hidden source
     def ensure_hidden_source(self, table_id: str) -> str:
@@ -559,6 +563,7 @@ class KnowhowProjector:
                     self.knowhow.set_knowhow_row_projection_if_table_seq(
                         row_id, "failed", snapshot_mutation_seq
                     )
+                pulse_touch_for_job_kinds(self._collab_touch, notebook_id, KNOWHOW_TERMINAL_PULSE_KINDS)
                 return
 
             projected_mutation_seq = self.knowhow.bump_knowhow_mutation_seq(table_id)
@@ -568,6 +573,7 @@ class KnowhowProjector:
                 self.knowhow.set_knowhow_row_projection_if_table_seq(
                     row_id, "failed", snapshot_mutation_seq
                 )
+            pulse_touch_for_job_kinds(self._collab_touch, notebook_id, KNOWHOW_TERMINAL_PULSE_KINDS)
             raise
 
         # The projector's own bump is the sole allowed mutation since the
@@ -586,6 +592,7 @@ class KnowhowProjector:
         # app/services/knowhow/api.py's run_projection_and_sweep) and this pass
         # already resolved it above — returning it avoids a second table read
         # (get_knowhow_table loads every row + cell) purely to learn one id.
+        pulse_touch_for_job_kinds(self._collab_touch, notebook_id, KNOWHOW_TERMINAL_PULSE_KINDS)
         return notebook_id
 
     # --- elements ------------------------------------------------------

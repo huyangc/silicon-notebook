@@ -18,6 +18,7 @@
 // agent-profile-model.test.mjs 覆盖。
 import test from "node:test";
 import assert from "node:assert/strict";
+import ts from "typescript";
 
 import {
   callsIn,
@@ -25,6 +26,7 @@ import {
   jsxElements,
   jsxTextValues,
   parseModule,
+  parseText,
   stringLiterals,
 } from "../../test-support/semantic-source.mjs";
 
@@ -233,17 +235,69 @@ test("面板只经 profile-api 发请求：不拼 URL、不碰 api-client、不�
 // page.tsx 关弹窗的 effect(`useEffect(() => setUnderstandingOpen(false), [currentNotebookId])`)
 // 是第二层保险,不是本条守卫的对象——effect 跑在渲染**之后**,`AgentProfilePanel` 在
 // 那之前会先用新的 `notebookId` 重渲染一次,草稿/忙碌位/确认态这时还是旧库的。
-// `key={currentNotebookId}` 让组件随切库**立即整体重挂**,状态清零与 prop 变化同一次
-// 渲染完成,不必等 effect 追上来。判据用 JSX 绑定文本,不含行号——挪动这行不该报红。
-test("AgentProfilePanel 随 currentNotebookId 整体重挂（key，不只靠关弹窗 effect）", () => {
-  const matched = jsxElements(page, "AgentProfilePanel");
-  assert.ok(matched.length > 0, "没找到 AgentProfilePanel 挂载点（改名或删除？守卫失效）");
-  const offenders = matched.filter((element) => element.bindings?.key !== "currentNotebookId");
-  assert.deepEqual(
-    offenders.map((element) => element.scope),
-    [],
-    "AgentProfilePanel 缺 key={currentNotebookId} —— 切库时状态可能残留到下一个库",
-  );
+// key 必须在换账号、切库时都变化,让状态清零与 prop 变化同一次渲染完成。
+// 只解释 AST 中的身份绑定与字符串组合,不执行源码,也不钉整条表达式的文本拼法。
+function profileKeys(sourceFile) {
+  const keys = [];
+  function visit(node) {
+    if (
+      (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node))
+      && ts.isIdentifier(node.tagName) && node.tagName.text === "AgentProfilePanel"
+    ) {
+      const key = node.attributes.properties.find((attribute) => (
+        ts.isJsxAttribute(attribute) && attribute.name.text === "key"
+      ));
+      keys.push(key?.initializer && ts.isJsxExpression(key.initializer)
+        ? key.initializer.expression : undefined);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  return keys;
+}
+
+function keyValue(expression, actorId, notebookId) {
+  assert.ok(expression, "AgentProfilePanel 缺少身份 key");
+  if (ts.isParenthesizedExpression(expression)) return keyValue(expression.expression, actorId, notebookId);
+  if (ts.isStringLiteralLike(expression)) return expression.text;
+  if (ts.isIdentifier(expression) && expression.text === "currentNotebookId") return notebookId;
+  if (
+    ts.isPropertyAccessExpression(expression) && expression.name.text === "id"
+    && ts.isIdentifier(expression.expression) && expression.expression.text === "currentUser"
+  ) return actorId;
+  if (ts.isTemplateExpression(expression)) {
+    return expression.head.text + expression.templateSpans.map((span) => (
+      keyValue(span.expression, actorId, notebookId) + span.literal.text
+    )).join("");
+  }
+  if (ts.isBinaryExpression(expression) && expression.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    return keyValue(expression.left, actorId, notebookId) + keyValue(expression.right, actorId, notebookId);
+  }
+  assert.fail("AgentProfilePanel key 必须直接绑定账号和笔记本身份");
+}
+
+function assertProfileIdentity(sourceFile) {
+  const keys = profileKeys(sourceFile);
+  assert.ok(keys.length > 0, "没找到 AgentProfilePanel 挂载点（改名或删除？守卫失效）");
+  for (const key of keys) {
+    const identities = [
+      ["actor-a", "book-a"], ["actor-b", "book-a"],
+      ["actor-a", "book-b"], ["actor-b", "book-b"],
+    ];
+    assert.equal(new Set(identities.map(([actor, notebook]) => keyValue(key, actor, notebook))).size,
+      identities.length, "AgentProfilePanel key 必须隔离账号和笔记本,不能带入旧草稿/忙碌/确认态");
+  }
+}
+
+test("AgentProfilePanel 随账号和笔记本身份整体重挂（key，不只靠关弹窗 effect）", () => {
+  assertProfileIdentity(page);
+});
+
+test("面板身份守卫拒绝缺 key、单账号、单笔记本和常量 key", () => {
+  for (const binding of ["", "key={currentUser?.id}", "key={currentNotebookId}", 'key={"constant"}']) {
+    assert.throws(() => assertProfileIdentity(parseText(`<AgentProfilePanel ${binding} />`, "fixture.tsx")));
+  }
+  assertProfileIdentity(parseText('<AgentProfilePanel key={currentNotebookId + ":" + currentUser?.id} />', "fixture.tsx"));
 });
 
 

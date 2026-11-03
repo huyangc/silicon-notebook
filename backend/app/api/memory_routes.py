@@ -57,7 +57,7 @@ from app.models.memory import (
     DeleteWindowTransferRequest,
     MemoryBulkDeleteRequest,
     MemoryCreateFromAnswer,
-    MemoryOrigin,
+    MemoryOriginFilter,
     MemoryPreview,
     MemoryRecord,
     MemoryReviewRequest,
@@ -345,7 +345,7 @@ async def _memory_call(call, *args, **kwargs):
 async def list_all_memories(
     notebook_id: str | None = None,
     status_filter: MemoryStatus | None = Query(None, alias="status"),
-    origin: MemoryOrigin | None = None,
+    origin: MemoryOriginFilter | None = None,
     query: str = "",
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
@@ -370,7 +370,7 @@ async def list_all_memories(
 async def list_notebook_memories(
     notebook_id: str = Depends(require_notebook_read),
     status_filter: MemoryStatus | None = Query(None, alias="status"),
-    origin: MemoryOrigin | None = None,
+    origin: MemoryOriginFilter | None = None,
     query: str = "",
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
@@ -451,12 +451,15 @@ async def answer_memory_links(
     payload: AnswerMemoryLinksRequest,
     notebook_id: str = Depends(require_notebook_read),
     user: UserProfile = Depends(get_current_user),
-    service: MemoryRepository = Depends(memory_service),
 ) -> AnswerMemoryLinksResponse:
-    links = await _memory_call(
-        service.answer_memory_links, notebook_id, user.id, payload.answer_ids
+    """``links`` (unadopted suggestions left out, the shape older clients
+    read) and ``states`` (drafts included) in one read, through the runtime
+    seat (G15)."""
+    view = await _memory_call(
+        memory_membership_service().answer_memory_link_view,
+        notebook_id, user.id, payload.answer_ids,
     )
-    return AnswerMemoryLinksResponse(links=links)
+    return AnswerMemoryLinksResponse(links=view["links"], states=view["states"])
 
 
 @memory_router.post("/memories/bulk-delete")

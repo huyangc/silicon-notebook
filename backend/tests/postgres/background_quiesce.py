@@ -112,9 +112,11 @@ def quiesce_process_background_work(timeout: float = QUIESCE_SECONDS) -> None:
     """
     from app.services import background_jobs
     from app.services.kg import scheduler as kg_scheduler
+    from app.services.notebook_activity_writer import _drain_activity_writers_for_tests
 
     if _first_timeout is not None:
         if _all_pools_idle_atomically():
+            _drain_activity_writers_for_tests()
             return
         raise BackgroundWorkStuck(
             "still stuck since an earlier scope teardown in this process; not "
@@ -130,6 +132,7 @@ def quiesce_process_background_work(timeout: float = QUIESCE_SECONDS) -> None:
             if not executor.wait_idle(deadline):
                 raise _stuck(timeout)
         if _all_pools_idle_atomically():
+            _drain_activity_writers_for_tests()
             return
         if time.monotonic() >= deadline:
             raise _stuck(timeout)

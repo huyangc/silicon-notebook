@@ -641,6 +641,68 @@ def test_merge_keeps_dismissals_and_drops_relink_marks_and_findings(tmp_path):
     assert findings == {"nb-main"}
 
 
+def test_merge_keeps_primary_memory_suggest_state_and_folds_the_mode(tmp_path):
+    """自动用户记忆(计划 G16):开关表与作业行只保主库;指纹按 notebook_id 随库
+    合并;合并后 user_profiles.memory_mode 折叠到主库开关——副库独有用户写着
+    'suggest' 但主库没有他的开关行,展示值必须回到 'manual',不能与开关分叉。
+    主库自己开着的用户保持 'suggest'。"""
+    now = "2026-01-01T00:00:00"
+
+    def _mk(path, nb, user, *, enabled):
+        merge_dbs.migrate_to_current(path)
+        conn = sqlite3.connect(str(path))
+        with conn:
+            conn.execute(
+                "INSERT INTO users (id,email,display_name,role,created_at,"
+                "updated_at) VALUES (?,?,?,'member',?,?)", (user, f"{user}@x", user, now, now))
+            conn.execute(
+                "INSERT INTO user_profiles (id,user_id,memory_mode,domain_focus,"
+                "created_at,updated_at) VALUES (?,?,'suggest','[]',?,?)",
+                (f"profile-{user}", user, now, now))
+            conn.execute(
+                "INSERT INTO memory_suggest_users (owner_id, enabled, updated_at) "
+                "VALUES (?, ?, ?)", (user, 1 if enabled else 0, now))
+            conn.execute(
+                "INSERT INTO notebooks (id,name,purpose,primary_domain,status,"
+                "created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (nb, nb, "", "Semiconductor", "active", user, now, now))
+            conn.execute(
+                "INSERT INTO memory_suggest_jobs (notebook_id, owner_id, cursor_created_at, "
+                "window_started_at, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+                (nb, user, now, now, now, now))
+            conn.execute(
+                "INSERT INTO memory_suggest_read_fences (notebook_id,owner_id,lost_at) VALUES (?,?,?)",
+                (nb, user, now))
+            conn.execute(
+                "INSERT INTO memory_suggest_fingerprints (notebook_id, owner_id, fingerprint, "
+                "kind, created_at) VALUES (?, ?, 'fp-1', 'proposed', ?)", (nb, user, now))
+        conn.close()
+
+    primary, secondary, out = tmp_path / "a.db", tmp_path / "b.db", tmp_path / "out.db"
+    _mk(primary, "nb-main", "u-main", enabled=True)
+    _mk(secondary, "nb-sec", "u-sec", enabled=True)
+    result = merge_dbs.merge_core(out, primary, secondary, shared_base="nb-none")
+
+    conn = sqlite3.connect(str(out))
+    try:
+        switches = {r[0] for r in conn.execute("SELECT owner_id FROM memory_suggest_users")}
+        jobs = {r[0] for r in conn.execute("SELECT notebook_id FROM memory_suggest_jobs")}
+        fences = {r[0] for r in conn.execute("SELECT notebook_id FROM memory_suggest_read_fences")}
+        fingerprints = {
+            (r[0], r[1]) for r in conn.execute(
+                "SELECT notebook_id, owner_id FROM memory_suggest_fingerprints")
+        }
+        modes = dict(conn.execute("SELECT user_id, memory_mode FROM user_profiles"))
+    finally:
+        conn.close()
+    assert switches == {"u-main"}
+    assert jobs == {"nb-main"}
+    assert fences == {"nb-main"}
+    assert fingerprints == {("nb-main", "u-main"), ("nb-sec", "u-sec")}
+    assert modes == {"u-main": "suggest", "u-sec": "manual"}
+    assert result["row_counts"]["memory_mode_folded"] == 1
+
+
 def test_merge_carries_the_concept_seed_space_of_the_imported_clusters(tmp_path, monkeypatch):
     """Codex #988 R2 (S1, v102): the merge clears an imported notebook's state
     row but keeps its published concept clusters, built in the concept seed

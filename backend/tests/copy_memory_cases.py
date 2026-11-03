@@ -330,6 +330,7 @@ LENT_EVIDENCE: dict[str, tuple] = {
 def seed(insert: Callable[[str, dict], None], nb: str = NOTEBOOK, *, with_memory: bool = True) -> None:
     for row in world(nb, with_memory=with_memory):
         insert(row.table, row.values)
+    insert("memory_suggest_read_fences", {"notebook_id": nb, "owner_id": USERS[0], "lost_at": NOW})
 
 
 def expected_copy_counts(nb: str = NOTEBOOK) -> dict[str, int]:
@@ -657,6 +658,10 @@ MEMORY_CARRIERS_NOT_COPIED = frozenset({
     # v104: the paper-card cache is generated from a source's text on demand in
     # each environment; a copy neither carries nor invalidates it.
     "source_paper_cards",
+    # v106: auto user-memory suggestions' job rows and fingerprints belong to
+    # their owner's opt-in in the source notebook; a copy is a new notebook
+    # whose owner starts with neither.
+    "memory_suggest_jobs", "memory_suggest_fingerprints", "memory_suggest_read_fences",
 })
 
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Inspect or concurrently build the accumulated hot-path fix PostgreSQL
-indexes (six query-family groups).
+indexes in the active registry.
 
     python3 scripts/build_hotpath_indexes.py                 # inspect (default)
     python3 scripts/build_hotpath_indexes.py --apply          # build missing ones
@@ -14,7 +14,12 @@ definitions and ``migrations/0039_hotpath_batch1_indexes.sql`` for the full
 per-group "which query family does this serve" evidence.
 
 Relationship to the migration: this script is how an operator builds these
-indexes (every entry of ``HOTPATH_INDEX_SPECS``, batches 1-9: batch 1's query-family btree/partial indexes, batch 2's payload-search GIN and checkup-H5 partial index, batch 4's source-search GIN trigram indexes, batch 5's delete-jobization FK/keyset indexes, batch 6's generation-aware cluster replacements, batch 7's paper-metadata covering index, batch 8's find_sources summary trigram GIN (``idx_sources_nb_summary_trgm``, which has NO migration and exists only when this script built it), batch 9's source-element reading-order replacements (migration 0086); entries a later batch superseded have left the registry -- per-batch counts in backend/tests/hotpath_index_batches.py) on an already-populated, already-serving-traffic production
+indexes (every active entry of ``HOTPATH_INDEX_SPECS``, including batch 10's
+automatic-memory sampling partial index from migration 0087). Entries superseded
+by a later batch have left the registry; per-batch counts live in
+``backend/tests/hotpath_index_batches.py``. Batch 8's find_sources summary trigram
+GIN (``idx_sources_nb_summary_trgm``) has no migration and exists only when this
+script built it. The builder supports an already-populated, already-serving-traffic production
 database WITHOUT taking a blocking lock (``CREATE INDEX CONCURRENTLY``, one
 statement per index, no transaction). Migration 0039 in
 ``backend/app/repositories/postgres/migrations/`` uses plain
@@ -48,7 +53,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Inspect or concurrently build the accumulated hot-path fix PostgreSQL "
-            "indexes (six query-family groups). The database URL is read from an "
+            "indexes in the active registry. The database URL is read from an "
             "environment variable and never printed."
         )
     )

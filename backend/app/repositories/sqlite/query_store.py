@@ -60,6 +60,7 @@ from app.repositories.sqlite.memory_sql import (
     memory_viewer_filter,
     own_memory_source,
     no_memory_member_cluster,
+    unadopted_suggestion,
 )
 from app.repositories.sqlite.id_binding import bind_ids, drive_by, member_of
 from app.repositories.sqlite.mount_sql import (
@@ -867,8 +868,11 @@ class QueryStore:
         `access_sql.py` 模块 docstring 的「刻意不收口」):它不是「我能不能读这个
         notebook」的授权判定,而是一条**列表**查询——所以它不复用读权谓词,而且刻意
         只覆盖两个**群组**主体:
-        * `user` 主体的边在 P1 里还没有任何写入口(只读共享仍走 `notebook_members`,
-          由 `joined_notebook_rows` 那条负责),收进来只会凭空多一条空路径;
+        * `user` 主体的边(分享编辑 P1 的点名编辑者,以及遗留的点名 viewer/admin 行)
+          由 `UNION ALL` 之后的**第二个分支**单独取:它从 `notebook_grants` 按
+          `idx_notebook_grants_principal (principal_type, principal_id)` 双列点查起步,
+          组那三列为 NULL;两个分支列序逐列对齐(原分支同样补上
+          `_grant_principal_type`)。只读共享仍走 `notebook_members`;
         * `everyone` 主体沿用 `tier='base'` 的既有隐藏惯例——公共知识库不进常规
           列表,只在挂载选择器出现。把它收进来会让每个人的笔记本列表突然多出全部
           公共库。
@@ -885,13 +889,10 @@ class QueryStore:
         前者答「这条共享边给的是只读还是管理」,后者答「你在这个组里是不是管理员」,
         `group_admins` 主体的边两者都要为真。service 用它算 `can_manage_content`。
 
-        **登记的取舍**:这条查询只覆盖 `group` / `group_admins` 两个主体,所以由它
-        派生的 `can_manage_content` 也只覆盖这两类边;而后端的管理权谓词
-        (`access_sql.NOTEBOOK_ADMIN_SQL`)是四臂全收。两者今天等价,因为
-        `models/groups.py::GRANTABLE_PRINCIPAL_TYPES` 只收这两个主体——`user` /
-        `everyone` 的授权边在产品里根本没有写入口,更不可能带 `role='admin'`。这条
-        前提由 `test_group_routes.py` 的 grantable-principal 守卫钉住;真要给
-        `user` 主体开写入口,那道守卫会先红,提醒把这条投影一并扩掉。方向也是安全的:
+        **登记的取舍**:这条查询覆盖 `group` / `group_admins` / `user` 三个主体(第三个
+        由分享编辑 P1 的点名分支补上),由它派生的 `can_manage_content`(编辑边)与
+        `can_manage_notebook`(管理边)因此覆盖全部受限主体;`everyone` 不在其中——它
+        的边恒只读(管理/编辑谓词都排除 everyone),漏判不了任何写入口。方向是安全的:
         投影漏判只会少画按钮,不会多给权限(权威判定永远在守卫那一侧)。
 
         ⚠ **`CROSS JOIN` 是给 SQLite 查询规划器的驱动顺序提示,不是语义**(SQLite 对
@@ -913,14 +914,19 @@ class QueryStore:
         # 实际会执行的 SQL/参数,与下面用 f-string 还是 `+` 拼接谓词无关。
         point_filter = "" if notebook_id is None else "AND ng.notebook_id = ? "
         params = (user_id,) if notebook_id is None else (user_id, notebook_id)
-        return db.execute(
-            "SELECT nb.*, u.username AS _owner_username, "
-            "g.id AS _group_id, g.name AS _group_name, g.kind AS _group_kind, "
-            "ng.role AS _grant_role,"
+        pipeline = (
             "COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,"
             "COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') "
             "AS _published_pipeline_version "
-            "FROM group_members gm "
+        )
+        # 排序写在 compound 之后、按结果列名(两个分支列序相同);NULLS FIRST 是 SQLite
+        # 的默认,显式写出与 PG 对齐。
+        return db.execute(
+            "SELECT nb.*, u.username AS _owner_username, "
+            "g.id AS _group_id, g.name AS _group_name, g.kind AS _group_kind, "
+            "ng.role AS _grant_role, ng.principal_type AS _grant_principal_type,"
+            + pipeline
+            + "FROM group_members gm "
             "CROSS JOIN notebook_grants ng ON ng.principal_id = gm.group_id "
             "AND ng.principal_type IN ('group', 'group_admins') "
             "JOIN groups g ON g.id = gm.group_id "
@@ -930,8 +936,19 @@ class QueryStore:
             "WHERE gm.user_id = ? " + point_filter
             + "AND (ng.principal_type = 'group' OR gm.role = 'admin') "
             + f"AND nb.{access_sql.NOTEBOOK_LIVE_SQL} "
-            "ORDER BY nb.created_at ASC, nb.id ASC, g.id ASC",
-            params,
+            "UNION ALL "
+            "SELECT nb.*, u.username AS _owner_username, "
+            "NULL AS _group_id, NULL AS _group_name, NULL AS _group_kind, "
+            "ng.role AS _grant_role, ng.principal_type AS _grant_principal_type,"
+            + pipeline
+            + "FROM notebook_grants ng "
+            "JOIN notebooks nb ON nb.id = ng.notebook_id "
+            "LEFT JOIN users u ON u.id = nb.created_by "
+            "LEFT JOIN unified_kg_state ip ON ip.notebook_id=nb.id "
+            "WHERE ng.principal_type = 'user' AND ng.principal_id = ? " + point_filter
+            + f"AND nb.{access_sql.NOTEBOOK_LIVE_SQL} "
+            "ORDER BY created_at ASC, id ASC, _group_id ASC NULLS FIRST",
+            params + params,
         ).fetchall()
 
     @staticmethod
@@ -943,11 +960,26 @@ class QueryStore:
         Memory is private to ``created_by`` even when the notebook is shared;
         grouping by both privacy key and notebook id makes that scope explicit
         and avoids a per-card query.
+
+        "Your memories" leave out the unadopted system suggestions (design
+        §6.3): the original grouped count (``al``, the pre-suggestion
+        statement verbatim) LEFT JOIN the grouped unadopted count (``dr``,
+        through the partial ``idx_memory_suggest_unadopted``), subtracted and
+        floored at 0 (scalar ``MAX``; PostgreSQL: ``GREATEST``) in the same
+        statement. Never two reads: between them an adoption or a dismissal
+        would make the difference short-lived negative or miss it.
         """
         rows = db.execute(
+            "SELECT al.created_by, al.notebook_id, "
+            "MAX(0, al.c - COALESCE(dr.c, 0)) AS c FROM ("
             "SELECT created_by, notebook_id, COUNT(*) AS c FROM memory_items "
-            "WHERE created_by=? GROUP BY created_by, notebook_id",
-            (user_id,),
+            "WHERE created_by=? GROUP BY created_by, notebook_id) al "
+            "LEFT JOIN (SELECT us.created_by, us.notebook_id, COUNT(*) AS c "
+            "FROM memory_items us WHERE us.created_by=? "
+            f"AND {unadopted_suggestion('us')} "
+            "GROUP BY us.created_by, us.notebook_id) dr "
+            "ON dr.created_by=al.created_by AND dr.notebook_id=al.notebook_id",
+            (user_id, user_id),
         ).fetchall()
         return {
             (row["created_by"], row["notebook_id"]): int(row["c"])
@@ -1137,14 +1169,23 @@ class QueryStore:
             # 列表)同一条 live 过滤,避免 deleting 过渡态下这块摘要与下方笔记本明细
             # 表同屏数字不一致;`groups` 没有笔记本维度,不加。
             # memory_count 排除 status='rejected'——被拒绝的候选不代表用户采纳了
-            # Memory 机制。
+            # Memory 机制;系统建议同理(设计 §6.3):再减去未采纳且仍是 candidate 的
+            # 建议(rejected 的本来就不在原计数里)。原计数 `al` 是改前语句原样,
+            # 减项 `dr` 走部分索引(idx_memory_suggest_unadopted,或更小的 idx_memory_suggest_expiry),同一条语句内相减
+            # 并兜底 0(不分两次读)。
             memory_count = {
                 row["k"]: row["c"]
                 for row in db.execute(
+                    "SELECT al.k, MAX(0, al.c - COALESCE(dr.c, 0)) AS c FROM ("
                     "SELECT mi.created_by AS k,COUNT(*) AS c FROM memory_items mi "
                     "JOIN notebooks nb ON nb.id=mi.notebook_id "
                     f"WHERE mi.status<>'rejected' AND nb.{access_sql.NOTEBOOK_LIVE_SQL} "
-                    "GROUP BY mi.created_by"
+                    "GROUP BY mi.created_by) al "
+                    "LEFT JOIN (SELECT mi.created_by AS k,COUNT(*) AS c "
+                    "FROM memory_items mi JOIN notebooks nb ON nb.id=mi.notebook_id "
+                    f"WHERE {unadopted_suggestion('mi')} AND mi.status='candidate' "
+                    f"AND nb.{access_sql.NOTEBOOK_LIVE_SQL} "
+                    "GROUP BY mi.created_by) dr ON dr.k=al.k"
                 ).fetchall()
             }
             # knowhow_tables.created_by 早期/异常写入可能留空,同 kg_builds 排除空串。
@@ -2299,30 +2340,41 @@ class QueryStore:
         the lifecycle term -- the window is exactly when that term is false),
         oldest deadline first. Each item: ``notebook_id``, ``name``,
         ``delete_after`` (UTC ISO), ``is_owner``, ``memory_count`` (the user's
-        own Memory there, every status -- what the export holds) and
+        own Memory there, every status except the unadopted system suggestions
+        -- what the export holds) and
         ``transferable_count`` (the confirmed ones the move rule accepts:
         not ``promotion_state='proposed'``).
 
         Without ``notebook_id`` only the notice audience is listed: the owner
-        and readers holding at least one Memory there (ruling B3). With it,
+        and readers holding at least one Memory there (ruling B3) -- more rows
+        than unadopted system suggestions, so a reader with only drafts gets
+        no notice (design §6.3). With it,
         any reader of that one notebook gets its row (the explanation of
         ``GET /notebooks/{id}``'s 404).
 
         Driven by the partial ``idx_notebooks_pending_delete_due``: with no
         notebook inside a window the statement reads an empty index
         (plan pinned in ``tests/test_notebook_delete_grace_plans.py``)."""
-        params: list[Any] = [user_id, user_id, user_id, stored_instant_text(now)]
+        # Four ``?`` in the select list (is_owner, the two memory_count
+        # subqueries, transferable_count), then the window instant.
+        params: list[Any] = [user_id] * 4 + [stored_instant_text(now)]
         where = [
             access_sql.notebook_delete_window_open_sql("nb"),
             access_sql.read_access_clause("nb", "nm"),
         ]
         params.extend(access_sql.read_access_params(user_id))
         if notebook_id is None:
+            # "Holds memory there" = more rows than unadopted system suggestions
+            # (design §6.3): two counts bound to this (user, notebook), in this
+            # statement, through idx_memory_owner_notebook_status and the
+            # partial idx_memory_suggest_unadopted.
             where.append(
-                "(nb.created_by = ? OR EXISTS (SELECT 1 FROM memory_items om "
-                "WHERE om.created_by = ? AND om.notebook_id = nb.id))"
+                "(nb.created_by = ? OR (SELECT COUNT(*) FROM memory_items om "
+                "WHERE om.created_by = ? AND om.notebook_id = nb.id) > "
+                "(SELECT COUNT(*) FROM memory_items ou WHERE ou.created_by = ? "
+                f"AND ou.notebook_id = nb.id AND {unadopted_suggestion('ou')}))"
             )
-            params.extend((user_id, user_id))
+            params.extend((user_id, user_id, user_id))
         else:
             where.append("nb.id = ?")
             params.append(notebook_id)
@@ -2331,8 +2383,10 @@ class QueryStore:
                 "SELECT nb.id AS notebook_id, nb.name AS name, "
                 "nb.delete_after AS delete_after, "
                 "(nb.created_by = ?) AS is_owner, "
-                "(SELECT COUNT(*) FROM memory_items m WHERE m.created_by = ? "
-                "AND m.notebook_id = nb.id) AS memory_count, "
+                "MAX(0, (SELECT COUNT(*) FROM memory_items m WHERE m.created_by = ? "
+                "AND m.notebook_id = nb.id) - (SELECT COUNT(*) FROM memory_items u "
+                "WHERE u.created_by = ? AND u.notebook_id = nb.id "
+                f"AND {unadopted_suggestion('u')})) AS memory_count, "
                 "(SELECT COUNT(*) FROM memory_items m WHERE m.created_by = ? "
                 "AND m.notebook_id = nb.id AND m.status = 'confirmed' "
                 "AND m.promotion_state <> 'proposed') AS transferable_count "

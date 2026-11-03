@@ -9,6 +9,7 @@ import {
   KG_MAINTENANCE_POLL_MS,
   MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK,
   KG_RANGE_DEFAULT,
+  KG_NEIGHBOR_CAP,
   KG_SEARCH_DEBOUNCE_MS,
   filterPendingMergeTombstones,
   pendingMergeTombstoneKeys,
@@ -108,6 +109,20 @@ type KgGraphEffects = {
   refreshAfterKgDelete: (notebookId: string, guard: () => boolean) => Promise<void>;
   focusGraphNode: (nodeId: string) => void;
 };
+
+
+/** 整理/重新分析/补上关联被占用时的兜底文案(服务端 409 的点名文案优先)。 */
+const KG_BUILD_BUSY_MESSAGE = "另一项知识图谱分析正在运行，请等它完成";
+const KG_MAINTENANCE_RETRY_MESSAGE = "当前有其他整理任务刚结束，请再点一次";
+/** 按钮旁那句占用说明停留多久:一整句带人名,留够读完的时间。 */
+export const KG_BUSY_NOTICE_HOLD_MS = 6000;
+
+/**
+ * 被 409 挡下的是哪一颗按钮:说明只画在**那一颗**旁边(AGENTS.md Interactive feedback)。
+ * build = 整理;rebuild_all = 全部重新分析;relink = 补上关联;merge = 重新合并。
+ */
+export type KgBusyAction = "build" | "rebuild_all" | "relink" | "merge";
+type KgBusyNotice = { text: string; action: KgBusyAction };
 
 export type UseKgGraphOptions = {
   authority: KgOwnerAuthority;
@@ -243,6 +258,11 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   // 的「没建立关联的内容」把它写在按钮旁(新增 N 条关联,还剩 M 个没有关联的知识条目)。
   const [relinkResults, setRelinkResults] = useState<Map<string, RelinkResult>>(new Map());
   const relinkResultTimersRef = useRef(new Map<string, number>());
+  // 「整理 / 全部重新分析 / 补上关联」没能开始时服务端点名占用者的 409 文案(分享编辑 P1,
+  // D8:「张三发起的知识图谱分析正在运行」)。它是这几颗按钮的**结果**,画在按钮旁、自带计时
+  // 消失,不走页面顶部的状态条。按 actor+notebook 那一格记,同 deleteResults。
+  const [busyNotices, setBusyNotices] = useState<Map<string, KgBusyNotice>>(new Map());
+  const busyNoticeTimersRef = useRef(new Map<string, number>());
   const [buildingKg, setBuildingKg] = useState(false);
   const [trackedKgJobId, setTrackedKgJobId] = useState<string | null>(null);
   const trackedKgJobIdRef = useRef<string | null>(null);
@@ -414,7 +434,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
           neighborhood = await fetchKgNeighbors(
             graphOwner.notebookId,
             targetNodeId,
-            50,
+            KG_NEIGHBOR_CAP,
             sourceNotebookId || graphOwner.notebookId,
           );
         } catch { /* core graph remains usable */ }
@@ -525,6 +545,76 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     }
   };
 
+  const refreshForCollaboration = async (): Promise<boolean> => {
+    const owner = currentOwner();
+    if (!owner || !graphOpenRef.current) return false;
+    const requestId = ++graphRangeRequestRef.current;
+    const selected = selectedNodeIdRef.current;
+    const nodeRequest = graphNodeRequestRef.current;
+    const sourceNotebookId = selected ? nodeNotebookRef.current.get(selected) || owner.notebookId : owner.notebookId;
+    const isCurrent = () => owns(owner) && graphOpenRef.current
+      && requestId === graphRangeRequestRef.current
+      && nodeRequest === graphNodeRequestRef.current && selectedNodeIdRef.current === selected;
+    setRangeBusy(true);
+    try {
+      const [graph, merges, status, neighborhood] = await Promise.all([
+        fetchUnifiedGraph(owner.notebookId, rangeLimitRef.current),
+        fetchPendingMerges(owner.notebookId),
+        fetchUnifiedKgStatus(owner.notebookId),
+        selected ? fetchKgNeighbors(owner.notebookId, selected, KG_NEIGHBOR_CAP, sourceNotebookId)
+          .catch((error) => { if (isKgNodeAbsent(error)) return null; throw error; }) : null,
+      ]);
+      if (!isCurrent() || neighborhood?.locating_unavailable) return false;
+      // The current range plus the selected bounded one-hop scope is the new
+      // authoritative view. Historical append-only overlays are not evidence
+      // that their old nodes/edges still exist. Upsert fresh same-id payloads
+      // inside the range too, then replace the expanded scope as one snapshot.
+      const freshNodes = new Map((neighborhood?.nodes ?? []).map((node) => [node.id, node]));
+      const freshEdges = new Map((neighborhood?.edges ?? []).map((edge) => [
+        `${edge.source_object_id}→${edge.target_object_id}→${edge.edge_type}`, edge,
+      ]));
+      const core = { ...graph,
+        nodes: graph.nodes.map((node) => freshNodes.get(node.id) ?? node),
+        edges: graph.edges.map((edge) => freshEdges.get(`${edge.source_object_id}→${edge.target_object_id}→${edge.edge_type}`) ?? edge),
+      };
+      const focus = prepareKgFocus(core, selected ?? undefined, neighborhood);
+      const resolvedSource = neighborhood?.source_notebook_id || sourceNotebookId;
+      const focusedNode = core.nodes.find((node) => node.id === focus.focusId)
+        ?? focus.expandedNodes.find((node) => node.id === focus.focusId);
+      // Only an authoritative absence may clear known detail. Other failures
+      // leave this snapshot uncommitted and the collaboration receipt retryable.
+      const [detail, context] = await Promise.all([
+        focus.focusId && focusedNode?.object_type === "concept"
+          ? fetchConceptDetail(owner.notebookId, focus.focusId, resolvedSource)
+            .catch((error) => { if (isKgNodeAbsent(error)) return null; throw error; }) : null,
+        focus.contextObjectId ? fetchNodeContext(owner.notebookId, focus.contextObjectId, resolvedSource)
+          .catch((error) => { if (isKgNodeAbsent(error)) return null; throw error; }) : null,
+      ]);
+      if (!isCurrent()) return false;
+      // Supersede an older selection read only when this complete replacement
+      // can commit. A failed refresh leaves the original selection usable.
+      graphNodeRequestRef.current += 1;
+      const notebookMap = new Map(core.nodes.map((node) => [node.id, nodeNotebookRef.current.get(node.id) || owner.notebookId]));
+      for (const node of neighborhood?.nodes ?? []) notebookMap.set(node.id, resolvedSource);
+      nodeNotebookRef.current = notebookMap;
+      nodeContextObjectRef.current = focus.focusId && focus.contextObjectId ? new Map([[focus.focusId, focus.contextObjectId]]) : new Map();
+      setUnifiedGraph(core);
+      setVizBuilding(Boolean(core.viz_building));
+      setExpandedNodes(focus.expandedNodes);
+      setExpandedEdges(focus.expandedEdges);
+      setPendingMerges(filterPendingMerges(owner, merges));
+      setUnifiedStatus(status);
+      setSelectedNodeId(focus.focusId);
+      setConceptDetailFirstPage(focus.focusId ? { notebookId: owner.notebookId, nodeId: focus.focusId, sourceNotebookId: resolvedSource } : null, detail);
+      setNodeContext(context);
+      return true;
+    } finally {
+      // This request took over the range window; even a failed/superseded
+      // predecessor cannot release it. A newer range request owns its own end.
+      if (owns(owner) && requestId === graphRangeRequestRef.current) setRangeBusy(false);
+    }
+  };
+
   const toggleType = (type: string) => {
     if (!currentOwner() || !graphOpenRef.current) return;
     const allTypes = Array.from(new Set((mergedGraph?.nodes ?? []).map((node) => node.object_type)));
@@ -550,7 +640,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     effectsRef.current.focusGraphNode(nodeId);
     let resolvedSourceNotebookId = sourceNotebookId;
     try {
-      const neighbors = await fetchKgNeighbors(owner.notebookId, nodeId, 50, sourceNotebookId);
+      const neighbors = await fetchKgNeighbors(owner.notebookId, nodeId, KG_NEIGHBOR_CAP, sourceNotebookId);
       if (!owns(owner) || !graphOpenRef.current || requestId !== graphNodeRequestRef.current
         || selectedNodeIdRef.current !== nodeId) return;
       resolvedSourceNotebookId = neighbors.source_notebook_id || sourceNotebookId;
@@ -1045,6 +1135,39 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     };
   }, []);
 
+  const showBusyNotice = (key: string, text: string, action: KgBusyAction) => {
+    const previous = busyNoticeTimersRef.current.get(key);
+    if (previous !== undefined) window.clearTimeout(previous);
+    const notice: KgBusyNotice = { text, action };
+    setBusyNotices((current) => new Map(current).set(key, notice));
+    busyNoticeTimersRef.current.set(key, window.setTimeout(() => {
+      busyNoticeTimersRef.current.delete(key);
+      setBusyNotices((current) => {
+        if (current.get(key) !== notice) return current;
+        const next = new Map(current);
+        next.delete(key);
+        return next;
+      });
+    }, KG_BUSY_NOTICE_HOLD_MS));
+  };
+
+  const clearBusyNotice = (key: string, action: KgBusyAction) => {
+    setBusyNotices((current) => {
+      if (current.get(key)?.action !== action) return current;
+      const next = new Map(current);
+      next.delete(key);
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    const timers = busyNoticeTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) window.clearTimeout(timer);
+      timers.clear();
+    };
+  }, []);
+
   const maintenanceOwnerKey = (owner: Pick<KgWorkspaceOwner, "actorId" | "notebookId">) =>
     ownerKey(owner);
   const maintenanceJobKey = (
@@ -1125,7 +1248,10 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       try {
         const started = await relinkKg(owner.notebookId);
         expectedMaintenanceJobRef.current.set(jobKey, started.job_id);
-        if (owns(owner)) effectsRef.current.notify("已开始补上关联；完成后会自动更新");
+        if (owns(owner)) {
+          clearBusyNotice(key, "relink");
+          effectsRef.current.notify("已开始补上关联；完成后会自动更新");
+        }
         return;
       } catch (error) {
         if (httpErrorStatus(error) === 409) {
@@ -1133,14 +1259,17 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
             setRelinkingNotebookIds((current) => releaseNotebookClaim(current, key));
             return;
           }
+          showBusyNotice(key, toUserMessage(error, KG_MAINTENANCE_RETRY_MESSAGE), "relink");
           const verdict = await adoptRunningMaintenance(owner);
           if (verdict !== "idle") return;
           if (attempt === 0) continue;
-          if (owns(owner)) effectsRef.current.notify("当前有其他整理任务刚结束，请再点一次");
           setRelinkingNotebookIds((current) => releaseNotebookClaim(current, key));
           return;
         }
-        if (owns(owner) && policyRef.current.canWriteKg) effectsRef.current.reportError(error);
+        if (owns(owner) && policyRef.current.canWriteKg) {
+          clearBusyNotice(key, "relink");
+          effectsRef.current.reportError(error);
+        }
         setRelinkingNotebookIds((current) => releaseNotebookClaim(current, key));
         return;
       } finally {
@@ -1174,6 +1303,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         const started = await rebuildUnifiedKg(owner.notebookId);
         expectedMaintenanceJobRef.current.set(jobKey, started.job_id);
         pendingRebuildRef.current.delete(key);
+        if (owns(owner)) clearBusyNotice(key, "merge");
         if (owns(owner) && !options.decision) {
           effectsRef.current.notify("已开始重新合并；完成后会自动更新");
         }
@@ -1196,17 +1326,20 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
             setRebuildingNotebookIds((current) => releaseNotebookClaim(current, key));
             return "denied";
           }
+          showBusyNotice(key, toUserMessage(error, KG_MAINTENANCE_RETRY_MESSAGE), "merge");
           const verdict = await adoptRunningMaintenance(owner);
           if (options.decision && verdict !== "idle") {
             setRebuildingNotebookIds((current) => claimNotebookSlot(current, key));
           }
           if (verdict !== "idle") return "adopted";
           if (attempt === 0) continue;
-          if (owns(owner)) effectsRef.current.notify("当前有其他整理任务刚结束，请再点一次");
           setRebuildingNotebookIds((current) => releaseNotebookClaim(current, key));
           return "failed";
         }
-        if (owns(owner) && policyRef.current.canWriteKg) effectsRef.current.reportError(error);
+        if (owns(owner) && policyRef.current.canWriteKg) {
+          clearBusyNotice(key, "merge");
+          effectsRef.current.reportError(error);
+        }
         if (options.pendingRetry) return "waiting";
         setRebuildingNotebookIds((current) => releaseNotebookClaim(current, key));
         return "failed";
@@ -1538,7 +1671,10 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       }
     } catch (error) {
       if (owns(owner) && ownsOperation("kg-build", operation)) {
-        effectsRef.current.reportError(error);
+        // 409 = 别人(或另一个标签页)发起的分析正在运行:服务端点名占用者,画在按钮旁。
+        if (httpErrorStatus(error) === 409) {
+          showBusyNotice(ownerKey(owner), toUserMessage(error, KG_BUILD_BUSY_MESSAGE), rebuild ? "rebuild_all" : "build");
+        } else effectsRef.current.reportError(error);
       }
       if (owns(owner) && ownsOperation("kg-build", operation)) setBuildingKg(false);
     }
@@ -1610,6 +1746,14 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       relinkResult: visible
         ? relinkResults.get(maintenanceOwnerKey(currentOwner()!)) ?? null
         : null,
+      /** 整理/重新分析/补上关联/重新合并没能开始的原因(服务端 409 文案),空串 = 没有。 */
+      busyNotice: visible
+        ? busyNotices.get(maintenanceOwnerKey(currentOwner()!))?.text ?? ""
+        : "",
+      /** 上面那句属于哪一颗按钮;各入口只在自己那一颗被挡下时画它。没有时为 null。 */
+      busyNoticeAction: visible
+        ? busyNotices.get(maintenanceOwnerKey(currentOwner()!))?.action ?? null
+        : null,
       buildingKg: visible && buildingKg,
       trackedKgJobId: visible ? trackedKgJobId : null,
     },
@@ -1622,6 +1766,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     closeAnalysis,
     updateGraphSearch,
     changeRange,
+    refreshForCollaboration,
     toggleType,
     clearTypes,
     selectNode,

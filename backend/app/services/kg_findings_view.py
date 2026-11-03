@@ -290,15 +290,23 @@ def page_sources(rows: Iterable[Mapping[str, object]]) -> List[str]:
     return sorted(ids)
 
 
-def live_source(source_id: str, state: Optional[Mapping[str, object]]) -> Dict[str, object]:
+def live_source(
+    source_id: str, state: Optional[Mapping[str, object]], viewer_user_id: str = "",
+) -> Dict[str, object]:
+    """``uploaded_by_me`` (share-edit P1, D14): the requester uploaded this source
+    of this notebook. An unattributed row, a source outside the notebook (the
+    point lookup is filtered by ``notebook_id``, so it reads ``exists=False``),
+    or no viewer is nobody's -- False. The uploader id stays server-side."""
     state = state or {}
     exists = bool(state.get("exists"))
+    uploader = str(state.get("uploaded_by") or "") if exists else ""
     return {
         "source_id": source_id,
         "exists": exists,
         "title": str(state.get("title") or "") if exists else "",
         "source_type": str(state.get("source_type") or "") if exists else "",
         "processing": bool(exists and source_is_processing(state)),
+        "uploaded_by_me": bool(viewer_user_id) and uploader == viewer_user_id,
     }
 
 
@@ -316,9 +324,11 @@ def page_row(
     dismissed_at: Optional[str],
     states: Mapping[str, Mapping[str, object]],
     built_at: object,
+    viewer_user_id: str = "",
 ) -> Dict[str, Any]:
     """One row of the page in the API shape (internal codes only). The status was
-    decided on the STORED evidence; the response carries `public_evidence`."""
+    decided on the STORED evidence; the response carries `public_evidence`.
+    ``viewer_user_id`` shapes each live source's ``uploaded_by_me``."""
     if status == STATUS_OPEN:
         reason = source_handled_reason(row, states, built_at)
         if reason is not None:
@@ -343,7 +353,7 @@ def page_row(
         "status": status,
         "handled_reason": reason if status == STATUS_HANDLED else None,
         "dismissed_at": dismissed_at,
-        "live_sources": [live_source(sid, states.get(sid)) for sid in sources],
+        "live_sources": [live_source(sid, states.get(sid), viewer_user_id) for sid in sources],
     }
 
 

@@ -405,6 +405,68 @@ def test_active_lease_released_on_exception_exit(repo, tmp_path, monkeypatch):
     assert sid not in service._active_sources, "异常出口后租约残留(finally 未释放)"
 
 
+@pytest.mark.parametrize("failed_after_publish", [False, True])
+def test_source_terminal_announces_every_committed_surface(repo, tmp_path, monkeypatch, failed_after_publish):
+    from app.services.embedding import FakeEmbedder
+
+    bind_all_embedding_clients(repo, FakeEmbedder(dim=repo.settings.embed_dim))
+    path = tmp_path / "source.md"
+    path.write_text("# Source\n\nPublished knowledge.\n", encoding="utf-8")
+    notebook = repo.create_notebook(NotebookCreate(name="before"))
+    source_id = _seed_queued_source(repo, notebook.id, str(path))
+    service = repo._runtime.source_ingestion
+    touched = []
+
+    def terminal(nb, kinds, *args):
+        touched.append((nb, kinds))
+        repo._runtime.collaboration.touch_for_job(nb, kinds, "owner", "提交人")
+
+    monkeypatch.setattr(service, "_collab_touch", terminal)
+
+    def extract(source_id, **kwargs):
+        repo.store_kg(notebook.id, source_id, [{"local_id": "node", "object_type": "concept", "payload": {"name": "Published"}, "evidence": []}], [])
+        if failed_after_publish:
+            raise RuntimeError("after graph publication")
+
+    def metadata(nb, sid):
+        with repo._write() as db:
+            db.execute("UPDATE notebooks SET name='后台画像' WHERE id=?", (nb,))
+
+    hooks = SourcePipelineHooks(should_extract_kg=lambda nb: True, extract_source=extract,
+                               mark_unified_dirty=lambda nb: None, augment_notebook_metadata=metadata,
+                               maybe_enqueue_scale_fold=lambda nb: None, note_corpus_change=lambda nb: None)
+    service.process_source(source_id, hooks)
+    assert repo.get_source(source_id).parse_status == ("failed" if failed_after_publish else "extracted")
+    with repo._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM knowledge_objects WHERE notebook_id=?", (notebook.id,)).fetchone()["c"] > 0
+        assert db.execute("SELECT name FROM notebooks WHERE id=?", (notebook.id,)).fetchone()["name"] == "后台画像"
+    assert touched == [(notebook.id, ("sources", "knowledge", "kg", "notebook"))]
+    assert [row["kind"] for row in repo._runtime.collaboration.pulse.recent_owner_changes(notebook.id, "owner")] == ["sources"]
+
+
+@pytest.mark.parametrize("failed_after_publish", [False, True])
+def test_retype_only_extraction_publishes_derived_surfaces_after_settlement(repo, tmp_path, monkeypatch, failed_after_publish):
+    notebook = repo.create_notebook(NotebookCreate(name="retype"))
+    source = _seed_queued_source(repo, notebook.id)
+    repo._runtime.source_store.set_status(source, "extracting")
+    service = repo._runtime.source_ingestion
+    touched = []
+
+    def reconcile(source_id, extract):
+        repo.store_kg(notebook.id, source_id, [{"local_id": "node", "object_type": "concept", "payload": {"name": "retyped"}, "evidence": []}], [])
+        if failed_after_publish:
+            raise RuntimeError("after graph publication")
+        service.set_source_status(source_id, "extracted")
+
+    monkeypatch.setattr(service, "_extract_reconciling_doc_type", reconcile)
+    monkeypatch.setattr(service, "_collab_touch", lambda nb, kind, *args: touched.append((kind, repo.get_source(source).parse_status)))
+    hooks = SourcePipelineHooks(should_extract_kg=lambda nb: True, extract_source=lambda sid: None, mark_unified_dirty=lambda nb: None,
+                               augment_notebook_metadata=lambda *args: None, maybe_enqueue_scale_fold=lambda nb: None, note_corpus_change=lambda nb: None)
+    service._reextract_retyped(source, notebook.id, hooks)
+    status = "failed" if failed_after_publish else "extracted"
+    assert touched == [(("sources", "knowledge", "kg", "notebook"), status)]
+
+
 def test_exhausted_guaranteed_parser_chain_marks_source_failed(
     repo, tmp_path, monkeypatch
 ):

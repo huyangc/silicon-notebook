@@ -5,6 +5,13 @@ from collections.abc import Mapping
 from typing import Callable, Sequence
 
 from app.repositories.knowhow_asset_refs import required_asset_ids
+from app.repositories.knowhow_guarded_result import (
+    CONTENT_CHANGED,
+    GROUP_CHANGED,
+    current_cell,
+    guarded_conflict,
+    guarded_success,
+)
 from app.repositories.ports import CATALOG_MAX_CANDIDATE_PAGE, KNOWHOW_COLUMN_KINDS
 from app.repositories.sqlite.anchor_normalization import js_trim, sqlite_js_trim_expression
 from app.repositories.sqlite.database import SqliteDatabase
@@ -1072,6 +1079,10 @@ class KnowhowStore:
         simply absent, not an empty-string placeholder) and
         ``projection_status``. Raises ``KeyError`` if the table is gone."""
         with self.database.connect() as db:
+            # A revision and its cells must come from one WAL read snapshot.
+            # Nested callers may already own a snapshot on this read connection.
+            if not db.in_transaction:
+                db.execute("BEGIN DEFERRED")
             table_row = db.execute(
                 "SELECT * FROM knowhow_tables WHERE id = ?", (table_id,)
             ).fetchone()
@@ -1789,12 +1800,13 @@ class KnowhowStore:
         require_assets: Sequence[str] = (),
         actor: str = "",
         origin: str = "user",
-    ) -> None:
+    ) -> int:
         """Upsert one cell's content. One write transaction: the cell
         (insert or update-in-place via the ``UNIQUE(row_id, column_id)``
         conflict target), the row's ``updated_at`` + ``projection_status`` ->
         ``'pending'``, and the owning table's ``mutation_seq`` += 1 (table_id
-        resolved from the row — the public signature has no table_id).
+        resolved from the row — the public signature has no table_id). Returns
+        that transaction's committed mutation_seq, never a later writer's.
 
         ``require_assets`` names asset ids the new content references and that
         must still exist at COMMIT time (``ValueError`` and a full rollback
@@ -1836,11 +1848,12 @@ class KnowhowStore:
                 "WHERE id = ?",
                 (now, row_id),
             )
-            db.execute(
+            mutation_seq = db.execute(
                 "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 "
-                "WHERE id = (SELECT table_id FROM knowhow_rows WHERE id = ?)",
+                "WHERE id = (SELECT table_id FROM knowhow_rows WHERE id = ?) "
+                "RETURNING mutation_seq",
                 (row_id,),
-            )
+            ).fetchone()["mutation_seq"]
             table_row = db.execute(
                 "SELECT table_id FROM knowhow_rows WHERE id = ?", (row_id,)
             ).fetchone()
@@ -1858,6 +1871,7 @@ class KnowhowStore:
                     actor=actor,
                     origin=origin,
                 )
+        return int(mutation_seq)
 
     def update_knowhow_cells(
         self,
@@ -1867,7 +1881,7 @@ class KnowhowStore:
         require_assets: Sequence[str] = (),
         actor: str = "",
         origin: str = "user",
-    ) -> None:
+    ) -> int | None:
         """Batch upsert the SAME (column, content) across MULTIPLE rows in
         ONE write transaction — the merged-cell "write the whole concept
         group" case (anchor-grouping spec §6, followup A): editing a shared
@@ -1881,7 +1895,8 @@ class KnowhowStore:
         callers guarantee same-table membership, exactly like
         ``update_knowhow_cell`` takes no table_id argument and trusts its
         one row). Empty ``row_ids`` is a no-op: no transaction opened, no
-        mutation_seq bump. All-or-nothing by construction — everything runs
+        mutation_seq bump. Returns the committed mutation_seq (None for an
+        empty batch). All-or-nothing by construction — everything runs
         inside a single ``with self.database.write() as db:`` block, so any
         failure partway through (e.g. a row_id that doesn't exist, tripping
         the ``knowhow_cells.row_id`` FK) rolls back every write already made
@@ -1947,11 +1962,12 @@ class KnowhowStore:
                     "WHERE id = ?",
                     (now, row_id),
                 )
-            db.execute(
+            mutation_seq = db.execute(
                 "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 "
-                "WHERE id = (SELECT table_id FROM knowhow_rows WHERE id = ?)",
+                "WHERE id = (SELECT table_id FROM knowhow_rows WHERE id = ?) "
+                "RETURNING mutation_seq",
                 (row_ids[0],),
-            )
+            ).fetchone()["mutation_seq"]
             table_row = db.execute(
                 "SELECT table_id FROM knowhow_rows WHERE id = ?", (row_ids[0],)
             ).fetchone()
@@ -1962,6 +1978,7 @@ class KnowhowStore:
                     kind="cell_update", payload={"cells": cells},
                     actor=actor, origin=origin,
                 )
+        return int(mutation_seq)
 
     def update_knowhow_cells_bulk_guarded(
         self,
@@ -2239,7 +2256,9 @@ class KnowhowStore:
         no new wire is needed. (The per-row byte-exact baseline stays the value-edit
         guard; this pair is the structural guard.)
 
-        Returns ``{"written": [(row_id, column_id), ...], "conflict": bool}``.
+        Returns ``{"written": [(row_id, column_id), ...], "conflict": bool}`` plus
+        ``reason``/``current`` on a refusal and ``stored`` on success (share-edit
+        P1, D7: see ``app.repositories.knowhow_guarded_result``).
         ``conflict=True`` guarantees ``written == []`` (the caller maps it to a
         409 with a friendly "内容已被其他人修改，请刷新后重试"). Empty ``updates``
         is a no-op (``{"written": [], "conflict": False}``, no transaction).
@@ -2255,11 +2274,12 @@ class KnowhowStore:
         so a revert deletes the newly inserted cell instead of materializing an
         empty one. Stored cells reuse the exact phase-1 value."""
         if not updates:
-            return {"written": [], "conflict": False}
+            return guarded_success([], [], {})
         now = self.now()
         written: list[tuple[str, str]] = []
         written_table_ids: list[str] = []
         by_table: "dict[str, list[dict]]" = {}
+        mutation_seqs: dict[str, int] = {}
         before_values: "dict[tuple[str, str], str | None]" = {}
         with self.database.write() as db:
             # F1 (cross-process atomicity): reserve the write lock BEFORE phase 1
@@ -2279,7 +2299,7 @@ class KnowhowStore:
             anchor_guard = anchor_column_id is not None and expected_anchor is not None
             if anchor_guard:
                 if len(expected_anchor) != len(updates):
-                    return {"written": [], "conflict": True}
+                    return guarded_conflict(GROUP_CHANGED)
                 # Round-5 P1: the per-row byte-exact anchor re-read in the phase-1
                 # loop below catches a FROZEN target that LEFT the group, but two
                 # STRUCTURAL drifts leave every per-row baseline still matching while
@@ -2305,7 +2325,7 @@ class KnowhowStore:
                         for update_table_id, _row, _column, _before, _content in updates
                     )
                 ):
-                    return {"written": [], "conflict": True}
+                    return guarded_conflict(GROUP_CHANGED)
                 anchor_table_id = anchor_col_row["table_id"]
                 # (b) EXACT MEMBERSHIP: for each DISTINCT frozen anchor VALUE among
                 # the targets, the CURRENT member row-id set must EQUAL the frozen
@@ -2352,7 +2372,7 @@ class KnowhowStore:
                             current_by_key.setdefault(key, set()).add(cell["row_id"])
                     for key, frozen_ids in frozen_by_key.items():
                         if current_by_key.get(key, set()) != frozen_ids:
-                            return {"written": [], "conflict": True}
+                            return guarded_conflict(GROUP_CHANGED)
             # Phase 1: membership + stale compare for ALL entries BEFORE writing.
             for idx, (table_id, row_id, column_id, expected_before, content_md) in enumerate(updates):
                 membership = db.execute(
@@ -2368,7 +2388,7 @@ class KnowhowStore:
                     or membership["col_table"] != table_id
                     or membership["tbl_notebook"] != notebook_id
                 ):
-                    return {"written": [], "conflict": True}
+                    return guarded_conflict(GROUP_CHANGED)
                 current_row = db.execute(
                     "SELECT content_md FROM knowhow_cells "
                     "WHERE row_id = ? AND column_id = ?",
@@ -2387,7 +2407,9 @@ class KnowhowStore:
                     else stored_before == expected_before
                 )
                 if not current_matches:
-                    return {"written": [], "conflict": True}
+                    return guarded_conflict(
+                        CONTENT_CHANGED, self._guarded_current_on(db, updates)
+                    )
                 before_values[(row_id, column_id)] = stored_before
                 if anchor_guard:
                     # Re-read THIS row's anchor cell under the same lock and compare
@@ -2413,7 +2435,7 @@ class KnowhowStore:
                         anchor_cell["content_md"] if anchor_cell is not None else ""
                     )
                     if current_anchor != expected_anchor[idx]:
-                        return {"written": [], "conflict": True}
+                        return guarded_conflict(GROUP_CHANGED)
             # F2: every entry cleared membership+stale → the new content's newly
             # referenced assets must still exist in THIS notebook. All entries share
             # notebook_id (membership just proved it), so checking against any target
@@ -2453,10 +2475,11 @@ class KnowhowStore:
                 if table_id not in written_table_ids:
                     written_table_ids.append(table_id)
             for table_id in written_table_ids:
-                db.execute(
-                    "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 WHERE id = ?",
+                mutation_seqs[table_id] = int(db.execute(
+                    "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 WHERE id = ? "
+                    "RETURNING mutation_seq",
                     (table_id,),
-                )
+                ).fetchone()["mutation_seq"])
             for written_table_id, cells in by_table.items():
                 record_change(
                     db, new_id=self.new_id, now=self.now,
@@ -2464,7 +2487,26 @@ class KnowhowStore:
                     kind="cell_update", payload={"cells": cells},
                     actor=actor, origin=origin,
                 )
-        return {"written": written, "conflict": False}
+        return guarded_success(written, updates, mutation_seqs)
+
+    def _guarded_current_on(self, db, updates) -> "list[dict[str, object]]":
+        """Every guarded target's stored content, read in the caller's write
+        transaction (the ``current`` of a ``content_changed`` refusal)."""
+        out = []
+        mutation_seqs = {
+            table_id: int(db.execute(
+                "SELECT mutation_seq FROM knowhow_tables WHERE id = ?", (table_id,)
+            ).fetchone()["mutation_seq"])
+            for table_id in {update[0] for update in updates}
+        }
+        for table_id, row_id, column_id, _expected, _content in updates:
+            row = db.execute(
+                "SELECT content_md FROM knowhow_cells WHERE row_id = ? AND column_id = ?",
+                (row_id, column_id),
+            ).fetchone()
+            out.append(current_cell(row_id, column_id, row["content_md"] if row else "",
+                                    mutation_seqs[table_id]))
+        return out
 
     def validate_cell_target(self, row_id: str, column_id: str) -> None:
         """Assert (row, column) name a real cell slot: both exist AND belong
@@ -2632,8 +2674,9 @@ class KnowhowStore:
         that assumes its target already exists)."""
         with self.database.connect() as db:
             row = db.execute(
-                "SELECT r.table_id AS table_id, t.notebook_id AS notebook_id "
+                "SELECT r.table_id AS table_id, t.notebook_id AS notebook_id, COALESCE(nb.created_by,'') AS owner_id "
                 "FROM knowhow_rows r JOIN knowhow_tables t ON t.id = r.table_id "
+                "JOIN notebooks nb ON nb.id=t.notebook_id "
                 "WHERE r.id = ?",
                 (row_id,),
             ).fetchone()

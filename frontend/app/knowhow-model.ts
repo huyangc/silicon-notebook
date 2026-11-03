@@ -14,7 +14,7 @@
 import { API_BASE } from "./api-config.ts";
 import { performApiRequest, requestJson, requestVoid } from "./api-client.ts";
 import type { ReasoningTraceStep } from "./ask-stream.ts";
-import { throwHumanizedHttpError } from "./errors.ts";
+import { humanizedError, throwHumanizedHttpError } from "./errors.ts";
 import { requestTaskStream } from "./request-task-stream.ts";
 
 // --- 内容类型（kind）与文案 -----------------------------------------------------
@@ -103,6 +103,10 @@ export type KnowhowTableDetail = {
   rows: KnowhowRow[];
   // 行标题列 id；null=未设置(记录型表，只做检索投影，不建图谱节点)。
   anchorColumnId: string | null;
+  /** Revision of the consistent full-table snapshot; absent on older servers. */
+  mutationSeq?: number;
+  /** Revisions of cell deltas laid over that snapshot (browser state only). */
+  cellMutationSeqs?: Record<string, Record<string, number>>;
 };
 
 // 建表/导入时提交的列定义（列名 + 角色，与文件列序对齐）。旧导入向导(Task 9
@@ -136,6 +140,28 @@ export type KnowhowCellPatchResult = {
   columnId: string;
   contentMd: string;
   projectionStatus: ProjectionStatus;
+  mutationSeq?: number;
+};
+
+// 一格的存储值（分享编辑 P1，决策 D7）：保存成功的写后值、409 冲突时服务端同一写事务里
+// 读到的当前值、同一浏览器标签页之间广播的值，都是这一个形状。
+export type KnowhowCellValue = {
+  rowId: string;
+  columnId: string;
+  contentMd: string;
+  mutationSeq?: number;
+  projectionStatus?: ProjectionStatus;
+};
+
+// 单元格乐观校验被拒（409 detail.code = "knowhow_cell_conflict"）的原因：
+// content_changed——某个写目标的存储值已不等于带上去的基线，current 是每个写目标此刻的
+// 存储值（「用我的覆盖」拿它当新基线重发）；group_changed——写目标这一组本身变了（成员、
+// 锁定值或分组列），current 为空，不能覆盖，只能刷新后再编辑。
+export type KnowhowCellConflictReason = "content_changed" | "group_changed";
+
+export type KnowhowCellConflict = {
+  reason: KnowhowCellConflictReason;
+  current: KnowhowCellValue[];
 };
 
 // 行级智能补全只生成待审阅建议，不直接写库。confidence 是后端稳定协议；
@@ -182,7 +208,7 @@ export type KnowhowCellsBatchPatchInput = {
   contentMd: string;
   // 并发防护（P1-b）：可选的每行基线，**按 rowIds 顺序平行**（expectedBefore[i]
   // 对应 rowIds[i]）。提供时后端把整组当作一次 all-or-nothing 事务内比对，任一
-  // 行的基线陈旧就整组 409 拒写；省略时退回 last-write-wins（手动编辑器合并格保存）。
+  // 行的基线陈旧就整组 409 拒写；手动编辑器合并格保存也逐行带基线，省略只供兼容调用方。
   expectedBefore?: string[];
   // 并发防护（P1 round-4）：可选的 anchor 基线守卫。anchorColumnId = 分组键列 id，
   // expectedAnchor **按 rowIds 顺序平行** = 每行 anchor 列的快照值。与 expectedBefore
@@ -297,6 +323,7 @@ type WireKnowhowTableDetail = {
   // Task 3 起附带；未落地前该字段不存在(undefined)——mapDetail 据此回退到从
   // columns[].role/kind==='anchor' 派生。
   anchor_column_id?: string | null;
+  mutation_seq?: number;
 };
 
 // 预览列的线上形状：Task 3 起字段改名为 guessed_kind，迁移期间仍可能是
@@ -316,6 +343,7 @@ type WireKnowhowCellPatchResult = {
   column_id: string;
   content_md: string;
   projection_status: ProjectionStatus;
+  mutation_seq?: number;
 };
 
 type WireKnowhowAppendPreview = {
@@ -397,6 +425,7 @@ function mapDetail(table: WireKnowhowTableDetail): KnowhowTableDetail {
     columns,
     rows: (table.rows ?? []).map(mapRow),
     anchorColumnId: table.anchor_column_id !== undefined ? table.anchor_column_id : deriveAnchorColumnId(columns),
+    ...(validMutationSeq(table.mutation_seq) ? { mutationSeq: table.mutation_seq } : {}),
   };
 }
 
@@ -611,16 +640,95 @@ function mapCellPatchResult(wire: WireKnowhowCellPatchResult): KnowhowCellPatchR
     columnId: wire.column_id,
     contentMd: wire.content_md,
     projectionStatus: wire.projection_status,
+    ...(validMutationSeq(wire.mutation_seq) ? { mutationSeq: wire.mutation_seq } : {}),
   };
+}
+
+const KNOWHOW_CELL_CONFLICT_REASONS: readonly KnowhowCellConflictReason[] = ["content_changed", "group_changed"];
+
+export const validMutationSeq = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+/**
+ * 判定一个 HTTP 失败是否是单元格乐观校验的结构化 409（backend `knowhow_routes.py`
+ * `_cell_conflict`）。命中 → {reason, current}；其余一律 null（调用方落回共享错误层）。
+ * 判据与 parseKnowhowRevertFailure 同口径：status 与 code 成对、reason 在闭集里、current
+ * 每一项三个字段都是字符串——任何一项不合形就整体不认，绝不拿半份数据去当覆盖基线。
+ * 给用户看的那句话不从这里取：它经 throwHumanizedHttpError 的可信结构化通道
+ * （errors.ts `TRUSTED_STRUCTURED_FAILURES`）落进异常文本，这里只解析机器字段。
+ */
+export const parseKnowhowCellConflict = (status: number, body: unknown): KnowhowCellConflict | null => {
+  if (status !== 409 || typeof body !== "object" || body === null) return null;
+  const detail = (body as Record<string, unknown>).detail;
+  if (typeof detail !== "object" || detail === null) return null;
+  const d = detail as Record<string, unknown>;
+  if (d.code !== "knowhow_cell_conflict") return null;
+  const reason = KNOWHOW_CELL_CONFLICT_REASONS.find((item) => item === d.reason);
+  if (!reason || !Array.isArray(d.current)) return null;
+  const current: KnowhowCellValue[] = [];
+  for (const item of d.current as unknown[]) {
+    if (typeof item !== "object" || item === null) return null;
+    const entry = item as Record<string, unknown>;
+    if (typeof entry.row_id !== "string" || typeof entry.column_id !== "string" || typeof entry.content_md !== "string") {
+      return null;
+    }
+    if (entry.mutation_seq !== undefined && !validMutationSeq(entry.mutation_seq)) return null;
+    current.push({ rowId: entry.row_id, columnId: entry.column_id, contentMd: entry.content_md,
+      ...(validMutationSeq(entry.mutation_seq) ? { mutationSeq: entry.mutation_seq } : {}) });
+  }
+  return { reason, current };
+};
+
+// 冲突的机器字段挂在共享错误层抛出的那个异常上（WeakMap，不改异常的形状与品牌）：
+// 既有调用方照旧按 httpErrorStatus(err) === 409 分流（规整保存的 stale-skip）、照旧经
+// extractErrorMessage 取可展示文案；需要双版本的调用方再用 knowhowCellConflictOf 取原因与
+// 当前值。
+const knowhowCellConflicts = new WeakMap<object, KnowhowCellConflict>();
+
+/** A successful legacy server write cannot be ordered until a fresh snapshot
+ * confirms it. A changed snapshot uses the same in-place conflict controls as
+ * a refused optimistic write; it is not branded as an HTTP failure. */
+export function knowhowCellConflictError(conflict: KnowhowCellConflict): Error {
+  const error = humanizedError("保存后表格内容已变化，请确认当前版本");
+  knowhowCellConflicts.set(error, conflict);
+  return error;
+}
+
+export const knowhowCellConflictOf = (err: unknown): KnowhowCellConflict | null =>
+  typeof err === "object" && err !== null ? knowhowCellConflicts.get(err) ?? null : null;
+
+// 两个单元格写端点共用的请求：成功返回 JSON；失败先用克隆体探测结构化 409（body 只能读
+// 一次，同 revertKnowhowTable），再交原始响应走 throwHumanizedHttpError——异常文本、诊断
+// 日志与状态码品牌都与 requestJson 逐字相同，只是命中冲突时多挂一份 {reason, current}。
+async function requestKnowhowCellWrite<T>(path: string, body: string): Promise<T> {
+  const res = await performApiRequest(path, { method: "PATCH", body, tag: "knowhow" });
+  if (!res.ok) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await res.clone().text());
+    } catch {
+      parsed = undefined;
+    }
+    const conflict = parseKnowhowCellConflict(res.status, parsed);
+    try {
+      await throwHumanizedHttpError(res, "knowhow");
+    } catch (err) {
+      if (conflict && typeof err === "object" && err !== null) knowhowCellConflicts.set(err, conflict);
+      throw err;
+    }
+  }
+  return (await res.json()) as T;
 }
 
 // 格子内容 patch：返回 {rowId,columnId,contentMd,projectionStatus}——调用方
 // 用 projectionStatus 立即刷新该行的同步状态徽标，不必等待下一次整表拉取。
 //
-// expectedBefore（并发防护 P1-b）：提供时随请求体带 expected_before，后端在**同一
-// 写事务内**比对当前落库内容，不一致就 409 拒写（nothing written）——批量规整保存
-// 走这条路。省略时不带该键，退回既有 last-write-wins（手动编辑器的语义，刻意不变：
-// 那是真人在编辑，不该被自己更早的快照挡下）。
+// expectedBefore（并发防护 P1-b；分享编辑 P1 决策 D7 起覆盖浏览器的手动保存）：提供时随
+// 请求体带 expected_before，后端在**同一写事务内**逐字节比对当前落库内容，不一致就 409
+// 拒写（nothing written，detail 带 reason/current，见 parseKnowhowCellConflict），成功时
+// 返回的就是这次写入的存储值——调用方拿它当下一次的基线（knowhow-cell-sync.ts）。批量
+// 规整保存、手动格子编辑、「优化整行」接受都带它。省略时不带该键，退回 last-write-wins
+// （格子历史「恢复此版本」与 API 客户端）。
 // origin（knowhow 表版本管理 Task 14，第 7 个位置参数——与 expectedBefore 同一
 // 层级的"追加可选位置参数"手法，不引入 options 对象、不动既有调用点）：谁/
 // 什么产生了这次写入，原样落进后端这条 knowhow_changes 流水（见后端
@@ -638,17 +746,13 @@ export const patchKnowhowCell = (
   expectedBefore?: string,
   origin?: string,
 ): Promise<KnowhowCellPatchResult> =>
-  requestJson<WireKnowhowCellPatchResult>(
+  requestKnowhowCellWrite<WireKnowhowCellPatchResult>(
     `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/cells/${columnId}`,
-    {
-      method: "PATCH",
-      body: JSON.stringify({
-        content_md: contentMd,
-        ...(expectedBefore === undefined ? {} : { expected_before: expectedBefore }),
-        ...(origin === undefined ? {} : { origin }),
-      }),
-      tag: "knowhow",
-    },
+    JSON.stringify({
+      content_md: contentMd,
+      ...(expectedBefore === undefined ? {} : { expected_before: expectedBefore }),
+      ...(origin === undefined ? {} : { origin }),
+    }),
   ).then(mapCellPatchResult);
 
 // followup A（anchor 分组 spec §6「整组批量写单事务，不半改」）：合并共享格
@@ -679,11 +783,10 @@ export const batchPatchKnowhowCells = (
   // knowhow 表版本管理 Task 14：同 patchKnowhowCell 的 origin 参数——省略时不
   // 进请求体，退回后端默认 "user"。
   if (input.origin !== undefined) body.origin = input.origin;
-  return requestJson<WireKnowhowCellPatchResult[]>(`/notebooks/${notebookId}/knowhow/${tableId}/cells`, {
-    method: "PATCH",
-    body: JSON.stringify(body),
-    tag: "knowhow",
-  }).then((wireResults) => wireResults.map(mapCellPatchResult));
+  return requestKnowhowCellWrite<WireKnowhowCellPatchResult[]>(
+    `/notebooks/${notebookId}/knowhow/${tableId}/cells`,
+    JSON.stringify(body),
+  ).then((wireResults) => wireResults.map(mapCellPatchResult));
 };
 
 // --- Excel 模板往返（Task 6）------------------------------------------------------

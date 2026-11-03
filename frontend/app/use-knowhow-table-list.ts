@@ -59,16 +59,18 @@ export function useKnowhowTableList({
   const currentNotebookRef = useRef(notebookId);
   const tablesRequestRef = useRef(0);
   const loadTables = useCallback(() => {
-    if (currentNotebookRef.current !== notebookId) return; // 上一个笔记本的命令落地：不再刷它的清单
+    if (currentNotebookRef.current !== notebookId) return Promise.resolve(false); // 上一个笔记本的命令落地：不再刷它的清单
     const requestId = ++tablesRequestRef.current;
     setTablesLoading(true);
     setTablesError(null);
-    fetchKnowhowTables(notebookId)
+    return fetchKnowhowTables(notebookId)
       .then((list) => {
         if (tablesRequestRef.current === requestId) setTables(list);
+        return tablesRequestRef.current === requestId;
       })
       .catch(() => {
         if (tablesRequestRef.current === requestId) setTablesError("加载 knowhow 表失败，请重试");
+        return false;
       })
       .finally(() => {
         if (tablesRequestRef.current === requestId) setTablesLoading(false);

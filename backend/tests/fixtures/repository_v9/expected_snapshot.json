@@ -371,6 +371,10 @@
       "base_kg_notebook_ids": [],
       "base_notebooks": [],
       "can_manage_content": true,
+      "can_manage_notebook": true,
+      "collab_pulse": null,
+      "collaborator_is_member": false,
+      "collaborator_role": "",
       "counts": {
         "cases": 0,
         "checklist_items": 0,
@@ -404,6 +408,7 @@
       "paper_meta_backfilling": false,
       "paper_meta_missing": false,
       "primary_domain": "Analog IC",
+      "pulse_cursor": null,
       "purpose": "Freeze schema-v9 repository composition behavior.",
       "shared_from": "",
       "source_types": [
@@ -530,6 +535,7 @@
       "title": "Fixture amplifier notes",
       "type": "markdown",
       "updated_at": "<timestamp>",
+      "uploaded_by_me": false,
       "venue": null
     },
     "source_elements": [
@@ -584,6 +590,7 @@
         "summary": "A deterministic mixed-format repository fixture.",
         "title": "Fixture amplifier notes",
         "type": "markdown",
+        "uploaded_by_me": false,
         "venue": null
       }
     ]
@@ -1250,8 +1257,18 @@
         "type": "index"
       },
       {
+        "name": "idx_ask_jobs_conv_utc",
+        "sql_sha256": "2ee4f209f6b0f650ad895a5f10f1a5e7ab19d32b491b3b6078b703af5bd84835",
+        "type": "index"
+      },
+      {
         "name": "idx_ask_jobs_creator_activity",
         "sql_sha256": "8bffbf7a2f2854ed7d595f155968ef3bc5c85aa267cd234b825134810c69a968",
+        "type": "index"
+      },
+      {
+        "name": "idx_ask_jobs_memory_suggest_utc",
+        "sql_sha256": "b43f31571aea4a7fb318121a8090381e71c65cf7583b3eaeb6ada2dd630a934f",
         "type": "index"
       },
       {
@@ -1755,8 +1772,33 @@
         "type": "index"
       },
       {
+        "name": "idx_memory_suggest_expiry",
+        "sql_sha256": "8e89e61a27a09f126dbb0ccd3a94c238283ec1b9e61127233066f01b1947b9c4",
+        "type": "index"
+      },
+      {
+        "name": "idx_memory_suggest_unadopted",
+        "sql_sha256": "0dc71152f8783ac356fe1f6eaefbdf74f779852b0002d3a27418b6d05ca06445",
+        "type": "index"
+      },
+      {
+        "name": "idx_memory_suggest_users_enabled",
+        "sql_sha256": "bb36fb34a58e0cd9b177881571652340e88288efe3731ed53d6442a39620d327",
+        "type": "index"
+      },
+      {
         "name": "idx_model_service_status_user_checked",
         "sql_sha256": "25887295ed2835d69eaab8a435739ab73380bf437ab9620638fb77de1937fdc4",
+        "type": "index"
+      },
+      {
+        "name": "idx_notebook_activity_created",
+        "sql_sha256": "1b2074aee14e7b2db2a345c94f52a687135bf53e74ab47c3d82d8b5800fd6c21",
+        "type": "index"
+      },
+      {
+        "name": "idx_notebook_activity_nb_created",
+        "sql_sha256": "1e51b7d8fdbaff829c011f1fd06ee80640f928f6bdcf7ab1313f95152f19dd38",
         "type": "index"
       },
       {
@@ -2421,7 +2463,7 @@
       },
       {
         "name": "memory_items",
-        "sql_sha256": "c46c541f98ddc8fafe58d38ce79fcc40b6921ab5fa91b6a535a7b95ab9740f02",
+        "sql_sha256": "1d3b3ca4b6f1514f246bc3a3c14dfa3c9c48517143c028b0254a18081415c14b",
         "type": "table"
       },
       {
@@ -2460,6 +2502,26 @@
         "type": "table"
       },
       {
+        "name": "memory_suggest_fingerprints",
+        "sql_sha256": "1c38b0ca4913ee255853877dad00cf459ddc8a50d11ef1cc628df995abd9af64",
+        "type": "table"
+      },
+      {
+        "name": "memory_suggest_jobs",
+        "sql_sha256": "c607b682a1dbd2ede349c446686f6800ec842ba3a6d861c4bc04da23b1840802",
+        "type": "table"
+      },
+      {
+        "name": "memory_suggest_read_fences",
+        "sql_sha256": "2c673097370242b43fdede4210476d76996a18cdc50d6c09ff230cacabe4255f",
+        "type": "table"
+      },
+      {
+        "name": "memory_suggest_users",
+        "sql_sha256": "7565c3d359239e28fc244cb58e6b2551f4e8d6859603b368a6019267bc21b74e",
+        "type": "table"
+      },
+      {
         "name": "mention_edges",
         "sql_sha256": "9846113ca76bd4de0669e123045a769b993940fdbfbcb7dbda33c287afb477fa",
         "type": "table"
@@ -2472,6 +2534,11 @@
       {
         "name": "model_service_status",
         "sql_sha256": "61c03df81c3b62670958245669e447fb962445981f8338a5d5454043f8a09315",
+        "type": "table"
+      },
+      {
+        "name": "notebook_activity",
+        "sql_sha256": "cadf849ed82c0c319689809048ec2958ff3a0e0430f60b78690da956f7b6b274",
         "type": "table"
       },
       {
@@ -3370,6 +3437,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 105
+    "user_version": 107
   }
 }

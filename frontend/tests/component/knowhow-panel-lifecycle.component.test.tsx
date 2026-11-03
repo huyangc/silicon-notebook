@@ -386,7 +386,8 @@ test("closing the jumped-to drawer and then editing a cell does not reopen the d
     { method: "GET", path: "/notebooks/nb-1/knowhow" },
     { method: "GET", path: "/notebooks/nb-1/knowhow/t-rec" },
     { method: "GET", path: "/agent/knowhow/rows/r1" },
-    { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r2/cells/c-fix", body: { content_md: "校准晶振" } },
+    // D7: manual saves carry the stored baseline ("" for a never-written cell).
+    { method: "PATCH", path: "/notebooks/nb-1/knowhow/t-rec/rows/r2/cells/c-fix", body: { content_md: "校准晶振", expected_before: "" } },
   ]);
 });
 
@@ -529,10 +530,7 @@ test("a jump to a row of the open table that is really gone refetches once, then
   ]);
 });
 
-test("a jump to the table already open but failed to load falls back to the list with a notice", async () => {
-  // Keeping the reopened table's detail (S6) must not turn a failed load into a
-  // dead end: the stale-citation effect sees the failure in the same commit and
-  // goes back to the list, as for a cited table that fails to load. No refetch.
+test("a jump to a temporarily unavailable selected table keeps its retry instead of claiming deletion", async () => {
   const server = suite.server();
   routeTable(server, "nb-1", recordDetail());
   server.once("GET", "/notebooks/nb-1/knowhow/t-rec", { status: 500, json: { detail: "boom" } });
@@ -542,8 +540,8 @@ test("a jump to the table already open but failed to load falls back to the list
   expect(await screen.findByText("加载表格详情失败，请重试")).toBeInTheDocument();
 
   panel.update({ ...BASE_PROPS, initialTableId: "t-rec", initialRowId: "r2" });
-  expect(await screen.findByText("未能定位到引用指向的表格，它可能已被删除。")).toBeInTheDocument();
-  expect(await screen.findByRole("button", { name: "打开表格：排障记录" })).toBeInTheDocument();
+  expect(screen.getByText("加载表格详情失败，请重试")).toBeInTheDocument();
+  expect(screen.queryByText("未能定位到引用指向的表格，它可能已被删除。")).toBeNull();
   await settle();
   expect(server.log).toEqual([
     { method: "GET", path: "/notebooks/nb-1/knowhow" },

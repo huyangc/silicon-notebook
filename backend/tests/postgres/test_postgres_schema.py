@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 86
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 88
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -69,10 +69,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 86
-    assert migrator.migrate() == 86
-    assert migrator.current_version() == 86
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 86
+    assert migrator.migrate() == 88
+    assert migrator.migrate() == 88
+    assert migrator.current_version() == 88
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 88
 
 
 @pytest.mark.postgres_integration
@@ -92,7 +92,7 @@ def test_concept_seed_space_columns_match_the_sqlite_v102_contract(postgres_data
                 "VALUES (%s,'n',now(),now())", (notebook_id,))
         conn.execute("INSERT INTO unified_kg_state (notebook_id, updated_at) "
                      "VALUES ('nb-0082', now())")
-    assert PostgresMigrator(postgres_database).migrate() == 86
+    assert PostgresMigrator(postgres_database).migrate() == 88
     with postgres_database.write() as conn:
         conn.execute("INSERT INTO unified_kg_state (notebook_id, updated_at) "
                      "VALUES ('nb-0083', now())")
@@ -129,7 +129,7 @@ def test_kg_findings_storage_matches_the_sqlite_v97_contract(postgres_database):
 
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 86
+    assert PostgresMigrator(postgres_database).migrate() == 88
     with postgres_database.connect() as conn:
         def columns(table):
             return [
@@ -196,6 +196,145 @@ def test_kg_findings_storage_matches_the_sqlite_v97_contract(postgres_database):
 
 
 @pytest.mark.postgres_integration
+def test_memory_suggest_storage_matches_the_sqlite_v106_contract(postgres_database):
+    """0087 mirrors SQLite v106: the nullable ``memory_items.suggested_signal``
+    (an existing memory reads NULL), the two partial indexes with their exact
+    predicates, the three tables column for column, their primary keys, the
+    notebook cascades (no owner FK) and the two CHECKs."""
+    import psycopg
+
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate(target_version=86) == 86
+    with postgres_database.write() as db:
+        db.execute(
+            "INSERT INTO users (id, email, display_name, role, created_at, updated_at) "
+            "VALUES ('u-0085', 'u@x', 'u', 'user', now(), now())")
+        db.execute(
+            "INSERT INTO notebooks (id, name, created_at, updated_at) "
+            "VALUES ('nb-0085', 'n', now(), now())")
+        db.execute(
+            "INSERT INTO memory_items (id, notebook_id, created_by, origin, status, "
+            "title, content_md, created_at, updated_at) VALUES ('mem-0085', 'nb-0085', "
+            "'u-0085', 'ask_answer', 'candidate', 't', 'c', now(), now())")
+    assert migrator.migrate() == 88
+    assert migrator.migrate() == 88
+    with postgres_database.connect() as conn:
+        def columns(table):
+            return [
+                (row["column_name"], row["data_type"], row["is_nullable"])
+                for row in conn.execute(
+                    "SELECT column_name, data_type, is_nullable FROM "
+                    "information_schema.columns WHERE table_schema=current_schema() "
+                    "AND table_name=%s ORDER BY ordinal_position",
+                    (table,),
+                ).fetchall()
+            ]
+
+        signal = conn.execute(
+            "SELECT data_type, is_nullable, column_default, collation_name FROM "
+            "information_schema.columns WHERE table_schema=current_schema() "
+            "AND table_name='memory_items' AND column_name='suggested_signal'"
+        ).fetchone()
+        old_row = conn.execute(
+            "SELECT suggested_signal FROM memory_items WHERE id='mem-0085'"
+        ).fetchone()
+        indexes = {
+            row["indexname"]: row["indexdef"]
+            for row in conn.execute(
+                "SELECT indexname, indexdef FROM pg_indexes "
+                "WHERE schemaname=current_schema() AND indexname LIKE 'idx_memory_suggest_%%'"
+            ).fetchall()
+        }
+        keys = {
+            row["table_name"]: row["definition"]
+            for row in conn.execute(
+                "SELECT c.conrelid::regclass::text AS table_name, "
+                "pg_get_constraintdef(c.oid) AS definition FROM pg_constraint c "
+                "JOIN pg_namespace n ON n.oid=c.connamespace "
+                "WHERE n.nspname=current_schema() AND c.contype='p' "
+                "AND c.conrelid::regclass::text LIKE 'memory_suggest_%%'"
+            ).fetchall()
+        }
+        foreign = sorted(
+            (row["table_name"], row["confdeltype"], row["referenced"])
+            for row in conn.execute(
+                "SELECT c.conrelid::regclass::text AS table_name, c.confdeltype, "
+                "c.confrelid::regclass::text AS referenced FROM pg_constraint c "
+                "JOIN pg_namespace n ON n.oid=c.connamespace "
+                "WHERE n.nspname=current_schema() AND c.contype='f' "
+                "AND c.conrelid::regclass::text LIKE 'memory_suggest_%%'"
+            ).fetchall()
+        )
+        users = columns("memory_suggest_users")
+        jobs = columns("memory_suggest_jobs")
+        fingerprints = columns("memory_suggest_fingerprints")
+        fences = columns("memory_suggest_read_fences")
+    assert dict(signal) == {
+        "data_type": "text", "is_nullable": "YES", "column_default": None,
+        "collation_name": "C",
+    }
+    assert old_row["suggested_signal"] is None
+    assert set(indexes) == {"idx_memory_suggest_unadopted", "idx_memory_suggest_expiry", "idx_memory_suggest_users_enabled"}
+    assert "WHERE (enabled = 1)" in indexes["idx_memory_suggest_users_enabled"]
+    assert "(created_by, notebook_id, status)" in indexes["idx_memory_suggest_unadopted"]
+    assert indexes["idx_memory_suggest_unadopted"].endswith(
+        "WHERE ((suggested_signal IS NOT NULL) AND (status = ANY "
+        "(ARRAY['candidate'::text, 'rejected'::text])))"
+    )
+    assert "(created_at)" in indexes["idx_memory_suggest_expiry"]
+    assert indexes["idx_memory_suggest_expiry"].endswith(
+        "WHERE ((suggested_signal IS NOT NULL) AND (status = 'candidate'::text))"
+    )
+    assert keys == {
+        "memory_suggest_users": "PRIMARY KEY (owner_id)",
+        "memory_suggest_jobs": "PRIMARY KEY (notebook_id, owner_id)",
+        "memory_suggest_fingerprints": "PRIMARY KEY (notebook_id, owner_id, fingerprint)",
+        "memory_suggest_read_fences": "PRIMARY KEY (notebook_id, owner_id)",
+    }
+    assert foreign == [
+        ("memory_suggest_fingerprints", "c", "notebooks"),
+        ("memory_suggest_jobs", "c", "notebooks"),
+        ("memory_suggest_read_fences", "c", "notebooks"),
+    ]
+    tz = "timestamp with time zone"
+    assert users == [
+        ("owner_id", "text", "NO"), ("enabled", "integer", "NO"),
+        ("enabled_at", tz, "YES"), ("quota_day", "text", "NO"),
+        ("quota_used", "integer", "NO"), ("updated_at", tz, "NO"),
+    ]
+    assert jobs == [
+        ("notebook_id", "text", "NO"), ("owner_id", "text", "NO"),
+        ("status", "text", "NO"), ("pending_signal", "integer", "NO"),
+        ("cursor_created_at", tz, "NO"), ("cursor_id", "text", "NO"),
+        ("cursor_inclusive", "integer", "NO"), ("window_started_at", tz, "NO"),
+        ("consecutive_failures", "integer", "NO"), ("claim_token", "text", "NO"),
+        ("runs", "integer", "NO"), ("candidates_written", "integer", "NO"),
+        ("last_outcome", "text", "NO"), ("failure_reason", "text", "NO"),
+        ("started_at", tz, "YES"), ("finished_at", tz, "YES"),
+        ("created_at", tz, "NO"), ("updated_at", tz, "NO"),
+    ]
+    assert fingerprints == [
+        ("notebook_id", "text", "NO"), ("owner_id", "text", "NO"),
+        ("fingerprint", "text", "NO"), ("kind", "text", "NO"),
+        ("expires_at", tz, "YES"), ("created_at", tz, "NO"),
+    ]
+    assert fences == [("notebook_id", "text", "NO"), ("owner_id", "text", "NO"), ("lost_at", tz, "NO")]
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with postgres_database.write() as db:
+            db.execute(
+                "INSERT INTO memory_suggest_jobs (notebook_id, owner_id, status, "
+                "cursor_created_at, window_started_at, created_at, updated_at) "
+                "VALUES ('nb-0085','u-0085','queued',now(),now(),now(),now())")
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with postgres_database.write() as db:
+            db.execute(
+                "INSERT INTO memory_suggest_fingerprints (notebook_id, owner_id, "
+                "fingerprint, kind, created_at) VALUES ('nb-0085','u-0085','f','other',now())")
+
+
+@pytest.mark.postgres_integration
 def test_ask_job_report_id_matches_the_sqlite_v99_contract(postgres_database):
     """0080 mirrors SQLite v99: ``ask_jobs.report_id`` is text NOT NULL DEFAULT
     '' under the "C" collation like its neighbours, a turn that exists before
@@ -213,8 +352,8 @@ def test_ask_job_report_id_matches_the_sqlite_v99_contract(postgres_database):
             "INSERT INTO ask_jobs (id, notebook_id, question, status, created_at, "
             "updated_at) VALUES ('job-v79', 'nb-v80', 'why?', 'running', now(), now())"
         )
-    assert migrator.migrate() == 86
-    assert migrator.migrate() == 86
+    assert migrator.migrate() == 88
+    assert migrator.migrate() == 88
     # The ledger skips an applied version, so re-execute the file itself: the
     # statement is IF NOT EXISTS and must neither fail nor touch the column.
     with postgres_database.write() as db:
@@ -232,8 +371,14 @@ def test_ask_job_report_id_matches_the_sqlite_v99_contract(postgres_database):
             "SELECT report_id FROM ask_jobs WHERE id='job-v79'"
         ).fetchone()
         indexes = conn.execute(
-            "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() "
-            "AND tablename='ask_jobs' AND indexdef ILIKE '%report_id%'"
+            # Check keys/INCLUDE columns rather than partial-index predicates.
+            "SELECT idx.relname AS indexname FROM pg_index ix "
+            "JOIN pg_class tbl ON tbl.oid=ix.indrelid "
+            "JOIN pg_class idx ON idx.oid=ix.indexrelid "
+            "JOIN pg_namespace ns ON ns.oid=tbl.relnamespace "
+            "WHERE ns.nspname=current_schema() AND tbl.relname='ask_jobs' "
+            "AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid=tbl.oid "
+            "AND a.attname='report_id' AND a.attnum=ANY(ix.indkey))"
         ).fetchall()
     assert dict(column) == {
         "data_type": "text", "is_nullable": "NO", "column_default": "''::text",
@@ -264,7 +409,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 86
+    assert migrator.migrate() == 88
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -347,7 +492,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 86
+        assert PostgresMigrator(databases[1]).migrate() == 88
     finally:
         for database in databases:
             database.close()
@@ -458,6 +603,8 @@ def test_packaged_index_migration_phases_are_exact():
         (84, "source_paper_meta_source_nb"),
         (85, "source_paper_cards"),
         (86, "source_element_reading_order"),
+        (87, "memory_suggest"),
+        (88, "notebook_activity"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -1014,6 +1161,18 @@ def test_packaged_index_migration_phases_are_exact():
     assert index_declarations(86) == [
         (False, "idx_source_elements_reading_order"),
         (False, "idx_source_elements_type_reading_order"),
+    ]
+    # Migration 87 adds the G20/batch-10 sampling index and the two partial
+    # memory_items indexes; its three tables declare primary keys only.
+    assert index_declarations(87) == [
+        (False, "idx_ask_jobs_memory_suggest_sample"),
+        (False, "idx_memory_suggest_unadopted"),
+        (False, "idx_memory_suggest_expiry"),
+        (False, "idx_memory_suggest_users_enabled"),
+    ]
+    assert index_declarations(88) == [
+        (False, "idx_notebook_activity_nb_created"),
+        (False, "idx_notebook_activity_created"),
     ]
     # Spelled without ``IF NOT EXISTS`` on purpose, and that is asserted
     # rather than merely commented: app/migration/shadow/postgres_catalog.py

@@ -452,7 +452,7 @@ def _expected_indexes(
 ) -> dict[str, IndexContract]:
     result: dict[str, IndexContract] = {}
     pattern = re.compile(
-        rf"\bCREATE\s+(UNIQUE\s+)?INDEX\s+({_IDENT})\s+ON\s+({_IDENT})"
+        rf"\bCREATE\s+(UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?({_IDENT})\s+ON\s+({_IDENT})"
         rf"(?:\s+USING\s+({_IDENT}))?\s*\(",
         re.I | re.S,
     )

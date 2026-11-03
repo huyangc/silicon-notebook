@@ -123,6 +123,24 @@ class KgBuildJobStore:
             raise KeyError(job_id)
         return self._row(row)
 
+    def running_initiator(self, notebook_id: str) -> "tuple[str, str] | None":
+        """``(user_id, name)`` of who started this notebook's running analysis
+        job, or None when none runs (share-edit P1, spec §5): the 409 a second
+        initiator gets names the first. One point read through the same partial
+        unique index ``has_running`` uses (``idx_kg_build_jobs_one_running``),
+        joined to ``users`` by primary key; only ever paid on that 409. The name
+        is what other people are shown -- the display name, falling back to the
+        username -- never ``audit_label``. A deleted initiator answers ``""``."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT j.created_by AS user_id, "
+                "COALESCE(NULLIF(BTRIM(u.display_name),''), u.username, '') AS name "
+                "FROM kg_build_jobs j LEFT JOIN users u ON u.id = j.created_by "
+                "WHERE j.notebook_id=%s AND j.status='running'",
+                (notebook_id,),
+            ).fetchone()
+        return None if row is None else (str(row["user_id"] or ""), str(row["name"] or ""))
+
     def has_running(self, notebook_id: str) -> bool:
         """Quiesce leg A (batch 3·W1 PR-3 §T-3.3): a plain index point-query
         against ``idx_kg_build_jobs_one_running``

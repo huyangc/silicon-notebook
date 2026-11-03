@@ -80,6 +80,15 @@ Memory」的常见情形没有任何额外成本(调用方在无外人 Memory �
   簇片段另有 `cluster_seed_object_id` 的铸造形状字面量(`'K-~ko-'` / `'K'` / `'-~ko-'`),
   守卫逐个登记。
 * Knowhow 不在本模块的判据内:Knowhow 投影是笔记本级共享的,M1 只针对 Memory。
+
+## 「未采纳的系统建议」(自动用户记忆,SQLite v106 / PostgreSQL 0087)
+
+* `unadopted_suggestion(memory_alias)` —— 记忆行是系统建议且尚未被用户采纳
+  (`suggested_signal IS NOT NULL AND status IN UNADOPTED_SUGGESTION_STATUSES`)。零参数,
+  无内层别名。它是**行属性**,与查看者无关;「你的记忆」的各个计数/列表读者按设计 §6.3
+  引用它排除草稿(计数类读者在同一条语句里做「原计数 − 本片段计数」,减项走同形的部分
+  索引 `idx_memory_suggest_unadopted`)。状态字面量只在 `UNADOPTED_SUGGESTION_STATUSES`
+  出现一次,由片段渲染。
 """
 
 from __future__ import annotations
@@ -368,3 +377,21 @@ def no_memory_cluster(cluster_alias: str) -> str:
     """`memory_cluster` 的否定(同一对臂,两个 NOT EXISTS 以便规划成反连接)。零参数。"""
     c = _alias(cluster_alias, _CLUSTER_INNER | _CANONICAL_INNER)
     return f"(NOT {_memory_member_arm(c)} AND NOT {_memory_canonical_arm(c)})"
+
+
+#: 「未采纳的系统建议」的状态集合(自动用户记忆,设计 §6.3):系统建议的 candidate(待处理)
+#: 与 rejected(已忽略或已过期)。它的取反里带 `suggested_signal` 的行(confirmed /
+#: deprecated)是**已采纳**的,即用户自己的记忆。
+UNADOPTED_SUGGESTION_STATUSES: tuple[str, ...] = ("candidate", "rejected")
+
+
+def unadopted_suggestion(memory_alias: str) -> str:
+    """记忆行 `memory_alias` 是一条**未采纳的系统建议**。零参数。
+
+    `({a}.suggested_signal IS NOT NULL AND {a}.status IN ('candidate', 'rejected'))`——
+    与 `idx_memory_suggest_unadopted` 的部分索引谓词同形,计数类读者按「原计数 − 本片段
+    计数」在同一条语句里相减时,减项能走那条部分索引。所有排除草稿的读者都引用它,不手写。
+    """
+    a = _alias(memory_alias, frozenset())
+    statuses = ", ".join(f"'{status}'" for status in UNADOPTED_SUGGESTION_STATUSES)
+    return f"({a}.suggested_signal IS NOT NULL AND {a}.status IN ({statuses}))"

@@ -30,6 +30,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
+from app.api.collab_marks import committed_result
 from app.api.deps import repository, require_user_or_agent, user_or_agent_scope
 from app.models.knowhow import (
     KnowhowAgentTable,
@@ -149,6 +150,7 @@ async def put_agent_cell_code(
     location = await _resolve_row_notebook(repo, row_id, "Row not found")
     async with user_or_agent_scope(
         request, location["notebook_id"], "knowhow:code", write=True,
+        owner_id=location.get("owner_id", ""),
         not_found_detail="Row not found",
     ) as actor:
         try:
@@ -159,11 +161,12 @@ async def put_agent_cell_code(
             # for both (put_cell_code's own default), or an agent-authored
             # code attachment would be indistinguishable from a human's in
             # the history timeline.
-            return await run_in_threadpool(
+            result = await run_in_threadpool(
                 knowhow_api.put_cell_code, repo, row_id, column_id,
                 body.code_text, body.language, actor.actor_label,
                 origin="agent" if actor.is_agent else "user",
             )
+            return committed_result(request, location["notebook_id"], "knowhow:write", result)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except KeyError:
@@ -179,6 +182,7 @@ async def delete_agent_cell_code(row_id: str, column_id: str, request: Request) 
     location = await _resolve_row_notebook(repo, row_id, "Row not found")
     async with user_or_agent_scope(
         request, location["notebook_id"], "knowhow:code", write=True,
+        owner_id=location.get("owner_id", ""),
         not_found_detail="Row not found",
     ) as actor:
         try:
@@ -188,6 +192,7 @@ async def delete_agent_cell_code(row_id: str, column_id: str, request: Request) 
                 actor=actor.actor_label,
                 origin="agent" if actor.is_agent else "user",
             )
+            committed_result(request, location["notebook_id"], "knowhow:write", None)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except KeyError:

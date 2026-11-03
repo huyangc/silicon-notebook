@@ -59,7 +59,7 @@ BASELINE_CEILING = {
     "F841": {"count": 9, "files": 9},
     # Import order (I001, one per unsorted import block). Recorded, never
     # auto-fixed: no import was reordered when the rule was turned on.
-    "I001": {"count": 1350, "files": 987},
+    "I001": {"count": 1346, "files": 983},
 }
 
 #: Line suppressions that name a gated rule, per rule. These predate the gate

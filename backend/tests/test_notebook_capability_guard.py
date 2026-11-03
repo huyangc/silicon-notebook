@@ -20,6 +20,10 @@ P0 阶段行为零变化(每个能力名都解析到既有的 owner-only 判定)
      只读成员 404、陌生人 404;外加 P2 新增的组管理员一列(通过)与
      ``notebook:delete``(仍 404)。
 
+分享编辑 P1-T2 加了第三档 ``"edit"``(owner ∪ admin/editor 边,``require_notebook_edit``):
+七个内容写挪进 edit 档(组管理员逐格不变),新增恒 owner 的 ``notebook:collaborate``;
+行为抽查多一列「点名编辑者」(``test_named_editor_column_passes_edit_tier_only``)。
+
 ⚠ 结构扫描**不检查归类是否正确**:把读端点错挂写能力(或把 kg 端点挂成
 knowhow:write)在结构上不可检测——守卫只保证"必经能力工厂",归类对错靠
 任务级评审兜底。
@@ -74,23 +78,30 @@ def test_notebook_capability_allowed_rejects_unknown_capability():
 #: `scale_index:write`(admin)从 kg:write 拆出检索索引的重建与取消。拆的轴是下面那张
 #: `EXPECTED_MIRROR_FENCE`——那三个旧能力名各自混着「改同步层内容」与「改目标端自有
 #: 状态」两类端点,一格答不了两件事。
+#:
+#: 分享编辑 P1(决策 D1/D2)新增第三档 "edit"(owner ∪ admin/editor 边):七个内容写
+#: 从 admin 挪到 edit(编辑权 ⊇ 管理权,组管理员逐格不变),`notebook:manage` /
+#: `notebook:grant` 留在 admin,新增 `notebook:collaborate`(编辑者名单)恒 owner。
 EXPECTED_CAPABILITY_LEVELS = {
-    "sources:write": "admin",
-    "kg:write": "admin",
-    "knowhow:write": "admin",
-    "knowledge:write": "admin",
-    "catalog:write": "admin",
-    "scale_index:write": "admin",
+    "sources:write": "edit",
+    "kg:write": "edit",
+    "knowhow:write": "edit",
+    "knowledge:write": "edit",
+    "catalog:write": "edit",
+    "scale_index:write": "edit",
     "reports:write": "owner",
     "notebook:manage": "admin",
     "notebook:grant": "admin",
     "notebook:configure": "owner",
     "notebook:mount": "owner",
     "notebook:delete": "owner",
-    "agent_profile:write": "admin",
+    "agent_profile:write": "edit",
     # 网页导出单本笔记本:导出文件可在别处导入成导入者的新笔记本——owner 对本库的
     # 对外处置,与链接分享同理,恒 owner。
     "notebook:export": "owner",
+    # 点名共享的编辑者名单只归库主管(决策 D2)。
+    "notebook:collaborate": "owner",
+    "notebook:activity": "edit",
 }
 
 #: 镜像写入围栏的**逐格**期望值(跨环境增量同步,docs/incremental-sync-design.md §5)。
@@ -123,16 +134,19 @@ EXPECTED_MIRROR_FENCE = {
     "agent_profile:write": False,
     # 导出只读这本库、写的是请求者自己的作业:镜像也允许导出(计划 §9 推荐默认)。
     "notebook:export": False,
+    # 编辑者名单是目标端自己的可见性,与 notebook:grant 同理。
+    "notebook:collaborate": False,
+    "notebook:activity": False,
 }
 
 
 def test_capability_value_domain_is_frozen():
-    """值域冻结在 {"owner", "admin"}。
+    """值域冻结在 {"owner", "admin", "edit"}。
 
-    P0 冻结在 {"owner"};P2-T2 加了第二档。再新增档位(比如某天的 "member")时这条
-    断言必须跟着改——它就是那道提醒"这里也要跟进"的信号。
+    P0 冻结在 {"owner"};P2-T2 加了第二档;分享编辑 P1 加了第三档 edit。再新增档位
+    时这条断言必须跟着改——它就是那道提醒"这里也要跟进"的信号。
     """
-    assert set(deps._CAPABILITY_LEVELS.values()) == {"owner", "admin"}
+    assert set(deps._CAPABILITY_LEVELS.values()) == {"owner", "admin", "edit"}
 
 
 def test_capability_levels_are_pinned_cell_by_cell():
@@ -171,27 +185,30 @@ def test_never_touched_capabilities_stay_owner_only():
     )
 
 
-def test_every_registered_capability_resolves_to_its_level_guard():
-    """每个能力名解析回**对应档位守卫的同一个函数对象**。
+def test_every_capability_has_its_own_stable_wrapper():
+    """Every capability has one cached wrapper, including unfenced ones."""
+    raw = {deps.require_notebook_write, deps.require_notebook_admin, deps.require_notebook_edit}
+    wrappers = []
+    for capability in deps._CAPABILITY_LEVELS:
+        guard = deps.require_notebook_capability(capability)
+        assert guard is deps.require_notebook_capability(capability)
+        assert guard not in raw
+        wrappers.append(guard)
+    assert len(set(wrappers)) == len(wrappers)
 
-    不是"另一份行为等价的实现",是同一个对象——工厂只做查表,判定各只有一份实现
-    (未授权 → 404,不泄露存在性)。
-    """
+
+def test_pulse_kind_table_is_closed_and_pinned():
+    from app.domain.collaboration import PULSE_KINDS
     expected = {
-        "owner": deps.require_notebook_write,
-        "admin": deps.require_notebook_admin,
+        "sources:write": "sources", "kg:write": "kg", "knowhow:write": "knowhow",
+        "knowledge:write": "knowledge", "catalog:write": "catalog", "scale_index:write": "scale_index",
+        "agent_profile:write": "understanding", "notebook:manage": "notebook", "notebook:grant": "notebook",
+        "notebook:configure": "notebook", "notebook:mount": "notebook", "notebook:delete": "notebook",
+        "notebook:collaborate": "notebook", "notebook:export": "none", "reports:write": "none", "notebook:activity": "none",
     }
-    for capability, level in deps._CAPABILITY_LEVELS.items():
-        if deps._CAPABILITY_MIRROR_FENCE[capability]:
-            # 带围栏的能力返回的是**包装依赖**而不是裸档位守卫(它要在档位守卫之后
-            # 再判一次镜像状态)。包装是加法:档位判定仍然只有档位守卫那一份,由下面
-            # 的行为矩阵用例证明它逐字沿用(未授权仍 404)。
-            continue
-        assert deps.require_notebook_capability(capability) is expected[level], (
-            capability, level,
-        )
-    # 两档必须是**不同**的对象,否则「翻格」根本没有发生(整张表还解析到同一个守卫)。
-    assert deps.require_notebook_write is not deps.require_notebook_admin
+    assert set(deps._CAPABILITY_PULSE_KIND) == set(deps._CAPABILITY_LEVELS)
+    assert deps._CAPABILITY_PULSE_KIND == expected
+    assert set(expected.values()) <= PULSE_KINDS
 
 
 # --------------------------------------------------------------------------
@@ -246,6 +263,7 @@ def test_fenced_capability_factory_returns_a_stable_object():
         # 将来某一格单独改判据时会连带改掉别的格。
         assert guard is not deps.require_notebook_write, capability
         assert guard is not deps.require_notebook_admin, capability
+        assert guard is not deps.require_notebook_edit, capability
     assert len({id(deps.require_notebook_capability(c)) for c in fenced}) == len(fenced)
 
 
@@ -322,7 +340,9 @@ def test_no_bare_require_notebook_access_outside_deps_and_mcp():
 #: 直接引用。``require_notebook_admin`` 从 P2-T2 起同样进这份名单——不进的话,新端点
 #: 可以直接挂 ``Depends(require_notebook_admin)`` 拿到管理档,而这个选择既不进能力表、
 #: 也不会出现在任何一份「哪些能力是 admin 档」的清单里。
-_BARE_LEVEL_GUARDS = ("require_notebook_write", "require_notebook_admin")
+_BARE_LEVEL_GUARDS = (
+    "require_notebook_write", "require_notebook_admin", "require_notebook_edit",
+)
 
 
 @pytest.mark.parametrize("guard_name", _BARE_LEVEL_GUARDS)
@@ -577,7 +597,8 @@ def test_group_admin_passes_the_flipped_content_capabilities(tmp_path, monkeypat
         ("notebook:manage", "patch", f"/api/notebooks/{nb}"),
     ]
     for capability, method, path in probes:
-        assert deps._CAPABILITY_LEVELS[capability] == "admin", capability
+        # 分享编辑 P1 把五个内容写挪到 edit 档(编辑权 ⊇ 管理权),组管理员这一列逐格不变。
+        assert deps._CAPABILITY_LEVELS[capability] in ("admin", "edit"), capability
         for who in ("owner", "deputy"):
             resp = getattr(client, method)(path, json={}, headers=w[who]) if method in ("post", "patch") \
                 else getattr(client, method)(path, headers=w[who])
@@ -586,6 +607,97 @@ def test_group_admin_passes_the_flipped_content_capabilities(tmp_path, monkeypat
             resp = getattr(client, method)(path, json={}, headers=w[who]) if method in ("post", "patch") \
                 else getattr(client, method)(path, headers=w[who])
             assert resp.status_code == 404, (capability, who, resp.status_code, resp.text)
+
+
+def _grant_editor(notebook_id: str, user_id: str) -> None:
+    """直接写一条 `(user, editor)` 授权边。点名共享的写入口在后续任务里才有,这里
+    要钉的只是「这条边存在时,能力表给它哪几格」。"""
+    from app.services.sqlite_repository import _now
+
+    with deps.repository()._write() as db:
+        db.execute(
+            "INSERT INTO notebook_grants "
+            "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (f"ged-{notebook_id[-6:]}", notebook_id, "user", user_id, "editor",
+             None, _now()),
+        )
+
+
+def test_named_editor_column_passes_edit_tier_only(tmp_path, monkeypatch):
+    """分享编辑 P1:「编辑者」一列。
+
+    点名编辑者通过 edit 档的**七个**内容写能力(与 owner、组管理员同),而 admin 档
+    (`notebook:manage` 改画像、`notebook:grant` 授权边)与 owner 档(链接分享、挂载、
+    导出、删库)一律 404。组管理员那一列在 edit 档同样放行——把内容写挪到 edit 档对他
+    逐格不变。普通组员与陌生人一律 404。纯函数版与带级别版对同一批人给出同一答案。
+    """
+    client = _client(tmp_path, monkeypatch)
+    w = _group_admin_world(client, "y")
+    nb = w["notebook"]
+    src = _seed_source(nb)
+    editor_h = _login(client, "y00000005")
+    editor_id = client.get("/api/me", headers=editor_h).json()["id"]
+    _grant_editor(nb, editor_id)
+    w["editor"] = editor_h
+
+    edit_probes = [
+        ("notebook:activity", "get", f"/api/notebooks/{nb}/activity"),
+        ("sources:write", "post", f"/api/notebooks/{nb}/backfill-vectors"),
+        ("kg:write", "post", f"/api/notebooks/{nb}/kg/build"),
+        ("knowhow:write", "post", f"/api/notebooks/{nb}/knowhow"),
+        ("knowledge:write", "post", f"/api/notebooks/{nb}/object-schemas"),
+        ("catalog:write", "post", f"/api/notebooks/{nb}/sources/{src}/command-catalog"),
+        ("scale_index:write", "post", f"/api/notebooks/{nb}/scale-index/cancel"),
+        (
+            "agent_profile:write", "post",
+            f"/api/notebooks/{nb}/understanding/experiences/distill",
+        ),
+    ]
+    assert {c for c, *_ in edit_probes} == {
+        c for c, level in deps._CAPABILITY_LEVELS.items() if level == "edit"
+    }
+    for capability, method, path in edit_probes:
+        for who in ("owner", "deputy", "editor"):
+            resp = client.request(method.upper(), path, json={}, headers=w[who])
+            assert resp.status_code != 404, (capability, who, resp.status_code, resp.text)
+        for who in ("plain", "stranger"):
+            resp = client.request(method.upper(), path, json={}, headers=w[who])
+            assert resp.status_code == 404, (capability, who, resp.status_code, resp.text)
+
+    # admin 档:组管理员放行、编辑者 404。
+    assert _manage_probe(client, nb, w["deputy"]).status_code == 200
+    assert _manage_probe(client, nb, editor_h).status_code == 404
+    assert client.get(f"/api/notebooks/{nb}/grants", headers=w["deputy"]).status_code == 200
+    assert client.get(f"/api/notebooks/{nb}/grants", headers=editor_h).status_code == 404
+    # owner 档:编辑者一律 404。
+    for method, path in (
+        ("get", f"/api/notebooks/{nb}/share"),
+        ("get", f"/api/notebooks/{nb}/mountable"),
+        ("get", f"/api/notebooks/{nb}/bases"),
+        ("post", f"/api/notebooks/{nb}/export"),
+        ("delete", f"/api/notebooks/{nb}"),
+    ):
+        resp = getattr(client, method)(path, headers=editor_h)
+        assert resp.status_code == 404, (method, path, resp.status_code, resp.text)
+    # 编辑者照常能读这本库。
+    assert client.get(f"/api/notebooks/{nb}", headers=editor_h).status_code == 200
+
+    # 纯函数版与带级别版:同一张表、同一批人。
+    for capability, level in deps._CAPABILITY_LEVELS.items():
+        allowed = deps.notebook_capability_allowed(capability, nb, editor_id)
+        assert allowed is (level == "edit"), capability
+        access = deps.notebook_capability_level(capability, nb, editor_id)
+        assert (access is not None) is allowed, capability
+        if access is not None:
+            assert access.level == "edit"
+            assert deps.notebook_edit_without_admin(access)
+        deputy = deps.notebook_capability_level(capability, nb, w["deputy_id"])
+        assert (deputy is not None) is (level in ("edit", "admin")), capability
+        assert not deps.notebook_edit_without_admin(deputy)
+    assert deps.notebook_capability_level("sources:write", nb, "nobody") is None
+    with pytest.raises(KeyError):
+        deps.notebook_capability_level("no:such", nb, editor_id)
 
 
 # notebook:manage 的代表端点(组管理员可达),各处「证明 deputy 确有管理权」共用它。

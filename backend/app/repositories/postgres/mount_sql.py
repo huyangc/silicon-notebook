@@ -67,6 +67,15 @@ MOUNT_GATE_CLOSED_EXPR = (
 # 消费点不许手拼。
 MOUNT_BASE_NOT_LIVE_EXPR = "(NOT b." + NOTEBOOK_LIVE_SQL + ")"
 
+# 「挂载方一旦被共享,这条边就失效」(分享编辑 P1,决策 D13):此刻有效且只靠借入臂
+# 有效。镜像 sqlite/mount_sql.py,理由(为什么按臂判、不能用 origin 的 shared 类别、
+# 同 owner 为什么写成 NULL 安全、为什么只在 `/bases` 投影里算)写在那份。
+MOUNT_CLOSES_WHEN_SHARED_EXPR = (
+    "(" + MOUNT_VALID_EXPR + " AND NOT (b.tier = 'base'"
+    " OR (b.created_by IS NOT NULL AND b.created_by = a.created_by)"
+    " OR " + everyone_grant_expr("b.id") + "))"
+)
+
 MOUNT_VALID = " AND " + MOUNT_VALID_EXPR
 
 # 可挂候选的来源投影(群组知识共享 P1-T4)。

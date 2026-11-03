@@ -49,6 +49,10 @@ const passwordModal = await parseModule("password-change-modal.tsx");
 const searchProfileModal = await parseModule("search-profile-modal.tsx");
 const releaseNotesModal = await parseModule("release-notes-modal.tsx");
 const memoryPanel = await parseModule("memory-panel.tsx");
+const memorySuggestToggle = await parseModule("memory-suggest-toggle.tsx");
+const memorySuggestOwner = await parseModule("use-memory-suggest-mode.ts");
+const memorySuggestionOwner = await parseModule("use-memory-suggestion-review.ts");
+const memorySuggestionCard = await parseModule("memory-suggestion-card.tsx");
 const catalogPanel = await parseModule("command-catalog-panel.tsx");
 const conversationShare = await parseModule("conversation-share-modal.tsx");
 // PR-5 分片 1：晋升队列与关系审核队列从 page.tsx 搬到各自的 owner hook + 弹窗组件。
@@ -372,6 +376,35 @@ test("presentation close never releases an in-flight domain operation", () => {
     const clauseCalls = callSitesIn(caseClauseIn(close, label)).map(({ target }) => target);
     assert.deepEqual(clauseCalls, expectedCalls, label);
   }
+});
+
+test("memory suggestion close uses actor leases and the presentation-only close sink", () => {
+  const openCalls = callSitesIn(findFunctionIn(memorySuggestOwner, "useMemorySuggestMode", "openConfirmation")).map(({ target }) => target);
+  for (const target of ["modals.captureActorOwner", "modals.issue", "modals.publish"]) assert.ok(openCalls.includes(target), target);
+  const close = findFunctionIn(page, "Home", "handleRootModalClosed");
+  assert.deepEqual(callSitesIn(caseClauseIn(close, "memory-suggest-close")).map(({ target }) => target), ["memorySuggestMode.commands.clearConfirmation"]);
+  const clear = findFunctionIn(memorySuggestOwner, "useMemorySuggestMode", "clearConfirmation").getText(memorySuggestOwner);
+  assert.doesNotMatch(clear, /operationRef|setMemoryMode|setResult/);
+  const toggleText = memorySuggestToggle.getText(memorySuggestToggle);
+  assert.match(toggleText, /aria-modal=\{modalView\.topmost\}/);
+  assert.match(toggleText, /aria-hidden=\{!modalView\.topmost\}/);
+  assert.match(toggleText, /inert=\{modalView\.topmost \? undefined : true\}/);
+  assert.match(toggleText, /zIndex: modalView\.zIndex/);
+  assert.match(pageText, /modalView: rootModals\.view\("memory-suggest-close"\)/);
+});
+
+test("memory suggestion adoption owns actor payload and uses the root presentation lease", () => {
+  const calls = callSitesIn(findFunctionIn(memorySuggestionOwner, "useMemorySuggestionReview", "open")).map(({ target }) => target);
+  for (const target of ["modals.captureActorOwner", "modals.issue", "modals.publish"]) assert.ok(calls.includes(target), target);
+  const close = findFunctionIn(page, "Home", "handleRootModalClosed");
+  assert.deepEqual(callSitesIn(caseClauseIn(close, "memory-suggestion-adopt")).map(({ target }) => target), ["memorySuggestionReview.commands.clear"]);
+  const clear = findFunctionIn(memorySuggestionOwner, "useMemorySuggestionReview", "clear").getText(memorySuggestionOwner);
+  assert.doesNotMatch(clear, /operation\.current\s*=|setBusy\(/);
+  const modal = findFunction(memorySuggestionCard, "MemorySuggestionAdoptionModal").getText(memorySuggestionCard);
+  assert.match(modal, /aria-hidden=\{!modalView\.topmost\}/);
+  assert.match(modal, /inert=\{modalView\.topmost \? undefined : true\}/);
+  assert.match(modal, /active: Boolean\(pending && modalView\.open && modalView\.topmost\)/);
+  assert.match(pageText, /<MemorySuggestionAdoptionModal review=\{memorySuggestionReview\} modalView=\{rootModals\.view\("memory-suggestion-adopt"\)\}/);
 });
 
 test("modal mutations suppress errors after their frozen lease becomes stale", () => {

@@ -66,7 +66,7 @@ export type KgDeleteOutcome = "deleted" | "failed";
  * 重新解析的进展。`abandoned`:等待期间切了笔记本 / 账号或没了写权限,来源库没提交(或丢掉了
  * 回来的结果)——这一行只放开在飞态,不写任何结果。
  */
-export type KgReparsePhase = "running" | "started" | "skipped" | "failed" | "abandoned";
+export type KgReparsePhase = "running" | "started" | "skipped" | "busy" | "failed" | "abandoned";
 
 /**
  * 处置入口。全部可选:没传的那一种就不出按钮(例如组件测试只关心一部分)。
@@ -88,6 +88,8 @@ export type KgFindingHandlers = {
 export type KgFindingsActionState = {
   /** 可编辑成员;只读成员与镜像库为 false:一个按钮都没有,也没有「标为正常」。 */
   canWrite: boolean;
+  /** 能删任何人上传的来源;false = 点名编辑者,只对本人上传的来源给「删除来源…」(D14)。 */
+  canDeleteAnySource?: boolean;
   deletingSourceIds: ReadonlySet<string>;
   /**
    * 重新解析的占位(来源库跟踪那一份,全页共用):提交之后、跟踪判定这一次跑完之前,引用这篇
@@ -97,6 +99,11 @@ export type KgFindingsActionState = {
   relinking: boolean;
   /** 维护槽被占(重新合并 / 整理 / 删除知识图谱在跑):补上关联撞同一把锁,禁用。 */
   maintenanceBusy: boolean;
+  /**
+   * 「补上关联」被服务端 409 挡下时的点名说明(分享编辑 P1,D8:「张三发起的…正在运行」)。
+   * 它是那颗按钮的结果,画在按钮旁、由 use-kg-graph 计时消失;空串 = 没有。
+   */
+  relinkBusyNotice?: string;
   pendingMerges: readonly PendingMerge[];
 };
 
@@ -474,6 +481,7 @@ function FindingRowView({
   const evidence = findingEvidenceView(row);
   const plan = findingActionPlan(row, {
     canWrite: state.canWrite,
+    canDeleteAnySource: state.canDeleteAnySource,
     pendingMerges: state.pendingMerges,
     reparsingSourceIds: state.reparsingSourceIds,
   });
@@ -556,6 +564,9 @@ function FindingRowView({
           } else if (phase === "skipped") {
             showResult({ tone: "neutral", text: "这篇来源已不在或无需重新解析" });
             onChanged();
+          } else if (phase === "busy") {
+            // D8:另一位协作者刚提交了同一篇,它正在解析。原因写在这颗按钮旁,不走横幅。
+            showResult({ tone: "neutral", text: "这篇来源正在解析，请等它完成" });
           } else if (phase === "failed") {
             showResult({ tone: "failed", text: "没能开始重新解析，请稍后重试" });
           }
@@ -681,6 +692,9 @@ function FindingRowView({
             </span>
           ))}
           {relinkBlocked ? <span className="kg-finding-action-note" role="status">其它图谱任务进行中</span> : null}
+          {state.relinkBusyNotice && visible.some((spec) => spec.kind === "relink") ? (
+            <span className="kg-finding-action-note kg-busy-notice" role="status">{state.relinkBusyNotice}</span>
+          ) : null}
           {result ? <span className={`kg-finding-result is-${result.tone}`} role="status">{result.text}</span> : null}
           {canDismiss ? (
             <button

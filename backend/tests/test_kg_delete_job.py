@@ -434,7 +434,7 @@ def test_running_analysis_refuses_delete_with_the_build_copy(api):
     assert refused.status_code == 409
     assert refused.json()["detail"] == "当前笔记本已有知识图谱分析任务正在运行"
     assert submitted == []
-    assert lifecycle.kg_maintenance.active_kind(nb) is None
+    assert lifecycle.kg_maintenance.busy_refusal(nb) is None
 
 
 def test_analysis_started_during_delete_is_refused_with_holder_delete(api):
@@ -481,7 +481,7 @@ def test_durable_analysis_row_from_another_process_refuses_delete(api):
     assert refused.status_code == 409
     assert refused.json()["detail"] == "当前笔记本已有知识图谱分析任务正在运行"
     assert len(submitted) == 1
-    assert lifecycle.kg_maintenance.active_kind(nb) is None
+    assert lifecycle.kg_maintenance.busy_refusal(nb) is None
     assert client.get(f"/api/notebooks/{nb}/kg/delete/status").json() == finished
 
     assert repo._runtime.kg_build_jobs.finish(other_process_row["id"], "succeeded")
@@ -498,7 +498,7 @@ def test_failing_durable_probe_revokes_the_claim(repo, monkeypatch):
     monkeypatch.setattr(repo._runtime.kg_build_jobs, "has_running", _unavailable)
     with pytest.raises(RuntimeError):
         repo.start_kg_delete(nb)
-    assert lifecycle.kg_maintenance.active_kind(nb) is None
+    assert lifecycle.kg_maintenance.busy_refusal(nb) is None
     assert repo.kg_delete_status(nb)["status"] == "idle"
 
 
@@ -639,7 +639,7 @@ def test_interrupted_delete_still_releases_the_slot(repo, monkeypatch):
         repo.run_kg_delete_job(nb, job["job_id"])
 
     assert repo.kg_delete_status(nb)["status"] == "failed"
-    assert lifecycle.kg_maintenance.active_kind(nb) is None
+    assert lifecycle.kg_maintenance.busy_refusal(nb) is None
 
 
 def test_notebook_delete_landing_mid_job_fails_the_job_and_frees_the_slot(
@@ -810,7 +810,7 @@ def test_preview_refresh_held_elsewhere_or_failing_does_not_fail_the_delete(
     monkeypatch.setattr(scale, "refresh_viz_after_graph_reset", _broken)
     _run_delete(repo, nb)
     assert repo.kg_delete_status(nb)["status"] == "succeeded"
-    assert repo._runtime.knowledge_lifecycle.kg_maintenance.active_kind(nb) is None
+    assert repo._runtime.knowledge_lifecycle.kg_maintenance.busy_refusal(nb) is None
 
 
 # ---------------------------------------------------------------------------

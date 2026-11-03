@@ -1494,6 +1494,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
+        "scope": "<module>.collaboration_service",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
         "scope": "<module>.content_overview_service",
         "target": "_runtime"
       },
@@ -1543,6 +1549,12 @@
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
         "scope": "<module>.memory_preview_client",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.memory_suggest_service",
         "target": "_runtime"
       },
       {
@@ -1632,6 +1644,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>._kg_analysis_busy",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.build_kg",
         "target": "_runtime"
       },
@@ -1675,6 +1693,18 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_tools/maintenance.py",
         "scope": "<module>._start_kg_build",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/session.py",
+        "scope": "<module>.register_session_tools.create_notebook.create",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/session.py",
+        "scope": "<module>.register_session_tools.create_notebook.create.<lambda>",
         "target": "_runtime"
       },
       {
@@ -1747,6 +1777,12 @@
         "kind": "attribute",
         "path": "backend/app/eval/find_sources_calibrate.py",
         "scope": "<module>.wide_open_finder",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/collab_jobs.py",
+        "scope": "<module>.pulse_touch_for_mcp",
         "target": "_runtime"
       },
       {
@@ -3599,6 +3635,24 @@
       },
       {
         "kind": "attribute",
+        "path": "scripts/bench_collab_pulse.py",
+        "scope": "<module>.measure",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_collab_pulse.py",
+        "scope": "<module>.seed",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_collab_pulse.py",
+        "scope": "<module>.sql_probe",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
         "path": "scripts/bench_scale_build_paging.py",
         "scope": "<module>._rss_child",
         "target": "_runtime"
@@ -4529,6 +4583,12 @@
         "kind": "patch",
         "path": "backend/tests/test_concept_description_rewrite.py",
         "scope": "<module>.test_cli_interrupt_exits_130_at_once_and_the_rerun_continues",
+        "target": "close"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_collab_pulse.py",
+        "scope": "<module>.execute",
         "target": "close"
       },
       {
@@ -5618,7 +5678,7 @@
     "owner": "SourceIngestionService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, source_id: 'str') -> 'None'"
+    "signature": "(self, source_id: 'str', *, uploader_must_be: 'str | None' = None) -> 'None'"
   },
   "effective_document_limit": {
     "consumers": [
@@ -6084,18 +6144,6 @@
         "kind": "attribute",
         "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.import_knowhow_table",
-        "target": "get_knowhow_table"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/knowhow_routes.py",
-        "scope": "<module>.patch_knowhow_cell",
-        "target": "get_knowhow_table"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/knowhow_routes.py",
-        "scope": "<module>.patch_knowhow_cells_batch",
         "target": "get_knowhow_table"
       },
       {
@@ -6580,6 +6628,12 @@
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
         "scope": "<module>.reparse_sources",
+        "target": "get_source"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/build_chunks.py",
+        "scope": "<module>.main",
         "target": "get_source"
       },
       {
@@ -9843,6 +9897,18 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/services/startup_warmup.py",
+        "scope": "<module>._expire_memory_suggestions",
+        "target": "settings"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/bench_collab_pulse.py",
+        "scope": "<module>.measure",
+        "target": "settings"
+      },
+      {
+        "kind": "attribute",
         "path": "scripts/replay_retrieval.py",
         "scope": "<module>._run_full",
         "target": "settings"
@@ -10340,7 +10406,7 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, row_id: 'str', column_id: 'str', content_md: 'str', require_assets=(), actor: 'str' = '', origin: 'str' = 'user') -> 'None'"
+    "signature": "(self, row_id: 'str', column_id: 'str', content_md: 'str', require_assets=(), actor: 'str' = '', origin: 'str' = 'user') -> 'int'"
   },
   "update_knowhow_cells": {
     "consumers": [
@@ -10355,7 +10421,7 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, row_ids: 'list', column_id: 'str', content_md: 'str', require_assets=(), actor: 'str' = '', origin: 'str' = 'user') -> 'None'"
+    "signature": "(self, row_ids: 'list', column_id: 'str', content_md: 'str', require_assets=(), actor: 'str' = '', origin: 'str' = 'user') -> 'int | None'"
   },
   "update_knowhow_cells_bulk_guarded": {
     "consumers": [

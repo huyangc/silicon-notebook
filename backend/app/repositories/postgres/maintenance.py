@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+from datetime import timedelta
 import logging
 from pathlib import Path
 import threading
@@ -700,6 +701,8 @@ class PostgresMaintenanceAdapter:
             "DELETE FROM retained_user_activity WHERE expires_at<=%s",
             (now,),
         ))
+        cutoff = now - timedelta(days=self._runtime.settings.notebook_activity_retention_days)
+        _settle("notebook_activity", lambda: self._runtime.sharing_store.purge_expired_activity(cutoff.isoformat()))
 
         def _purge_retained_global_turns() -> None:
             # The global Ask turns retained after a participant library's

@@ -27,6 +27,7 @@ from app.repositories.scale_build_lock import (
     ScaleBuildLockAttempt,
     ScaleBuildLockLost,
 )
+from app.services.collab_jobs import current_job_actor, job_queue_entry, pulse_touch_for_job, submission_context
 from app.services.offline_batch import offline_batch_active
 
 # Outcome of one admission attempt in ``_admit_scale_op`` — the three cases a
@@ -133,6 +134,7 @@ def _viz_signature_superseded(cached_signature: Any, current_signature: Any) -> 
 
 
 class ScaleArtifactRuntime:
+    _collab_touch = None
     def __init__(
         self,
         *,
@@ -357,6 +359,7 @@ class ScaleArtifactRuntime:
             return ""
 
     def notify_index_done(self, notebook_id: str) -> None:
+        pulse_touch_for_job(self._collab_touch, notebook_id, "scale_index")
         try:
             from app.services.pending_bus import pending_bus
 
@@ -742,7 +745,8 @@ class ScaleArtifactRuntime:
     # ------------------------------ viz read/build
 
     def _start_daemon(self, name: str, target: Callable[[], None]) -> None:
-        threading.Thread(target=target, name=name, daemon=True).start()
+        context = submission_context()
+        threading.Thread(target=context.run, args=(target,), name=name, daemon=True).start()
 
     def _spawn_viz_build(self, notebook_id: str) -> None:
         with self.viz_building_lock:
@@ -1903,9 +1907,10 @@ class ScaleArtifactRuntime:
         queue position is anchored to the first enqueue (codex R3 P2).
         """
         prior = self.idle_queue.get(notebook_id)
-        self.idle_queue[notebook_id] = (
+        self.idle_queue[notebook_id] = job_queue_entry(
             "full",
             prior[1] if prior is not None else _utc_now_iso(),
+            prior,
         )
 
     def _park_pending(self, notebook_id: str, mode: str) -> None:
@@ -1916,9 +1921,10 @@ class ScaleArtifactRuntime:
         original stamp so the handoff order stays anchored to first arrival.
         """
         prior = self._scale_pending.get(notebook_id)
-        self._scale_pending[notebook_id] = (
+        self._scale_pending[notebook_id] = job_queue_entry(
             mode,
             prior[1] if prior is not None else _utc_now_iso(),
+            prior,
         )
 
     def _slot_available(self) -> bool:
@@ -2315,6 +2321,8 @@ class ScaleArtifactRuntime:
                         self.building.discard(notebook_id)
                     if succeeded and published:
                         self.notify_index_done(notebook_id)
+                    else:
+                        pulse_touch_for_job(self._collab_touch, notebook_id, "scale_index")
                     # A corpus publication that landed while this build was
                     # running records a coalesced full follow-up. Claim it
                     # immediately rather than waiting for the off-peak
@@ -2352,7 +2360,10 @@ class ScaleArtifactRuntime:
             self._register_scale_build_lock(notebook_id, lock_handle)
             handed_off = True
             try:
-                self._start_daemon(f"scaleidx-{notebook_id}", run)
+                actor = getattr(removed_idle_entry if claim_idle else removed_pending_entry, "actor", None) if claim_idle or claim_pending else None
+                actor = actor or current_job_actor()
+                context = submission_context(actor)
+                self._start_daemon(f"scaleidx-{notebook_id}", lambda: context.run(run))
             except Exception:
                 # The worker never got either of the two things this thread
                 # took for it. Both go back, and so does every displaced queue
@@ -2561,9 +2572,10 @@ class ScaleArtifactRuntime:
                 # 入队,时间戳必须与它同锚点,否则「入队序位次 + 刷新的时间戳」自相
                 # 矛盾(codex R3 P2)。
                 prior = self.idle_queue.get(notebook_id)
-                self.idle_queue[notebook_id] = (
+                self.idle_queue[notebook_id] = job_queue_entry(
                     mode,
                     prior[1] if prior is not None else _utc_now_iso(),
+                    prior,
                 )
             self._ensure_scheduler()
             # 入列也要推一次待办快照(镜像 _run_scale_op 对 building 的处理):
@@ -2625,6 +2637,7 @@ class ScaleArtifactRuntime:
             from app.services.pending_bus import publish_snapshot
 
             publish_snapshot(self._resolve_index_owner(notebook_id))
+            pulse_touch_for_job(self._collab_touch, notebook_id, "scale_index")
         return {
             "cancelled": bool(removed),
             "state": self.status(notebook_id)["state"],

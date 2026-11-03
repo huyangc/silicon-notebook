@@ -152,6 +152,17 @@ test("没有会看不到的记忆:如实说明,不出现导出入口", async () 
   expect(within(dialog).getByRole("button", { name: "确认退出" })).toBeEnabled();
 });
 
+test("退群按服务端本人记忆口径展示，不把系统草稿计入或提示删除", async () => {
+  installServer([previewOf({ notebook_count: 1, memory_count: 2, suggestion_count: 999, notebooks: [{ notebook_id: "nb-a", name: "封装工艺库", memory_count: 2, suggestion_count: 999 }] })]);
+  mount();
+  const dialog = await panel();
+  expect(await within(dialog).findByText(leaveHiddenText(1, 2))).toBeVisible();
+  expect(dialog).not.toHaveTextContent("999");
+  expect(dialog).not.toHaveTextContent("未处理的系统建议");
+  expect(dialog).not.toHaveTextContent("永久删除");
+  expect(within(dialog).getByText(LEAVE_KEPT_TEXT)).toBeVisible();
+});
+
 test("预览读到之前不能确认;读不到时说明原因、可以重试,没有确认按钮", async () => {
   const user = userEvent.setup();
   let fail = true;

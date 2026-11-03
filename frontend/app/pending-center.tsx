@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode, type Ref } fr
 import { Bell } from "lucide-react";
 import { performApiRequest } from "./api-client.ts";
 import { getToken } from "./auth";
-import { itemSig, currentSigs, doneMessage, pruneSigs, pendingView, askElapsedLabel, pendingItemOrigin, transferLabel } from "./pending-actions";
+import { itemSig, currentSigs, doneMessage, isAccessChangeEvent, pruneSigs, pendingView, askElapsedLabel, pendingItemOrigin, transferLabel } from "./pending-actions";
 import { bellDeletionHint, bellDeletionLabel } from "./notebook-deletion-copy.ts";
 import { TransferBellActions } from "./notebook-transfer-panel.tsx";
 
@@ -63,7 +63,13 @@ export type DoneToast = { notebook_id: string; notebook_name: string; ts: number
 
 export type Snapshot = { count: number; items: PendingItem[] };
 
-export function usePendingActions(enabled: boolean) {
+/**
+ * `onAccessChanged`:收到改变访问权的推送(`isAccessChangeEvent`,如「被添加为编辑者」)时调用,
+ * 参数是那本笔记本的 id。宿主据此重取清单并对账工作区。经 ref 读,换回调不重连推送流。
+ */
+export function usePendingActions(enabled: boolean, onAccessChanged?: (notebookId: string) => void) {
+  const accessChangedRef = useRef(onAccessChanged);
+  accessChangedRef.current = onAccessChanged;
   const [snapshot, setSnapshot] = useState<Snapshot>({ count: 0, items: [] });
   const [doneItems, setDoneItems] = useState<DoneToast[]>([]);
   const [toast, setToast] = useState<DoneToast | null>(null);
@@ -126,6 +132,7 @@ export function usePendingActions(enabled: boolean) {
             if (msg.kind === "snapshot") {
               setSnapshot(msg.data as Snapshot);
             } else if (msg.kind === "event" && msg.event) {
+              if (isAccessChangeEvent(msg.event)) accessChangedRef.current?.(String(msg.notebook_id ?? ""));
               const text = doneMessage(msg.event, msg);
               if (!text) continue;
               const d: DoneToast = {
