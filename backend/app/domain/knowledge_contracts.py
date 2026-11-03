@@ -19,6 +19,24 @@ USABLE_STATUSES = ("approved", "reviewed", "project_specific", "conflict")
 # Every status a curator can stamp on a knowledge object.
 KNOWLEDGE_STATUSES = ("approved", "reviewed", "deprecated", "conflict", "project_specific")
 
+# Exact declared values behind collisions with the graph's common envelope.
+SCHEMA_FIELDS_PAYLOAD_KEY = "_schema_fields"
+
+
+def knowledge_payload_text(payload: dict, *, skip_keys=()) -> str:
+    """Semantic text includes exact declared values behind envelope collisions."""
+    parts = []
+    declared = payload.get(SCHEMA_FIELDS_PAYLOAD_KEY)
+    for values, excluded in ((payload, skip_keys), (declared if isinstance(declared, dict) else {}, ())):
+        for key, value in values.items():
+            if str(key).startswith("_") or key in excluded:
+                continue
+            if isinstance(value, str):
+                parts.append(value)
+            elif isinstance(value, (list, tuple)):
+                parts.extend(str(item) for item in value)
+    return " ".join(parts)
+
 
 def visible_payload(payload: object) -> dict:
     """A knowledge object's payload as any client may see it: every key that

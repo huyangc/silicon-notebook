@@ -413,7 +413,7 @@ def test_kg_ingest_resolves_extract_refine_and_glean_before_window_submit(
 
     def fake_extract_window(
         extract_client, elements, section_path, doc_type, index, *,
-        refine, gleaning_rounds, base_filter, refine_client, glean_client,
+        refine, gleaning_rounds, base_filter, refine_client, glean_client, object_schemas=None,
     ):
         seen.update(
             extract=extract_client, refine=refine_client, glean=glean_client,

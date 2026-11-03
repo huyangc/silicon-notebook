@@ -711,15 +711,9 @@ _PAYLOAD_SKIP_KEYS = frozenset({"section_path"})
 
 
 def _payload_text(payload: Dict[str, object]) -> str:
-    parts: List[str] = []
-    for key, value in payload.items():
-        if str(key).startswith("_") or key in _PAYLOAD_SKIP_KEYS:
-            continue
-        if isinstance(value, str):
-            parts.append(value)
-        elif isinstance(value, (list, tuple)):
-            parts.extend(str(item) for item in value)
-    return " ".join(parts)
+    from app.domain.knowledge_contracts import knowledge_payload_text
+
+    return knowledge_payload_text(payload, skip_keys=_PAYLOAD_SKIP_KEYS)
 
 
 # 关系 embedding 输入里端点名的截断上限——协议边界的具名常量,live store_kg 与

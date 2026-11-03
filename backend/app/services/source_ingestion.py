@@ -14,6 +14,7 @@ from typing import Any, Callable, ContextManager, Iterable, List, Optional, Sequ
 from urllib.parse import urlparse
 
 from app.core.config import Settings
+from app.domain.extraction_profiles import ObjectSchema
 from app.core.event_logging import EventLogger
 from app.domain.indexing_pipeline import (
     BUILTIN_INDEXING_PIPELINE_VERSION,
@@ -287,7 +288,7 @@ class SourceIngestionService:
         note_corpus_change: Callable[[str], None] = lambda _notebook_id: None,
         require_indexing_write: Callable[[str], None] = lambda _notebook_id: None,
         indexing_pipelines: IndexingPipelineHostPort | None = None,
-        effective_object_types: Callable[[str], Iterable[str]] = lambda _notebook_id: (),
+        effective_object_schemas: Callable[[str], Mapping[str, ObjectSchema]] | None = None,
         analysis_artifacts: Any = None,
         spreadsheet_analysis: Any = None,
         # The batch form of ``clear_source_extraction_state`` (several sources
@@ -387,7 +388,7 @@ class SourceIngestionService:
 
         self.require_indexing_write = require_indexing_write
         self.indexing_pipelines = indexing_pipelines
-        self.effective_object_types = effective_object_types
+        self.effective_object_schemas = effective_object_schemas
         # 论文元数据 backfill 进程内状态镜像 kg_building（重启即清）
         # nb_id → {"total": N, "done": k, "_gen": G}
         self._paper_meta_backfilling: dict[str, dict] = {}
@@ -2978,6 +2979,10 @@ class SourceIngestionService:
             frozen_identity=frozen_pipeline_identity,
         )
         plugin_kg_active = kg_strategy is not None
+        object_schemas = (
+            dict(self.effective_object_schemas(source.notebook_id))
+            if self.effective_object_schemas is not None else None
+        )
         preserve_source_graph = preserve_existing_until_complete or plugin_kg_active
         doc_type_id = (
             self.normalize_doc_type(getattr(source, "doc_type", "") or "")
@@ -3033,7 +3038,7 @@ class SourceIngestionService:
             base_filter = self.notebook_tier(source.notebook_id) == "base"
             plugin_object_types = tuple(
                 str(item)
-                for item in self.effective_object_types(source.notebook_id)
+                for item in (object_schemas or {})
                 if str(item).strip()
             )
             plugin_limits = IndexingPipelineKgLimits(
@@ -3074,6 +3079,7 @@ class SourceIngestionService:
                     pipeline_id=pipeline_id,
                     plugin_object_types=plugin_object_types,
                     plugin_limits=plugin_limits if plugin_kg_active else None,
+                    object_schemas=object_schemas,
                 )
             if graph.failed_windows:
                 # 逐窗口失败的原因只在这里落盘:extract_graph 为隔离窗口吞掉了异常,

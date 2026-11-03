@@ -2,24 +2,30 @@
 by integer position in the reply's own nodes array. Evidence is anchored by
 element-id markers: the LLM emits
 only an integer "ev" label per node/edge, and the backend maps it back to that
-source element's exact text/offsets (drop ungroundable nodes). Node types
-constrained to the 4; edges to the vocab."""
+source element's exact text/offsets (drop ungroundable nodes). Configured runs
+use the notebook's active definitions; edges retain the core vocabulary."""
 from __future__ import annotations
+import json
 import logging
 from collections import Counter
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from app.domain.extraction_profiles import ObjectSchema
 from openai import APIConnectionError, APITimeoutError
 from app.core.llm import cap_kwargs
 from app.services.kg.edge_schema import (
     VALID_EDGE_TYPES,
     edge_schema_hint,
     is_valid_edge_pair,
+    is_queryable_edge_pair,
     render_edge_prompt_rules,
 )
 from app.services.kg.json_utils import safe_json
 from app.services.kg.models import Edge, Evidence, Node, Step
 from app.services.kg.parsing import SourceElementQ
 from app.services.kg.run_control import KgBuildAborted
+from app.services.kg.schema_contract import (
+    configured_schemas, schema_hint, schema_instructions, schema_node_values,
+)
 from app.services.prompts import gleaning_prompt, refine_prompt, REFINE_SCHEMA_HINT
 
 NODE_TYPES = {"Concept", "Claim", "Formula", "Procedure"}
@@ -76,11 +82,20 @@ _KG_SCHEMA_HINT = (
 )
 
 
-def _grounded_node_positions(nodes: list, elements: List[SourceElementQ]) -> set:
+def _grounded_node_positions(nodes: list, elements: List[SourceElementQ], schemas=None) -> set:
     """Positions in the reply's ``nodes`` array whose entry survives the node
     gate. Edge endpoints index the ORIGINAL array, so a position whose node
     was dropped (bad type, no name, ungroundable) is a dangling endpoint."""
-    return {i for i, it in enumerate(nodes) if _grounds_a_node(it, elements)}
+    return {i for i, it in enumerate(nodes) if _grounds_a_node(it, elements, schemas)}
+
+
+def _node_values(item, schemas):
+    if schemas is not None:
+        return schema_node_values(item, schemas)
+    if not isinstance(item, dict) or not _typed_str(item.get("type"), NODE_TYPES):
+        return None
+    name = _name_str(item.get("name"))
+    return (item["type"], name, {}) if name else None
 
 
 def _edge_endpoints(it: Any) -> Tuple[int, int]:
@@ -92,7 +107,7 @@ def _edge_endpoints(it: Any) -> Tuple[int, int]:
     return _evidence_index(it.get("source")), _evidence_index(it.get("target"))
 
 
-def _grounds_a_node(it: Any, elements: List[SourceElementQ]) -> bool:
+def _grounds_a_node(it: Any, elements: List[SourceElementQ], schemas=None) -> bool:
     """Does this one LLM node dict clear the SAME gate extract_window / _glean_nodes
     apply before the entry becomes an object? Downstream keeps a node only when it
     is a typed dict (``isinstance(it, dict) and it.get("type") in NODE_TYPES``) with
@@ -106,18 +121,17 @@ def _grounds_a_node(it: Any, elements: List[SourceElementQ]) -> bool:
     against): fall back to the minimal field set the real gate needs, a non-empty
     ``name`` AND an integer ``ev``. Conservative by construction (it cannot use the
     name-substring fallback), which only ever means "re-fetch", never "cache junk"."""
-    if not isinstance(it, dict) or not _typed_str(it.get("type"), NODE_TYPES):
+    values = _node_values(it, schemas)
+    if values is None:
         return False
-    name = _name_str(it.get("name"))
-    if not name:
-        return False
+    _object_type, name, _payload = values
     if elements:
         return _resolve(elements, it.get("ev"), name) is not None
     return isinstance(it.get("ev"), int)
 
 
 def _fragment_grounds_something(content: str, elements: List[SourceElementQ],
-                                edges_consumed: bool = True) -> bool:
+                                edges_consumed: bool = True, *, schemas=None) -> bool:
     """Cache-admission gate for the KG-fragment schema (_KG_SCHEMA_HINT), judged by
     running the DOWNSTREAM grounding logic itself instead of a shape approximation.
 
@@ -162,7 +176,7 @@ def _fragment_grounds_something(content: str, elements: List[SourceElementQ],
     edges = data.get("edges")
     if edges is not None and not isinstance(edges, list):
         return False
-    grounded = _grounded_node_positions(nodes, elements)
+    grounded = _grounded_node_positions(nodes, elements, schemas)
     if nodes and not grounded:
         return False
     if edges and edges_consumed:
@@ -253,16 +267,23 @@ def _extract_call_kwargs(
 
 
 def _prompt(labeled_text: str, section_path: str, doc_type: str,
-            base_filter: bool = False) -> str:
+            base_filter: bool = False, *, schemas=None) -> str:
     base_rule = (
         "\nBASE-TIER QUALITY FILTER: drop non-knowledge meta-text — pedagogical "
         "asides (\"In a semester system…\"), exercise/homework hints, tool/UI "
         "trivia, document navigation. Keep only durable technical knowledge.\n"
         if base_filter else ""
     )
+    type_rule = (
+        "Use EXACTLY these node types: Concept, Claim, Formula,\nProcedure"
+        if schemas is None else schema_instructions(schemas)
+    )
+    type_word_rule = (
+        "one\nof the four node-type words above"
+        if schemas is None else "one of the active node-type names above"
+    )
     return f"""Extract a knowledge-graph fragment from this {doc_type} passage
-(section: {section_path}). Use EXACTLY these node types: Concept, Claim, Formula,
-Procedure (Concept=a NAMED reusable technical entity — method, mechanism,
+(section: {section_path}). {type_rule} (Concept=a NAMED reusable technical entity — method, mechanism,
 component, named model/structure/distribution; Claim=truth-evaluable assertion;
 Formula=equation; Procedure=ordered process).
 
@@ -313,8 +334,7 @@ it (write 3, never "3", 3.0 or true). An edge's "source" and "target" are node
 INDEXES: the bare INTEGER position of the endpoint node in THIS reply's "nodes"
 array, counting from 0 (the first node is 0, the second 1), with the same integer
 rules as "ev". Source and target must be two different nodes, and each index must
-be less than the number of nodes you return. "type" is exactly one
-of the four node-type words above, as a string. "name" carries the node's text as
+be less than the number of nodes you return. "type" is exactly {type_word_rule}, as a string. "name" carries the node's text as
 a single string (Concept/Procedure name, Claim proposition, Formula expression).
 For an ordered multi-step Procedure emit ONE Procedure node with an ordered
 `steps` array, each {{"name":..,"ev":..}} with the same string/integer rules;
@@ -330,7 +350,7 @@ Passage:
 \"\"\"{labeled_text}\"\"\"
 
 Return JSON ONLY:
-{_KG_SCHEMA_HINT}
+{schema_hint(schemas, _KG_SCHEMA_HINT)}
 """
 
 
@@ -429,7 +449,7 @@ def refine_nodes(client: Any, elements: List[SourceElementQ], nodes: List[Node],
 
 def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
                  doc_type: str, first_raw: str, nodes: List[Node], win_idx: int,
-                 max_rounds: int, base_filter: bool = False) -> None:
+                 max_rounds: int, base_filter: bool = False, *, schemas=None) -> None:
     """Gleaning: ask the LLM for MISSED nodes and append new (deduped, grounded)
     ones to `nodes` in place. v1 = nodes only (no edges). Best-effort: no-op when
     unconfigured; on any failure returns with whatever was gathered (never raises —
@@ -437,24 +457,33 @@ def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
     if not getattr(client, "configured", False) or max_rounds < 1:
         return
 
-    def _nm(s: str) -> str:
-        return " ".join((s or "").split()).lower()
+    def _identity(node_type, name, payload):
+        return (node_type, " ".join((name or "").split()).lower(),
+                json.dumps(payload, sort_keys=True, ensure_ascii=False))
 
-    seen = {(n.type, _nm(n.name)) for n in nodes}
+    seen = {_identity(n.type, n.name, n.payload) for n in nodes}
     labeled = "\n".join(f"[{i}] {e.text}" for i, e in enumerate(elements))
+    glean_instruction = (
+        gleaning_prompt(section_path, doc_type) if schemas is None else
+        "Add ONLY missed nodes using the same active notebook definitions, "
+        "payload fields, primary field, and integer ev labels. Do not repeat "
+        "existing nodes. Extract only passage-supported facts in their original "
+        "language. Return the same JSON shape with an empty edges list; "
+        "return an empty nodes list if nothing was missed."
+    )
     messages = [
-        {"role": "user", "content": _prompt(labeled, section_path, doc_type, base_filter=base_filter)},
+        {"role": "user", "content": _prompt(labeled, section_path, doc_type, base_filter=base_filter, schemas=schemas)},
         {"role": "assistant", "content": first_raw},
-        {"role": "user", "content": gleaning_prompt(section_path, doc_type)},
+        {"role": "user", "content": glean_instruction},
     ]
     for _ in range(max_rounds):
         try:
             raw = client.chat_json(
-                messages, _KG_SCHEMA_HINT,
+                messages, schema_hint(schemas, _KG_SCHEMA_HINT),
                 **_extract_call_kwargs(
                     client,
                     lambda content: _fragment_grounds_something(
-                        content, elements, edges_consumed=False
+                        content, elements, edges_consumed=False, schemas=schemas
                     ),
                 ),
             )
@@ -465,22 +494,22 @@ def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
             return
         added = 0
         for it in _list_items(data.get("nodes")):
-            if not isinstance(it, dict) or not _typed_str(it.get("type"), NODE_TYPES):
+            values = _node_values(it, schemas)
+            if values is None:
                 continue
-            name = _name_str(it.get("name"))
-            nm = _nm(name)
-            key = (it["type"], nm)
-            if not nm or key in seen:
+            node_type, name, payload = values
+            key = _identity(node_type, name, payload)
+            if key in seen:
                 continue
             el = _resolve(elements, it.get("ev"), name)
             if el is None:
                 continue
-            node = Node(id=f"W{win_idx}-{len(nodes)}", type=it["type"],
-                        name=name, section_path=section_path,
+            node = Node(id=f"W{win_idx}-{len(nodes)}", type=node_type,
+                        name=name, payload=payload, section_path=section_path,
                         evidence=[_ev(el)])
-            if it["type"] == "Procedure":
+            if node_type == "Procedure":
                 node.steps = _parse_steps(elements, it.get("steps"))
-            if it["type"] in ("Claim", "Formula"):
+            if node_type in ("Claim", "Formula"):
                 node.validity_scope = _parse_validity_scope(it.get("validity_scope"))
             nodes.append(node)
             seen.add(key)
@@ -498,8 +527,10 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
                    gleaning_rounds: int = 0, base_filter: bool = False,
                    refine_client: Any | None = None,
                    glean_client: Any | None = None,
+                   object_schemas: Mapping[str, ObjectSchema] | None = None,
                    ) -> Tuple[List[Node], List[Edge]]:
-    if not elements:
+    schemas = configured_schemas(object_schemas)
+    if not elements or schemas == {}:
         return [], []
     labeled = "\n".join(f"[{i}] {e.text}" for i, e in enumerate(elements))
     # OpenAICompatibleClient.chat_json takes (messages, response_schema_hint).
@@ -512,11 +543,11 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
     # safe_json below; only a failed invocation is counted as a failed window.
     raw = client.chat_json(
         [{"role": "user",
-          "content": _prompt(labeled, section_path, doc_type, base_filter=base_filter)}],
-        _KG_SCHEMA_HINT,
+          "content": _prompt(labeled, section_path, doc_type, base_filter=base_filter, schemas=schemas)}],
+        schema_hint(schemas, _KG_SCHEMA_HINT),
         **_extract_call_kwargs(
             client,
-            lambda content: _fragment_grounds_something(content, elements),
+            lambda content: _fragment_grounds_something(content, elements, schemas=schemas),
         ),
     )
     data = safe_json(raw)
@@ -527,18 +558,19 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
     by_position: Dict[int, str] = {}
     type_by_node_id: Dict[str, str] = {}
     for position, it in enumerate(_list_items(data.get("nodes"))):
-        name = _name_str(it.get("name")) if isinstance(it, dict) else ""
-        if not name or not _typed_str(it.get("type"), NODE_TYPES):
+        values = _node_values(it, schemas)
+        if values is None:
             continue
+        node_type, name, payload = values
         el = _resolve(elements, it.get("ev"), name)
         if el is None:
             continue
         nid = f"W{win_idx}-{len(nodes)}"
-        node = Node(id=nid, type=it["type"], name=name,
+        node = Node(id=nid, type=node_type, name=name, payload=payload,
                     section_path=section_path, evidence=[_ev(el)])
-        if it["type"] == "Procedure":
+        if node_type == "Procedure":
             node.steps = _parse_steps(elements, it.get("steps"))
-        if it["type"] in ("Claim", "Formula"):
+        if node_type in ("Claim", "Formula"):
             node.validity_scope = _parse_validity_scope(it.get("validity_scope"))
         nodes.append(node)
         type_by_node_id[nid] = node.type
@@ -550,7 +582,7 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
         # remainder (abort still propagates — the user cancelled).
         try:
             _glean_nodes(glean_client or client, elements, section_path, doc_type, raw, nodes, win_idx,
-                         gleaning_rounds, base_filter=base_filter)
+                         gleaning_rounds, base_filter=base_filter, schemas=schemas)
         except KgBuildAborted:
             raise
         except Exception as exc:
@@ -598,7 +630,8 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
         if not s or not t or s == t:
             rejected_edges[(it["type"], "missing_or_self_endpoint")] += 1
             continue
-        if not is_valid_edge_pair(
+        edge_pair_allowed = is_valid_edge_pair if schemas is None else is_queryable_edge_pair
+        if not edge_pair_allowed(
             it["type"], type_by_node_id.get(s), type_by_node_id.get(t)
         ):
             rejected_edges[(it["type"], "invalid_endpoint_pair")] += 1

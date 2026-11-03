@@ -172,9 +172,9 @@ def is_valid_edge_pair(edge_type: object, source_type: object, target_type: obje
 def is_queryable_edge_pair(edge_type: object, source_type: object, target_type: object) -> bool:
     """Apply the core contract without hiding schema-extension node types.
 
-    Extraction emits only the four core object types and therefore uses the
-    strict :func:`is_valid_edge_pair`. Existing deployments may additionally
-    project administrator-defined knowledge types into the unified graph. A
+    Default extraction uses the four core object types and the strict
+    :func:`is_valid_edge_pair`. Configured extraction and deployment extensions
+    may additionally project registered knowledge types into the unified graph. A
     known edge touching such an extension type remains queryable; pairs whose
     two endpoints are both core types are always checked strictly.
     """

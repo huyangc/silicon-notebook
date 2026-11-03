@@ -2504,15 +2504,9 @@ class QueryStore:
 
     @staticmethod
     def _payload_join(payload: dict) -> str:
-        parts: list[str] = []
-        for key, value in payload.items():
-            if str(key).startswith("_"):
-                continue
-            if isinstance(value, str):
-                parts.append(value)
-            elif isinstance(value, (list, tuple)):
-                parts.extend(str(item) for item in value)
-        return " ".join(parts)
+        from app.domain.knowledge_contracts import knowledge_payload_text
+
+        return knowledge_payload_text(payload)
 
     def search_notebook(
         self, notebook_id: str, query: str, *, viewer_id: "str | None" = None,

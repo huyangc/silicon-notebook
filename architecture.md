@@ -799,6 +799,13 @@ owner 固定为 token 主人；后续工具仍逐次走原有授权，不向同 
 
 ### 3.5 KG 与索引维护
 
+- `SchemaRegistryService.effective_schemas` 是内置抽取的类型定义来源；runtime 把完整定义读取器
+  注入 `SourceIngestionService`，每篇来源冻结一次，交给窗口抽取和 gleaning。`kg/schema_contract.py`
+  负责配置提示、输出形状和字段接纳，`Node.payload` 携带声明字段直至 `build_records`；通用 name
+  对齐主字段，证据仍由核心绑定。与通用字段重名的声明值原样保存在 `_schema_fields`，知识字段投影
+  与领域文本生成会读取原值，图谱消费者保留原通用类型。配置相同的同名节点才归并（含 gleaning），避免不同字段值被吞掉。默认定义保持
+  原有提示和 wire shape；配置保存不触发旧图重抽，已运行来源保持原快照。
+
 - 新摄取数据使 unified KG 进入 dirty 状态，不在 Ask 请求路径同步整库重建。
 - 打开 Knowledge Graph overlay 时读取当前图和 `GET /api/notebooks/{id}/unified-kg/status`；只有用户触发刷新时才调用 rebuild。
 - KG 首次构建/整库重建使用显式 build/rebuild 端点；跨文档 merge review 只处理有界候选批次。

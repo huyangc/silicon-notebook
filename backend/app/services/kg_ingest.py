@@ -7,9 +7,11 @@ import bisect
 import concurrent.futures as cf
 import math
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Mapping, Tuple
 
 from app.core.llm import cap_kwargs
+from app.domain.extraction_profiles import ObjectSchema
+from app.domain.knowledge_contracts import SCHEMA_FIELDS_PAYLOAD_KEY
 from app.domain.indexing_pipeline import (
     IndexingKgEdgeProposal,
     IndexingKgFragment,
@@ -587,7 +589,11 @@ def build_records(graph: KnowledgeGraph, source_id: str, source_title: str,
         if not bound:
             continue
         kept.add(node.id)
-        payload = {"name": node.name, "section_path": node.section_path}
+        payload = {
+            key: value for key, value in node.payload.items()
+            if key not in {"name", "section_path", "steps", "validity_scope"}
+        }
+        payload.update(name=node.name, section_path=node.section_path)
         if node.validity_scope:
             payload["validity_scope"] = node.validity_scope
         if node.steps:
@@ -603,6 +609,12 @@ def build_records(graph: KnowledgeGraph, source_id: str, source_title: str,
                     })
             if bound_steps:
                 payload["steps"] = bound_steps
+        declared_collisions = {
+            key: value for key, value in node.payload.items()
+            if payload.get(key) != value
+        }
+        if declared_collisions:
+            payload[SCHEMA_FIELDS_PAYLOAD_KEY] = declared_collisions
         objects.append({
             "local_id": node.id,
             "object_type": node.type.lower(),
@@ -722,6 +734,7 @@ def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
                   pipeline_id: str = "",
                   plugin_object_types: tuple[str, ...] = (),
                   plugin_limits: IndexingPipelineKgLimits | None = None,
+                  object_schemas: Mapping[str, ObjectSchema] | None = None,
                   ) -> KnowledgeGraph:
     """Window the text, extract a KG fragment per window concurrently, denoise,
     then canonicalize. 抽取前按 should_extract_window 跳过低价值窗口；抽取后按
@@ -772,7 +785,7 @@ def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
                                   gleaning_rounds=gleaning_rounds,
                                   base_filter=base_filter,
                                   refine_client=refine_client,
-                                  glean_client=glean_client)
+                                  glean_client=glean_client, object_schemas=object_schemas)
                     for idx, (w, els) in enumerate(pairs)]
         # Production submit_window returns concurrent.futures.Future. Some
         # synchronous compatibility/test schedulers return a minimal

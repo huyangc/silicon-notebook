@@ -37,7 +37,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Set
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
-from app.domain.knowledge_contracts import visible_payload
+from app.domain.knowledge_contracts import visible_payload, knowledge_payload_text
 from app.domain.memory_kg_isolation import (
     PROMOTION_PROPOSE_MESSAGE,
     MemoryPromotionRefused,
@@ -140,15 +140,7 @@ def knowledge_headline(object_type: str, payload: dict) -> str:
 
 
 def payload_join(payload: dict) -> str:
-    parts: List[str] = []
-    for key, value in payload.items():
-        if str(key).startswith("_"):
-            continue
-        if isinstance(value, str):
-            parts.append(value)
-        elif isinstance(value, (list, tuple)):
-            parts.extend(str(item) for item in value)
-    return " ".join(parts)
+    return knowledge_payload_text(payload)
 
 
 def _stored_resolved_name(stored: Any) -> Optional[str]:

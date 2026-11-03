@@ -26,6 +26,7 @@ class Node(BaseModel):
     mentions: List[Evidence] = Field(default_factory=list)
     steps: List[Step] = Field(default_factory=list)   # ordered steps for a flow Procedure
     validity_scope: Dict[str, Any] = Field(default_factory=dict)  # claim/formula only: {region[],assumptions[],approximation,range}
+    payload: Dict[str, Any] = Field(default_factory=dict, exclude_if=lambda value: not value)
 
 class Edge(BaseModel):
     id: str

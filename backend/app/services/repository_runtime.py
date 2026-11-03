@@ -1844,9 +1844,7 @@ class RepositoryRuntime:
             note_corpus_change=self.agent_profile_jobs.note_corpus_change,
             require_indexing_write=self.indexing_pipeline.require_write_admission,
             indexing_pipelines=self.indexing_pipelines,
-            effective_object_types=lambda notebook_id: (
-                self.schema_registry.effective_schemas(notebook_id).keys()
-            ),
+            effective_object_schemas=self.schema_registry.effective_schemas,
             make_persist_image=make_persist_image,
             delete_source_images=delete_source_images,
             element_enrichers=self.element_enrichers,

@@ -181,9 +181,14 @@ def _keep_only_section_markers(answer: str, section_keys: set) -> str:
 def knowledge_record(object_type: str, obj: dict, schema) -> KnowledgeRecord:
     """KG 对象 → KnowledgeRecord 展示投影(canonical body;facade 的
     _knowledge_record 与 ask_reasoning 的 related_knowledge 共用)。"""
+    from app.domain.knowledge_contracts import SCHEMA_FIELDS_PAYLOAD_KEY
     from app.services.knowledge_governance import knowledge_headline
 
     payload = obj.get("payload") or {}
+    common_payload = payload
+    declared = payload.get(SCHEMA_FIELDS_PAYLOAD_KEY)
+    if isinstance(declared, dict):
+        payload = {**payload, **declared}
     visible_payload_keys = [
         key for key in payload if not str(key).startswith("_")
     ]
@@ -212,7 +217,7 @@ def knowledge_record(object_type: str, obj: dict, schema) -> KnowledgeRecord:
     return KnowledgeRecord(
         id=obj["id"],
         object_type=object_type,
-        headline=knowledge_headline(object_type, payload),
+        headline=knowledge_headline(object_type, common_payload),
         fields=fields,
         status=obj.get("status", "approved"),
         owner=obj.get("owner", ""),
