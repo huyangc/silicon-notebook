@@ -7,6 +7,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+VENV_DIR="${VENV_DIR:-$SCRIPT_DIR/.venv}"
+OFFLINE="${OFFLINE:-0}"
+if [[ "$OFFLINE" == 1 ]]; then
+  # --no-index alone still permits remote find-links and constraint files.
+  for pip_option in ${!PIP_@}; do unset "$pip_option"; done
+  export PIP_NO_INDEX=1 PIP_CONFIG_FILE=/dev/null PIP_DISABLE_PIP_VERSION_CHECK=1
+fi
 
 log() { printf '\033[1;34m[install]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[install:错误]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -21,27 +28,27 @@ PY
 log "python: $("$PYTHON_BIN" -V 2>&1) @ $(command -v "$PYTHON_BIN")"
 
 # --- 2) 建 venv(无 root;缺 ensurepip/python3-venv 时 --without-pip + wheelhouse 引导 pip 兜底) ---
-if [[ -x "$SCRIPT_DIR/.venv/bin/python" ]]; then
+if [[ -x "$VENV_DIR/bin/python" ]]; then
   log ".venv 已存在,复用。"
 else
   log "创建 venv…"
-  if "$PYTHON_BIN" -m venv .venv 2>/tmp/sn_venv_err; then
+  if "$PYTHON_BIN" -m venv "$VENV_DIR" 2>/tmp/sn_venv_err; then
     :
   else
     log "python -m venv 失败(通常缺 ensurepip/python3-venv,装它需 root)。尝试 --without-pip 兜底…"
-    rm -rf .venv
-    "$PYTHON_BIN" -m venv --without-pip .venv 2>>/tmp/sn_venv_err || {
+    rm -rf "$VENV_DIR"
+    "$PYTHON_BIN" -m venv --without-pip "$VENV_DIR" 2>>/tmp/sn_venv_err || {
       cat /tmp/sn_venv_err >&2 || true
       die "venv 创建失败。三选一:(a) 让管理员安装 python3-venv;(b) 设 PYTHON_BIN 指向自带 venv/pip 的 python(如 conda/pyenv);(c) 手动建好 venv 后重跑。"
     }
     pipwhl="$(ls "$SCRIPT_DIR"/wheelhouse/pip-*.whl 2>/dev/null | head -1 || true)"
     [[ -n "$pipwhl" ]] || die "venv 无 pip、wheelhouse 里也没有 pip 轮子,无法离线引导 pip。请让管理员装 python3-venv,或改用自带 pip 的 python。"
     log "用 wheelhouse 里的 pip 轮子引导 pip 进 venv…"
-    .venv/bin/python "$pipwhl/pip" install --no-index --find-links wheelhouse pip setuptools wheel
+    "$VENV_DIR/bin/python" "$pipwhl/pip" install --no-index --find-links wheelhouse pip setuptools wheel
   fi
 fi
 
-PIP=(".venv/bin/python" -m pip)
+PIP=("$VENV_DIR/bin/python" -m pip)
 
 # --- 3) 装 python 依赖:按带哈希的锁文件装,优先离线 wheelhouse,装不上回退在线(python 源) ---
 # backend/requirements.txt 是带哈希的运行依赖锁;wheelhouse/locked-wheels.txt 是打包时按它
@@ -58,11 +65,13 @@ if compgen -G "$SCRIPT_DIR/wheelhouse/*.whl" >/dev/null 2>&1; then
   if "${PIP[@]}" install --no-index --find-links wheelhouse --require-hashes -r "$WHEEL_REQ"; then
     log "离线安装完成。"
   else
+    [[ "$OFFLINE" != 1 ]] || die "离线依赖安装失败；请用相同系统、架构和 Python 小版本重新打包，现有配置无需更换。"
     # 不带 --find-links:包内就地编译的 wheel 不在锁文件哈希里,混进来会让哈希校验失败。
     log "wheelhouse 装不上,回退按锁文件在线安装(python 源)…"
     "${PIP[@]}" install --require-hashes ${index_args[@]+"${index_args[@]}"} -r "$REQ"
   fi
 else
+  [[ "$OFFLINE" != 1 ]] || die "离线安装需要完整 wheelhouse；请重新打包且不要设置 SKIP_WHEELHOUSE。"
   log "无 wheelhouse,按锁文件从 python 源在线安装依赖…"
   "${PIP[@]}" install --require-hashes ${index_args[@]+"${index_args[@]}"} -r "$REQ"
 fi
@@ -89,7 +98,7 @@ fi
 
 # --- 6) 就绪自检(只读,不启动服务) ---
 log "自检 python 依赖…"
-"$SCRIPT_DIR/.venv/bin/python" - <<'PY' || die "python 依赖自检未通过,见上面缺失项。"
+"$VENV_DIR/bin/python" - <<'PY' || die "python 依赖自检未通过,见上面缺失项。"
 import importlib.util, sys
 mods = ["fastapi", "uvicorn", "pydantic", "pydantic_settings", "numpy", "scipy",
         "hnswlib", "networkx", "rustworkx", "igraph", "orjson", "openai", "httpx",

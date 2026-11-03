@@ -688,6 +688,24 @@ Target knobs: `PYTHON_BIN`, `PIP_INDEX_URL`, `FRONTEND_HOST` / `FRONTEND_PORT` /
 wheels won't install (install.sh then falls back to the index). The bundle's `DEPLOY.md` has
 target-side details.
 
+For an existing installation, stop services and other writers and back up the database, storage and
+configuration. Extract the new bundle outside the original directory, run
+`./upgrade.sh --target /original/install` from the new bundle, then start from the **original** directory
+and check `/api/ready` and existing data. This preserves configuration, business data and the install
+root; release-owned program directories are replaced, so keep custom files outside them. It first
+prepares and checks an independent Python environment using the complete wheelhouse; failure neither
+falls back to the network nor modifies the old environment. Configuration is not merged with templates;
+edit the original files for any newly required fields. After an interruption, keep services stopped and
+add `--recover` to the same command before retrying. Program backups remain in `.local/upgrade-backups/`;
+these cannot undo database migrations on first startup, so rollback after startup requires the
+pre-upgrade database and storage backup. First installs can use `OFFLINE=1 ./install.sh` to forbid
+network fallback. See the [bundle instructions](../packaging/DEPLOY.md#已有安装原地升级) for the replacement
+list, retained environments and recovery. Effective data/configuration paths overlapping release files
+are rejected before replacement. Additional packages in the old environment, including deployment
+plugins, require their exact-version offline wheels and dependencies through repeatable
+`--extra-wheelhouse /local/wheels`; missing or incompatible packages stop the upgrade. New code checks
+the original settings and plugin imports before switching environments.
+
 ## Configuration
 
 All model services are reached over URL endpoints — no local model servers are started.

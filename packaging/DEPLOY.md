@@ -16,6 +16,7 @@ scripts/       运行时/升级脚本(autotune.sh、migrate_legacy_model_env.py)
 .env.example   配置模板
 model-services.example.toml  系统模型服务模板(无密钥)
 install.sh     一键安装(建 venv + 装依赖 + 生成模型 TOML/.env + 自检)
+upgrade.sh / upgrade.py  将新包更新到原安装目录，保留配置与数据
 start.sh       启动(venv uvicorn 后端 + 便携 node 前端)
 stop.sh        停止
 release-manifest.json  更新说明清单(本次构建的版本序号 + 面向用户的更新说明;无 git 打包时没有此文件)
@@ -40,6 +41,59 @@ vi .env                 # 这里只填写 api_key_env 所引用的密钥；endpo
 ```
 
 浏览器打开前端地址即可。停止用 `./stop.sh`。
+
+## 已有安装：原地升级
+
+以后始终在**原安装目录**启动和停止。新包解压到原目录之外，不要重新安装到每版的新目录，也不要解压覆盖旧目录。
+
+1. 在原目录执行 `./stop.sh`，停止其它启动器、批处理与全部写入者；升级期间不要并发启动。
+2. 按下文「备份与回滚闸门」备份数据库、存储及配置。SQLite 备份要包含 WAL 中的数据，PostgreSQL 使用既有备份流程。
+3. 从**新包目录**执行（`--target` 是原安装目录）：
+
+   ```bash
+   ./upgrade.sh --target /srv/silicon-notebook
+   # 指定与打包机小版本一致的 Python：
+   PYTHON_BIN=/path/to/python3.13 ./upgrade.sh --target /srv/silicon-notebook
+   ```
+
+4. 回到**原目录**执行 `./start.sh`，检查 `/api/ready`、登录、原有知识库及附件后再恢复写入。
+
+旧格式离线包也可以直接作为目标，无需先补装升级脚本。系统、架构与 Python 小版本须与打包机一致。
+升级必须有完整 wheelhouse；缺包、哈希校验或依赖自检失败时终止，不联网补装。
+首次安装也可用 `OFFLINE=1 ./install.sh` 禁止联网回退。
+
+升级先在 `.local/upgrade-venvs/` 创建独立环境并自检，再替换发行程序和模板，切换 `.venv` 链接。
+旧环境不会被原地安装依赖。`.env`、既有 `.local` 业务数据、模型配置及发行程序目录以外的
+自定义文件保持原样；安装根路径不变，所以既有相对数据库、存储、模型和插件配置路径仍指向原位置。
+`backend/app`、`frontend`、`node`、`scripts`、`wheelhouse` 是整体替换的发行目录，不要在其中存放
+自定义数据、配置或插件。`backend/requirements.txt`、根目录模板和启停脚本也是发行文件。
+程序目录使用符号链接时拒绝升级。
+
+升级前会读取原环境的有效设置；数据库、存储、模型/插件配置或插件代码路径若与发行文件重叠，
+会拒绝升级，先将它们移至 `.local` 或安装目录之外并更新原配置。不会静默改用模板或新数据库。
+旧环境额外安装的包（包括插件及私有依赖）须准备对应版本的离线 wheel；可重复指定目录：
+
+```bash
+./upgrade.sh --target /srv/silicon-notebook --extra-wheelhouse /media/plugin-wheels
+```
+
+未提供额外包或依赖不兼容时保留旧安装；安装额外包后检查依赖一致性，并在切换前用新代码检查原配置与插件导入。
+
+新增设置沿用程序默认值；已有配置不自动改写或合并模板。若新版本要求补齐模型容量或绑定等配置，
+按版本说明编辑原配置，无需换整份文件。升级不自动启动或迁移数据库；数据库仍由首次启动自动迁移。
+
+准备或替换失败时自动恢复旧程序和环境。若掉电或强制结束留下中断记录，保持停服，从新包目录执行：
+
+```bash
+./upgrade.sh --target /srv/silicon-notebook --recover
+```
+
+恢复只处理程序和环境，不改配置与数据；之后重试升级。新启动器遇到中断记录会拒绝启动；第一次升级
+旧包时也必须保持停服，旧启动器没有这个检查。成功后旧程序和环境入口保留在
+`.local/upgrade-backups/<批次>/previous/`，独立环境保留在 `.local/upgrade-venvs/`；
+确认不再需要回退后再人工清理，不能删除当前 `.venv` 指向的环境。
+程序备份不能撤销首次启动后的数据库变更；此时回退须同时恢复升级前数据库、存储及同批次旧程序和 `.venv`。
+不要只换回旧代码运行新 schema。
 
 插件需要独立配套服务时，在 `EXTENSIONS_CONFIG` 指向的 TOML 中声明 `services`。
 `start.sh` 会先按依赖启动并等待服务就绪，失败时回收本次创建的进程；`stop.sh` 同时停止
@@ -97,6 +151,8 @@ TOML 与新的密钥槽位。推算出的并发容量仅是迁移初值，应用
 |---|---|
 | `PYTHON_BIN` | 指定 python 解释器(默认 `python3`);想用 conda/pyenv 的 python 时用它 |
 | `PIP_INDEX_URL` | pip 源地址(wheelhouse 缺包时在线补装用) |
+| `OFFLINE` | 设 `1` 禁止联网回退，原地升级固定开启 |
+| `VENV_DIR` | 环境目录，默认包根 `.venv`；升级器内部指定独立环境，日常无需设置 |
 
 启动(`start.sh`):
 

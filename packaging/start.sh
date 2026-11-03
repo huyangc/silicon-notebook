@@ -16,6 +16,14 @@ RUN_DIR="$SCRIPT_DIR/.local/run"
 
 die() { printf '\033[1;31m[start:错误]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Publish startup before checking the upgrade sentinel. An upgrader checks this
+# alongside backend/frontend PIDs before replacing any program files.
+mkdir -p "$RUN_DIR"
+START_PID_FILE="$RUN_DIR/package-start.$$.pid"
+echo "$$" > "$START_PID_FILE"
+trap 'rm -f "$START_PID_FILE"' EXIT
+[[ ! -d "$SCRIPT_DIR/.local/offline-upgrade" ]] || die "升级正在进行或上次升级中断；请等待完成，或按 DEPLOY.md 使用 --recover 恢复后再启动。"
+
 # --- 存在性检查(未 install 就早报错) ---
 [[ -x "$VENV_PY"  ]] || die "缺 $VENV_PY —— 先跑 ./install.sh。"
 [[ -x "$NODE_BIN" ]] || die "缺便携 node $NODE_BIN —— 包不完整。"
@@ -104,6 +112,7 @@ cleanup_start() {
   [[ -z "${BACKEND_PID:-}" ]] || rm -f "$RUN_DIR/backend.pid"
   [[ -z "${FRONTEND_PID:-}" ]] || rm -f "$RUN_DIR/frontend.pid"
   extension_services_cleanup || status=1
+  rm -f "$START_PID_FILE"
   exit "$status"
 }
 trap cleanup_start EXIT
@@ -151,6 +160,7 @@ done
 [[ "$ok" == 1 ]] || die "启动失败；正在清理本次启动的进程。"
 
 extension_services_handoff
+rm -f "$START_PID_FILE"
 trap - EXIT INT TERM HUP
 
 echo "backend  : http://${BACKEND_HOST}:${BACKEND_PORT}   (PID $(cat "$RUN_DIR/backend.pid"), log $LOG_DIR/backend.log)"
