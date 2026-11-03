@@ -908,6 +908,15 @@ class ScaleArtifactRuntime:
             # only past this early return, so a scale-embedded serve pays no extra
             # version_signal read (finding 3).
             return scale
+        # Warm reads keep the existing one-stat, one-DB-snapshot path. Only
+        # cold readers and followers need the flight's post-load revalidation.
+        database_snapshot = self._viz_database_snapshot(notebook_id)
+        cached = self._warm_standalone_viz_index(
+            notebook_id, disk_signature=self._viz_signature(notebook_id),
+            database_snapshot=database_snapshot, on_refresh=on_refresh,
+        )
+        if cached is not None:
+            return cached
         return self._standalone_viz_singleflight(
             notebook_id, emit_refusal=emit_refusal, on_refresh=on_refresh
         )
@@ -981,6 +990,29 @@ class ScaleArtifactRuntime:
     def _viz_database_snapshot(self, notebook_id):
         return list(self.version(notebook_id)), int(self.projections.version_signal(notebook_id)[1])
 
+    def _warm_standalone_viz_index(self, notebook_id, *, disk_signature, database_snapshot, on_refresh):
+        """Reuse a resident graph after one shared disk/DB identity sample."""
+        if disk_signature is MANIFEST_ABSENT:
+            self.viz_cache.pop(notebook_id, None)
+            return None
+        cached, cached_signature = self._viz_cache_entry(self.viz_cache.get(notebook_id))
+        if cached is None:
+            return None
+        cur, cur_cseq = database_snapshot
+        if self.projections.predates_memory_isolation(cached.manifest, cur):
+            self.viz_cache.pop(notebook_id, None)
+            return None
+        if _viz_signature_superseded(cached_signature, disk_signature):
+            self.viz_cache.pop(notebook_id, None)
+            return None
+        if self._viz_manifest_fresh(cached.manifest, cur, cur_cseq):
+            return cached
+        if cached_signature is not None:
+            # An unchanged stale disk generation stays reusable while its
+            # refresh policy runs; unknown identities must take the cold path.
+            return self._serve_stale_viz(notebook_id, cached, on_refresh)
+        return None
+
     def _standalone_viz_index(self, notebook_id, *, emit_refusal, on_refresh, database_snapshot):
         """Read/cache one generation; called only by its single-flight leader."""
         cur, cur_cseq = database_snapshot
@@ -996,60 +1028,12 @@ class ScaleArtifactRuntime:
         # ``load()``'s own version gate over the main root, which the catalog
         # already revalidates against disk.
         disk_signature = self._viz_signature(notebook_id)
-        if disk_signature is MANIFEST_ABSENT:
-            # Provably retired. Drop the warm entry and take the "no standalone
-            # viz" path below — ``load_viz`` reads the same absent root as None,
-            # so this ends in the existing build/spawn logic, not in a return of
-            # the removed generation.
-            self.viz_cache.pop(notebook_id, None)
-        else:
-            cached, cached_signature = self._viz_cache_entry(
-                self.viz_cache.get(notebook_id)
-            )
-            if cached is not None:
-                superseded = _viz_signature_superseded(
-                    cached_signature, disk_signature
-                )
-                if self.projections.predates_memory_isolation(
-                    cached.manifest, cur
-                ):
-                    # M1: built before the isolation -- may hold a member's
-                    # Memory; never served, not even as a stale folding.
-                    self.viz_cache.pop(notebook_id, None)
-                elif self._viz_manifest_fresh(cached.manifest, cur, cur_cseq):
-                    if not superseded:
-                        return cached
-                    # A newer generation is on disk under the same version/
-                    # cseq: drop it now so a concurrent reader cannot be handed
-                    # the stale object while this call reloads.
-                    self.viz_cache.pop(notebook_id, None)
-                elif not superseded and cached_signature is not None:
-                    # STALE-SLOT HIT (批 3·W4 T-W4-3b finding A). Warm entries
-                    # used to be served only while ``_viz_manifest_fresh``
-                    # agreed, so a stale artifact re-ran ``load_viz`` — three
-                    # million-element lists plus the CSR adjacency — on EVERY
-                    # read. That was survivable while the state converged in
-                    # minutes (a background build was refreshing it); T-W4-3
-                    # refuses that refresh for a large notebook, which turns a
-                    # transient window into an open-ended one, and open-ended
-                    # times per-read reload is the actual regression.
-                    #
-                    # The slot is keyed on the DISK SIGNATURE, not on the two
-                    # DB-derived gates: those say "this generation is behind
-                    # the database" (which is exactly why it is here and will
-                    # keep being true), while the signature says "this is still
-                    # the same generation I loaded and already judged stale".
-                    # Both ways it stops being that are natural misses, not
-                    # bookkeeping we have to remember to run: the scale index
-                    # build publishes through ``.tmp`` + rename, so the next
-                    # generation arrives on a new inode; and a same-generation
-                    # replacement (the offline CLI's ``import``) changes
-                    # mtime/size/inode too — the identity ``_viz_signature``
-                    # was built for on the fresh path. ``cached_signature is
-                    # not None`` keeps the R5 corner conservative: an entry
-                    # with no recorded identity has no invalidation basis, so
-                    # it reloads rather than being served indefinitely.
-                    return self._serve_stale_viz(notebook_id, cached, on_refresh)
+        cached = self._warm_standalone_viz_index(
+            notebook_id, disk_signature=disk_signature,
+            database_snapshot=database_snapshot, on_refresh=on_refresh,
+        )
+        if cached is not None:
+            return cached
         # M1: same refusal as the warm-entry branch above. The artifact is
         # treated as absent, so a within-budget notebook builds a fresh one
         # right here and a large one reports "no preview yet" until the scale
