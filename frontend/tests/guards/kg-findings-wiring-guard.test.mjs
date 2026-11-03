@@ -94,11 +94,16 @@ test("重新解析:先弹说明确认框,确认后才进在飞态、才发请求
   // 体检同款批量重新解析:runReparse 与面板共用 reparseOutcome,请求、提示与刷新都在
   // source-reparse-request.ts 的 requestReparse 里(归属核对之后才有副作用,那边的用例钉住)。
   const run = page.getFullText();
-  assert.match(run, /const runReparse = async \(nb: string, sourceIds: string\[\], stillOwned: \(\) => boolean\): Promise<boolean> => \(\s*\(await reparseOutcome\(nb, sourceIds, stillOwned\)\) === "started"\s*\);/);
-  assert.match(run, /requestReparse\(nb, sourceIds, stillOwned, \{\s*reparse: reparseSources,/);
+  // 分享编辑 P1(D8):一篇都没排上、因为它们正在解析时(busy),原因写在那一组「处理」按钮旁。
+  // 部分跳过(skipped_busy 非空、仍排上了几篇)时,「另有 N 篇正在解析，已跳过」同样写在那一组
+  // 按钮旁(skippedBusy 回调),不只靠 toast。
+  assert.match(run, /const runReparse = async \(\s*nb: string,\s*sourceIds: string\[\],\s*stillOwned: \(\) => boolean,\s*groupKey: string,\s*\): Promise<boolean> => \{\s*(?:\/\/[^\n]*\n\s*)*const outcome = await reparseOutcome\(nb, sourceIds, stillOwned, \(count\) => \{\s*setCheckupBusyNotice\(\{ key: groupKey, text: reparseSkippedBusyText\(count\) \}\);\s*\}\);\s*if \(outcome === "busy"\) setCheckupBusyNotice\(\{ key: groupKey, text: REPARSE_ALL_BUSY_TEXT \}\);\s*return outcome === "started";\s*\};/);
+  assert.match(run, /requestReparse\(nb, sourceIds, stillOwned, \{\s*skippedBusy,\s*reparse: reparseSources,/);
+  // 那句说明挂在被点的那一组「处理」按钮紧后面(同一个 .checkup 行内),按组 key 认领。
+  assert.match(run, /<\/button>\s*\{checkupBusyNotice\?\.key === g\.key && \(\s*<span className="kg-busy-notice" role="status">\{checkupBusyNotice\.text\}<\/span>\s*\)\}/);
   // 体检的批量修复同样带上发起时的 owner;回来时不再是那本,就不动新库的忙碌位。
   assert.match(run, /const stillOwned = \(\) => owner !== null && sourceLibrary\.captureOwner\(\) === owner;/);
-  assert.match(run, /started = await runReparse\(nb, g\.sample, stillOwned\);/);
+  assert.match(run, /started = await runReparse\(nb, g\.sample, stillOwned, g\.key\);/);
   assert.match(run, /if \(!started && activeNotebookIdRef\.current === nb\) \{/);
   // 同一个修复按钮里的补齐向量走同一条规则:请求回来先核对归属,再提示、刷新、开轮询窗口。
   assert.match(run, /started = await runBackfillVectors\(nb, stillOwned\);/);

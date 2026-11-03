@@ -23,6 +23,7 @@ function baseUser(searchProfile: unknown = null): AuthUser {
     role: "user",
     username: "u00000001",
     ui_mode: "auto",
+    memory_mode: "manual",
     search_profile: searchProfile,
   };
 }

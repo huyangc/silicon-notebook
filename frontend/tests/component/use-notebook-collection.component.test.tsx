@@ -44,6 +44,9 @@ function notebook(
   access: "owner" | "reader" = "owner",
   canManageContent = false,
   syncOrigin = "",
+  // 分享编辑 P1:管理档另起一位。缺省 = 与内容管理权相同(组管理员的形态,本参数出现之前的
+  // 夹具都是组管理员);点名编辑者显式传 false。
+  canManageNotebook = canManageContent,
 ): NotebookSummary {
   return {
     id,
@@ -55,6 +58,7 @@ function notebook(
     created_label: "8月22日",
     access,
     can_manage_content: canManageContent,
+    can_manage_notebook: canManageNotebook,
     sync_origin: syncOrigin,
   };
 }
@@ -555,9 +559,39 @@ test("rename reports a committed write even when the refreshed list loses manage
     is_shared: true,
     granted_via: [{ group_id: "new", group_name: "新群组", kind: "team" }],
     can_manage_content: false,
+    // 分享编辑 P1:管理位跟刷新后的那一行走,不留请求那一刻的 true。
+    can_manage_notebook: false,
     document_limit: 321,
   });
   expect(effects.notify).toHaveBeenCalledWith("笔记本名称已更新");
+});
+
+test("rename carries the refreshed named-grant projection, not the request-time one (share-edit P1)", async () => {
+  const renamed = notebook("shared", "reader", true);
+  renamed.name = "renamed";
+  renamed.collaborator_role = "";
+  renamed.collaborator_is_member = false;
+  notebookApi.updateNotebook.mockResolvedValueOnce(renamed);
+  render(<Harness />);
+  publish([notebook("shared", "reader", true)]);
+  vi.mocked(effects.refreshComposite).mockImplementationOnce(async () => {
+    // Meanwhile the owner named this group admin an editor, and they joined by link.
+    const refreshed = notebook("shared", "reader", true);
+    refreshed.collaborator_role = "editor";
+    refreshed.collaborator_is_member = true;
+    publish([refreshed]);
+  });
+
+  let result: NotebookSummary | null = null;
+  await act(async () => {
+    result = await value!.renameNotebook("shared", "renamed");
+  });
+  expect(result).toMatchObject({
+    name: "renamed",
+    can_manage_notebook: true,
+    collaborator_role: "editor",
+    collaborator_is_member: true,
+  });
 });
 
 test("rename does not return stale detail after a successful refresh removes the notebook", async () => {
@@ -1578,4 +1612,52 @@ test("rows-unpublished view fields stay referentially stable across re-renders",
     expect(later.visibleRows).toBe(first.visibleRows);
     expect(later.searchHits).toBe(first.searchHits);
   }
+});
+
+
+// ---------------------------------------------------------------------------
+// 分享编辑 P1-T12(规格 §9 逐格表 `:484` 与 `:352–362`):点名编辑者有编辑权、没有管理权。
+// 设置弹窗对他打得开(索引管线切换是 kg:write),画像字段只读、保存时不发 PATCH;改名入口不给。
+
+test("编辑者打得开设置弹窗,画像只读:保存不发 PATCH,只切索引管线", async () => {
+  render(<Harness />);
+  publish([notebook("edited", "reader", true, "", false)]);
+
+  // 改名(notebook:manage)是管理档:一个请求都不发。
+  let renamed: NotebookSummary | null = null;
+  await act(async () => { renamed = await value!.renameNotebook("edited", "新名字"); });
+  expect(renamed).toBeNull();
+  expect(notebookApi.updateNotebook).not.toHaveBeenCalled();
+
+  await act(async () => value!.openEditor("edited"));
+  expect(value!.editor?.target.id).toBe("edited");
+  expect(value!.editor?.canManageNotebook).toBe(false);
+  expect(value!.editor?.canManageContent).toBe(true);
+  // 挂载恒 owner,不读。
+  expect(basesApi.listMountable).not.toHaveBeenCalled();
+
+  notebookApi.setNotebookIndexingPipeline.mockResolvedValueOnce(indexingProjection({ changed: true }));
+  notebookApi.getNotebook.mockResolvedValueOnce(notebook("edited", "reader", true, "", false));
+  await act(async () => value!.saveEditor({ ...editorPatch, indexing_pipeline_id: "plugin.arxiv" }));
+  expect(notebookApi.updateNotebook).not.toHaveBeenCalled();
+  expect(notebookApi.setNotebookIndexingPipeline).toHaveBeenCalledWith("edited", "plugin.arxiv");
+});
+
+test("编辑者没改管线时保存不说「已更新」,也不发任何写请求", async () => {
+  render(<Harness />);
+  publish([notebook("edited", "reader", true, "", false)]);
+  await act(async () => value!.openEditor("edited"));
+  notebookApi.getNotebook.mockResolvedValueOnce(notebook("edited", "reader", true, "", false));
+  await act(async () => value!.saveEditor(editorPatch));
+  expect(notebookApi.updateNotebook).not.toHaveBeenCalled();
+  expect(notebookApi.setNotebookIndexingPipeline).not.toHaveBeenCalled();
+  expect(effects.notify).toHaveBeenCalledWith("索引管线没有变化，没有需要保存的修改。");
+});
+
+test("只读成员(没有编辑权也没有管理权)打不开设置弹窗", async () => {
+  render(<Harness />);
+  publish([notebook("readonly", "reader", false, "", false)]);
+  await act(async () => value!.openEditor("readonly"));
+  expect(value!.editor).toBeNull();
+  expect(notebookApi.fetchNotebookIndexingPipeline).not.toHaveBeenCalled();
 });

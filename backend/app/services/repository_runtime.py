@@ -65,6 +65,9 @@ from app.services.model_registry import SystemModelServiceRegistry
 from app.services.model_status import ModelStatusService
 from app.services.memory_service import MemoryService
 from app.services.memory_retrieval import MemoryRetriever
+from app.services.memory_suggest_job import MemorySuggestJob
+from app.services.memory_suggest_service import MemorySuggestService
+from app.services.memory_suggest_trigger import MemorySuggestTrigger
 from app.services.kg import scheduler as kg_scheduler
 from app.services.kg.scale_artifact_codec import KG_SCALE_ARTIFACT_CODEC
 from app.services.collection_catalog import CollectionCatalogService
@@ -314,6 +317,10 @@ class _PersistenceSeats:
     # MCP answer links (v94/0074), read/written through
     # ``deps.answer_link_repository``.
     answer_links: Any
+    # Auto user-memory suggestions (v106/0087): the switch, job rows,
+    # fingerprints and sampling reads. Bare store seat; the trigger, job and
+    # switch service wire on top of it. See MemorySuggestStorePort.
+    memory_suggest_store: Any
     source_store: Any
     chunk_store: Any
     # Task 25: reports-table row persistence is seam-free (the shared
@@ -419,6 +426,7 @@ def _build_persistence_seats(
         wishes=bundle.wishes,
         ask_intent_handles=bundle.ask_intent_handles,
         answer_links=bundle.answer_links,
+        memory_suggest_store=bundle.memory_suggest,
         source_store=bundle.sources,
         chunk_store=bundle.chunks,
         report_store=bundle.reports,
@@ -849,7 +857,7 @@ def _build_ask_domain(
     foundation: _ProcessFoundation,
     seats: _PersistenceSeats,
     ask_service: Callable[[], AskService],
-    note_ask_completed: Callable[[str, str, str], None],
+    note_ask_completed: Callable[..., None],
 ) -> _AskDomain:
     """Domain 9 — Ask execution over domain 2's ask-state store.
 
@@ -880,9 +888,11 @@ def _build_ask_domain(
             # 链一起静默死亡而答案照常交付——由行为用例按真实 arity 钉住)。
             # 这层 lambda 保留只是为了把上面那条 ⚠ 注释钉在正确的 arity 上,不是
             # 为了迟绑定——``note_ask_completed`` 参数本身已经是 ``self._note_ask_completed``
-            # 这个 bound method,迟绑定早已成立。
-            note_ask_completed=lambda nb, uid, mode_id: note_ask_completed(
-                nb, uid, mode_id
+            # 这个 bound method,迟绑定早已成立。自动用户记忆(设计 2026-10-28
+            # §4.1)起另带三个关键字参数(ask_job_id/submitted_via/
+            # had_clarification),原样透传——丢掉它们,第四条链就永远认不出网页提问。
+            note_ask_completed=lambda nb, uid, mode_id, **facts: note_ask_completed(
+                nb, uid, mode_id, **facts
             ),
         ),
     )
@@ -979,6 +989,16 @@ class _AgentJobsDomain:
     # 兄弟更薄——没有模型调用,读写都在同一个进程内锁的临界区内同步完成,
     # 不需要后台线程池句柄(见 ``search_profile_job`` 模块 docstring)。
     search_profile_jobs: SearchProfileInferenceService
+    # 自动用户记忆(设计 2026-10-28 §4.1):提问完成第四条链的触发判定。计数落在
+    # 持久的 job 行上(不是进程内状态),单例只为「交给后台」那一处只有一份实现。
+    # ``start_job`` 就是下面那个 job 的 ``start``(只入队、单飞)。
+    memory_suggest_trigger: MemorySuggestTrigger
+    # 自动用户记忆的一轮建议(设计 §4.2,计划 T7b):认领→轻活池→落终态。
+    # ``MemoryService`` 晚于本域组合,由 ``wire_memory`` 接上(之前 ``start`` 不认领)。
+    memory_suggest_job: MemorySuggestJob
+    # ``PATCH /me/memory-mode`` 的开关服务;同样依赖 ``MemoryService``,在
+    # ``wire_memory`` 里构造,此前为 None。
+    memory_suggest_service: MemorySuggestService | None
 
 
 def _build_agent_jobs(
@@ -988,10 +1008,21 @@ def _build_agent_jobs(
 
     Inputs: ``seats.agent_profile`` / ``retrieval_experiences`` /
     ``agent_observations`` / ``database`` / ``source_store`` / ``queries`` /
-    ``ask_state`` / ``sharing_store`` / ``identity`` from domain 2 and
-    ``foundation.settings`` / ``models`` / ``event_log`` from domain 1.
+    ``ask_state`` / ``sharing_store`` / ``identity`` / ``memory_suggest_store``
+    from domain 2 and ``foundation.settings`` / ``models`` / ``event_log`` from
+    domain 1.
     """
 
+    # 自动用户记忆的一轮建议。取数只走 ``memory_suggest_store``(每条读都在 SQL 里
+    # 绑本人,隐私守卫逐条钉住);认领后复核读权走与读侧同一份谓词的 sharing 座位。
+    memory_suggest_job = MemorySuggestJob(
+        store=seats.memory_suggest_store,
+        access=seats.sharing_store,
+        settings=foundation.settings,
+        models=foundation.models,
+        event_log=foundation.event_log,
+        new_id=foundation.seams.new_id,
+    )
     return _AgentJobsDomain(
         agent_profile_jobs=AgentProfileConsolidationService(
             settings=foundation.settings,
@@ -1044,10 +1075,29 @@ def _build_agent_jobs(
             identity=seats.identity,
             event_log=foundation.event_log,
         ),
+        # 读权与开关都在 ``note_signal`` 的同一个写事务里复核(计划 B9),所以
+        # 这里不给它 sharing 座位。``start_job`` 只入队(认领失败即单飞返回)。
+        memory_suggest_trigger=MemorySuggestTrigger(
+            seats.memory_suggest_store, foundation.settings, memory_suggest_job.start
+        ),
+        memory_suggest_job=memory_suggest_job,
+        memory_suggest_service=None,
     )
 
 
 class RepositoryRuntime:
+    _collaboration_publisher = None
+    _collaboration = None
+    _collaboration_lock = threading.Lock()
+
+    @property
+    def collaboration(self):
+        with self._collaboration_lock:
+            if self._collaboration is None:
+                from app.services.collab_runtime import CollaborationRuntime
+                self._collaboration = CollaborationRuntime(self.settings, self.sharing_store, self.groups, self.database)
+            return self._collaboration
+
     # Document-level search (spec 2026-10-28 §5), composed on first use by
     # ``source_finder`` (it needs the lazily wired retrieval).  A class-level
     # default rather than an ``__init__`` seat: ``__init__`` is a zero-slack
@@ -1104,36 +1154,7 @@ class RepositoryRuntime:
         self._ask_wire_lock = threading.Lock()
         self._ask_retrieval: "Callable[[], Any] | None" = None
         seats = _build_persistence_seats(persistence_factory, foundation)
-        self.database = seats.database
-        self.identity = seats.identity
-        self.model_status_store = seats.model_status_store
-        self.model_status = seats.model_status
-        self.queries = seats.queries
-        self.notebook_store = seats.notebook_store
-        self.kg_build_jobs = seats.kg_build_jobs
-        self.notebook_delete_jobs = seats.notebook_delete_jobs
-        self.agent_profile = seats.agent_profile
-        self.retrieval_experiences = seats.retrieval_experiences
-        self.agent_observations = seats.agent_observations
-        self.extension_toggles = seats.extension_toggles
-        self.wishes = seats.wishes
-        self.ask_intent_handles = seats.ask_intent_handles
-        self.answer_links = seats.answer_links
-        self.source_store = seats.source_store
-        self.chunk_store = seats.chunk_store
-        self.report_store = seats.report_store
-        self.knowledge = seats.knowledge
-        self.governance = seats.governance
-        self.unified_kg = seats.unified_kg
-        self.ask_state = seats.ask_state
-        self.memory_store = seats.memory_store
-        self.index_projections: IndexProjectionStorePort = seats.index_projections
-        self.embedding_store: EmbeddingStorePort = seats.embedding_store
-        self.sharing_store: SharingStorePort = seats.sharing_store
-        self.groups: GroupStorePort = seats.groups
-        self.knowhow_store = seats.knowhow_store
-        self.knowhow_transfer_store = seats.knowhow_transfer_store
-        self.knowhow_history_store = seats.knowhow_history_store
+        self._mount_persistence_seats(seats)
         notebook = _build_notebook_domain(foundation, seats)
         self.notebook_summaries = notebook.notebook_summaries
         self.source_files = notebook.source_files
@@ -1196,10 +1217,7 @@ class RepositoryRuntime:
         self.command_catalog = tools.command_catalog
         self.collection_catalog = tools.collection_catalog
         self.collection_enumeration = tools.collection_enumeration
-        agents = _build_agent_jobs(foundation, seats)
-        self.agent_profile_jobs = agents.agent_profile_jobs
-        self.retrieval_experience_jobs = agents.retrieval_experience_jobs
-        self.search_profile_jobs = agents.search_profile_jobs
+        self._mount_agent_jobs(_build_agent_jobs(foundation, seats))
         # 体检 H4/H5 事件失效插槽(facade 构造期挂转发器;详见 _notify_source_vectors_written)。
         self.on_source_vectors_written: "Callable[[str], None] | None" = None
         # P2·T2 体检聚合(CheckupService)刻意不在这里构造:它依赖 maintenance 的 COUNT +
@@ -1209,6 +1227,57 @@ class RepositoryRuntime:
         # SQLite maintenance face(CLI/batch 组合根)同理不在 runtime 里——它由 facade 的
         # ``maintenance`` property 懒接线,因为它需要 embedder-bound retrieval provider,与
         # 上面的 ``ask`` 同一个理由。
+
+    def _mount_persistence_seats(self, seats: _PersistenceSeats) -> None:
+        """Mount domain 2's store seats on the runtime, one explicit line each.
+
+        Pure mounting: every statement is ``self.<seat> = seats.<field>`` and
+        nothing is called or built here (``test_repository_runtime_composition``
+        reads these lines exactly like ``__init__``'s own mounts and holds the
+        method to that shape). It exists so the composition root stays a short
+        list of domain builders as the persistence bundle grows.
+        """
+        self.database = seats.database
+        self.identity = seats.identity
+        self.model_status_store = seats.model_status_store
+        self.model_status = seats.model_status
+        self.queries = seats.queries
+        self.notebook_store = seats.notebook_store
+        self.kg_build_jobs = seats.kg_build_jobs
+        self.notebook_delete_jobs = seats.notebook_delete_jobs
+        self.agent_profile = seats.agent_profile
+        self.retrieval_experiences = seats.retrieval_experiences
+        self.agent_observations = seats.agent_observations
+        self.extension_toggles = seats.extension_toggles
+        self.wishes = seats.wishes
+        self.ask_intent_handles = seats.ask_intent_handles
+        self.answer_links = seats.answer_links
+        self.memory_suggest_store = seats.memory_suggest_store
+        self.source_store = seats.source_store
+        self.chunk_store = seats.chunk_store
+        self.report_store = seats.report_store
+        self.knowledge = seats.knowledge
+        self.governance = seats.governance
+        self.unified_kg = seats.unified_kg
+        self.ask_state = seats.ask_state
+        self.memory_store = seats.memory_store
+        self.index_projections: IndexProjectionStorePort = seats.index_projections
+        self.embedding_store: EmbeddingStorePort = seats.embedding_store
+        self.sharing_store: SharingStorePort = seats.sharing_store
+        self.groups: GroupStorePort = seats.groups
+        self.knowhow_store = seats.knowhow_store
+        self.knowhow_transfer_store = seats.knowhow_transfer_store
+        self.knowhow_history_store = seats.knowhow_history_store
+
+    def _mount_agent_jobs(self, agents: _AgentJobsDomain) -> None:
+        """Mount domain 11's post-ask chains, one explicit line each (same pure
+        shape as ``_mount_persistence_seats``; it keeps ``__init__`` short)."""
+        self.agent_profile_jobs = agents.agent_profile_jobs
+        self.retrieval_experience_jobs = agents.retrieval_experience_jobs
+        self.search_profile_jobs = agents.search_profile_jobs
+        self.memory_suggest_trigger = agents.memory_suggest_trigger
+        self.memory_suggest_job = agents.memory_suggest_job
+        self.memory_suggest_service = agents.memory_suggest_service
 
     def _current_user_id(self) -> str:
         """The request's current user id, resolved at CALL time.
@@ -1254,9 +1323,16 @@ class RepositoryRuntime:
     # 的计数语义,接线由 test_agent_profile_job_overlay.py 的静态守卫钉住。
     # 当时的理由是 MCP 侧的提问恰恰是「越用越熟」最重要的输入,零计数是缺陷。
     def _note_ask_completed(
-        self, notebook_id: str, user_id: str, mode_id: str = "reasoning"
+        self, notebook_id: str, user_id: str, mode_id: str = "reasoning", *,
+        ask_job_id: str = "", submitted_via: str = "", had_clarification: bool = False,
     ) -> None:
-        """一次提问完成之后要推进的**三条**后台链路。
+        """一次提问完成之后要推进的**四条**后台链路(第四条是自动用户记忆的触发,
+        设计 2026-10-28 §4.1:只收这次提问的入口、是否带澄清答复与 ``ask_jobs.id``,
+        只在网页的 notebook 提问上计数;判定全在 ``MemorySuggestTrigger``)。
+
+        三个关键字参数由调用点传入真实值:``ask_job_id`` 是这次提问的
+        ``ask_jobs.id``(没有 job 行的入口传空串)、``submitted_via`` 是那一行的
+        入口字面量、``had_clarification`` = 定稿理解带非空澄清答复。
 
         它们是三个不同的特性,拿到的数据也刻意不同,而**差在哪一维**正是三条链
         各自的隐私边界:P1 的巡固被告知是**哪位成员在哪个库**(它写的正是那个人
@@ -1275,16 +1351,20 @@ class RepositoryRuntime:
         整个方法同样 fail-open:它挂在一个**答案已经交付之后**的钩子上。
         ``KeyboardInterrupt``/``SystemExit`` 不是「错误」,继续上抛。
         """
+        notification = CompletedAskNotification(
+            actor_id=user_id,
+            notebook_id=notebook_id,
+            mode_id=mode_id,
+            submitted_via=submitted_via,
+            had_clarification=had_clarification,
+            ask_job_id=ask_job_id,
+        )
         host = self.ask_completed_observers
         if host is None:
-            self._note_ask_completed_compat(notebook_id, user_id, mode_id)
+            self._note_ask_completed_compat(notification)
             return
         context = AskCompletedObserverCallContext(
-            notification=CompletedAskNotification(
-                actor_id=user_id,
-                notebook_id=notebook_id,
-                mode_id=mode_id,
-            ),
+            notification=notification,
             agent_profile=_AskCompletedAccess(
                 lambda: self.agent_profile_jobs.note_ask_completed(
                     notebook_id, user_id
@@ -1307,6 +1387,11 @@ class RepositoryRuntime:
                 time.monotonic()
                 + self.settings.ask_post_completion_extension_timeout_seconds
             ),
+            # Notebook-scope Asks only: the global twin leaves this seat empty.
+            memory_suggest=_AskCompletedAccess(
+                lambda: self.memory_suggest_trigger.note_ask_completed(notification)
+            ),
+            skip_builtin_memory_suggest=self.memory_suggest_trigger.has_fresh_manual_hint(user_id),
         )
         host.observe_application(context, event_sink=self.event_log.emit)
 
@@ -1406,9 +1491,12 @@ class RepositoryRuntime:
         host.observe_application(context, event_sink=self.event_log.emit)
 
     def _note_ask_completed_compat(
-        self, notebook_id: str, user_id: str, mode_id: str
+        self, notification: CompletedAskNotification
     ) -> None:
         """Direct-constructor compatibility until every non-app root injects a host."""
+        notebook_id = notification.notebook_id
+        user_id = notification.actor_id
+        mode_id = notification.mode_id
         try:
             self.agent_profile_jobs.note_ask_completed(notebook_id, user_id)
         except Exception as exc:  # noqa: BLE001 — 已交付的答案不因后台记账而改判
@@ -1429,6 +1517,16 @@ class RepositoryRuntime:
         except Exception as exc:  # noqa: BLE001 — 同上
             _log.warning(
                 "search profile ask-completed notification failed: %s", type(exc).__name__
+            )
+        # Fourth chain, last as in the host order. The trigger is fail-open on
+        # its own; this try keeps "one chain never eats another" true at the
+        # call site rather than by the callee's convention.
+        try:
+            self.memory_suggest_trigger.note_ask_completed(notification)
+        except Exception as exc:
+            _log.warning(
+                "memory suggestion ask-completed notification failed: %s",
+                type(exc).__name__,
             )
 
     def _active_source_ids_snapshot(self) -> "set[str]":
@@ -1502,6 +1600,16 @@ class RepositoryRuntime:
             # constructor requirement, so it cannot be composed without it.
             membership=self.sharing,
             export_max_bytes=self.settings.memory_export_max_bytes,
+            # Auto memory suggestions: the expiry reads/writes and the draft
+            # lifetime (design §5.4).
+            memory_suggest_store=self.memory_suggest_store,
+            suggestion_expiry_days=self.settings.auto_memory_suggest_expiry_days,
+        )
+        # The suggestion run writes drafts and expires them through this
+        # service; the per-user switch deletes open drafts through it.
+        self.memory_suggest_job.attach_memory(self.memory_service)
+        self.memory_suggest_service = MemorySuggestService(
+            self.memory_suggest_store, self.memory_service, self.settings, self.seams.now
         )
         self.memory_retriever = MemoryRetriever(self.memory_store, query_embedder)
         self.catalog.memory_retriever = self.memory_retriever
@@ -1526,6 +1634,8 @@ class RepositoryRuntime:
         if self._closed:
             return
         self._closed = True
+        if self._collaboration is not None:
+            self._collaboration.close()
         if self._global_ask is not None:
             self._global_ask.close()
         if self.notebook_transfers is not None:
@@ -1902,6 +2012,21 @@ class RepositoryRuntime:
         # SourceIngestionService 闭包持有 facade,强引用会让任何长期持有
         # command_catalog 的对象把整个 facade 钉住(见 scale/catalog 的滞留测试)。
         self.command_catalog.source_locks = weakref.ref(self.source_ingestion)
+        return self._wire_collaboration_publishers()
+
+    def _wire_collaboration_publishers(self):
+        runtime_ref = weakref.ref(self)
+
+        def publish(notebook_id, kind, actor_id=None, actor_name=None):
+            runtime = runtime_ref()
+            if runtime is not None and not runtime._closed:
+                runtime.collaboration.touch_for_job(notebook_id, kind, actor_id, actor_name)
+
+        self._collaboration_publisher = publish
+        for service in (self.source_ingestion, self.knowledge_lifecycle, self.scale_artifacts,
+                        self.command_catalog, self.agent_profile_jobs, self.retrieval_experience_jobs,
+                        self.knowledge_lifecycle.kg_maintenance, self.knowledge_lifecycle.kg_conflict_jobs):
+            service._collab_touch = publish
         # paper-meta backfill in the pending-actions bell (Task 5): same
         # deferred-seam problem as catalog above (pending_actions_service is
         # constructed in wire_query_services(), before this method runs), but
@@ -2494,6 +2619,8 @@ class RepositoryRuntime:
             observations=self.agent_observations,
             # E7-4:回答 id 接口的属主判定(库读权 ∧ 会话创建者)读这一座。
             ask_state=self.ask_state,
+            # 自动用户记忆(G17):失去读权的成员,其建议作业行随之删除。
+            memory_suggest=self.memory_suggest_store,
         )
         return self.sharing
 

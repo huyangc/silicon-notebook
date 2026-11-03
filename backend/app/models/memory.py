@@ -31,6 +31,10 @@ class MemoryWrite:
     confirmed_by: str | None = None
     confirmed_at: str | None = None
     provenance: Mapping[str, Any] | None = None
+    # Auto user-memory suggestions: the signal class of a system suggestion
+    # (``memory_suggest_contracts.SuggestedSignal``), None for every other
+    # memory.
+    suggested_signal: str | None = None
 
 
 @dataclass(frozen=True)
@@ -47,19 +51,43 @@ class MemoryRevision:
 
 
 MemoryOrigin = Literal["ask_answer", "external_agent"]
+#: The list filter's origin domain: the two stored origins plus the virtual
+#: ``suggested`` (rows with a ``suggested_signal``; their stored origin stays
+#: ``ask_answer``, design D5(b)).
+MemoryOriginFilter = Literal["ask_answer", "external_agent", "suggested"]
 MemoryStatus = Literal["candidate", "confirmed", "rejected", "deprecated"]
 MemoryPromotionState = Literal["none", "proposed", "approved", "rejected"]
+
+
+@dataclass(frozen=True)
+class MemberExitCompletion:
+    """Atomic completion: remaining personal/draft counts mean no writes;
+    an ended edge reports exact draft deletions and surviving read authority.
+    A replaced or absent claim ends nothing and leaves its new edge untouched.
+    """
+
+    memory_count: int
+    ended: bool
+    keeps_access: bool = False
+    deleted_suggestion_count: int = 0
+    remaining_suggestion_count: int = 0
 
 
 @dataclass(frozen=True)
 class MemberExitSnapshot:
     """What leaving a notebook would do to the leaver's own Memory.
 
-    ``memory_count`` is the number of Memory rows (every status) the exit
-    would delete: zero when the user is not a member, or would keep reading
-    the notebook through its ownership or a grant (``keeps_access``). The
-    ids and the membership token are filled only for a claiming read taken
-    under the membership lock.
+    ``memory_count`` is how many of "your memories" (every status except the
+    unadopted system suggestions, design §6.3) the exit would delete, and
+    ``suggestion_count`` how many unadopted system suggestions it would delete
+    besides (G10): both zero when the user is not a member, or would keep
+    reading the notebook through its ownership or a grant (``keeps_access``).
+    The ids (the rows of "your memories" the exit purges -- so
+    ``len(memory_ids) == memory_count``; the unadopted suggestions are NOT
+    claimed by id: ``finish_member_exit`` deletes whatever is still unadopted
+    under the membership lock, so one adopted after the claim is kept) and
+    the membership token are filled only for a claiming read taken under the
+    membership lock.
     """
 
     is_member: bool
@@ -69,20 +97,51 @@ class MemberExitSnapshot:
     # What identifies the claimed membership row (its ``added_at``): the
     # finish ends only THAT membership, never one re-created meanwhile.
     membership_token: Any = None
+    suggestion_count: int = 0
+
+
+@dataclass(frozen=True)
+class MemberExitCounts:
+    """``MemoryService.exit_disclosure``: what leaving would delete now --
+    ``memory_count`` of "your memories" (the number the leaver acknowledges)
+    and ``suggestion_count`` unadopted system suggestions besides (G10)."""
+
+    memory_count: int
+    suggestion_count: int = 0
+
+
+@dataclass(frozen=True)
+class MemberExitOutcome:
+    """``MemoryService.leave_notebook``: what THIS exit deleted, counted by
+    the server -- ``deleted_memory_count`` of "your memories" and
+    ``deleted_suggestion_count`` unadopted system suggestions (G10). Neither
+    is ever negative."""
+
+    deleted_memory_count: int
+    deleted_suggestion_count: int = 0
+    # Internal commit receipt, never part of the HTTP deletion-count shape.
+    # A missing or replaced claimed edge can also return a successful no-op.
+    ended: bool = False
 
 
 class MemoryExitDisclosure(BaseModel):
-    """``GET /notebooks/{id}/membership/exit-disclosure``."""
+    """``GET /notebooks/{id}/membership/exit-disclosure``: ``memory_count`` of
+    "your memories" the exit deletes (the number to acknowledge) and
+    ``suggestion_count`` unadopted system suggestions it deletes besides
+    (G10; 0 for anyone who never turned suggestions on)."""
 
     memory_count: int
+    suggestion_count: int = 0
 
 
 class MemberExitResult(BaseModel):
     """``DELETE /notebooks/{id}/membership`` 200: the exit finished; this
-    request deleted ``deleted_memory_count`` Memories (counted by the
-    server)."""
+    request deleted ``deleted_memory_count`` of "your memories" and
+    ``deleted_suggestion_count`` unadopted system suggestions (both counted by
+    the server)."""
 
     deleted_memory_count: int
+    deleted_suggestion_count: int = 0
 
 
 class MemoryRecord(BaseModel):
@@ -104,6 +163,20 @@ class MemoryRecord(BaseModel):
     created_at: str
     updated_at: str
     provenance: Dict[str, Any] = Field(default_factory=dict)
+    # Set on a system suggestion (adopted or not): the signal class that
+    # produced it. None for every memory a person or an agent created.
+    suggested_signal: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class SuggestionWriteResult:
+    """``create_suggestions_with_initial_revision``: the suggestions this
+    transaction inserted, in write order, and how many writes it skipped
+    because the owner already holds a memory of that answer (the
+    ``idx_memory_answer_once`` conflict of a repeated-class suggestion)."""
+
+    created: tuple[MemoryRecord, ...]
+    deduped: int
 
 
 class MemoryHit(BaseModel):
@@ -174,8 +247,23 @@ class AnswerMemoryLinksRequest(BaseModel):
     answer_ids: List[str] = Field(default_factory=list, max_length=200)
 
 
+class AnswerMemoryState(BaseModel):
+    """One answer's memory as ``answer-memory-links`` reports it in
+    ``states``: drafts included (``suggested`` and ``status`` say which)."""
+
+    memory_id: str
+    status: MemoryStatus
+    suggested: bool = False
+
+
 class AnswerMemoryLinksResponse(BaseModel):
+    """``links``: answer -> the caller's memory saved from it, unadopted
+    system suggestions left out (the shape older clients read, unchanged).
+    ``states``: answer -> every such memory, drafts included (design §5.3,
+    G15) -- "has a suggestion" vs "saved"."""
+
     links: Dict[str, str] = Field(default_factory=dict)
+    states: Dict[str, AnswerMemoryState] = Field(default_factory=dict)
 
 
 class MemoryBulkDeleteRequest(BaseModel):
@@ -248,3 +336,6 @@ class MemoryExportSnapshot:
     title: str
     delete_after: Optional[str]
     items: tuple["MemoryRecord", ...]
+    # Unadopted system suggestions in the same snapshot, left out of
+    # ``items`` (drafts are not exported; the header says how many).
+    omitted_suggestion_count: int = 0

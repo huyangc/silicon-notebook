@@ -9,7 +9,7 @@ import { getToken } from "../../app/auth";
 afterEach(() => { vi.unstubAllGlobals(); localStorage.clear(); sessionStorage.clear(); });
 
 const user: AuthUser = {
-  id: "u1", email: "", display_name: "", role: "user", username: "a12345678", ui_mode: "auto", search_profile: null,
+  id: "u1", email: "", display_name: "", role: "user", username: "a12345678", ui_mode: "auto", memory_mode: "manual", search_profile: null,
 };
 
 function capabilities(overrides: Partial<AuthCapabilities> = {}): AuthCapabilities {

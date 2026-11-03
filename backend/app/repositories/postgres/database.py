@@ -53,6 +53,10 @@ _ISOLATION_LEVELS = {
     "repeatable read": IsolationLevel.REPEATABLE_READ,
     "serializable": IsolationLevel.SERIALIZABLE,
 }
+_READ_SNAPSHOT_TRANSACTION_SETUP = frozenset({
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+})
 
 
 _CONNECTION_LOG_STATE = threading.local()
@@ -255,6 +259,12 @@ class _BudgetedReadConnection:
         if isinstance(query, str) and query.lstrip().upper().startswith(
             ("ROLLBACK", "RELEASE SAVEPOINT")
         ):
+            return self.connection.execute(query, params, **kwargs)
+        if isinstance(query, str) and " ".join(query.strip().upper().split()) in _READ_SNAPSHOT_TRANSACTION_SETUP:
+            # SET TRANSACTION must precede every SELECT, including set_config.
+            # These closed, data-free setup statements still check cancellation
+            # and the deadline; the following data query installs its timeout.
+            self.budget.remaining_seconds()
             return self.connection.execute(query, params, **kwargs)
         timeout_ms = max(1, math.ceil(self.budget.remaining_seconds() * 1000))
         if self.statement_ceiling_ms is not None:
@@ -944,6 +954,9 @@ class PostgresDatabase:
             except Exception:  # noqa: BLE001 - nothing left to salvage
                 pass
         self._scale_build_lock_slots.release()
+
+    def pool_wait_stats(self) -> dict[str, int]:
+        return self._pool.get_stats()
 
     def close(self) -> None:
         """Close the pool once. Closing an unopened/already-closed pool is safe.

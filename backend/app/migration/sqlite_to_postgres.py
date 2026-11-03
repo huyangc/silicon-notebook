@@ -42,6 +42,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 from app.repositories.sqlite.bundle import SqlitePersistenceBundleFactory
 from app.repositories.sqlite.migrations import SqliteMigrator
+from app.repositories.sqlite_functions import register_sqlite_functions
 from app.services.vector_index import decode_vector, encode_vector
 
 
@@ -217,6 +218,7 @@ def _quote_sqlite_identifier(value: str) -> str:
 
 def _sqlite_read_only(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    register_sqlite_functions(connection)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only=ON")
     return connection
@@ -471,6 +473,7 @@ def create_consistent_snapshot(
     try:
         with _sqlite_read_only(source) as source_connection:
             with sqlite3.connect(temporary) as target_connection:
+                register_sqlite_functions(target_connection)
                 progress("正在通过 SQLite backup API 创建一致性快照…")
                 source_connection.backup(
                     target_connection,
@@ -483,6 +486,7 @@ def create_consistent_snapshot(
                 target_connection.commit()
         os.chmod(temporary, 0o600)
         with sqlite3.connect(temporary) as check:
+            register_sqlite_functions(check)
             result = str(check.execute("PRAGMA quick_check").fetchone()[0])
             if result.lower() != "ok":
                 raise SqliteToPostgresMigrationError(
@@ -604,6 +608,7 @@ def prepare_upgraded_snapshot(
 
         try:
             with sqlite3.connect(working) as connection:
+                register_sqlite_functions(connection)
                 connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 connection.execute("PRAGMA journal_mode=DELETE")
                 version = int(connection.execute("PRAGMA user_version").fetchone()[0])

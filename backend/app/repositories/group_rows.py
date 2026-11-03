@@ -28,15 +28,16 @@ MISSING_PRINCIPAL_KIND = "missing"
 #: 写一份,是因为同一个判据现在有三个消费点(两条 summary 行查询喂「已分享」徽标、
 #: 「已分享」总览的 WHERE),三份手抄迟早会让徽标亮着而总览说「尚未分享」。
 #:
-#: 谓词只认**两个群组主体**:`user` 主体在 P1 还没有任何写入口(只读共享仍走
-#: `notebook_members`,徽标那一半由 `notebooks.is_shared` 负责),`everyone` 是公共
-#: 知识库的兼容映射、有自己的 tier 表达,把它算成「已分享」会让每个公共库都多一个
-#: 说不清的徽标。
+#: 谓词认**两个群组主体与点名(`user`)主体**,精确匹配:分享编辑 P1 起点名编辑者
+#: 也算「已分享」(徽标亮、出现在「我分享的」总览里),零新增往返。`everyone` 仍不在
+#: 其中——它是公共知识库的兼容映射、有自己的 tier 表达,把它算成「已分享」会让每个
+#: 公共库都多一个说不清的徽标。名字沿用(`GROUP_GRANT_*` / `_shared_to_groups`),
+#: 计数那条 `GROUP_GRANT_COUNT_SQL` 仍只数群组。
 #:
 #: 关联列写死 `notebooks.id`:三个消费点的主表都是未起别名的 `notebooks`。
 GROUP_GRANT_EXISTS_SQL = (
     "EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id"
-    " AND ng.principal_type IN ('group', 'group_admins'))"
+    " AND ng.principal_type IN ('group', 'group_admins', 'user'))"
 )
 
 #: 上一条的计数形态:这本库共享给了几个**不同的**群组。
@@ -49,6 +50,7 @@ GROUP_GRANT_COUNT_SQL = (
 )
 
 #: `NotebookSummary.is_shared` 的第二个来源列(见 `notebook_catalog.from_row`)。
+#: 名字是历史沿用:分享编辑 P1 起它也包含点名授权边(见上)。
 SHARED_TO_GROUPS_COLUMN = GROUP_GRANT_EXISTS_SQL + " AS _shared_to_groups"
 
 
@@ -124,6 +126,40 @@ def notebook_grant_confers_admin(row: Any) -> bool:
     return role == ADMIN_GRANT_ROLE
 
 
+#: 点名协作者的角色(分享编辑 P1,决策 D1):只出现在 `principal_type='user'` 的边上。
+COLLABORATOR_ROLE = "editor"
+
+#: 授予**编辑权**的 `notebook_grants.role` 取值。与两份
+#: `access_sql._edit_principal_match_expr` 里的 `role IN ('admin','editor')` 字面量是同一
+#: 组值;三处刻意不互相 import(理由同 `ADMIN_GRANT_ROLE`),由
+#: `test_edit_role_literals_agree` 钉住。
+EDIT_GRANT_ROLES = (ADMIN_GRANT_ROLE, COLLABORATOR_ROLE)
+
+
+def notebook_named_grant_role(row: Any) -> str:
+    """调用者在这一行上的**点名授权**角色(`user` 主体时为 `editor`/`viewer`/遗留
+    `admin`,否则 ""):驱动 `NotebookSummary.collaborator_role`。缺列按 "" 收。"""
+    try:
+        principal_type = row["_grant_principal_type"]
+        role = row["_grant_role"]
+    except (KeyError, IndexError, TypeError):
+        return ""
+    return str(role or "") if principal_type == "user" else ""
+
+
+def notebook_grant_confers_edit(row: Any) -> bool:
+    """这条授权边行是否**授予编辑权**(分享编辑 P1)。
+
+    与 `notebook_grant_confers_admin` 同一条理由住在中性层、同一个列(`_grant_role`)、
+    同一个缺列口径(按 False 收)。编辑权 ⊇ 管理权:管理边在这里也为真。
+    """
+    try:
+        role = row["_grant_role"]
+    except (KeyError, IndexError, TypeError):
+        return False
+    return role in EDIT_GRANT_ROLES
+
+
 #: 共享申请的三个合法状态。与 `models/groups.py::SHARE_REQUEST_STATUSES` 同值——
 #: 那份是 API 层校验真源,这里是行整形层复用的同一集合(两处不互相 import:models 是
 #: API 层、这里是中性行整形,由 `test_group_routes` 的写路径断言与它一致)。
@@ -169,8 +205,11 @@ def fold_granted_notebook_groups(rows: Sequence[Any]) -> dict[str, list[dict]]:
     """
     out: dict[str, list[dict]] = {}
     for row in rows:
-        bucket = out.setdefault(row["notebook_id"], [])
         group_id = row["group_id"]
+        if group_id is None:
+            # 点名(user 主体)分支的行没有群组(分享编辑 P1):不是「来自群组」。
+            continue
+        bucket = out.setdefault(row["notebook_id"], [])
         if any(existing["group_id"] == group_id for existing in bucket):
             continue
         bucket.append(

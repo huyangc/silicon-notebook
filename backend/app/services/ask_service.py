@@ -150,6 +150,7 @@ from app.services.federated_run import (
     current_detached_ask_turn,
     detached_ask_turn,
 )
+from app.services.memory_suggest_trigger import had_clarification_answers
 from app.services.model_work import ModelNotConfiguredError
 from app.services.paper_card_answer import (
     PaperCardEvidence,
@@ -963,7 +964,7 @@ class AskService:
         overview_sources=None,
         overview_source_generation=None,
         paper_tools=None,
-        note_ask_completed: "Callable[[str, str, str], None] | None" = None,
+        note_ask_completed: "Callable[..., None] | None" = None,
         ceiling_readers: "CeilingReaders | None" = None,
         report_followup_readers: "ReportFollowupReaders | None" = None,
     ) -> None:
@@ -1956,7 +1957,11 @@ class AskService:
             self.finish_job(job_id, "done", answer_id=answer_id)
             # 答案已落库、终态 job 行已提交、响应已在手上——只剩返回。这一句
             # 的位置与「恰好一次」的论证见 ``_note_ask_completed``。
-            self._note_ask_completed(notebook_id, user_id, mode.id)
+            self._note_ask_completed(
+                notebook_id, user_id, mode.id, ask_job_id=job_id,
+                submitted_via=submitted_via,
+                had_clarification=had_clarification_answers(response),
+            )
             return response
         finally:
             publish_snapshot(user_id)
@@ -2097,9 +2102,13 @@ class AskService:
         return on_trace
 
     def _note_ask_completed(
-        self, notebook_id: str, user_id: str, mode_id: str
+        self, notebook_id: str, user_id: str, mode_id: str, *,
+        ask_job_id: str = "", submitted_via: str = "", had_clarification: bool = False,
     ) -> None:
-        """同步提问面的「提问完成」钩子 —— 三条记忆链路的另一个触发点。
+        """同步提问面的「提问完成」钩子 —— 记忆链路的另一个触发点。
+
+        三个关键字参数(这次的 ``ask_jobs.id``、建行时的入口字面量、定稿理解是否
+        带澄清答复)原样交给被调方,供自动用户记忆的触发判定(设计 2026-10-28 §4.1)。
 
         **交给后台,请求线程零阻塞。** 这是与协调器同一条理由的另一半:那边把
         通知放在 ``final`` 事件**之后**,是为了「通知永远不能延迟或先于交付」;
@@ -2154,7 +2163,10 @@ class AskService:
 
         def _notify_in_background() -> None:
             try:
-                notify(notebook_id, user_id, mode_id)
+                notify(
+                    notebook_id, user_id, mode_id, ask_job_id=ask_job_id,
+                    submitted_via=submitted_via, had_clarification=had_clarification,
+                )
             except Exception:  # noqa: BLE001 — 已交付的答案不因后台记账而改判
                 self.event_log.logger.exception(
                     "ask completion notification failed for notebook %s",

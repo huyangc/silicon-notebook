@@ -4,6 +4,7 @@ from app.api.admin_routes import router as admin_router
 from app.api.agent_profile_routes import router as agent_profile_router
 from app.api.ask_routes import router as ask_router
 from app.api.catalog_routes import router as catalog_router
+from app.api.collab_routes import router as collab_router
 from app.api.content_overview_routes import router as content_overview_router
 from app.api.group_routes import router as group_router
 from app.api.global_ask_routes import router as global_ask_router
@@ -11,6 +12,7 @@ from app.api.kg_routes import router as kg_router
 from app.api.knowhow_routes import router as knowhow_router
 from app.api.knowledge_routes import router as knowledge_router
 from app.api.memory_routes import memory_router
+from app.api.notebook_collaborator_routes import router as notebook_collaborator_router
 from app.api.notebook_routes import router as notebook_router
 from app.api.notebook_transfer_routes import router as notebook_transfer_router
 from app.api.report_routes import router as report_router
@@ -48,5 +50,8 @@ for domain_router in (
     global_ask_router,
     # 网页导出/导入单本笔记本(.snbk)。同上:注册顺序不影响 api_contract 夹具。
     notebook_transfer_router,
+    # 点名共享(分享编辑 P1)。同上:注册顺序不影响 api_contract 夹具。
+    notebook_collaborator_router,
+    collab_router,
 ):
     router.include_router(domain_router)

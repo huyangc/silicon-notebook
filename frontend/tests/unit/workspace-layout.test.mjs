@@ -292,8 +292,11 @@ test("workspace capabilities separate notebook type ownership from the global ba
     canRebuildIndexes: false,
     canGrantAccess: false,
     canConfigureNotebook: false,
+    canManageCollaborators: false,
     canMountBases: false,
     canManageNotebook: false,
+    canDeleteAnySource: false,
+    canDestroyKnowhowTables: false,
     canDeleteNotebook: false,
     canExportNotebook: false,
     canManageReports: true,
@@ -310,8 +313,11 @@ test("workspace capabilities separate notebook type ownership from the global ba
     canRebuildIndexes: true,
     canGrantAccess: true,
     canConfigureNotebook: true,
+    canManageCollaborators: true,
     canMountBases: true,
     canManageNotebook: true,
+    canDeleteAnySource: true,
+    canDestroyKnowhowTables: true,
     canDeleteNotebook: true,
     canExportNotebook: true,
     canManageReports: true,
@@ -328,8 +334,11 @@ test("workspace capabilities separate notebook type ownership from the global ba
     canRebuildIndexes: true,
     canGrantAccess: true,
     canConfigureNotebook: true,
+    canManageCollaborators: true,
     canMountBases: true,
     canManageNotebook: true,
+    canDeleteAnySource: true,
+    canDestroyKnowhowTables: true,
     canDeleteNotebook: true,
     canExportNotebook: true,
     canManageReports: true,
@@ -343,7 +352,7 @@ test("group admins get the content-management bits on a notebook that is still `
   // 群组知识共享 P2:后端把六个内容管理能力从 owner-only 翻成「owner ∪ 组管理边」,
   // 而 `access` 刻意仍是 "reader"（权限档没有新增枚举值，裁决 P2-3）。只看 access 的
   // 界面会让组管理员对着一个 API 全部允许、按钮全部藏起来的只读工作区。
-  assert.deepEqual(workspaceCapabilities("reader", "user", true), {
+  assert.deepEqual(workspaceCapabilities("reader", "user", true, "", true), {
     mirrored: false,
     mirrorOrigin: "",
     mirrorHidesNotebookManage: false,
@@ -356,10 +365,14 @@ test("group admins get the content-management bits on a notebook that is still `
     // (P2-T2 评审 P0;跨环境同步 §5 把它们拆成两个能力名,级别一个字没变):组管理员
     // 有内容管理权,但 access 仍是 reader → canConfigureNotebook 为 **false**。
     canConfigureNotebook: false,
+    // 编辑者名单(notebook:collaborate)恒 owner:组管理员不能把写权点名发给别人。
+    canManageCollaborators: false,
     // 挂载同样恒 owner,组管理员拿不到（与 canConfigureNotebook 同级别,只是围栏相反）。
     canMountBases: false,
     // 改名/tier 是 notebook:manage(admin 档):组管理员**有**。
     canManageNotebook: true,
+    canDeleteAnySource: true,
+    canDestroyKnowhowTables: true,
     // 删库恒 owner。
     canDeleteNotebook: false,
     // 导出整本库同样恒 owner(notebook:export):组管理员有内容管理权也拿不到。
@@ -380,7 +393,7 @@ test("group admins get the content-management bits on a notebook that is still `
   assert.equal(workspaceCapabilities("owner", "user", false).canWriteNotebook, true);
   // 系统管理员这一维与内容管理权正交:组管理员不因此获得全局基线写权。
   assert.equal(
-    workspaceCapabilities("reader", "admin", true).canManageGlobalSchemas,
+    workspaceCapabilities("reader", "admin", true, "", true).canManageGlobalSchemas,
     true,
   );
 });
@@ -393,10 +406,10 @@ test("canExportNotebook is owner-only and stays on a mirror (notebook:export: ow
   assert.equal(workspaceCapabilities("owner", "user").canExportNotebook, true);
   assert.equal(workspaceCapabilities("owner", "admin").canExportNotebook, true);
   assert.equal(workspaceCapabilities("reader", "user").canExportNotebook, false);
-  assert.equal(workspaceCapabilities("reader", "user", true).canExportNotebook, false, "组管理员不是库主");
-  assert.equal(workspaceCapabilities("reader", "admin", true).canExportNotebook, false, "系统管理员身份不翻这一格");
+  assert.equal(workspaceCapabilities("reader", "user", true, "", true).canExportNotebook, false, "组管理员不是库主");
+  assert.equal(workspaceCapabilities("reader", "admin", true, "", true).canExportNotebook, false, "系统管理员身份不翻这一格");
   assert.equal(workspaceCapabilities("owner", "user", false, "site-a").canExportNotebook, true, "镜像也能导出");
-  assert.equal(workspaceCapabilities("reader", "user", true, "site-a").canExportNotebook, false);
+  assert.equal(workspaceCapabilities("reader", "user", true, "site-a", true).canExportNotebook, false);
   assert.equal(workspaceCapabilities(undefined, "user").canExportNotebook, true, "旧行缺 access 时按 owner(同 canDeleteNotebook)");
 });
 
@@ -408,10 +421,10 @@ test("canConfigureNotebook is owner-only — content-management权 never unlocks
   // 判据只看 access。
   assert.equal(workspaceCapabilities("owner", "user").canConfigureNotebook, true);
   // 组管理员(reader + can_manage_content=true)有内容写权,但配置权仍为 false。
-  assert.equal(workspaceCapabilities("reader", "user", true).canConfigureNotebook, false);
+  assert.equal(workspaceCapabilities("reader", "user", true, "", true).canConfigureNotebook, false);
   assert.equal(workspaceCapabilities("reader", "user", false).canConfigureNotebook, false);
   // canWrite 放宽了(组管理员为真),canConfigure 没有——两者刻意分开。
-  assert.equal(workspaceCapabilities("reader", "user", true).canWriteNotebook, true);
+  assert.equal(workspaceCapabilities("reader", "user", true, "", true).canWriteNotebook, true);
 });
 
 
@@ -485,7 +498,7 @@ test("镜像 × 只读成员:收的那一侧不会被围栏放宽", () => {
 });
 
 test("镜像 × 组管理员:内容写与改名被挡,索引重建仍在", () => {
-  const mirror = workspaceCapabilities("reader", "user", true, "site-a");
+  const mirror = workspaceCapabilities("reader", "user", true, "site-a", true);
   assert.equal(mirror.canWriteNotebook, false);
   assert.equal(mirror.canGovernKnowledge, false);
   assert.equal(mirror.canManageNotebookSchemas, false);
@@ -498,19 +511,19 @@ test("镜像 × 组管理员:内容写与改名被挡,索引重建仍在", () =>
   assert.equal(mirror.canMountBases, false);
   assert.equal(mirror.canDeleteNotebook, false);
   // 系统管理员那一维与镜像正交。
-  assert.equal(workspaceCapabilities("reader", "admin", true, "site-a").canManageGlobalSchemas, true);
+  assert.equal(workspaceCapabilities("reader", "admin", true, "site-a", true).canManageGlobalSchemas, true);
 });
 
 // 「控件确实被收走了」与「他没有这个权限」是两件事:就地说明只该出现在前者。
 test("mirrorHidesNotebookManage 只对本来握有 notebook:manage 的人为真", () => {
   // owner / 组管理员:本地库上有改名控件,镜像把它收走了 → 要解释。
   assert.equal(workspaceCapabilities("owner", "user", false, "site-a").mirrorHidesNotebookManage, true);
-  assert.equal(workspaceCapabilities("reader", "user", true, "site-a").mirrorHidesNotebookManage, true);
+  assert.equal(workspaceCapabilities("reader", "user", true, "site-a", true).mirrorHidesNotebookManage, true);
   // 纯只读成员:他本来就没有那个控件,一句「镜像的名称…」是在解释他从未见过的事。
   assert.equal(workspaceCapabilities("reader", "user", false, "site-a").mirrorHidesNotebookManage, false);
   // 本地库一律为假(没有任何东西被收走)。
   assert.equal(workspaceCapabilities("owner", "user").mirrorHidesNotebookManage, false);
-  assert.equal(workspaceCapabilities("reader", "user", true).mirrorHidesNotebookManage, false);
+  assert.equal(workspaceCapabilities("reader", "user", true, "", true).mirrorHidesNotebookManage, false);
   // ⚠ 判据不是 `!canManageNotebook`:那一位对只读成员恒假,正是要避开的那一格。
   assert.equal(workspaceCapabilities("reader", "user", false, "site-a").canManageNotebook, false);
 });

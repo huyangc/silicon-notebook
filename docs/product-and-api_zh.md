@@ -168,7 +168,7 @@ CJK 字符）；一个标题去掉开头编号（如 `5.7.2.1`、`Figure 1-1.`�
 | `questions_30d` | 最近 30 天的笔记本／全局问答提交，含保留项。 |
 | `questions_failed`／`reports_failed` | 仅 `status='failed'`，含保留项与全局问答；取消不计。 |
 | `kg_builds` | 用户创建的全部状态 KG 任务；删除笔记本后不保留。 |
-| `memory_count` | 存活库中该用户非 `rejected` 的 Memory。 |
+| `memory_count` | 存活库中该用户非 `rejected` 的 Memory，并排除未采纳系统建议。 |
 | `knowhow_tables` | 存活库中该用户创建的表，包括归于复制者的深拷贝副本。 |
 | `joined_notebooks`／`groups` | 加入他人存活共享库的成员关系数／群组成员关系数。 |
 | `conversations` | 已废弃但兼容保留的字段，包含该用户的全局会话。 |
@@ -823,7 +823,7 @@ Knowhow 单元格历史（已披露的最近条数上限）、Agent 调用/观�
   原 owner 仍保留组管理员身份。owner 在转让前不可降级、不可移出、也不可自行退出；
   `created_by` 只保留为不可变的创建审计。
 - **授权边**是 `(notebook, principal, role)`，`principal ∈ {user, group,
-  group_admins, everyone}`、`role ∈ {viewer, admin}`。表里的每一行都是**生效中**的
+  group_admins, everyone}`、`role ∈ {viewer, admin, editor}`（`editor` 只用于 `user` 主体，见下文「点名共享：编辑者」）。表里的每一行都是**生效中**的
   授权——判定谓词零 status 过滤，因此不存在「忘了滤 pending」这类漏洞形态。笔记本
   owner（`created_by`）仍是隐含的最高授权。
 - **挂载**机制不变，只改有效性谓词：**读权 ⇒ 可挂载**，但受下面的借入挂载门约束。
@@ -882,7 +882,7 @@ owner——见下文「挂载配置与链接分享恒 owner」。**Agent/MCP 面
 `delete` 两档（来源写入、来源删除、构建）仍是 owner-only 红线——长期 token 是独立凭据，其
 owner 可能在签发后很久才被授管理权，MCP 写工具删文档的爆炸半径正是这道 owner 门当初要防的。
 浏览器 HTTP 面已放宽 admin、Agent token 面没有，是刻意分歧不是疏漏，组管理员的写权只在浏览器
-界面生效。
+界面生效；点名的编辑者同样如此（分享编辑 P1，D5）。
 
 系统管理员另有**群组维度的运维旁路**——可读任意组详情、可管理任意组的成员与授权边，
 不要求他是该组成员。这与既有的「系统管理员可转移 `notebooks.created_by`」同性质，理由
@@ -891,6 +891,153 @@ owner 可能在签发后很久才被授管理权，MCP 写工具删文档的爆�
 `GET /groups?scope=all` 是给系统管理员的全局管理面，没有旁路它就是一张每行都点不开的
 表。旁路**不覆盖自助退出**（「退出」的前提是本人真的在组里），不伪造成员身份
 （`my_role` 仍如实为空），也不放宽笔记本维度的任何读写守卫。
+
+### 点名共享：编辑者（分享编辑 P1）
+
+owner 可以按用户名把某个人加为**编辑者**：一条 `(user, editor)` 授权边，点名即生效（不需要对方
+接受，也没有「可编辑链接」）。群组授权边不开放 `editor`（`GRANT_ROLES` 不变）。
+
+**编辑者能做什么**：能改「库里有什么」，不能改「谁能看到这本库、这本库叫什么、库本身的存废与去向」。
+
+- 编辑权谓词 `access_sql.NOTEBOOK_EDIT_SQL` = owner ∪ `role IN ('admin','editor')` 的有效授权边（排除
+  `everyone`），包含链为 写 ⊆ 管理 ⊆ 编辑 ⊆ 读；管理权谓词一字未改，`editor` 不会漏进管理档。
+- 能力表新增 `edit` 档：`sources:write`、`kg:write`、`scale_index:write`、`knowhow:write`、
+  `knowledge:write`、`catalog:write`、`agent_profile:write` 七格从 admin 改为 edit——组管理员的能力集合
+  逐格不变。新增 `notebook:collaborate`（恒 owner，围栏 False）管理编辑者名单。`notebook:manage`、
+  `notebook:grant`、`notebook:configure`、`notebook:mount`、`notebook:export`、`notebook:delete` 对编辑者
+  都是 404。
+- 四处收窄（D14）：编辑者只能删除**本人上传**的来源（`uploaded_by` 为空的历史来源也不能删，404）；
+  Knowhow 表只能 `copy` 出本库、不能 `move`；不能删除整张 Knowhow 表；不能清理 Knowhow 变更历史。行/列/
+  单元格删除、回退、图谱删除与重建、检索经验清空照常可做（有历史可回退或可重建）。
+- Knowhow 代码附件的浏览器会话写改按 `knowhow:write` 判定（D6，推翻原「会话写恒 owner」取舍）：组管理员
+  与编辑者都能写，只读读者 404。
+- **Agent/MCP 面不变**（D5）：编辑者与组管理员一样，写权只在浏览器界面生效；MCP 的 manage/delete 档
+  仍只认 owner。
+
+| 方法 | 路径 | 守卫与语义 |
+| --- | --- | --- |
+| `GET` | `/notebooks/{id}/collaborators` | 读守卫。owner 得 `{view:"owner", items:[…]}`：全部 `user` 主体授权（`editor`、遗留 `viewer`/`admin` 如实返回），每行带用户名、显示名、授予人、时间；本人持有 `(user, editor)` 边者得 `{view:"editor", editors:[{username, display_name}]}`（D17，只有编辑者的名字）；其他人 404 |
+| `PUT` | `/notebooks/{id}/collaborators/{user_id}` | `notebook:collaborate`。**设为** editor：`(user, viewer)` 升为 editor、遗留 `(user, admin)` **降为** editor，id 不变；已是 editor 时幂等（`changed:false`，不再通知）。返回 `{grant, changed, previous_role}`；真正变化时给对方铃铛推 `notebook_collaborator_granted`。公共库 409、目标无效（不存在/停用/是 owner）400 |
+| `DELETE` | `/notebooks/{id}/collaborators/{user_id}` | 删别人：`notebook:collaborate`，不论角色；该用户因此完全失去读权时清理理解覆盖层与观测（同移除成员），仍有读权时只降级；Memory 一律不删。删自己（`user_id` 是调用者）= **退出协作**，合同与 `DELETE /notebooks/{id}/membership` 逐一相同（`acknowledged_memory_count`、204 / 200 `{deleted_memory_count, deleted_suggestion_count}` / 409 `exit_disclosure_required` / 409·503 `exit_incomplete`），并同样幂等：本人在该库没有点名授权（已退出、从未有过、库已不在）时 204，带确认数时 409（`memory_count: 0`），对任何笔记本 id 同一回答，不泄露存在性 |
+| `GET` | `/notebooks/{id}/collaborators/{user_id}/exit-disclosure` | 读守卫，仅本人：返回 `memory_count`（本人的记忆）和 `suggestion_count`（未采纳的系统建议）；仍有其他读权或没有点名授权时两者均为 0 |
+
+- **完整性约束**：`GET /grants`（群组 / everyone 行）与 `GET /collaborators`（全部 `user` 行）合起来恰好
+  覆盖 `notebook_grants` 的全部行，每行都能经对应端点撤销；`DELETE /grants/{grant_id}` 命中 `user` 行时与
+  「不存在」同为 404。所以同步种子、历史数据或手工修复留下的 `user` 行，owner 也看得见、撤得掉。
+- **TOCTOU**：PUT 在同一写事务里锁笔记本行（PG `FOR SHARE`）复核 owner、存活与非公共库，再 upsert。
+  `POST /notebooks/{id}/tier` 切到 `base` 时若存在编辑者，返回 409「请先移除这本笔记本的编辑者」，与授予
+  互斥（同一行锁配对）。
+- **两个退出**：既是只读成员又是编辑者时，「退出协作」只删授权边（降回只读成员，不删 Memory），「退出
+  共享」只删成员行（仍是编辑者，不删 Memory）；两个都退，后退的那一个才触发 Memory 告知与删除。
+  两个入口在共同锁顺序下重验最后读权；未携带确认数、最初保留读权的零删除请求若因另一个退出而新发现待删记忆或建议，返回新的披露，零写入。撤销点名授权也在撤销事务内清理失去最后读权者的建议采样作业；仍有读权者保留原窗口。
+- **借入挂载（D13）**：第一次加编辑者 = 本库出现授权边，本库挂载的**借入**参考库对所有人（含 owner 自己在
+  本库的提问）失效；撤销最后一个编辑者（且无其他成员/授权边）后自动恢复。`GET /notebooks/{id}/bases`
+  的每项新增 `closes_when_shared`：此刻有效、且仅靠借入臂有效的边为 true（同 owner、公共库、经 everyone
+  可读、本库早已关门的都为 false），分享弹窗据此在授予前列出并二次确认。
+- **投影**：`NotebookSummary.can_manage_content` 精确为「有编辑权」；新增 `can_manage_notebook`（owner 或
+  管理边）、`collaborator_role`（调用者点名授权的角色：`"editor"`，或遗留的 `"viewer"`/`"admin"`；没有点名授权为
+  `""`；非空时本人的退出走 `DELETE /collaborators/{me}`）与 `collaborator_is_member`（点名授权之外是否还有成员行，
+  即两个退出的交叉态；只在 `collaborator_role` 非空时计算，零额外语句）。编辑者的库经
+  `granted_notebook_rows` 的 `user` 分支进入笔记本列表（`granted_via` 为空）；`is_shared` 与「我分享的」
+  范围包含 `user` 边，`SharedByMeItem.collaborators` 列出 `[{username, display_name, role, user_id}]`（库主
+  名下一条语句聚合）。来源投影新增 `uploaded_by_me`（按请求者整形，上传人 id 不上 wire）；
+  `GET /notebooks/{id}/kg-analysis/findings` 每行 `live_sources[]`（`FindingLiveSource`）同样新增
+  `uploaded_by_me`：只有请求者本人上传的本库来源为 true（未记上传人、不在本库或已删除的来源为 false），
+  问题清单据此只在编辑者本人上传的来源旁给「删除来源…」。
+- **并发**：单篇 `POST /sources/{id}/parse` 在该来源正在解析时 409「这份来源正在解析，请等它完成」（D8）；
+  批量 `POST /notebooks/{id}/sources/reparse` 跳过正在解析的来源，响应新增 `skipped_busy: [source_id]`。
+  图谱分析或维护被**别人**占着时，409 带发起人显示名（为空回落用户名），如「张三发起的知识图谱分析正在
+  运行」「张三发起的补上关联正在运行，请等它完成」；发起人是自己时文案不变。已处理的冲突审核项再处理时
+  409「这一项已被处理」。文档数上限按库 owner 计（编辑者上传占 owner 额度），超限文案为「已达到这本
+  笔记本的文档上限：…」。浏览器把这些回答都写在被拒的那颗按钮旁，不进页面顶部状态条：带人名的知识图谱
+  409 写在「整理 / 全部重新分析 / 补上关联 / 重新合并」旁（工作区、索引行、知识图谱视图侧栏、问题清单那一行）；
+  「这份来源正在解析，请等它完成」写在这篇来源的「重新解析」旁；体检批量处理跳过的篇数写在那一组「处理」旁
+  （一篇都没排上为「这些来源正在解析，请等它们完成」，部分排上为「另有 N 篇正在解析，已跳过」）。
+- **Knowhow 单元格乐观校验（D7）**：浏览器的手动保存（普通格、合并共享格、「优化整行」接受）都带
+  `expected_before`（合并格逐行，并带锚定守卫），与存储值逐字节比较。成功响应是写事务内的存储值（不再
+  事务外重读），作为下一次的基线；冲突为 409
+  `{"code":"knowhow_cell_conflict","reason":"content_changed"|"group_changed","message":…,"current":[{row_id,column_id,content_md,mutation_seq}]}`：
+  `content_changed` 时 `current` 是同一事务读到的各目标存储值，可作为「用我的覆盖」的新基线；
+  `group_changed`（行/表不在了、锚定列或组成员变了）不给覆盖。从未写过的格子按 `""` 比较。同一浏览器的
+  标签页经 `BroadcastChannel("knowhow-cell:<table_id>")` 共享保存后的值，不会被自己拒绝；该标签页整表读取
+  在途时收到的值先排队，等那次读取落定后按提交顺序合并。每条格子保存响应和冲突值都带表的持久
+  `mutation_seq`，在写事务内取值；表详情的版本与格子值来自同一个一致读快照。广播携带
+  `[row_id,column_id,content_md,mutation_seq]`，按格子排序：旧提交的迟到响应或消息不能覆盖较新值或基线，
+  而另一格较早提交的值仍可应用。较旧的本浏览器提交若与较新快照同值，只前移打开的编辑器基线；后台读取
+  本身不前移基线。旧版无版本值不能盖过已带版本的值（升级后刷新旧标签页，恢复跨页共享）。旧后端的本页
+  保存成功回包若缺提交版本，会重拉详情：同值只确认这些格子的基线，无法用已知本浏览器写入解释的变化
+  交给已有冲突控件；读取失败则明确显示保存已完成、最新内容尚未确认，并保留草稿。带版本的正常保存不
+  增加这次读取。「用我的覆盖」
+  就是一次保存：成功后与普通保存一样关闭格子编辑器。不带 `expected_before` 的 API 写仍是 last-write-wins。
+- **跨环境同步（D16）**：同步导入器跳过源端的 `user` 主体授权边（含编辑者边），计入报告
+  `skipped_user_grants`；镜像上的点名授权由目标端 owner 自行决定。
+- **账号合并（D18）**：持有编辑者边（任何 `user` 主体授权边）的账号属 `blocking`，合并被拒；先由 owner
+  撤销，合并后再对保留账号重新授予。
+
+### 协作脉搏
+
+仅 `GET /api/notebooks/{id}` 在 `NotebookSummary` 回填 `collab_pulse` 与 `pulse_cursor`；
+其他响应为 null，前端保留上次已知的启用判断。详情为 true 才启动轮询，首次使用该详情的游标；
+游标在读取详情之前从内存取得，后续详情刷新不覆盖正在轮询的游标。单人私有库、仅经公共库或
+`everyone` 臂可读的读者不启动轮询；公共库的 owner 与有写权者仍可启动。这是刷新提示，不是新增
+内容读取通道，也不提供多人同时修改文本。
+
+`POST /api/notebooks/{id}/pulse` 请求为 `{since:"epoch:rev"|"",visible:bool}`。会话鉴权之后仅做
+一次访问级别点查，其余工作都在进程内；失去读权返回 404。响应为
+`{cursor,reset,changes:[{kind,actor_name,at}],viewers:[{user_id,display_name,role}],other_reader_count,next_interval_s}`。
+在场名单仅包含写者，角色为 `owner|admin|editor`；包括读者自己查看时，也不披露只读读者身份。
+会话与作业操作者取用户显示名，空时回落到用户名；MCP 写工具提示使用令牌属主 id 与 Agent 画像名。
+`other_reader_count` 是当前参与协作的只读读者人数，不是全站公共读者数。变化只标出区域：
+`sources|kg|knowhow|knowledge|catalog|notebook|understanding|scale_index`。某类全是查看者本人改动时
+省略该类但推进游标；同一合并记录里有他人改动时仍返回。
+来源处理落定会发布 `sources`、`knowledge`、`kg`、`notebook` 提示；Knowhow 投影发布
+`knowhow`、`knowledge`、`kg`、`notebook`，覆盖派生对象与笔记本画像。各区域仍各自遵守
+已挂载视图与编辑草稿的刷新守卫。
+同步来源删除（含 MCP）与 Knowhow 整表删除、转移也为各自发生变化的笔记本发布同一依赖集合，
+一次 HTTP 操作在每本受影响的笔记本仍只排队一条主类别活动记录。KG 维护发布 `kg`、`knowledge`、`notebook`；
+持久 KG 构建另发布 `sources` 抽取状态，冲突审阅仍仅为 `kg`。
+整表移动部分失败时，仍通知已经明确提交的目标副本；源若已进入投影清理，则保守提示其相关区域
+重新读取，不将其记为成功移出。普通失败或已回滚的写操作不发布提示。
+
+游标由进程 epoch 与全局递增 revision 组成。游标缺失／非法、epoch 不同、revision 来自未来、
+环形缓冲已挤掉历史，或游标后发生回收且本库条目未连续保留时，返回 reset；冷库的第一次改动
+本身不导致 reset。隐藏标签页停发，回到前台立即补一次；请求单飞，切人或切库时取消／丢弃迟到结果。
+同类刷新去抖，只自动刷新已挂载且未编辑的区域；编辑中的草稿保留，并提供就地「有新的改动 · 刷新」。
+本库来源详情打开时，即使来源栏收起也算来源区域已挂载；更新保留当前来源页查询与已展开的原文窗口。
+明确的来源不存在响应会关闭详情，临时失败保留已知内容并提供就地重试。借入来源详情不随无关的本库
+提示刷新。没有本库详情打开时，收起来源栏不读取来源列表，重新展开取当前页；成功确认的来源失效
+也会推进既有内容消费者，即使当前可见页的摘要元数据没有变化。
+连续第二次 reset 起改为手动刷新，一次正常响应后恢复；epoch 在不同值之间回切则停止轮询，
+显示「协作同步暂不可用」并记录无内容诊断事件。404 停止轮询，走既有访问权复核。
+
+`GET /api/notebooks/{id}/activity` 要求 `notebook:activity`（edit 档，镜像围栏 false，脉搏类别 `none`），
+返回 `{items:[{id,notebook_id,kind,capability,actor_id,actor_name,target,created_at}]}`，将有界的 owner 进程内近期改动
+与非 owner 持久记录合并。owner 的主活动有独立进程内投影，每库以 `NOTEBOOK_ACTIVITY_PANEL_LIMIT`
+为界，随该库脉搏状态一同回收；派生区域提示不另占活动槽，也不因提示合并而改写原主活动。
+界面叫「最近改动」，只读者没有入口。它不是合规审计：owner 写入零新增 SQL；
+非 owner 写入只异步排队一次独立短事务 INSERT，不等待它才返回响应。有界队列满或写入失败时丢提示，
+只记无内容诊断。actor 不设用户外键，登记为 `audit_kept`；删库级联删除，历史属于本部署，不进入
+笔记本复制闭包或跨环境同步。
+
+下表是精确设置与协议数值真源；整数设置均为正数，慢速间隔与池等待阈值必须严格递增。
+
+| 控制项 | 设置／协议 | 默认值／不变量 |
+| --- | --- | --- |
+| 常规轮询间隔 | `COLLAB_PULSE_INTERVAL_SECONDS` | 15 秒 |
+| 慢速间隔 | `COLLAB_PULSE_SLOW_INTERVALS` | `30,60` 秒，均大于常规间隔 |
+| 池等待阈值 | `COLLAB_PULSE_POOL_WAIT_SLOW_MS`、`COLLAB_PULSE_POOL_WAIT_VERY_SLOW_MS` | 50／200 毫秒，非负 |
+| 每库环形缓冲／笔记本 LRU | `COLLAB_PULSE_RING_SIZE`、`COLLAB_PULSE_MAX_NOTEBOOKS` | 64 条／2000 本 |
+| 持久保留期／面板上限 | `NOTEBOOK_ACTIVITY_RETENTION_DAYS`、`NOTEBOOK_ACTIVITY_PANEL_LIMIT` | 90 天／50 条 |
+| 写入队列 | `NOTEBOOK_ACTIVITY_QUEUE_SIZE` | 256 条等待记录，单 worker |
+| 池观察窗口／在场 TTL | 协议 | 近 10 秒／响应间隔的 3 倍 |
+| 服务端合并／客户端同类去抖／就地结果提示 | 协议 | 1／2／3 秒 |
+
+touch 无条件记录进程内变化，即使没有人在看也不查库；合并时移到尾部并取得更大 revision，保留
+所有 actor。非安全成功写路由按封闭清单分类：能力规则只消费 guard 标记，分支规则只消费实际
+写入的 explicit 标记，`none` 两者都忽略。预览、私有报告与导出作业不发布内容变化。
+后台作业终态、成功的 MCP 来源／构建工具也发布提示，失败不影响原业务。提交作业时捕获名字，
+只有恢复上下文缺名时才按主键回落读取。离线 CLI 写入不覆盖；部署要求单进程，重启 epoch 与
+打开笔记本时的整体读取兜底。
 
 ### 群组工作台
 
@@ -934,7 +1081,7 @@ Notebook；仅有 `group_admins` 边的库不向普通成员披露。owner 与�
 | `POST /groups/{id}/invite-link/rotate` | 组管理员（系统管理员恢复旁路） | 原子换新 token，旧链接立即停止解析 |
 | `POST /group-invites/{token}/join` | 已登录 | 原子加入为 `member`；已有角色幂等保留；无效/已撤销/组已删除统一 404 |
 | `GET /users/resolve?username=` | 任何登录用户 | 按用户名**精确**查，只返回 id/用户名/显示名 |
-| `GET /notebooks/{id}/grants` | `notebook:grant` | 该库全部授权边，四类主体如实返回 |
+| `GET /notebooks/{id}/grants` | `notebook:grant` | 该库的群组与 everyone 授权边（`user` 主体的点名授权见 `GET /notebooks/{id}/collaborators`，两者合起来恰好覆盖全部行） |
 | `POST /notebooks/{id}/grants` | `notebook:grant` **且**目标组组管理员 | 只收 `group` / `group_admins` 两个主体 |
 | `DELETE /notebooks/{id}/grants/{grant_id}` | `notebook:grant` | 笔记本维度撤销 |
 | `GET /groups/{id}/shared-notebooks` | 群组成员（系统管理员旁路） | 本组成员可见的共享知识库清单 |
@@ -1420,7 +1567,8 @@ Knowhow 表时，若段落会归到 Memory 投影或表自身隐藏来源以外�
 [Agent MCP 与 Memory 接入 SOP](./agent-mcp-memory-sop_zh.md)。本节继续作为产品/API 权威契约；
 SOP 负责首次接入与验收步骤。
 
-Memory 必须由用户手动选择、归创建者私有，并且始终绑定到且只绑定到一个 notebook。
+Memory 必须经用户明确确认才进入正式问答、搜索或报告，归创建者私有，并且始终绑定到且只绑定到一个 notebook。
+用户开启记忆建议后，系统可以先起草候选，见下文「自动用户记忆建议」。
 在 Ask 回答上点击“保存到 Memory”后，后端先生成标题、正文和标签预览，用户可编辑，
 只有最终确认才写入 `confirmed` Memory。预览模型未配置或失败时，系统确定性地用问题作
 标题，并用移除显示引用后的回答作正文。当该 Memory 所属 notebook 非 base 库且已开启
@@ -1431,6 +1579,28 @@ Memory 必须由用户手动选择、归创建者私有，并且始终绑定到�
 notebook 卡片数量和 notebook Memory 标签是同一份数据的 notebook 局部视图。总数与待确认数
 始终按 owner 全量统计，不随状态、搜索或 notebook 筛选变化；notebook 筛选项来自有界的 owner
 聚合查询，不做逐 notebook 查询。
+
+**在界面处理系统建议。** 笔记本记忆面板与头像菜单「私有记忆」共享本人跨笔记本的「记忆建议」
+开关，只读成员也可开启。部署接线关闭时隐藏入口；模型不可用时，在开启控件旁说明原因。
+关闭确认经根弹窗协调器呈现，删除选项默认不勾；数量只算本人当前可读笔记本的待确认建议，
+不随列表筛选变化，结果显示实际删除数。
+
+建议采纳后仍保留「系统建议」来源徽标，来源筛选新增同名项。卡片显示建议原因，沿用标题、
+正文和标签编辑，提供逐条「采纳／忽略」；本环境的会话仍可访问时可「查看原回答」。跨库跳转
+等目标工作区提交后才打开既有会话。采纳默认勾选符合条件的「同时整理进知识图谱」，
+「同时弃用《旧标题》」默认不勾。旧记忆暂时读取失败可独立重试，也可先单独采纳。
+先完成采纳，再处理所选弃用；弃用失败明确显示部分成功，只重试弃用，每个完成阶段都刷新列表和统计。
+重试弃用前先重读同一用户在同一笔记本的旧记忆：已经弃用就完成该阶段，不再发送状态转换请求；
+仍已确认才重试弃用。读取失败或身份不匹配时保留重试，不宣称成功。
+
+本人统计行「系统建议：已采纳 N、已忽略 M（含过期）」使用列表 total：已采纳为 confirmed 与
+deprecated 之和，已忽略为 rejected，含过期，不随当前筛选变化。绑定了待确认建议的回答显示
+「有建议」，仍保留保存入口。开启建议且查看问答时，对尚无记忆关联的回答依次等待 1、3、10 秒补查，
+随后停止。返回问答或浏览器页面重新可见时重新核对，因此超过有限补查窗口才完成的任务仍可被发现。
+页面隐藏时不发建议补查请求；切换用户、笔记本或会话会中止旧观察并丢弃迟到结果。
+只有开启建议、将尚未保存回答标为有用的用户才看到就地「存为记忆」
+提示；默认／手动用户的回答 DOM 与请求不变。两条自行退出路径都分别披露未采纳建议，
+只有建议时也显示确认，不提供草稿导出／搬迁，并报告实际删除结果。
 
 这条隐藏合成源及其元素与 Memory 本身一样私有。`GET /api/sources/{id}` 及其 `/elements`、
 `/elements-page`，`/api/notebooks/{id}/sources/{source_id}` 下的三个活跃笔记本读取，以及 MCP
@@ -1481,6 +1651,131 @@ reason 1,000 字符、task context 序列化 UTF-8 8,192 bytes、evidence 最多
 嵌套 NaN、正负 Infinity 会在持久化前被拒绝，合法 JSON null 则保持原样往返。
 MCP 提案严格使用这些 Core 上限，不再叠加更窄的重复限制。
 tag 原始列表会先按 20 条限额校验，再 trim/去重；空白 tag 直接拒绝。
+
+### 自动用户记忆建议
+
+`UserProfile.memory_mode` 默认 `manual`，未知存储值也读作 `manual`。唯一在线写入口
+`PATCH /api/me/memory-mode` 只改本人，请求为
+`{"memory_mode":"suggest","delete_unadopted":false}`（改为 `manual` 即关闭），响应为
+`{"user":UserProfile,"deleted_suggestion_count":N}`。模式非法返回 422；部署接线关闭
+（含全部信号类都关闭）时请求开启返回 409 `detail.code="memory_suggest_unavailable"`，
+什么都不写。`GET /api/system/config` 分别披露 `auto_memory_suggest_enabled` 与
+`auto_memory_suggest_model_ready`，不代替用户自己的选择。
+
+切换事务同时更新画像与开关，关闭时删除本人的作业行。可选删除在提交后执行，只删本人
+**仍有读权**的各库里还处于 `candidate` 的系统建议，告知数来自同一列表范围。取列表后被
+采纳的行保留；已忽略/已过期、已采纳、手动与 Agent 记录都不删，失去读权的草稿照常过期。
+响应返回实际删除数。
+
+取样只读本人在本库已完成、`output="answer"` 且不属于报告的网页提问；全局/MCP 提问、
+报告、他人会话与未完成回答不参与。`clarified` 取澄清答复，`repeated` 对相近问题聚类，
+选择有据回答并优先本人最新标为有用的反馈。`corrected` 配对本人在本库同一网页会话中相邻的
+两轮：先找原始直接上一轮，再独立校验资格，不能跳过中间的 MCP、失败、他人、其他库、报告或仅检索
+提问。前一轮不能早于本作业窗口，前后两轮都必须严格晚于本人在本库最近一次失去读权的时刻，
+等于该边界的轮次也排除。前回答必须有合法的保存入口时间，且不晚于后问的创建时间；
+时间缺失或非法时不取该对。这只是必要的因果过滤，不能证明前回答在追问前已提交、交付或被阅读。
+模型输入只含有界的问题、澄清问答、回答节选
+与本人近邻记忆，统一视为不可信资料。每轮只写候选，不写 confirmed 或向量。
+`suggested_signal` 为可空 `clarified|repeated|corrected`；存储 `origin` 仍是 `ask_answer`。
+`GET /api/memories?origin=suggested` 选系统建议，`origin=ask_answer` 排除它们，带与不带
+搜索词一致。不新增批量采纳或忽略。
+
+建议 provenance 保留 `question`、`answer_id`、`conversation_id`、`mode`、`evidence_level`，
+另有 `suggestion:{signal,kind,answer_ids,cluster_size,refines,conflicts_with_sources}`；`kind` 为
+`term|fact|correction`，`refines` 为 confirmed 近邻 id 或 null。反复类也保留本人原回答的
+`citations`、`anchors`。快照仍私有，存储 id 不会绕过实时跳转权限。
+模型返回的每一项必须含 JSON 布尔值 `conflicts_with_sources`；缺失、null、数值或字符串
+会使整批拒绝。共享提供方 schema 提示可能允许嵌套标量为 null，领域终验仍是最终判据。
+该标记判断的是输入节选中明确出现的引用资料说法与提议是否矛盾；false 不代表已核实与所有资料一致。
+纠正类在 `suggestion.answer_ids` 中记录前后回答 id，顶层 `answer_id` 指向后回答以供跳转，
+`source_answer_id` 为 NULL，不占用两条回答各自的手动保存唯一位置。
+
+纠正类卡片理由为「你在追问中纠正了回答」。仅当记录是 `corrected`，且
+`provenance.suggestion.conflicts_with_sources` 为真正的布尔值 `true` 时显示「与资料不一致」；
+采纳后仍保留，其他类别、旧记录或非法取值不显示。提议仍须用户逐条审核采纳后才参与正式检索。
+
+下表是数值真源。预算行属于经校验的部署设置，算法行是协议常量。
+
+| 预算 / 算法 | 设置或常量 | 默认值 / 不变量 |
+| --- | --- | --- |
+| 部署 / 澄清 / 反复 / 纠正开关 | `AUTO_MEMORY_SUGGEST_ENABLED`、`AUTO_MEMORY_SUGGEST_CLARIFIED_ENABLED`、`AUTO_MEMORY_SUGGEST_REPEATED_ENABLED`、`AUTO_MEMORY_SUGGEST_CORRECTED_ENABLED` | 均为 `true`；个人模式仍默认 `manual` |
+| 提问触发 / 候选积压闸 | `AUTO_MEMORY_SUGGEST_TRIGGER`、`AUTO_MEMORY_SUGGEST_BACKLOG_MAX` | 每人每库 5 / 5；澄清类开启时，澄清答复直接触发 |
+| UTC 每日调用 / 每轮信号 / 每轮新候选 | `AUTO_MEMORY_SUGGEST_DAILY_CAP`、`AUTO_MEMORY_SUGGEST_ITEMS_PER_RUN`、`AUTO_MEMORY_SUGGEST_CANDIDATES_PER_RUN` | 跨库合计 3 / 8 / 3；默认每人每天至多 9 条新建议 |
+| 问题 / 澄清 / 回答节选 / 整轮输入字符 | `AUTO_MEMORY_SUGGEST_QUESTION_MAX_CHARS`、`AUTO_MEMORY_SUGGEST_CLARIFICATION_MAX_CHARS`、`AUTO_MEMORY_SUGGEST_ANSWER_EXCERPT_MAX_CHARS`、`AUTO_MEMORY_SUGGEST_INPUT_MAX_CHARS` | 500 / 500 / 1,500 / 8,000；同一套投影预算 |
+| 输出 token | `AUTO_MEMORY_SUGGEST_OUTPUT_MAX_TOKENS` | 1,024 |
+| 候选过期 / 负缓存期限 / 过期页 | `AUTO_MEMORY_SUGGEST_EXPIRY_DAYS`、`AUTO_MEMORY_SUGGEST_DECLINED_TTL_DAYS`、`AUTO_MEMORY_SUGGEST_EXPIRY_SWEEP_LIMIT` | 30 天 / 30 天 / 500 行 |
+| 每轮外部调用 | 协议 | 至多一次 chat 和一次批量 embedding；embedding 不可用时近邻仅走词法 |
+| 反复聚类 | `REPEATED_JACCARD_MIN`、`REPEATED_MIN_CLUSTER_SIZE`、`REPEATED_WINDOW_DAYS`、`REPEATED_WINDOW_LIMIT` | 0.6 / 3 问 / 30 天 / 最新 40 条合格提问 |
+| 澄清与纠正扫描 / 指纹词基 / 簇指纹 | `CLARIFIED_SCAN_MAX`、`FINGERPRINT_MIN_TERMS`、`CLUSTER_FINGERPRINT_MAX` | 每类扫描均为升序 40 问 / 2 个词 / 10 个 |
+| 每侧近邻 / 向量扫描 / 连续失败 | `NEIGHBOR_K`、`NEIGHBOR_VECTOR_SCAN_MAX`、`MAX_CONSECUTIVE_FAILURES` | 3 / 最新 500 条 / 3 次 |
+| 成熟采纳的弃用观察 | 统计协议 | 采纳后 30 天；已删除行不能追溯统计 |
+| 信号类评估出口（D11） | 按类运营复核 | 某类累计至少 100 条提议后，采纳率低于 30% 即关闭该类 |
+
+D11 使用统计漏斗的采纳率：已采纳除以已采纳、已忽略与已过期的决定总数，不含待处理。
+累计提议量以保留的聚合证据确认；当前快照无法重建已删除行。关闭类别由运营复核决定。
+
+作业行生命周期就是取样窗口，起点含建行的触发提问，但不得早于本次开启时刻。开启后才完成的旧提问
+从开启边界建窗，不回溯手动模式期间的问题。重复开启保留同一边界；关闭再开启则建立新边界。
+取样与游标比较都按保留完整微秒精度的 UTC 时刻、
+再按提问 id 排序；时间字符串的不同写法不参与并列判定。成功与 `no_signal` 均推进到各升序
+扫描的共同前缀末尾；澄清与纠正项按提问升序合并，排在反复类之前。这两类输入截断或模型
+保留但超出写入上限的项，使游标停在**首个超额项上并包含它**。
+已写草稿有指纹，重扫不重复；游标窗口内更早的合格提问尚未完成时，游标也停在它上面。
+这条边界在全部取样扫描之前读取，即使该问在两次读取之间完成，也保留到本轮结束。
+先按游标筛选再取最早未完成项，窗口之前的旧请求不能遮住窗口内的请求。截断的
+反复类簇不挡升序游标，可能要有新提问才再出现。`skipped`、`backlog`、`disabled`、
+`daily_cap` 不推进。`model_rejected`、`model_unavailable`、`failed` 累计失败，达到阈值
+后越过该批，运行事件里记 `model_status="gave_up"`，不是新增 outcome。启动恢复把崩溃
+中断批次计为一次失败；重试等下次触发，已尝试的调用消耗预占额度，`no_signal` 不占额度。
+
+指纹只存哈希。`proposed` 永不过期，忽略、过期或删除建议后仍在，只保证**同一指纹不重提**。
+短澄清答复并入对应澄清问题的词基，不读取实际上未持久化的选项；内容不能登记 proposed 指纹时仍保持各问独立。
+同一批相同的可登记澄清内容只送出一次，不同内容保留各自的候选及游标/写入上限位置。`declined` 会过期，不能
+降级已有 proposed；它与候选写入同在通过读权、开关、claim 核对后的事务里。候选过期迁为
+`rejected`，修订原因 `expired`。readiness 之后的启动清扫、既有周期清扫与认领后的作业
+执行有界过期，部署与按类开关都不关闭清理。rejected 永久保留，直到用户明确删除。
+采纳才调度向量及可选图谱抽取；`confirm` 与从原回答保存候选共用修订、向量、图谱、事件
+和同步补发收尾。从回答保存已忽略的绑定建议时，同事务替换为手动记忆，指纹保留。澄清与
+纠正类不占回答唯一槽位；纠正类指纹对类别、本库、后问排序后的关键词基及前回答 id 哈希。
+`refines` 不会自动修改旧记忆。
+
+`POST /api/notebooks/{id}/answer-memory-links` 保持 `links:{answer_id:memory_id}`，
+排除未采纳建议，并追加含草稿的 `states:{answer_id:{memory_id,status,suggested}}`。
+两者选择同一行，历史异常重复时优先已采纳项。MCP 候选结果仅在未采纳系统建议上追加
+`suggested_by_system:true`；Agent 不能采纳或忽略它们。
+
+| 读者 | 未采纳系统建议（`candidate` 或 `rejected`）口径 |
+| --- | --- |
+| 正式问答 / 搜索 / 报告、confirmed 探针 | 仍仅选 confirmed |
+| 本人审核列表、回答 states、可读候选的 MCP | 沿既有属主与读权门包含 |
+| 库概览 / 最近记忆、退群预览、删除窗口提醒、管理员用量 | 排除；计数在同一 SQL 相减 |
+| 内容导出及计数 | 排除；内部 `omitted_suggestion_count` 在非空 Markdown 导出头中披露遗漏数 |
+| 退出确认 | 不计入 `memory_count`，另报 `suggestion_count`；领取 id 与清理覆盖全部状态 |
+| 通用计数、删库通知受众、删库 | 保留原全状态 / 超集口径 |
+| 跨环境同步 | 只同步已采纳（含弃用），子行跟随父行，采纳时补发 |
+
+退出告知及其 409 追加 `suggestion_count`；完成、未完成与失败响应追加
+`deleted_suggestion_count`。记忆为零的快速 204 还要求建议为零；仅删建议也可返回 200。
+确认只比较 `memory_count`。领取后才被采纳的建议保留并使退出未完成；确认数不符时不改数据。
+
+失去读权后清理相关作业：移出、取消链接分享、自行退出、撤销授权 / 批量授权、删群、退群 /
+移出群组、降级组管理员；群组及链接成员变更在同一写事务里清理，PostgreSQL 中涉及同一笔记本的
+撤权在改动授权前锁住共同笔记本根并串行。仍有其它读权路径则保留作业；延迟清理也保留重获读权后的新窗口。
+已开启者即使尚无作业，也在本环境记录最近一次彻底失权边界；重获读权后收到旧完成通知，重建窗口不能越过该边界。
+多条读权中仍有一条存活时不推进此边界。重获读权
+从新窗口开始，不回溯上次成员身份期间。非自行退出保留记忆和指纹；实际清理记忆的自行退出
+也清该窗口与指纹。
+
+失权时刻是开区间边界：取样提问必须按完整微秒精度严格晚于它，个人开启时刻仍含边界。
+即使已重新授予，同一微秒的提问也保守排除；晚一微秒即可合格。另一条读权仍存活时不记此边界。
+
+第四个内建完成观察者排在原三条链之后，在答案交付后共享截止时刻并隔离失败。认证刚读到的
+本人 manual 提示、且进程代次仍稳定时，只跳过这个精确身份的内建项，零额外模式 SQL。
+模式写入在 I/O 前及提交 / 回滚后使提示失效；缺失、过期或身份不符的提示回退实时主键读。
+认证复用旧画像对象时不会重签，新鲜请求的有效提示仍可随既有后台 ContextVar 复制传播。
+开启用户始终实时读，并在写事务复核读权和开关。不建逐用户缓存，不改回答和 prompt。
+
+### Agent 接入与令牌
 
 “Agent 接入”页（`/agents`，账户菜单一级入口，也是它唯一的入口）可创建稳定
 Agent profile 并签发 token。
@@ -2117,18 +2412,21 @@ Memory 贡献的证据，绝不会随 Memory 一起被删（编辑记忆后重�
 批量删除写一条不含内容的审计事件（笔记本、用户、条数）。
 
 退出共享笔记本会删除退出者本人在该库的记忆。在「结束某个人的访问」的各种操作里，只有本人的退出会删
-东西。退出前，`GET /notebooks/{id}/membership/exit-disclosure` 返回 `{"memory_count": N}`：此刻退出将
-永久删除的、调用者本人在该库的记忆条数（各种状态都算；不是成员、或退出后仍能凭所有者身份或直接/群组/
-everyone 授权读这本库时为 0）。随后 `DELETE /notebooks/{id}/membership[?acknowledged_memory_count=A]`
+东西。退出前，`GET /notebooks/{id}/membership/exit-disclosure` 返回
+`{"memory_count": N, "suggestion_count": S}`：N 是本人记忆条数（排除未采纳系统建议），
+S 是另将删除的未采纳建议（candidate 或 rejected）。不是成员、或退出后仍能凭所有者身份或直接/群组/
+everyone 授权读这本库时两者为 0。随后 `DELETE /notebooks/{id}/membership[?acknowledged_memory_count=A]`
 在成员行锁下领取此刻要删的确切 C 条，每种结果都如实说明服务端做了什么，数字由服务端计：
 
-- C = 0 且 A 缺省或为 0：204；成员关系结束（或本来就不在）；什么都不删。
+- C = 0、S = 0 且 A 缺省或为 0：204；成员关系结束（或本来就不在）；什么都不删。
 - A ≠ C，包括 C 为 0 而 A > 0（期间已不是成员、有了授权，或把记忆移走了）：409
-  `{"detail": {"code": "exit_disclosure_required", "memory_count": C}}`；什么都不删，成员关系不变。
-- A = C > 0 且退出完成：200 `{"deleted_memory_count": d}`，d 是本次请求实际删除的条数。
+  `{"detail": {"code": "exit_disclosure_required", "memory_count": C, "suggestion_count": S}}`；什么都不删，成员关系不变。
+- A = C 且清理后退出完成（含只删建议）：200
+  `{"deleted_memory_count": d, "deleted_suggestion_count": s}`，均为本次实际删除数。
 - A = C > 0，删了 d 条，但出现了 r 条调用者没有确认过的记忆（退出期间新存的）：409
-  `{"detail": {"code": "exit_incomplete", "deleted_memory_count": d, "memory_count": r}}`；仍是成员，
-  那 d 条已永久删除，r 条保留。
+  `{"detail": {"code": "exit_incomplete", "deleted_memory_count": d, "deleted_suggestion_count": s,
+  "memory_count": r}}`；仍是成员，已删项永久删除，r 条保留（含领取后才采纳的建议）。
+  建议只在成功收尾时删除，未完成时 s 恒为零；若记忆一条也没删，变化的计数改报 `exit_disclosure_required`。
 - A = C > 0 而清理中途失败：503，同样的 `exit_incomplete` 响应体（d 可以为 0）；仍是成员；可能已经删掉了
   一部分记忆，重试会从重新告知条数开始，接着删下去。
 
@@ -3021,17 +3319,17 @@ Ask 与深度报告共用的意图规划器保留用户要求的详细程度。�
 
 `reasoning_agent` 决策、`ask_answer` 合成与深度报告的四个 workload（`report_outline`、`report_sufficiency`、`report_section`、`report_summary`）始终先走严格 JSON 解析。严格解析失败后，共享修复层只允许接收对象首尾完整、且仅有可恢复语法错误（如缺引号/逗号）的响应。修复结果不得超出 schema example 的顶层字段，布尔字段必须是真正的 JSON boolean，枚举样例值必须留在词表内，拒绝非有限数；每个非空字符串值还必须逐字存在于原始响应中。修复只许恢复分隔符：按文档顺序读出的键与标量值必须与模型写下的序列完全一致，丢弃、合并、拆分、调序或编造任何一项的修复都以 `string_changed` 拒绝（相邻两个字符串 `"A" "B",` 曾被修成正文 `A` 加一个键 `B","grounded`，正文被悄悄截短；重复的键只留下最后一个值）。字符串里不构成 JSON 转义的反斜杠（LaTeX 的 `\mathrm{V}`、`50\%`、`\_`）在这道闸之前就已对所有 workload 按字面读（见下文）；它与真正的语法错误同时出现时，修复层按同一读法处理，字符串出现在按此读法解码后的回复字符串里也算逐字存在，这覆盖了 `\n` 分段转义与 LaTeX 混写的回答（deepseek-flash，2026-09-29）。截断对象、数组/标量、未知字段、类型混淆和字符串重构仍视为畸形响应。检索器异常会降级成可持久化的终态 Ask 回答，不再因为不存在的 result 中止编排。
 
-同一个 scheduler 出口现在覆盖当前注册表里的**全部 29 个 chat workload**，而不只覆盖问答和深度报告。这道边界遵循 2026-09-14 定下的 harness 原则：prompt 要准确，共享边界吸收模型可能出现的偏差，只有各领域 parser 在「错了会写坏数据」的地方保持严格。有五种偏差在严格解析之前就被吸收，对所有 workload 生效、与 `MODEL_JSON_REPAIR_MODE` 无关，因为每一种都只有一种读法。其一，双引号字符串里不构成 JSON 转义的反斜杠（后面不是 `"`、`\`、`/`、`b`、`f`、`n`、`r`、`t`，也不是 `u` 加四位十六进制——prompt 要求写 `\\`，模型仍写出 LaTeX 的 `\mathrm{V}`、`50\%`、`\_`）只有一种读法，即写下的字符：回复按把这些反斜杠加倍后的文本交付，解码结果恰好是这些字符，并记一条无正文的 `model_json_repair` 事件（`status: "escaped"`、`reason: "stray_backslash"`）；合法转义保持 JSON 含义，所以恰好是合法转义的 LaTeX 命令（`\times`、`\frac`、`\nu`）仍按 JSON 解码，只能靠 prompt 避免。其二，字符串里直接打出的控制字符（答案里的换行、制表符）写成对应的 JSON 转义，记 `status: "escaped"`、`reason: "control_char"`；词法单元之间的空白不动。其三，**值**字符串里未转义的 `"`，若后面跟的是正文而不是 JSON 结构（`"所谓"恒流"模式"`，或一对引号只转义了一个的 `\"|DSML|"`），读作正文里的字符并转义，记 `status: "escaped"`、`reason: "inner_quote"`。后面跟 `,`、`}`、`]` 或结尾的引号闭合字符串，但前提是该字符串里的引号（已转义的与按正文读的合计）成对：数目为奇数时，这个闭合引号同样可能是那个按正文读的引号的另一半（`"这种模式叫"恒流"}`、`["a, "b"]`），回复保持拒绝；后面跟 `:`、另一个引号（单引号或双引号）或任何 JSON 值的开头——字面量、数字、`[]`、`["`、`{"`（`["first" null "second"]`；引用 `[k1]`、LaTeX `{x}` 属于正文）的，可能是键的开头或丢了逗号，回复同样保持拒绝；数组里凡是不闭合字符串的引号都有歧义（`["first"second"third"]`、`["a" b "c"]` 可能是丢了逗号的几项），所以这种读法只用于对象的值——那里没有键的项不是 JSON，`"the "foo" mode"` 只有一种读法；键字符串从不按这种读法处理（吞了引号的键说明回复重开过或已损坏，不是键）。这种读法放在最后尝试，因为只有它会移动模型写下的字符串边界。其四，完整的顶层对象之后只跟着零散的闭合标点（`}`、`]`、引号、反引号、空白——deepseek-flash 的报告章节曾在完整合法的对象后多出一个 `"}`），或跟着同一个对象的重写（完整重写、重复多次、或被 token 预算截断的半份；词法单元之间的空白可以不同，字符串内的空白必须一致），按该对象逐字节交付，并记一条无正文的 `model_json_repair` 事件（`status: "trimmed"`、`reason: "trailing_data"`）。对象之后出现其他内容——任何一处不同的第二个对象、截断后又被闭合成另一个对象的半份、模型本想写进去的 `, "key": value}` 字段、说明文字——仍按 `invalid_json` 失败。其五，回复重开过——先是一个或多个片段，每个片段都被其后的文本逐字（词法单元之间的空白除外）重复，且片段不能停在嵌套值可能开始的位置（`:`、`[`、`,` 之后：`{"answer":{"answer":…}}` 有第二种读法），然后才是完整对象：2026-10-09 起 DeepSeek-V4-Flash 的答案合成回成 `{"{"answer": …}`，2026-10-14 又回成 `{"answer{"answer": …}` 与 `{"answer":"{"answer": …}`——按该对象交付（除上述转义外逐字节），并记一条无正文的 `model_json_repair` 事件（`status: "trimmed"`、`reason: "duplicated_open"`）。先去掉片段再读字符串（否则片段里的零散引号会把其后所有字符串边界翻转），对象必须与非空 schema hint 至少共有一个顶层字段，其后只允许空白、引号和每个被去掉的片段至多一个 `}`：片段没被其后文本重复（两份不同的答案）、出现 `]`、更多字段、第二个对象或剩余部分被截断，说明该对象是嵌套值或不完整，回复保持原有的拒绝原因（`invalid_json`，修复类 workload 为 `incomplete_object`）。重开扫描是线性的：每个片段只从最近一个重开点比起，只尝试最近的八个重开点，所以重开多次的回复照样能读，卡在重复同一片段里的回复也很快被拒绝。具体地，严格 JSON 可解析之后，边界**只在回复对任何消费者都不可用时拒绝**——不是 JSON、不是对象、为空、被截断、带有 JSON 本身无法表示的数值（`NaN`、`Infinity`、溢出的指数——一个 `+inf` 的 confidence 会在每个数值消费者那里被钳成最大值），或对象里一个预期顶层字段都没有（含 `{}`）。字段级与 schema example 的每一处不一致按两种方式之一处理，且无论哪种都记一条 `model_json_shape` 事件——例外是同一 hint 的严格投影会接受的 `null`（任何嵌套对象字段，或投影视为可选的根字段）：prompt 用它表示「未使用」，因此两种模式下都直接删除、不记事件——（`status: "deviation"`、工作负载、安全 `support_id`，以及有界的 `path`/`reason`/`fix` 列表，例如 `enumerate.kind: invalid_enum`；绝不含回复正文），这样示例与模型实际写法漂移的 prompt 在 `events.jsonl` 里持续可见，却不再让调用方失去这次回复。只有一种合理读法的偏差由边界**直接吸收**（`fix` 记下做了什么）：hint 声明有值处给了 JSON `null` 就把该键删掉——缺席与 null 对每个消费者都是同一件事，而下游一次裸字符串转换会把它变成字面量 `None` 并当正文落库；布尔 hint 收到 `"true"`/`"false"`、数值 hint 收到数字字符串就强转；声明为标量列表处给了单个标量就包成单元素列表，而不是被逐字符迭代；声明为对象列表处给了单个标量没有任何读法，直接删键，遍历该集合的消费者看到的是缺席而不是异常；声明字段全为 `null`（或全被删掉）的回复视同一个字段都没有，照样拒绝。其余不一致——有多种读法的类型错误、取值不在 `a|b|c` 枚举里、声明为对象处给了标量、嵌套对象与示例没有任何共有键——**原样交付**（`fix` 为空），由领域 parser 施加自己的容错（收窄枚举、丢掉那一条不可用的项），而不是整份回复失败。改动之前这次遍历遇到第一处不一致就整份拒绝：一个幻觉出来的边类型会丢掉整个知识图谱抽取窗口，`"year": null` 会让每个非论文来源的元数据失败，parser 自己写好的容错永远跑不到。由于这里的 schema 是示例而不是完整 JSON Schema，未出现的可选字段仍允许省略，模型额外返回的字段也不由这层删改；JSON 修复路径按同一套宽松遍历判断字段形状，只保留修复本身才可能违反的那道硬门（修复后的字符串必须在原始回复里逐字存在）。凡仍在这个统一边界被拒绝的响应，系统都会把完整模型消息、schema 提示、原始响应、用户问题（有显式问题时）和安全 `support_id` 写入私有分析工件；普通日志和问题列表不含这些正文。没有请求级笔记本身份的后台/脚本调用仍会保存到 `_unscoped`，因此不会因缺少 Notebook 路由上下文而漏记。
+同一个 scheduler 出口现在覆盖当前注册表里的**全部 30 个 chat workload**，而不只覆盖问答和深度报告。这道边界遵循 2026-09-14 定下的 harness 原则：prompt 要准确，共享边界吸收模型可能出现的偏差，只有各领域 parser 在「错了会写坏数据」的地方保持严格。有五种偏差在严格解析之前就被吸收，对所有 workload 生效、与 `MODEL_JSON_REPAIR_MODE` 无关，因为每一种都只有一种读法。其一，双引号字符串里不构成 JSON 转义的反斜杠（后面不是 `"`、`\`、`/`、`b`、`f`、`n`、`r`、`t`，也不是 `u` 加四位十六进制——prompt 要求写 `\\`，模型仍写出 LaTeX 的 `\mathrm{V}`、`50\%`、`\_`）只有一种读法，即写下的字符：回复按把这些反斜杠加倍后的文本交付，解码结果恰好是这些字符，并记一条无正文的 `model_json_repair` 事件（`status: "escaped"`、`reason: "stray_backslash"`）；合法转义保持 JSON 含义，所以恰好是合法转义的 LaTeX 命令（`\times`、`\frac`、`\nu`）仍按 JSON 解码，只能靠 prompt 避免。其二，字符串里直接打出的控制字符（答案里的换行、制表符）写成对应的 JSON 转义，记 `status: "escaped"`、`reason: "control_char"`；词法单元之间的空白不动。其三，**值**字符串里未转义的 `"`，若后面跟的是正文而不是 JSON 结构（`"所谓"恒流"模式"`，或一对引号只转义了一个的 `\"|DSML|"`），读作正文里的字符并转义，记 `status: "escaped"`、`reason: "inner_quote"`。后面跟 `,`、`}`、`]` 或结尾的引号闭合字符串，但前提是该字符串里的引号（已转义的与按正文读的合计）成对：数目为奇数时，这个闭合引号同样可能是那个按正文读的引号的另一半（`"这种模式叫"恒流"}`、`["a, "b"]`），回复保持拒绝；后面跟 `:`、另一个引号（单引号或双引号）或任何 JSON 值的开头——字面量、数字、`[]`、`["`、`{"`（`["first" null "second"]`；引用 `[k1]`、LaTeX `{x}` 属于正文）的，可能是键的开头或丢了逗号，回复同样保持拒绝；数组里凡是不闭合字符串的引号都有歧义（`["first"second"third"]`、`["a" b "c"]` 可能是丢了逗号的几项），所以这种读法只用于对象的值——那里没有键的项不是 JSON，`"the "foo" mode"` 只有一种读法；键字符串从不按这种读法处理（吞了引号的键说明回复重开过或已损坏，不是键）。这种读法放在最后尝试，因为只有它会移动模型写下的字符串边界。其四，完整的顶层对象之后只跟着零散的闭合标点（`}`、`]`、引号、反引号、空白——deepseek-flash 的报告章节曾在完整合法的对象后多出一个 `"}`），或跟着同一个对象的重写（完整重写、重复多次、或被 token 预算截断的半份；词法单元之间的空白可以不同，字符串内的空白必须一致），按该对象逐字节交付，并记一条无正文的 `model_json_repair` 事件（`status: "trimmed"`、`reason: "trailing_data"`）。对象之后出现其他内容——任何一处不同的第二个对象、截断后又被闭合成另一个对象的半份、模型本想写进去的 `, "key": value}` 字段、说明文字——仍按 `invalid_json` 失败。其五，回复重开过——先是一个或多个片段，每个片段都被其后的文本逐字（词法单元之间的空白除外）重复，且片段不能停在嵌套值可能开始的位置（`:`、`[`、`,` 之后：`{"answer":{"answer":…}}` 有第二种读法），然后才是完整对象：2026-10-09 起 DeepSeek-V4-Flash 的答案合成回成 `{"{"answer": …}`，2026-10-14 又回成 `{"answer{"answer": …}` 与 `{"answer":"{"answer": …}`——按该对象交付（除上述转义外逐字节），并记一条无正文的 `model_json_repair` 事件（`status: "trimmed"`、`reason: "duplicated_open"`）。先去掉片段再读字符串（否则片段里的零散引号会把其后所有字符串边界翻转），对象必须与非空 schema hint 至少共有一个顶层字段，其后只允许空白、引号和每个被去掉的片段至多一个 `}`：片段没被其后文本重复（两份不同的答案）、出现 `]`、更多字段、第二个对象或剩余部分被截断，说明该对象是嵌套值或不完整，回复保持原有的拒绝原因（`invalid_json`，修复类 workload 为 `incomplete_object`）。重开扫描是线性的：每个片段只从最近一个重开点比起，只尝试最近的八个重开点，所以重开多次的回复照样能读，卡在重复同一片段里的回复也很快被拒绝。具体地，严格 JSON 可解析之后，边界**只在回复对任何消费者都不可用时拒绝**——不是 JSON、不是对象、为空、被截断、带有 JSON 本身无法表示的数值（`NaN`、`Infinity`、溢出的指数——一个 `+inf` 的 confidence 会在每个数值消费者那里被钳成最大值），或对象里一个预期顶层字段都没有（含 `{}`）。字段级与 schema example 的每一处不一致按两种方式之一处理，且无论哪种都记一条 `model_json_shape` 事件——例外是同一 hint 的严格投影会接受的 `null`（任何嵌套对象字段，或投影视为可选的根字段）：prompt 用它表示「未使用」，因此两种模式下都直接删除、不记事件——（`status: "deviation"`、工作负载、安全 `support_id`，以及有界的 `path`/`reason`/`fix` 列表，例如 `enumerate.kind: invalid_enum`；绝不含回复正文），这样示例与模型实际写法漂移的 prompt 在 `events.jsonl` 里持续可见，却不再让调用方失去这次回复。只有一种合理读法的偏差由边界**直接吸收**（`fix` 记下做了什么）：hint 声明有值处给了 JSON `null` 就把该键删掉——缺席与 null 对每个消费者都是同一件事，而下游一次裸字符串转换会把它变成字面量 `None` 并当正文落库；布尔 hint 收到 `"true"`/`"false"`、数值 hint 收到数字字符串就强转；声明为标量列表处给了单个标量就包成单元素列表，而不是被逐字符迭代；声明为对象列表处给了单个标量没有任何读法，直接删键，遍历该集合的消费者看到的是缺席而不是异常；声明字段全为 `null`（或全被删掉）的回复视同一个字段都没有，照样拒绝。其余不一致——有多种读法的类型错误、取值不在 `a|b|c` 枚举里、声明为对象处给了标量、嵌套对象与示例没有任何共有键——**原样交付**（`fix` 为空），由领域 parser 施加自己的容错（收窄枚举、丢掉那一条不可用的项），而不是整份回复失败。改动之前这次遍历遇到第一处不一致就整份拒绝：一个幻觉出来的边类型会丢掉整个知识图谱抽取窗口，`"year": null` 会让每个非论文来源的元数据失败，parser 自己写好的容错永远跑不到。由于这里的 schema 是示例而不是完整 JSON Schema，未出现的可选字段仍允许省略，模型额外返回的字段也不由这层删改；JSON 修复路径按同一套宽松遍历判断字段形状，只保留修复本身才可能违反的那道硬门（修复后的字符串必须在原始回复里逐字存在）。凡仍在这个统一边界被拒绝的响应，系统都会把完整模型消息、schema 提示、原始响应、用户问题（有显式问题时）和安全 `support_id` 写入私有分析工件；普通日志和问题列表不含这些正文。没有请求级笔记本身份的后台/脚本调用仍会保存到 `_unscoped`，因此不会因缺少 Notebook 路由上下文而漏记。
 
 管理员问题列表以稳定 workload id 归入 7 类；报告执行上下文复用的共享 workload 归“深度报告”，不按其默认类误记：
 
-| 模型功能分类 | 当前 chat workload（共 29 个） |
+| 模型功能分类 | 当前 chat workload（共 30 个） |
 | --- | --- |
 | 问答 `ask` | `ask_answer`、`plugin_engine`、`reasoning_agent`、`query_rewrite`、`gap_consult_query`、`external_evidence_answer`、`evidence_refine` |
 | 深度报告 `report` | `report_outline`、`report_sufficiency`、`report_section`、`report_summary`、`report_context_compress` |
 | 来源处理 `source` | `source_summary`、`notebook_metadata`、`paper_metadata`、`chunk_question_generation` |
 | 知识库 `knowledge` | `kg_extract`、`kg_refine`、`kg_glean`、`kg_merge_review`、`kg_concept_description`、`kg_conflict_review`、`schema_induction` |
-| 记忆与库理解 `memory` | `memory_preview`、`agent_profile_consolidate` |
+| 记忆与库理解 `memory` | `memory_preview`、`agent_profile_consolidate`、`memory_suggest` |
 | 经验表格 `knowhow` | `knowhow_optimize`、`knowhow_reformat`、`knowhow_complete` |
 | 检索优化 `retrieval` | `retrieval_experience_distill` |
 
@@ -4112,7 +4410,7 @@ provider 返回 Markdown 和按顺序排列的已签发句柄。核心对每个�
 
 部署插件可以贡献按笔记本选择的索引管线；其 `pipeline_id` 以插件 id 命名空间化，描述符只暴露 label、description、version 与两个 override flag。parser 路由仍由启动时冻结的 ProviderChain 自动决定，用户只能选择 indexing pipeline，不能选择 parser。`GET /api/notebooks/{id}/indexing-pipeline` 对 reader 可读，返回净化后的当前选择、该笔记本可见的 option 列表，以及 `available` / `missing` / `pending` 等状态布尔；绝不泄露插件路径、capability 名、异常栈或 loader reason。`PATCH /api/notebooks/{id}/indexing-pipeline` 挂 `kg:write`，因此 owner 与组内容管理员都可切换 desired pipeline，纯 reader 保持只读。
 
-笔记本设置界面刻意拆成两档：owner 与内容管理员都能编辑笔记本元数据并切换索引管线，但只有 owner 能读取/修改参考库挂载——读挂载走 `notebook:configure`、改挂载走 `notebook:mount`，两者都恒 owner。纯只读成员也能通过同一个“设置”入口看到当前索引管线与状态的只读视图。任何管线切换都必须明确确认“将重建全库索引”。PATCH 先独立提交 desired `(pipeline_id, version, 不透明 generation)`，再认领既有持久 `kg_build_jobs` rebuild 单飞并立即返回 `pending + job_id`；worker 依次执行有界的整库 chunk 计划、可选的 core-owned KG 运行，以及合格库的 scale rebuild。迟到 worker 只有仍持有完全相同 generation 时才能发布；超界/失败会把 desired 代次保留为 pending，GET 投影 `rebuild_status=failed`，设置界面同时提供同管线重试与一键切回内建。**大库锁定切换到自定义管线（批 3·W3，决策 D3）**：活跃对象数超过 `INDEXING_PIPELINE_SWITCH_MAX_OBJECTS`（默认 20 万——按 WR-2 病灶规模的专用阈值，刻意不用低三个数量级的拷贝阈值）时，`begin()` 在落任何 desired 之前拒绝**非内建目标**的变更（409 带明确文案、什么都没保存、当前索引不受影响）。**切回内建保持放行**：卡在缺席/失败自定义管线上的大库，`require_write_admission` 让全部写入 fail-closed，切回内建是唯一自助出口——恢复重建即便再失败也只回到 retryable 态，不会更糟。干净态的无变化幂等保存仍走早退返回 200（卡死 pending 态本就到不了无变化早退，它的切回内建走豁免通道）。GET 投影新增服务端真值 `large_library_locked`：设置面板只禁用自定义管线选项与「重试当前管线」按钮，切回内建保持可点并就地说明。完整重构（拆每源事务 + 代次指针发布）排到有真实需求时。
+笔记本设置界面按权限开放：主人和组管理员可以修改笔记本元数据，点名编辑者只能查看；主人、组管理员和点名编辑者都可以切换索引管线。只有主人能读取/修改参考库挂载——读挂载走 `notebook:configure`、改挂载走 `notebook:mount`，两者都恒 owner。纯只读成员也能通过同一个“设置”入口看到当前索引管线与状态的只读视图。任何管线切换都必须明确确认“将重建全库索引”。PATCH 先独立提交 desired `(pipeline_id, version, 不透明 generation)`，再认领既有持久 `kg_build_jobs` rebuild 单飞并立即返回 `pending + job_id`；worker 依次执行有界的整库 chunk 计划、可选的 core-owned KG 运行，以及合格库的 scale rebuild。迟到 worker 只有仍持有完全相同 generation 时才能发布；超界/失败会把 desired 代次保留为 pending，GET 投影 `rebuild_status=failed`，设置界面同时提供同管线重试与一键切回内建。**大库锁定切换到自定义管线（批 3·W3，决策 D3）**：活跃对象数超过 `INDEXING_PIPELINE_SWITCH_MAX_OBJECTS`（默认 20 万——按 WR-2 病灶规模的专用阈值，刻意不用低三个数量级的拷贝阈值）时，`begin()` 在落任何 desired 之前拒绝**非内建目标**的变更（409 带明确文案、什么都没保存、当前索引不受影响）。**切回内建保持放行**：卡在缺席/失败自定义管线上的大库，`require_write_admission` 让全部写入 fail-closed，切回内建是唯一自助出口——恢复重建即便再失败也只回到 retryable 态，不会更糟。干净态的无变化幂等保存仍走早退返回 200（卡死 pending 态本就到不了无变化早退，它的切回内建走豁免通道）。GET 投影新增服务端真值 `large_library_locked`：设置面板只禁用自定义管线选项与「重试当前管线」按钮，切回内建保持可点并就地说明。完整重构（拆每源事务 + 代次指针发布）排到有真实需求时。
 
 处于 `pending` 时，普通来源上传/重解析、手工 KG build 与 scale rebuild 写入全部 fail-closed。worker 会校验所有用户可见导入来源的有界 chunk proposal，在发布事务外计算 embedding，再把每个来源的 chunks、反向行、向量、KG payload、来源事实与抽取结果写入不可见的 durable notebook stage。隐藏 Memory/Knowhow 合成产物由 core 管理、读取时按 actor SQL 隔离，不进入可选策略，也不进入 stage。单来源畸形 chunk proposal 会带一条稳定且无内容的 warning 回退内建 chunker；整库护栏超限不会写入 live product。若当前选中的插件缺席或不可用，界面会给出“切回内建”的恢复路径，同时不影响对旧已发布产物的普通读取。
 
@@ -4317,7 +4615,7 @@ token）。每项单独校验：非法的一项只丢掉它自己，绝不换成
 `source_parse`。系统把上传文件**复制**（不是移动）到笔记本来源目录之外的私有隔离区，
 管理员 API 只返回内容最小化的安全问题投影，绝不暴露物理路径或来源哈希。
 
-上述同一套私有工件还承载 `model_output`：当前 29 个结构化 chat workload 的响应只要
+上述同一套私有工件还承载 `model_output`：当前 30 个结构化 chat workload 的响应只要
 在 scheduler 统一出口没有通过 JSON 语法/形状协议，就新建一个不可变案例。列表只返回
 功能分类、稳定 workload id/显示名、失败类型、时间、`support_id` 和可用的用户/笔记本/
 父任务关联；完整消息、schema 提示、原始响应与显式用户问题只在管理员按单个案例打开详情
@@ -4410,10 +4708,10 @@ token）。每项单独校验：非法的一项只丢掉它自己，绝不换成
 - 跨文档概念合并使用确定性别名归一化 + 有界 top-k 向量候选（可扩展到上千概念）；可选 LLM 预审（`POST /notebooks/{id}/unified-kg/merges/review`）对小批量近义词候选做高置信确认/拒绝。
 - KG 抽取需要在系统模型 TOML 中绑定 `kg_extract` workload；离线 smoke 在需要验证检索/治理时会显式写入 KG 对象。
 - 两层联合检索尚属早期：把 notebook 标为 `base`/`personal`（经 `POST /notebooks/{id}/tier`）、边可信审核队列、晋升（个人→基准）现都已有专属前端控件（在分析工具栏）；把一个 notebook 发布为公共知识库只是让它可被挂载——tier 感知联合检索与 base 优先冲突规则只对显式把它挂为参考库的笔记本生效。
-- Notebook 分享有三种形态：链接复制、只读成员、共享给群组——都不是实时协同编辑。群组成员可以提问、写自己的深度报告；内容管理（来源、图谱、授权边）仍归 owner，组管理员的写权限是 P2。
+- 笔记本支持链接复制、只读成员、群组共享和点名编辑者。点名编辑者可按上文编辑者权限管理库内内容，组管理员保留管理权限；只有主人能管理点名编辑者或删除笔记本。Knowhow 单元格编辑按持久版本做乐观冲突检查，并在同一浏览器的标签页之间同步值。协作脉搏按上文单 API 进程的部署合同提供跨浏览器在场状态、最近改动与安全刷新；草稿保留，不安全的刷新保留显式操作入口。
 - PostgreSQL 是默认部署选项，当前开发和生产环境均使用 PostgreSQL；SQLite 仍作为可选后端，可与 PostgreSQL 一样由唯一 repository factory 原子选择。只改 `DATABASE_URL` 不会同步既有行；存量切换/回滚必须停写、验证备份，必要时执行外部数据迁移，并在启动后做一致性检查。PostgreSQL 向量存 `bytea`，不要求 pgvector。未配置时的 SQLite 代码兜底见部署文档，不代表当前环境的部署配置。
 - `off` 模式 PDF 回退用 PyMuPDF4LLM 的分页 Markdown，保留标题、多栏阅读顺序和重建表格；只有该解析器缺失或报错时才最后回退 pypdf。公式、图片和复杂扫描件的权威高保真路径仍是 MinerU。URL/上传文件的云解析在重试后仍失败时也走同一本地回退，并以 `extracted` + `parse_quality_warning=true` 返回；来源详情会说明风险并提供重新解析/删除入口，后续 MinerU 重解析成功会清掉警告。见[用 MinerU 解析 PDF](./operations_zh.md#用-mineru-解析-pdf)。
-- 用户记忆保持手动 opt-in，当前没有自动记忆行为。
+- 正式记忆仍须用户明确确认；开启系统建议后只自动起草本人私有候选（见「自动用户记忆建议」）。
 - PostgreSQL 查询取消（`psycopg.errors.QueryCanceled`——语句超时或运维主动取消）在**非流式**响应上冒泡到请求栈顶层时，返回结构化 `503`（`detail` 加机器可读的 `code: "query_timeout"`），并发出一条 `query_timeout` 事件（带与配对 `kind=http` 行相同的请求 id、method/path，路由带 notebook 维度时一并携带）——而不再是裸的、不可观测的 `500`。**流式**响应一旦已开始就无法改写状态码——流会中断，但同一条 `query_timeout` 事件（标 `streaming: true`）仍由最外层 ASGI 观察者发出。前端仍显示既有通用 5xx「服务暂时不可用」文案（不新增用户可见文案；`frontend/app/errors.ts` 对所有 5xx 都刻意泛化）。既有的 savepoint 有界探测（例如 `knowledge_store.py` 的 chunk 词法召回预算）不受影响——它们在自己的调用点就已捕获并转换为领域异常，QueryCanceled 到不了这个 handler。
 
 

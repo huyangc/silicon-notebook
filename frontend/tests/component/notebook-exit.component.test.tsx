@@ -141,6 +141,78 @@ const pressLeave = (user: ReturnType<typeof userEvent.setup>) =>
 
 const panel = () => screen.findByRole("dialog", { name: "退出共享" });
 
+test("只有未采纳系统建议也必须先披露确认，既不快速退出也不给草稿导出入口", async () => {
+  const calls = installServer([
+    (call) => call.method === "GET" && call.path.endsWith("/membership/exit-disclosure") ? json({ memory_count: 0, suggestion_count: 4 }) : undefined,
+    leave(() => json({ deleted_memory_count: 0, deleted_suggestion_count: 4 })),
+  ]);
+  const { onToast } = mount("bar");
+  const user = userEvent.setup();
+  await pressLeave(user);
+  const dialog = await panel();
+  expect(dialog).toHaveTextContent("4 条未采纳的系统建议会被永久删除");
+  expect(calls.filter((call) => call.method === "DELETE")).toHaveLength(0);
+  expect(within(dialog).queryByRole("button", { name: /导出|转移/ })).toBeNull();
+  await user.click(within(dialog).getByRole("button", { name: "确认退出并删除" }));
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享，已删除 4 条未采纳的系统建议"));
+  expect(calls.find((call) => call.method === "DELETE")?.search).toBe("");
+});
+
+test("退出分别披露记忆与系统建议，成功只报告服务端实际删除数", async () => {
+  installServer([
+    (call) => call.method === "GET" && call.path.endsWith("/membership/exit-disclosure") ? json({ memory_count: 2, suggestion_count: 3 }) : undefined,
+    leave(() => json({ deleted_memory_count: 2, deleted_suggestion_count: 2 })),
+  ]);
+  const { onToast } = mount("bar");
+  const user = userEvent.setup(); await pressLeave(user);
+  const dialog = await panel();
+  expect(dialog).toHaveTextContent("2 条记忆以及 3 条未采纳的系统建议");
+  expect(within(dialog).getByRole("button", { name: "导出为文件" })).toBeVisible();
+  await user.click(within(dialog).getByRole("button", { name: "确认退出并删除" }));
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享，已删除 2 条记忆以及 2 条未采纳的系统建议"));
+});
+
+test("409重新披露只剩系统建议时仍要求确认，不伪造没有要删除的内容", async () => {
+  let deletes = 0;
+  installServer([
+    (call) => call.method === "GET" && call.path.endsWith("/membership/exit-disclosure") ? json({ memory_count: 2, suggestion_count: 3 }) : undefined,
+    leave(() => ++deletes === 1 ? json({ detail: { code: "exit_disclosure_required", memory_count: 0, suggestion_count: 8 } }, 409) : json({ deleted_memory_count: 0, deleted_suggestion_count: 8 })),
+  ]);
+  const { onToast } = mount("bar"); const user = userEvent.setup();
+  await pressLeave(user); const dialog = await panel();
+  await user.click(within(dialog).getByRole("button", { name: "确认退出并删除" }));
+  await waitFor(() => expect(dialog).toHaveTextContent("8 条未采纳的系统建议会被永久删除"));
+  expect(deletes).toBe(1);
+  await user.click(within(dialog).getByRole("button", { name: "确认退出并删除" }));
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("已退出共享，已删除 8 条未采纳的系统建议"));
+});
+
+test("结果未知重新核对仍有系统建议时，只说剩余数，不猜删除数", async () => {
+  installServer([
+    (call) => call.method === "GET" && call.path.endsWith("/membership/exit-disclosure") ? json({ memory_count: 0, suggestion_count: 5 }) : undefined,
+    (call) => call.method === "GET" && call.path.endsWith("/notebooks") ? json([NOTEBOOK]) : undefined,
+    leave(() => { throw new TypeError("offline"); }),
+  ]);
+  mount("bar"); const user = userEvent.setup(); await pressLeave(user);
+  const dialog = await panel(); await user.click(within(dialog).getByRole("button", { name: "确认退出并删除" }));
+  await waitFor(() => expect(dialog).toHaveTextContent("还有 5 条未采纳的系统建议"));
+  expect(dialog).not.toHaveTextContent("已删除");
+});
+
+test("部分清理后剩余建议数尚未核对，读取失败不复用旧建议数继续删除", async () => {
+  let reads = 0;
+  const calls = installServer([
+    (call) => call.method === "GET" && call.path.endsWith("/membership/exit-disclosure") ? (++reads === 1 ? json({ memory_count: 1, suggestion_count: 2 }) : json({}, 503)) : undefined,
+    leave(() => json({ detail: { code: "exit_incomplete", deleted_memory_count: 0, deleted_suggestion_count: 0, memory_count: 1 } }, 503)),
+  ]);
+  mount("bar"); const user = userEvent.setup(); await pressLeave(user);
+  const dialog = await panel(); await user.click(within(dialog).getByRole("button", { name: "确认退出并删除" }));
+  await waitFor(() => expect(within(dialog).getByRole("button", { name: "重试" })).toBeVisible());
+  expect(within(dialog).queryByRole("button", { name: "确认退出并删除" })).toBeNull();
+  expect(dialog).toHaveTextContent("暂时无法确认将删除多少条记忆");
+  expect(calls.filter((call) => call.method === "DELETE")).toHaveLength(1);
+});
+
 beforeEach(() => {
   URL.createObjectURL = vi.fn(() => "blob:exit-test");
   URL.revokeObjectURL = vi.fn();

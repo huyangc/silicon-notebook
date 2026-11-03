@@ -18,7 +18,7 @@ pytestmark = pytest.mark.postgres_integration
 
 @pytest.fixture
 def store(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 86
+    assert PostgresMigrator(postgres_database).migrate() == 88
     return GlobalAskStore(postgres_database, marker="%s")
 
 

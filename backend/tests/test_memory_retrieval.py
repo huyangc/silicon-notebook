@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.config import Settings
+from app.models.memory import MemoryWrite
 from app.models.schemas import AskRequest, AskResponse, MemoryHit, NotebookCreate
 from app.services.memory_retrieval import MemoryRetriever
 from app.services.sqlite_repository import (
@@ -113,6 +114,64 @@ def test_notebook_plane_returns_relevant_confirmed_only(memory_data):
 
     assert [hit.memory_id for hit in hits] == [data.confirmed.id]
     assert all(hit.status == "confirmed" for hit in hits)
+
+
+def _suggestion(data, memory_id, status, signal, title, content):
+    """A system suggestion row written straight through the store (the
+    observation point for hand-built rows), owned by alice in her notebook."""
+    stamp = "2026-10-29T00:00:00+00:00"
+    return data.repo._runtime.memory_store.insert_memory(
+        MemoryWrite(
+            id=memory_id,
+            notebook_id=data.notebook.id,
+            created_by=data.alice.id,
+            origin="ask_answer",
+            status=status,
+            title=title,
+            content_md=content,
+            tags=[],
+            created_at=stamp,
+            updated_at=stamp,
+            confirmed_by=data.alice.id if status == "confirmed" else None,
+            confirmed_at=stamp if status == "confirmed" else None,
+            suggested_signal=signal,
+        )
+    )
+
+
+def test_notebook_plane_reads_adopted_suggestions_but_never_unadopted_ones(memory_data):
+    """Unadopted system suggestions (candidate / rejected) are drafts: the
+    formal plane (``("confirmed",)``) cannot return them even when they match
+    the query best. An ADOPTED suggestion is the user's memory like any other:
+    it is readable, but a wrong one must not crowd the right memory out."""
+    data = memory_data
+    query = "setup timing closure"
+    draft = _suggestion(
+        data, "mem-suggest-draft", "candidate", "clarified",
+        "Timing closure draft", "fix setup timing closure exactly",
+    )
+    dismissed = _suggestion(
+        data, "mem-suggest-dismissed", "rejected", "repeated",
+        "Timing closure dismissed", "fix setup timing closure exactly",
+    )
+    wrong = _suggestion(
+        data, "mem-suggest-wrong", "confirmed", "repeated",
+        "Timing closure advice", "skip setup timing closure",
+    )
+
+    hits = data.retriever.notebook_memory_hits(
+        data.alice.id, data.notebook.id, query, 10
+    )
+    ids = [hit.memory_id for hit in hits]
+
+    assert draft.id not in ids and dismissed.id not in ids
+    assert {hit.status for hit in hits} == {"confirmed"}
+    # the adopted-but-wrong memory is readable, and it does not push the right
+    # one out of the pool. Their order is deliberately NOT asserted: with the
+    # same lexical coverage the retriever breaks the tie by memory id, so the
+    # order carries no information about quality (the fixed eval in
+    # ``app/eval/memory_retrieval.py`` ranks the pair on distinct scores).
+    assert set(ids) == {data.confirmed.id, wrong.id}
 
 
 def test_agent_plane_shares_candidates_across_same_owner_profiles_only(memory_data):

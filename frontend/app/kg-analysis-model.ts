@@ -1316,6 +1316,13 @@ export type FindingActionPlan = {
 export type FindingActionContext = {
   /** 可编辑成员(只读成员、镜像库都是 false):false 时一个按钮都不出(§3.4)。 */
   canWrite: boolean;
+  /**
+   * 能删**任何人**上传的来源(库主与管理者;`workspaceCapabilities().canDeleteAnySource`)。
+   * 为 false 的可编辑成员是点名编辑者(决策 D14):「删除来源…」只对准他本人上传的来源
+   * (`live_sources[].uploaded_by_me`),他人的来源只给「打开来源」。缺省 true = 本字段出现之前
+   * 的行为。
+   */
+  canDeleteAnySource?: boolean;
   pendingMerges: readonly PendingMerge[];
   /**
    * 来源库的重新解析占位(use-source-library 的 `reparsingSourceIds`):从提交到跟踪判定这一次
@@ -1326,6 +1333,8 @@ export type FindingActionContext = {
 
 type SourceFacts = {
   title: string;
+  /** 读侧说这篇是请求者本人上传的(D14 的判据)。 */
+  uploadedByMe: boolean;
   sourceType: string;
   exists: boolean;
   processing: boolean;
@@ -1345,6 +1354,7 @@ function sourceFacts(row: KgFindingRow, sourceId: string): SourceFacts {
       || subjectTitle
       || "（没有标题）",
     sourceType: live?.source_type ?? "",
+    uploadedByMe: live?.uploaded_by_me === true,
     // 读侧每一页都会给涉及的来源此刻的样子;万一缺了这一篇,「打开来源核对」照出(只读、
     // 后端裁决),删除与重新解析不出——不知道类型就既拦不住收录来源的重新解析,也会让
     // 删除确认框用错文案。
@@ -1417,6 +1427,8 @@ export function findingActionPlan(row: KgFindingRow, context: FindingActionConte
       if (action.kind === "reparse_source" && facts.sourceType === "promotion") continue;
       // 疑似重复导入:建议保留的那份旁边不出删除(前端自己的防线)。
       if (action.kind === "delete_source" && row.rule_id === "F2" && keptSide(row, sourceId)) continue;
+      // D14:编辑者删不了别人上传的来源(后端 404),不给一个必然失败的按钮;「打开来源」已在上面给出。
+      if (action.kind === "delete_source" && context.canDeleteAnySource === false && !facts.uploadedByMe) continue;
       if (facts.processing && !plan.processingSourceIds.includes(sourceId)) {
         plan.processingSourceIds.push(sourceId);
       }

@@ -414,8 +414,10 @@ export function GroupsPage({
     () => new Set((shared ?? []).map((item) => item.notebook_id)),
     [shared],
   );
+  // 「共享给本组」的候选:共享是 notebook:grant(管理档)。点名编辑者有编辑权(can_manage_content)
+  // 却没有管理权——按编辑权放进来,他会看到一个提交必 404 的候选(分享编辑 P1)。
   const manageableNotebooks = useMemo(
-    () => notebooks.filter((item) => item.access !== "reader" || Boolean(item.can_manage_content)),
+    () => notebooks.filter((item) => item.access !== "reader" || Boolean(item.can_manage_notebook)),
     [notebooks],
   );
   const manageableById = useMemo(

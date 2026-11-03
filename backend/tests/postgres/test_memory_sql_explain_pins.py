@@ -237,3 +237,235 @@ def test_memory_sql_fragments_keep_their_index_paths(postgres_database, bystande
             cond.startswith("Index Cond:") and "source_id" in cond for cond in own
         ), (node, own, cluster)
     assert "idx_clusters_member" in cluster, cluster
+
+
+# ----- T5: the count readers that subtract unadopted suggestions (design §6.3)
+#
+# Each reader is "the original count minus the unadopted-suggestion count" in
+# ONE statement. The pins capture the statement the production method runs
+# (through ``psycopg.Connection.execute``) and EXPLAIN it with its real
+# parameters, in both ``bystander_snapshot`` states:
+#
+# * the minuend's plan subtree is the pre-suggestion statement's plan, node for
+#   node (``_assert_contains_subtree``): the readers' index-only path through
+#   ``idx_memory_owner_notebook_status`` is untouched;
+# * the subtrahend reads the partial ``idx_memory_suggest_unadopted`` and the
+#   statement never scans ``memory_items`` sequentially.
+
+_OLD_CARD_COUNTS_SQL = (
+    "SELECT created_by, notebook_id, COUNT(*) AS c FROM memory_items "
+    "WHERE created_by=%s GROUP BY created_by, notebook_id"
+)
+_OLD_ADMIN_MEMORY_COUNT_SQL = (
+    "SELECT mi.created_by AS k,COUNT(*) AS c FROM memory_items mi "
+    "JOIN notebooks nb ON nb.id=mi.notebook_id "
+    "WHERE mi.status<>'rejected' AND nb.{live} "
+    "GROUP BY mi.created_by"
+)
+_OLD_OVERVIEW_COUNTS_SQL = (
+    "SELECT COUNT(*) AS total,"
+    "COALESCE(SUM(CASE WHEN status='confirmed' THEN 1 ELSE 0 END),0) AS confirmed,"
+    "COALESCE(SUM(CASE WHEN status='candidate' THEN 1 ELSE 0 END),0) AS candidate "
+    "FROM memory_items WHERE created_by=%s AND notebook_id=%s"
+)
+_PARTIAL_INDEX = "idx_memory_suggest_unadopted"
+_OWNER_INDEX = "idx_memory_owner_notebook_status"
+_BULK_USERS = 20
+_BULK_NOTEBOOKS = 40
+_BULK_MEMORIES = 30_000
+_OLD_RECENT_SQL = (
+    "SELECT id,title,status,updated_at FROM memory_items m "
+    "WHERE created_by=%s AND notebook_id=%s "
+    "AND status IN ('confirmed','candidate') "
+    "ORDER BY updated_at DESC,id COLLATE \"C\" DESC LIMIT %s"
+)
+
+
+def _seed_suggestions(postgres_database) -> None:
+    """On top of ``_seed``: a deployment-shaped ``memory_items`` -- 30 000 rows
+    over 20 users and 40 notebooks, about one in a hundred an open or dismissed
+    suggestion (the partial index stays a small slice of the table, as in
+    production), plus a few for the two seeded users in the two seeded
+    notebooks, so every reader's key has both kinds of row."""
+    with postgres_database.write() as db:
+        db.execute("SET LOCAL statement_timeout = '0'")
+        db.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
+            "username,password_hash,password_salt,password_iterations) "
+            "SELECT 'u-bulk-'||g,'bulk'||g||'@example.test','b','user','active',%s,%s,"
+            "'u-bulk-'||g,'','',0 FROM generate_series(0,%s) g",
+            (_NOW, _NOW, _BULK_USERS - 1),
+        )
+        db.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+            "created_at,updated_at,tier) SELECT 'nb-bulk-'||g,'B','','','ready','u-a',%s,%s,"
+            "'personal' FROM generate_series(0,%s) g",
+            (_NOW, _NOW, _BULK_NOTEBOOKS - 1),
+        )
+        db.execute(
+            "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
+            "content_md,suggested_signal,created_at,updated_at) "
+            "SELECT 'bulk-'||g,'nb-bulk-'||(g%%%s),'u-bulk-'||(g%%%s),'ask_answer',"
+            "CASE WHEN g%%100=0 THEN (ARRAY['candidate','rejected'])[1+g%%2] "
+            "ELSE (ARRAY['confirmed','confirmed','candidate','deprecated'])[1+g%%4] END,"
+            "'t','x',CASE WHEN g%%100=0 THEN 'clarified' END,%s,%s "
+            "FROM generate_series(0,%s) g",
+            (_BULK_NOTEBOOKS, _BULK_USERS, _NOW, _NOW, _BULK_MEMORIES - 1),
+        )
+        db.execute(
+            "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
+            "content_md,suggested_signal,created_at,updated_at) "
+            "SELECT 'sug-'||g,CASE WHEN g%%2=0 THEN 'nb' ELSE 'nb-other' END,"
+            "CASE WHEN g%%4<2 THEN 'u-a' ELSE 'u-b' END,'ask_answer',"
+            "(ARRAY['candidate','rejected','confirmed'])[1+g%%3],'t','x',"
+            "(ARRAY['clarified','repeated'])[1+g%%2],%s,%s FROM generate_series(0,23) g",
+            (_NOW, _NOW),
+        )
+        db.execute("ANALYZE memory_items")
+    import psycopg
+
+    with psycopg.connect(postgres_database.settings.database_url, autocommit=True) as raw:
+        raw.execute("VACUUM (ANALYZE) memory_items")
+
+
+def _captured_statements(call, marker: str) -> list[tuple[str, object]]:
+    import psycopg
+
+    captured: list[tuple[str, object]] = []
+    original = psycopg.Connection.execute
+
+    def recording(self, query, params=None, **options):
+        if isinstance(query, str) and marker in query:
+            captured.append((query, params))
+        return original(self, query, params, **options)
+
+    psycopg.Connection.execute = recording
+    try:
+        call()
+    finally:
+        psycopg.Connection.execute = original
+    assert captured, f"no statement carrying {marker!r} ran"
+    return captured
+
+
+def _plan_of(postgres_database, bystander_snapshot, sql: str, params) -> str:
+    with postgres_database.connect() as connection:
+        bystander_snapshot.assert_visibility_map_blocked(connection, "memory_items")
+        return _plan(connection, sql, params)
+
+
+_QUALIFIER = re.compile(r"\b[a-z_][a-z0-9_]*\.(?=[a-z_])")
+#: EXPLAIN numbers a repeated alias (``mi``, ``mi_1``) in plan order, so which
+#: copy a subtree carries depends on the join order.
+_ALIAS_NUMBER = re.compile(r"\b(mi|nb)_\d+\b")
+
+
+def _node_lines(plan: str) -> list[str]:
+    """A plan's lines with indentation, the ``->`` arrow and column qualifiers
+    dropped (``Group Key: memory_items.notebook_id`` is how a join spells what a
+    lone scan spells ``notebook_id``), so two plans compare node for node
+    however deep a subtree sits."""
+    return [
+        _ALIAS_NUMBER.sub(
+            r"\1", _QUALIFIER.sub("", line.strip().removeprefix("->").strip()))
+        for line in plan.splitlines()
+    ]
+
+
+def _assert_contains_subtree(new_plan: str, old_plan: str) -> None:
+    """``old_plan`` appears in ``new_plan`` as one contiguous run of nodes."""
+    old, new = _node_lines(old_plan), _node_lines(new_plan)
+    width = len(old)
+    assert any(new[at:at + width] == old for at in range(len(new) - width + 1)), (
+        f"the pre-suggestion plan is not a subtree of the new one\n--- old ---\n"
+        f"{old_plan}\n--- new ---\n{new_plan}"
+    )
+
+
+def _scan_indexes(plan: str) -> list[str]:
+    return re.findall(r"Index (?:Only )?Scan using (\w+) on memory_items", plan)
+
+
+def _suggest_world(postgres_database):
+    assert PostgresMigrator(postgres_database).migrate()
+    _seed(postgres_database)
+    _seed_suggestions(postgres_database)
+
+
+def test_card_counts_keep_the_original_half_and_read_the_partial_index(
+    postgres_database, bystander_snapshot,
+):
+    from app.repositories.postgres.query_store import QueryStore
+
+    _suggest_world(postgres_database)
+    store = QueryStore(postgres_database)
+
+    def call():
+        with postgres_database.connect() as db:
+            store.memory_counts_by_owner_notebook(db, "u-a")
+
+    ((sql, params),) = _captured_statements(call, "FROM memory_items")
+    new_plan = _plan_of(postgres_database, bystander_snapshot, sql, params)
+    old_plan = _plan_of(
+        postgres_database, bystander_snapshot, _OLD_CARD_COUNTS_SQL, ("u-a",))
+    assert "Seq Scan" not in new_plan, new_plan
+    _assert_contains_subtree(new_plan, old_plan)
+    assert _scan_indexes(old_plan) == [_OWNER_INDEX], old_plan
+    assert sorted(_scan_indexes(new_plan)) == sorted([_OWNER_INDEX, _PARTIAL_INDEX]), new_plan
+
+
+def test_admin_user_overview_count_keeps_the_original_half_and_reads_the_partial_index(
+    postgres_database, bystander_snapshot,
+):
+    from app.repositories.postgres import access_sql
+    from app.repositories.postgres.query_store import QueryStore
+
+    _suggest_world(postgres_database)
+    store = QueryStore(postgres_database)
+    ((sql, params),) = _captured_statements(
+        store.list_user_usage, "AND mi.status='candidate'")
+    new_plan = _plan_of(postgres_database, bystander_snapshot, sql, params)
+    old_plan = _plan_of(
+        postgres_database, bystander_snapshot,
+        _OLD_ADMIN_MEMORY_COUNT_SQL.format(live=access_sql.NOTEBOOK_LIVE_SQL), None)
+    assert "Seq Scan on memory_items" not in new_plan, new_plan
+    _assert_contains_subtree(new_plan, old_plan)
+    # The subtrahend (open drafts only, over all users) reads one of the two
+    # partial suggestion indexes -- ``idx_memory_suggest_unadopted`` or, as it
+    # is also restricted to ``status='candidate'``, the smaller
+    # ``idx_memory_suggest_expiry`` -- and the minuend's owner index is the
+    # only other ``memory_items`` scan.
+    scans = sorted(_scan_indexes(new_plan))
+    assert scans in (
+        sorted([_OWNER_INDEX, _PARTIAL_INDEX]),
+        sorted([_OWNER_INDEX, "idx_memory_suggest_expiry"]),
+    ), new_plan
+
+
+def test_overview_keeps_the_original_half_and_reads_the_partial_index(
+    postgres_database, bystander_snapshot,
+):
+    from app.repositories.postgres.memory_store import MemoryStore
+
+    _suggest_world(postgres_database)
+    store = MemoryStore(postgres_database, new_id=lambda prefix: f"{prefix}-pin", now=lambda: _NOW)
+    statements = _captured_statements(
+        lambda: store.notebook_content_overview("u-a", "nb"), "FROM memory_items")
+    counts_sql, counts_params = next(
+        item for item in statements if "COUNT(*) AS unadopted" in item[0])
+    new_plan = _plan_of(postgres_database, bystander_snapshot, counts_sql, counts_params)
+    old_plan = _plan_of(
+        postgres_database, bystander_snapshot, _OLD_OVERVIEW_COUNTS_SQL, ("u-a", "nb"))
+    assert "Seq Scan" not in new_plan, new_plan
+    _assert_contains_subtree(new_plan, old_plan)
+    assert sorted(_scan_indexes(new_plan)) == sorted(
+        [*_scan_indexes(old_plan), _PARTIAL_INDEX]), (new_plan, old_plan)
+    # The "recent 3" list: the extra ``NOT unadopted`` term only adds a filter
+    # -- the access path is the one the pre-suggestion statement takes.
+    recent_sql, recent_params = next(
+        item for item in statements if "ORDER BY updated_at DESC" in item[0])
+    recent = _plan_of(postgres_database, bystander_snapshot, recent_sql, recent_params)
+    old_recent = _plan_of(
+        postgres_database, bystander_snapshot, _OLD_RECENT_SQL, recent_params)
+    assert "Seq Scan" not in recent and "Limit" in recent, recent
+    assert _scan_indexes(recent) == _scan_indexes(old_recent), (recent, old_recent)

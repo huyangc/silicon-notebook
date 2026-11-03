@@ -10,6 +10,8 @@ in ``tests/postgres/test_id_list_binding_pins.py``.
 from __future__ import annotations
 
 import inspect
+import threading
+import time
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -34,6 +36,7 @@ from app.repositories.postgres.search import (
 )
 from app.repositories.postgres.source_store import SourceStore
 from app.repositories.postgres.unified_kg_store import UnifiedKgStore
+from app.repositories.read_budget import ReadBudget, ReadBudgetExceeded
 
 
 TEXT_ARRAY = "string_to_array(%s,E'\\x1f')"
@@ -148,6 +151,46 @@ def test_the_read_budget_wrapper_forwards_prepare_to_the_bound_statement():
     assert inner.calls == [
         ("SELECT set_config('statement_timeout', %s, true)", ("1500ms",), {}),
         ("SELECT 1 WHERE x=ANY(%s)", ["a"], {"prepare": False}),
+    ]
+
+
+@pytest.mark.parametrize("statement", [
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+])
+def test_read_budget_snapshot_setup_precedes_timeout_select_but_data_keeps_its_budget(statement):
+    inner = _Recorder()
+    budget = SimpleNamespace(remaining_seconds=lambda: 1.5)
+    wrapped = _BudgetedReadConnection(inner, budget, statement_ceiling_ms=3000)
+    wrapped.execute(statement, prepare=False)
+    wrapped.execute("SELECT 7")
+    assert inner.calls == [
+        (statement, None, {"prepare": False}),
+        ("SELECT set_config('statement_timeout', %s, true)", ("1500ms",), {}),
+        ("SELECT 7", None, {}),
+    ]
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_read_budget_snapshot_setup_never_bypasses_expiry_or_cancellation(cancelled):
+    inner = _Recorder()
+    cancel = threading.Event()
+    if cancelled:
+        cancel.set()
+    budget = ReadBudget(time.monotonic() + (30 if cancelled else -1), cancel)
+    with pytest.raises(ReadBudgetExceeded):
+        _BudgetedReadConnection(inner, budget).execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+    assert inner.calls == []
+
+
+def test_snapshot_setup_exemption_does_not_match_a_data_statement_appended_to_it():
+    inner = _Recorder()
+    wrapped = _BudgetedReadConnection(inner, SimpleNamespace(remaining_seconds=lambda: 1.5))
+    query = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ; SELECT 7"
+    wrapped.execute(query)
+    assert inner.calls == [
+        ("SELECT set_config('statement_timeout', %s, true)", ("1500ms",), {}),
+        (query, None, {}),
     ]
 
 

@@ -772,3 +772,28 @@ test("主体内容 / 孤岛(S3):主题数来自依赖板块的产物,缺席时�
   assert.equal(structureSignal(summary({ structure: null }), null), null);
   assert.equal(structureSignal(summary({ present: false, structure }), null), null);
 });
+
+test("动作(分享编辑 P1,D14):编辑者只对本人上传的来源出「删除来源…」,他人的只给「打开来源」", () => {
+  const f1 = finding({
+    rule_id: "F1", severity: "high", subject: { kind: "source", key: "a", label: "A" }, subject_refs: ["a", "b"],
+    actions: [
+      { kind: "delete_source", capability: "sources:write", source_id: "a" },
+      { kind: "delete_source", capability: "sources:write", source_id: "b" },
+    ],
+    live_sources: [{ ...live("a", "A"), uploaded_by_me: false }, { ...live("b", "B"), uploaded_by_me: true }],
+  });
+  const editor = findingActionPlan(f1, { ...CONTEXT, canDeleteAnySource: false });
+  assert.deepEqual(editor.buttons.map((spec) => `${spec.kind}:${spec.sourceId}`), [
+    "open_source:a", "open_source:b", "delete_source:b",
+  ]);
+  // 库主 / 管理者(以及缺省,本字段出现之前)两份都给删除。
+  for (const context of [CONTEXT, { ...CONTEXT, canDeleteAnySource: true }]) {
+    assert.deepEqual(
+      findingActionPlan(f1, context).buttons.filter((spec) => spec.kind === "delete_source").map((spec) => spec.sourceId),
+      ["a", "b"],
+    );
+  }
+  // 读侧没说上传人(旧后端):按「不是本人」处理,编辑者不给删除。
+  const legacy = findingActionPlan({ ...f1, live_sources: [live("a", "A"), live("b", "B")] }, { ...CONTEXT, canDeleteAnySource: false });
+  assert.equal(legacy.buttons.some((spec) => spec.kind === "delete_source"), false);
+});

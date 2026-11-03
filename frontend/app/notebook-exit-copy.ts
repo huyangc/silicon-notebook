@@ -4,6 +4,12 @@
 // 的告知条数),客户端不自己算。核对不出来的事实不写成数字——比如网络中断后只能重读到
 // 「还剩几条」,那就只说还剩几条,不说「删了几条」。
 
+/** 「退出没有完成」时仍然成立的身份。成员关系的出口说「你仍是成员」;点名授权的出口由
+ *  调用方换成对应的身份(「你仍是编辑者」等)。 */
+export const STILL_MEMBER = "你仍是成员";
+export const STILL_EDITOR = "你仍是编辑者";
+export const STILL_NAMED = "你仍在点名共享名单里";
+
 export const EXIT_UNAVAILABLE_TEXT = "暂时无法确认将删除多少条记忆，请稍后重试。";
 export const EXIT_FAILED_TEXT = "退出没有成功，请重试";
 export const EXIT_UNVERIFIED_TEXT = "暂时无法确认是否已经退出，请刷新页面查看笔记本列表。";
@@ -15,9 +21,20 @@ export const EXIT_WAIT_FOR_EXPORT_TEXT = "正在导出，导出完成后才能�
 export const EXPORT_TOO_LARGE_TEXT =
   "你在这个笔记本里的记忆内容太多，超过了一次导出的上限，没能导出。可以先把一部分转移到你的其他笔记本。";
 
-/** 成功之后的提示:200 带服务端数到的条数,204(没有删)只说退出了。 */
-export const leftText = (deleted: number): string =>
-  deleted > 0 ? `已退出共享，已删除 ${deleted} 条记忆` : "已退出共享";
+/** 成功之后的提示:200 带服务端数到的条数,204(没有删)只说退出了。`action` 是入口上的
+ *  动作名(「退出共享」/「退出协作」),`note` 是退出之后仍然成立的那句话(例如「你仍是这本
+ *  笔记本的编辑者」),空串不加。 */
+export const leftText = (deleted: number, action = "退出共享", note = "", deletedSuggestions = 0): string => {
+  const deletedText = deleted > 0 ? `${deleted} 条记忆${deletedSuggestions > 0 ? `以及 ${deletedSuggestions} 条未采纳的系统建议` : ""}` : deletedSuggestions > 0 ? `${deletedSuggestions} 条未采纳的系统建议` : "";
+  const base = deletedText ? `已${action}，已删除 ${deletedText}` : `已${action}`;
+  return note ? `${base}；${note}` : base;
+};
+
+export function exitDeletionText(memoryCount: number, suggestionCount = 0): string {
+  if (memoryCount === 0 && suggestionCount === 0) return "你在这个笔记本里已经没有记忆了。";
+  const items = memoryCount > 0 ? `${memoryCount} 条记忆${suggestionCount > 0 ? `以及 ${suggestionCount} 条未采纳的系统建议` : ""}` : `${suggestionCount} 条未采纳的系统建议`;
+  return `退出后，你在这个笔记本里的 ${items}会被永久删除，无法恢复。`;
+}
 
 /** 409 exit_incomplete:面板还开着,就地说明(已删的已经没了,新增的要重新确认)。 */
 export const incompleteConfirmText = (deleted: number, remaining: number): string =>
@@ -26,24 +43,25 @@ export const incompleteConfirmText = (deleted: number, remaining: number): strin
     : `退出期间又新增了 ${remaining} 条记忆，确认后会删除它们并退出。`;
 
 /** 503 exit_incomplete:清理中途出错,你仍是成员。 */
-export const incompleteFailedText = (deleted: number, remaining: number): string =>
+export const incompleteFailedText = (deleted: number, remaining: number, still = STILL_MEMBER): string =>
   deleted > 0
-    ? `退出没有完成：已删除 ${deleted} 条记忆，还剩 ${remaining} 条，你仍是成员。可以重试。`
-    : `退出没有完成：没有删除任何记忆，还剩 ${remaining} 条，你仍是成员。可以重试。`;
+    ? `退出没有完成：已删除 ${deleted} 条记忆，还剩 ${remaining} 条，${still}。可以重试。`
+    : `退出没有完成：没有删除任何记忆，还剩 ${remaining} 条，${still}。可以重试。`;
 
 /** 409 exit_incomplete 的结果在面板已经关掉(取消/离开页面)之后才到:用提示告知。 */
-export const incompleteLateText = (deleted: number, remaining: number): string =>
+export const incompleteLateText = (deleted: number, remaining: number, still = STILL_MEMBER): string =>
   deleted > 0
-    ? `已删除 ${deleted} 条记忆，但退出没有完成：期间又新增了 ${remaining} 条，你仍是成员。`
-    : `退出没有完成：期间又新增了 ${remaining} 条记忆，你仍是成员。`;
+    ? `已删除 ${deleted} 条记忆，但退出没有完成：期间又新增了 ${remaining} 条，${still}。`
+    : `退出没有完成：期间又新增了 ${remaining} 条记忆，${still}。`;
 
 /**
  * 网络中断/超时之后重读到「仍是成员」:只陈述重读到的剩余条数。服务端不提供那次丢失的
  * 请求删了几条,所以既不说「删了一部分」也不说「都还在」——和确认时的条数比较证明不了
  * 什么(确认过的被删掉、同时又新存了几条,总数可以不变;少了的也可能是别处移走的)。
  */
-export function stillMemberText(remaining: number): string {
-  const lead = "退出的结果没有收到，重新核对后：你仍是成员，";
+export function stillMemberText(remaining: number, still = STILL_MEMBER, suggestionCount = 0): string {
+  const lead = `退出的结果没有收到，重新核对后：${still}，`;
+  if (suggestionCount > 0) return `${lead}还有${remaining > 0 ? ` ${remaining} 条记忆以及` : ""} ${suggestionCount} 条未采纳的系统建议。可以重试。`;
   if (remaining === 0) return `${lead}没有需要删除的记忆。可以重试。`;
   return `${lead}还有 ${remaining} 条记忆。可以重试。`;
 }

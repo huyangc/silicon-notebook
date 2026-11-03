@@ -69,6 +69,38 @@ bash scripts/check.sh --summary --lane contracts --lane frontend
 路径读取，需要保留证据时保留该目录，不再需要后手动清理。PR 评审原始输出的留存
 要求仍由[开发流程](../docs/development_zh.md#pr-评审与合入)负责。
 
+## 协作脉搏本机压测（T10，无模型）
+
+```bash
+# 默认仅输出 prepared 方案，不导入应用或配置、不连接数据库：
+python scripts/bench_collab_pulse.py
+python scripts/bench_collab_pulse.py --help
+# 后端脉搏端点接线完成后，经本机 heavy-gate 全局锁串行执行：
+python scripts/bench_collab_pulse.py --execute --repo /path/to/final-checkout --output /tmp/collab-pulse-receipt.json
+```
+
+`--execute` 仅在 localhost 上为当前系统用户创建独有随机临时 PostgreSQL 库，安装
+`pg_trgm` / `btree_gin`，使用干净的 Settings 和临时存储；退出时关闭池并删除该库。
+不接受现有数据库 URL，不绑定 HTTP 端口，不调用模型，拦截并计数任何外部 HTTP 尝试。
+需要本机 `createdb` / `dropdb` 和后端依赖。请勿与门禁、build 或其它重负载并行。
+
+默认 300 个独立合成账号/会话打开同一本群组库，首次到达均匀分散在一个默认间隔内，
+随后按真实脉搏响应的 `next_interval_s` 继续。间隔来自 Settings（默认 15 秒，约
+20 次/秒），默认测 3 个间隔；同机真实详情与列表 GET 交替，先测相同持续时间的 baseline，
+再随负载测量，分别报告两条读接口的差分。
+公共库和 everyone 库各 300 个只读标签页完全依据真实详情响应的 `collab_pulse`
+启动，验收实际零脉搏；两个库的 owner / 编辑者仍实际发请求。`--tabs`、`--cycles`
+与 `--read-rate` 是压测协议参数，不是生产上限。完整默认运行约 2–3 分钟。
+
+JSON 包括被测 HEAD、配置、场景实际请求数、请求延迟与读接口分位差、真实池 checkout
+等待 p99、调度迟到、返回间隔、非计时 SQL 预算探针、HTTP 尝试数和清理状态。
+SQL 探针只保存语句摘要，不保存参数或原始 SQL；新鲜会话的业务预算是鉴权 2 条、
+读权档位 1 条，额外业务 SQL 为零。池健康检查在真实 checkout 回调边界单独归为
+`pool_check`，客户端状态恢复单列 `client_reset`；`driver_sql_counts` 保留全部计数，
+不按 SQL 文本忽略查询。池 checkout 计时包含健康检查与可能的建连成本，不能解释成纯服务器锁等待。
+prepared / 单元测试通过不表示完成实测；只有 `status=measured` 且 `pg_cleanup=true`、
+`external_http_attempts=0` 的实际收据才是测量结果。脚本不自动重试或按阈值判绿。
+
 ## 统一 CLI 入口
 
 推荐从统一目录选择命令，不再为日常操作手动拼 `PYTHONPATH=backend`：
@@ -350,7 +382,7 @@ PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py --apply
 `docs/operations_zh.md` 的「PostgreSQL notebook-aware 词法索引」。索引只改变 planner 候选裁剪，
 不改变检索谓词、打分或排序。
 
-### `build_hotpath_indexes.py` —— 在线建立热路径修复索引（批 1–批 9，以登记表 `HOTPATH_INDEX_SPECS` 为准）
+### `build_hotpath_indexes.py` —— 在线建立热路径修复索引（批 1–批 10，以登记表 `HOTPATH_INDEX_SPECS` 为准）
 
 默认只读检查热路径修复登记表 `HOTPATH_INDEX_SPECS` 里的全部索引（各批现存条数见 `backend/tests/hotpath_index_batches.py`；被后续批次取代的条目已移出登记表）：批 1 六组共八条（`concept_clusters` 两条、三条反向 FK 覆盖、
 `knowledge_relations` 一条复合、`chunks(source_id, ordinal)`、`sources` 一条 partial），加批 2（迁移 0042）两条——`idx_knowledge_objects_nb_payload_trgm`（notebook 域复合 partial payload 全文 GIN：btree_gin 令 `notebook_id` 前置、`WHERE status != 'deprecated'`，与 `idx_knowledge_objects_nb_name_trgm` 同形，词集中在别的 notebook 时不再建全局位图；服务集合页搜索 knowledge 腿，稀有词从 5.9s 降到毫秒级（5.9s→3.6ms 的对照基准测于评审前的单表达式全局形，复合形是它的严格收窄、量级结论沿用，精确数字未重测）；生产 9.65M 行上体积按合成语料基准外推约为表段 1.5×（真实语料可能更大）、构建数分钟级，属登记过的写放大债，可 `DROP INDEX CONCURRENTLY` 无损回退；`--apply` 会按需安装 btree_gin 扩展）与 `idx_source_elements_nonblank`（体检 H5 的非空元素 partial），再加批 3（迁移 0043）一条——`idx_clusters_nb_canonical_member`：`concept_clusters(notebook_id, canonical_id, member_object_id)` 普通复合 btree，服务概念详情 hub 簇 keyset 分页的 `ORDER BY member_object_id`，秒级构建，无 GIN 那些顾虑；既有的 `idx_clusters_nb_canonical` 现在是它的严格前缀，同样登记为写放大冗余债、本批不下线，再加批 4（迁移 0048）三条——`idx_sources_nb_title_file_trgm`（`sources(notebook_id, lower(title), lower(file_name))` 的 notebook 域复合 partial GIN trgm，按可见来源类型 partial；两个 trgm 键让 `title`/`file_name` 两条 `LIKE` 腿的 `OR` 能对同一条索引扫两次再 BitmapOr）、`idx_source_authors_nb_name_trgm` 与 `idx_source_paper_meta_nb_ptitle_trgm`，服务来源页签服务端检索的三腿 UNION（生产实测：4.9 万 source 的 notebook 上带 q 的 COUNT 363ms，`source_authors` 21 万行、`source_paper_meta` 3.9 万行被整表扫）；索引的是短文本列而非整份 payload，基准语料上分别约为各自表段的 1.0×/0.3×/1.2×，分钟级构建，三条各自独立可 `DROP INDEX CONCURRENTLY` 回退；短 needle（<3 字符）与 planner 选型这两项实测取舍写在迁移 0048 头注释里；批 5（迁移 0049）三条删除作业化 FK/keyset btree、批 6（迁移 0051）三条簇图代次化接替索引（其中两条带 INCLUDE，取代的旧索引要在迁移前 `DROP INDEX CONCURRENTLY`，见部署文档）、批 7（迁移 0084）一条 `source_paper_meta(source_id) INCLUDE (notebook_id, is_paper)` 覆盖索引（缺论文元数据探针与看板计数按「子表行属于 source 所在的库」判时不回表，秒级构建）、批 8（无迁移）一条 `idx_sources_nb_summary_trgm`（`find_sources` 元数据腿的摘要腿，与 `idx_sources_nb_title_file_trgm` 同形的 partial GIN trgm；只有本脚本 `--apply` 建过才存在，没有它查询照样正确，实测见 `docs/superpowers/plans/2026-10-28-find-sources-measurement.md`）、批 9（迁移 0086）两条来源元素阅读顺序接替索引 `idx_source_elements_reading_order` / `idx_source_elements_type_reading_order`（键里带元素序号位数表达式，超过 9 999 个元素的来源按原文顺序读；取代的 `idx_source_elements_source_created` / `idx_source_elements_source_type` 要在迁移前 `DROP INDEX CONCURRENTLY`，见部署文档）——是否
@@ -657,6 +689,7 @@ timeout 与熔断跳过次数；KG 词法补充另按状态分开统计实际执
 | `qiefen_cv.py` | LLM 原子选择器的交叉验证评测 |
 | `kg_quality_audit.py` | 审计现有库的 KG 抽取质量:类型构成 / 重名率 / 文档频次长尾 / 噪声探针 / 连通性(只读、零 LLM),见下 |
 | `kg_findings_rehearsal.py` | 图谱分析「问题清单」的**生产只读演练**(规格 §14③):在一个 PostgreSQL 笔记本上跑产品同一套规则引擎,量出定阈值要看的分布与各阶段耗时/RSS;只读、默认不输出标题和概念名,见下 |
+| `auto_memory_stats.py` | 自动用户记忆建议的**只读零内容统计**(规格 §7.1):按信号类 × 状态计数、漏斗(原样采纳 / 编辑后采纳 / 忽略 / 过期 / 待处理)、采纳后 30 天弃用率、后台作业终态分布、回答引用次数(取自 `answers.payload.citations[].memory_id`);只出计数、类别与码,不出标题/正文/记忆 id。`--db <SQLite 文件>` 或 `--database-url <PostgreSQL URL>` 二选一,连接只读;可选 `--notebook-id`、`--since`。判据全文见脚本 docstring |
 | `validate_concept_filter.py` | 离线试跑 concept 噪声过滤(无 LLM/不写库) |
 | `validate_overmerge_fix.py` | 验证 concept 去过度合并 |
 | `shadow_sqlite_to_postgres.py` | 显式 SQLite→PostgreSQL 正向 shadow CLI：`preflight` / `start-forward` / `status` / `verify` / 前台 `worker`；单独设置 `SHADOW_DATABASE_URL` 不会启动同步，且不得与停写 importer 共用目标库，完整 runbook 见 `docs/operations_zh.md` |
@@ -839,6 +872,19 @@ PYTHONPATH=backend python3 scripts/kg_findings_rehearsal.py \
   (服务器地址、socket 路径、SQL 片段)一概不输出;阶段进度行只有阶段名、耗时与 RSS。
 
 ---
+
+### `auto_memory_stats.py` —— 只读系统记忆建议统计
+
+```bash
+python scripts/auto_memory_stats.py --db .local/silicon_notebook.db
+python scripts/auto_memory_stats.py --database-url "$DATABASE_URL" --notebook-id nb-xxx --since 2026-10-01
+```
+
+两个数据库参数二选一；脚本只读、零模型，不输出正文或记忆 id。JSON 包含按信号 / 状态计数、
+采纳 / 忽略 / 过期漏斗、成熟的弃用观察队列、作业 outcome / 原因码及回答引用卡计数。
+未形成引用卡的检索命中和已删除记忆的历史无法追溯；SQLite `--since` 回答时间过滤的混合
+时区边界也有已登记限制。口径、运行排查和限制见[自动记忆建议运维](../docs/operations_zh.md#自动记忆建议运维)，
+默认预算与算法数值见[产品契约](../docs/product-and-api_zh.md#自动用户记忆建议)。
 
 ## 常见坑
 - **后端无 `--reload`**:改了 `.env` 或后端代码,必须 `backend.sh restart` 才生效。

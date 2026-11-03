@@ -23,6 +23,7 @@ import {
   EXIT_CHANGED_TO_EMPTY_TEXT,
   EXIT_UNAVAILABLE_TEXT,
   EXIT_WAIT_FOR_EXPORT_TEXT,
+  exitDeletionText,
 } from "./notebook-exit-copy.ts";
 import { placePanel } from "./notebook-exit-placement.ts";
 import { DestinationPicker } from "./transfer-picker.tsx";
@@ -89,11 +90,12 @@ function ExitDialog({ exit }: { exit: NotebookExit }) {
     onEscape: exit.closeTransfer,
   });
 
-  const empty = flow.count === 0;
+  const hasMemories = flow.count > 0;
+  const empty = !hasMemories && (flow.suggestionCount ?? 0) === 0;
   // 本笔记本的导出还在进行:退出和转移都要等它完成(导出按页读取,先删/先移走会让文件
   // 缺掉后面的记忆)。取消不受影响。
   const waitingForExport = exit.exporting && !flow.leaving;
-  const locked = flow.leaving || flow.recounting || flow.transfer !== "idle" || exit.exporting;
+  const locked = flow.leaving || flow.recounting || flow.needsSuggestionRecount || flow.transfer !== "idle" || exit.exporting;
   const exportClass = exit.exportResult === "copied"
     ? "sort-button copy-result-copied"
     : exit.exportResult === "failed"
@@ -111,7 +113,7 @@ function ExitDialog({ exit }: { exit: NotebookExit }) {
     : flow.transfer === "working"
       ? "正在转移…"
       : "转移到其他笔记本";
-  const showHint = flow.phase === "confirm" && !empty;
+  const showHint = flow.phase === "confirm" && hasMemories;
 
   return (
     <>
@@ -120,7 +122,7 @@ function ExitDialog({ exit }: { exit: NotebookExit }) {
         className="notebook-exit-panel"
         role="dialog"
         aria-modal="true"
-        aria-label="退出共享"
+        aria-label={flow.label}
         aria-describedby={showHint ? `${leadId} ${hintId}` : leadId}
         tabIndex={-1}
       >
@@ -138,9 +140,7 @@ function ExitDialog({ exit }: { exit: NotebookExit }) {
         {flow.phase === "confirm" && (
           <>
             <p id={leadId} className="notebook-exit-lead">
-              {empty
-                ? "你在这个笔记本里已经没有记忆了。"
-                : `退出后，你在这个笔记本里的 ${flow.count} 条记忆会被永久删除，无法恢复。`}
+              {flow.needsSuggestionRecount ? "正在重新核对退出后将删除的记忆与系统建议数量…" : exitDeletionText(flow.count, flow.suggestionCount ?? 0)}
             </p>
             {showHint && (
               <p id={hintId} className="notebook-exit-hint">可以先把它们转移到你的其他笔记本，或导出为文件保存。</p>
@@ -152,7 +152,7 @@ function ExitDialog({ exit }: { exit: NotebookExit }) {
             )}
             {flow.notice && <p className="notebook-exit-hint" role="status">{flow.notice}</p>}
             {flow.failure && <p className="notebook-exit-error" role="alert">{flow.failure}</p>}
-            {!empty && (
+            {hasMemories && (
               <div className="notebook-exit-actions">
                 <button
                   type="button"
@@ -172,7 +172,7 @@ function ExitDialog({ exit }: { exit: NotebookExit }) {
                 </button>
               </div>
             )}
-            {!empty && exit.exportFailureReason && (
+            {hasMemories && exit.exportFailureReason && (
               <p className="notebook-exit-error" role="alert">{exit.exportFailureReason}</p>
             )}
           </>
@@ -195,7 +195,7 @@ function ExitDialog({ exit }: { exit: NotebookExit }) {
               disabled={locked}
               onClick={exit.confirm}
             >
-              {flow.leaving ? (flow.verifying ? "正在确认…" : "正在退出…") : empty ? "退出共享" : "确认退出并删除"}
+              {flow.leaving ? (flow.verifying ? "正在确认…" : "正在退出…") : empty ? flow.label : "确认退出并删除"}
             </button>
           )}
         </div>

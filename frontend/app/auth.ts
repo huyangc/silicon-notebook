@@ -22,6 +22,7 @@ export type AuthUser = {
   // 旧后端缺这个字段；normalizeUiMode 在每个写入点兜底成 "auto"，所以这里存的
   // 永远是已归一化的合法值，读取侧不必再判空/判非法。
   ui_mode: UiMode;
+  memory_mode: MemoryMode;
   // Agentic Memory P3（T6/T9）：检索/回答风格偏好文档。`unknown`——这是后端
   // `Dict[str, Any]` 的宽松 wire 类型（`{version, fields: {field: {value,
   // origin, updated_at}}}` 或 `null`），消费方必须经
@@ -29,6 +30,12 @@ export type AuthUser = {
   // 假装它是已经校验过的强类型。
   search_profile: unknown;
 };
+
+export type MemoryMode = "manual" | "suggest";
+
+export function normalizeMemoryMode(value: unknown): MemoryMode {
+  return value === "suggest" ? "suggest" : "manual";
+}
 
 /** Public, deployment-selected authentication surface.  The provider's private
  * protocol never crosses this boundary; the browser only receives a generic
@@ -61,9 +68,13 @@ export const LOCAL_AUTH_CAPABILITIES: AuthCapabilities = {
   provider_label: "",
 };
 
-/** fetchMe / updateUiMode 的响应体归一化——两处都要把后端 ui_mode 收敛成合法值。 */
+/** 所有身份响应共用的模式归一化；旧后端缺字段时保留安全默认值。 */
 function normalizeAuthUser(raw: AuthUser): AuthUser {
-  return { ...raw, ui_mode: normalizeUiMode((raw as { ui_mode?: unknown }).ui_mode) };
+  return {
+    ...raw,
+    ui_mode: normalizeUiMode((raw as { ui_mode?: unknown }).ui_mode),
+    memory_mode: normalizeMemoryMode((raw as { memory_mode?: unknown }).memory_mode),
+  };
 }
 
 const USERNAME_RE = /^[a-z][0-9]{8}$/;
@@ -231,6 +242,25 @@ export async function updateUiMode(mode: UiMode): Promise<AuthUser> {
     body: JSON.stringify({ ui_mode: mode }),
   });
   return normalizeAuthUser(user);
+}
+
+export type MemoryModeResponse = { user: AuthUser; deleted_suggestion_count: number };
+
+/** 切换本人记忆建议模式；由调用方把返回的完整用户档案写回当前用户状态。 */
+export async function setMemoryMode(
+  mode: MemoryMode,
+  deleteUnadopted = false,
+): Promise<MemoryModeResponse> {
+  const result = await requestJson<MemoryModeResponse>("/me/memory-mode", {
+    tag: "auth",
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ memory_mode: mode, delete_unadopted: deleteUnadopted }),
+  });
+  if (!Number.isSafeInteger(result.deleted_suggestion_count) || result.deleted_suggestion_count < 0) {
+    throw new TypeError("记忆建议切换结果格式无效");
+  }
+  return { user: normalizeAuthUser(result.user), deleted_suggestion_count: result.deleted_suggestion_count };
 }
 
 /** PATCH /me/search-profile——自助编辑「我的回答偏好」，返回更新后的完整用户

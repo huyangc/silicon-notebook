@@ -142,7 +142,7 @@ class HotpathIndexSpec:
     # 顺序是 builder 先行 CONCURRENTLY、迁移收尾落账——没有前置列,builder
     # 在未迁移的库上必然 42703。结构化而非裸 SQL(内评 P2):裸串靠
     # search_path 解析,--schema 非 public 时会把列加错表;守卫钉住 coldef
-    # 只许简单「类型 [NOT NULL DEFAULT 常量]」形态,防演化成第二个迁移器。
+    # 只许简单「类型 [COLLATE "C"] [NOT NULL DEFAULT 常量]」形态,防演化成第二个迁移器。
     prerequisites: tuple[tuple[str, str, str], ...] = ()
 
     def column_list_sql(self) -> str:
@@ -634,6 +634,27 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
         collations=("pg_catalog:C", "pg_catalog:C", "", "", "pg_catalog:C"),
         serves="typed-collection keyset enumeration in reading order + per-type element counts as an Index Only Scan (replaces idx_source_elements_source_type)",
     ),
+    # Batch 10 (0087): the auto-memory worker's two owner/notebook sample
+    # walks. Existing creator-activity ordering uses COALESCE(created_at),
+    # so it cannot stop these raw-created_at walks before sorting the owner.
+    HotpathIndexSpec(
+        name="idx_ask_jobs_memory_suggest_sample",
+        table="ask_jobs",
+        columns=("created_by", "notebook_id", "created_at", "id"),
+        predicate="status = 'done' AND submitted_via = 'web' AND output = 'answer' AND report_id = ''",
+        predicate_shape="status = 'done'::text AND submitted_via = 'web'::text AND output = 'answer'::text AND report_id = ''::text",
+        opclasses=("pg_catalog:text_ops", "pg_catalog:text_ops", "pg_catalog:timestamptz_ops", "pg_catalog:text_ops"),
+        collations=("pg_catalog:C", "pg_catalog:C", "", "pg_catalog:C"),
+        # The builder runs before migration, including on pre-0054 databases.
+        # Match the sealed column migrations exactly: unknown historical
+        # submission surfaces must remain unknown rather than becoming web.
+        prerequisites=(
+            ("ask_jobs", "submitted_via", 'text COLLATE "C" NOT NULL DEFAULT \'\''),
+            ("ask_jobs", "output", 'text COLLATE "C" NOT NULL DEFAULT \'answer\''),
+            ("ask_jobs", "report_id", 'text COLLATE "C" NOT NULL DEFAULT \'\''),
+        ),
+        serves="owner-bound clarified ascending and repeated descending auto-memory sampling, with LIMIT stopping in the index",
+    ),
 )
 
 
@@ -691,7 +712,14 @@ def _index_row(connection, schema: str, name: str):
 
 
 def _normalized_expr(value: str) -> str:
-    return " ".join((value or "").lower().replace("::text", "").split())
+    # SQL keywords/cast spelling are case-insensitive; quoted values are not.
+    # In particular status='DONE' is not the status='done' partial index a
+    # reader needs. Preserve literal whitespace and ::text inside literals too.
+    pieces = re.split(r'''('(?:''|[^'])*'|"(?:""|[^"])*")''', value or "")
+    return "".join(
+        piece if index % 2 else re.sub(r"\s+", " ", piece.lower().replace("::text", ""))
+        for index, piece in enumerate(pieces)
+    ).strip()
 
 
 def _matches_shape(row, spec: HotpathIndexSpec) -> bool:

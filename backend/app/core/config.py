@@ -1434,6 +1434,84 @@ class Settings(BaseSettings):
     # 同样的样本,不是证据被虚增。
     retrieval_experience_notebook_trigger: int = Field(
         10, ge=1, validation_alias="RETRIEVAL_EXPERIENCE_NOTEBOOK_TRIGGER")
+    # Collaboration process-local bounds, adaptive poll intervals and local
+    # activity retention. This feature deliberately has no deployment toggle.
+    collab_pulse_interval_seconds: int = Field(15, ge=1, validation_alias="COLLAB_PULSE_INTERVAL_SECONDS")
+    collab_pulse_slow_intervals: str = Field("30,60", validation_alias="COLLAB_PULSE_SLOW_INTERVALS")
+    collab_pulse_pool_wait_slow_ms: float = Field(50, ge=0, validation_alias="COLLAB_PULSE_POOL_WAIT_SLOW_MS")
+    collab_pulse_pool_wait_very_slow_ms: float = Field(200, ge=0, validation_alias="COLLAB_PULSE_POOL_WAIT_VERY_SLOW_MS")
+    collab_pulse_ring_size: int = Field(64, ge=1, validation_alias="COLLAB_PULSE_RING_SIZE")
+    collab_pulse_max_notebooks: int = Field(2000, ge=1, validation_alias="COLLAB_PULSE_MAX_NOTEBOOKS")
+    notebook_activity_retention_days: int = Field(90, ge=1, validation_alias="NOTEBOOK_ACTIVITY_RETENTION_DAYS")
+    notebook_activity_panel_limit: int = Field(50, ge=1, validation_alias="NOTEBOOK_ACTIVITY_PANEL_LIMIT")
+    notebook_activity_queue_size: int = Field(256, ge=1, validation_alias="NOTEBOOK_ACTIVITY_QUEUE_SIZE")
+
+    @model_validator(mode="after")
+    def validate_collab_pulse_intervals(self):
+        try:
+            intervals = tuple(int(value) for value in self.collab_pulse_slow_intervals.split(","))
+        except ValueError:
+            raise ValueError("COLLAB_PULSE_SLOW_INTERVALS requires two increasing positive integers") from None
+        if len(intervals) != 2 or not self.collab_pulse_interval_seconds < intervals[0] < intervals[1]:
+            raise ValueError("COLLAB_PULSE_SLOW_INTERVALS must increase above COLLAB_PULSE_INTERVAL_SECONDS")
+        if self.collab_pulse_pool_wait_slow_ms >= self.collab_pulse_pool_wait_very_slow_ms:
+            raise ValueError("COLLAB_PULSE_POOL_WAIT thresholds must increase")
+        return self
+
+    # 自动用户记忆(设计 2026-10-28,D1–D21):部署级总开关只决定「用户能不能把
+    # 记忆模式切到 suggest」。判据只有一处——``memory_suggest_wiring.
+    # memory_suggest_wiring_active``,观察者端口、job、API 与 /system/config 共用;
+    # 关掉即开关隐藏、端口与 job 全停、零额外查询。**过期清扫不看它**(G11):
+    # 已有的未处理建议照常 30 天过期,与「留在记忆页由用户处理」一致。
+    auto_memory_suggest_enabled: bool = Field(
+        True, validation_alias="AUTO_MEMORY_SUGGEST_ENABLED")
+    # 按信号类各一把开关(D11):关掉某一类即取样与触发都不再产出这一类;全部关闭
+    # 时观察者端口与部署开关关闭同样直接返回、零写入(G26)。
+    auto_memory_suggest_clarified_enabled: bool = Field(
+        True, validation_alias="AUTO_MEMORY_SUGGEST_CLARIFIED_ENABLED")
+    auto_memory_suggest_repeated_enabled: bool = Field(
+        True, validation_alias="AUTO_MEMORY_SUGGEST_REPEATED_ENABLED")
+    auto_memory_suggest_corrected_enabled: bool = Field(
+        True, validation_alias="AUTO_MEMORY_SUGGEST_CORRECTED_ENABLED")
+    # 以下全是成本与预算(G9),算法定义的常量在 ``memory_suggest_contracts``。
+    # 一律 ``ge=1``:0 要么让每次提问都排一次模型调用(触发),要么让特性开着却
+    # 永远不产出(其余各项),两者都不是「更保守」。确切取值只登记在
+    # docs/product-and-api*.md。
+    # 触发:本人在本库每累计这么多次网页提问排一次 job(带澄清答复的提问直接达阈)。
+    auto_memory_suggest_trigger: int = Field(
+        5, ge=1, validation_alias="AUTO_MEMORY_SUGGEST_TRIGGER")
+    # 积压闸:本人在本库未采纳的系统建议待确认数达到它即零调用。
+    auto_memory_suggest_backlog_max: int = Field(
+        5, ge=1, validation_alias="AUTO_MEMORY_SUGGEST_BACKLOG_MAX")
+    # 每人每天(UTC 日、跨库合计)模型调用上限,条件 UPDATE 预占。
+    auto_memory_suggest_daily_cap: int = Field(
+        3, ge=1, validation_alias="AUTO_MEMORY_SUGGEST_DAILY_CAP")
+    # 每轮送模的信号项上限与写入的新候选上限。
+    auto_memory_suggest_items_per_run: int = Field(
+        8, ge=1, validation_alias="AUTO_MEMORY_SUGGEST_ITEMS_PER_RUN")
+    auto_memory_suggest_candidates_per_run: int = Field(
+        3, ge=1, validation_alias="AUTO_MEMORY_SUGGEST_CANDIDATES_PER_RUN")
+    # 模型输入的四个字符上限:每项问题、每项澄清问答、每项回答节选、整轮合计。
+    # 截断只走这一组字段(取样投影、prompt 渲染共用)。
+    auto_memory_suggest_question_max_chars: int = Field(
+        500, ge=1, validation_alias="AUTO_MEMORY_SUGGEST_QUESTION_MAX_CHARS")
+    auto_memory_suggest_clarification_max_chars: int = Field(
+        500, ge=1, validation_alias="AUTO_MEMORY_SUGGEST_CLARIFICATION_MAX_CHARS")
+    auto_memory_suggest_answer_excerpt_max_chars: int = Field(
+        1500, ge=1, validation_alias="AUTO_MEMORY_SUGGEST_ANSWER_EXCERPT_MAX_CHARS")
+    auto_memory_suggest_input_max_chars: int = Field(
+        8000, ge=1, validation_alias="AUTO_MEMORY_SUGGEST_INPUT_MAX_CHARS")
+    # 单次模型调用的输出 token 上限。
+    auto_memory_suggest_output_max_tokens: int = Field(
+        1024, ge=1, validation_alias="AUTO_MEMORY_SUGGEST_OUTPUT_MAX_TOKENS")
+    # 未处理建议的过期天数(迁为「已忽略」,修订原因 expired)与负缓存有效天数。
+    auto_memory_suggest_expiry_days: int = Field(
+        30, ge=1, validation_alias="AUTO_MEMORY_SUGGEST_EXPIRY_DAYS")
+    auto_memory_suggest_declined_ttl_days: int = Field(
+        30, ge=1, validation_alias="AUTO_MEMORY_SUGGEST_DECLINED_TTL_DAYS")
+    # 过期清扫每轮处理的行数上限。
+    auto_memory_suggest_expiry_sweep_limit: int = Field(
+        500, ge=1, validation_alias="AUTO_MEMORY_SUGGEST_EXPIRY_SWEEP_LIMIT")
     # 推理模式(交互式,用户在线等)专用的 per-call LLM 超时/重试,与批量抽取
     # 的全局 openai_compat_* 解耦：单步更短超时 + 更少重试，避免卡死时久等。
     reasoning_timeout_seconds: int = Field(90, validation_alias="REASONING_TIMEOUT_SECONDS")

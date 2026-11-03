@@ -993,8 +993,10 @@ class RepositoryFacade:
     def list_notebook_bases(
         self, notebook_id: str, viewer_id: str | None = None
     ) -> list[dict]:
+        # The owner's `/bases` projection: the only reader of closes_when_shared
+        # (the warning before granting an editor, decision D13).
         return self._runtime.notebook_store.list_mount_edges_for_notebook(
-            notebook_id, viewer_id
+            notebook_id, viewer_id, with_closes_when_shared=True
         )
 
     def mountable_notebooks(self, notebook_id: str) -> list[dict]:
@@ -1203,6 +1205,11 @@ class RepositoryFacade:
     def answer_memory_links(
         self, notebook_id: str, user_id: str, answer_ids: List[str]
     ) -> dict[str, str]:
+        """测试观察点: compatibility for the old links-only projection:
+        read authority, unadopted exclusion and PG plan comparisons. HTTP uses
+        the service's combined links/states view; this root keeps its existing
+        read-only delegates reachable without expanding the facade.
+        """
         return self._runtime.memory_service.answer_memory_links(
             notebook_id, user_id, answer_ids
         )
@@ -1663,8 +1670,12 @@ class RepositoryFacade:
         """
         return self._runtime.source_store.evidence_elements(element_ids)
 
-    def delete_source(self, source_id: str) -> None:
-        return self._runtime.source_ingestion.delete_source_compat(source_id)
+    def delete_source(
+        self, source_id: str, *, uploader_must_be: str | None = None
+    ) -> None:
+        return self._runtime.source_ingestion.delete_source_compat(
+            source_id, uploader_must_be=uploader_must_be
+        )
 
     def extract_source(self, source_id: str) -> None:
         """Public entry to (re-)extract a single source's KG in place. Delegates to
@@ -3082,7 +3093,7 @@ class RepositoryFacade:
     def update_knowhow_cell(
         self, row_id: str, column_id: str, content_md: str, require_assets=(),
         actor: str = "", origin: str = "user",
-    ) -> None:
+    ) -> int:
         return self._runtime.knowhow_store.update_knowhow_cell(
             row_id, column_id, content_md, require_assets,
             actor=actor, origin=origin,
@@ -3091,7 +3102,7 @@ class RepositoryFacade:
     def update_knowhow_cells(
         self, row_ids: list, column_id: str, content_md: str, require_assets=(),
         actor: str = "", origin: str = "user",
-    ) -> None:
+    ) -> int | None:
         return self._runtime.knowhow_store.update_knowhow_cells(
             row_ids, column_id, content_md, require_assets,
             actor=actor, origin=origin,

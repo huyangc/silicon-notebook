@@ -74,6 +74,42 @@ def canonical_of(name: str) -> str:
 EXPECTED_SNAPSHOT = Path(__file__).with_name("fixtures") / "kg_findings_world_expected.json"
 
 
+def check_uploaded_by_me(repo, notebook_id: str, *, postgres: bool) -> None:
+    """``FindingLiveSource.uploaded_by_me`` (share-edit P1, D14), shared by both
+    backends: True only for the requester's own upload of THIS notebook; another
+    user's upload, an unattributed row, a deleted source and an anonymous read are
+    all False; the uploader id never reaches the page."""
+    p = "%s" if postgres else "?"
+    with repo._runtime.database.write() as db:
+        db.execute(f"UPDATE sources SET uploaded_by={p} WHERE id='src-dup-a'", ("u-me",))
+        db.execute(f"UPDATE sources SET uploaded_by={p} WHERE id='src-dup-b'", ("u-other",))
+        db.execute(f"UPDATE sources SET uploaded_by={p} WHERE id='src-off'", ("u-me",))
+        db.execute("UPDATE sources SET uploaded_by=NULL WHERE id='src-broken'")
+    service = repo._runtime.kg_analysis
+
+    def mine(viewer: str) -> Dict[str, bool]:
+        page = service.findings_page(notebook_id, viewer_user_id=viewer)
+        assert "u-me" not in json.dumps(asdict(page), default=str)
+        assert "u-other" not in json.dumps(asdict(page), default=str)
+        return {source["source_id"]: source["uploaded_by_me"]
+                for row in page.rows for source in row["live_sources"]}
+
+    named = ("src-off", "src-dup-a", "src-dup-b", "src-broken")
+    for viewer, expected in (
+        ("u-me", (True, True, False, False)),
+        ("u-other", (False, False, True, False)),
+    ):
+        seen = mine(viewer)
+        assert tuple(seen[source_id] for source_id in named) == expected, viewer
+        # every other source on the page (the core ones) has no uploader recorded
+        assert not any(value for key, value in seen.items() if key not in named), viewer
+    assert set(mine("").values()) == {False}
+    # a deleted source is nobody's (``exists=False``), even if it was mine
+    with repo._runtime.database.write() as db:
+        db.execute("DELETE FROM sources WHERE id='src-off'")
+    assert mine("u-me")["src-off"] is False
+
+
 def hidden_text_served(repo, notebook_id: str) -> List[str]:
     """The ``HIDDEN_ONLY_TEXT`` entries found, case-insensitively and as
     substrings, anywhere in what the findings list serves for the world: every

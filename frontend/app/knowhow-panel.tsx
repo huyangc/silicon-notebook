@@ -60,6 +60,7 @@ import {
   X,
 } from "lucide-react";
 import { requestBlob } from "./api-client.ts";
+import { httpErrorStatus, humanizedError } from "./errors.ts";
 import {
   cellSummary,
   fetchKnowhowTable,
@@ -68,11 +69,15 @@ import {
   addKnowhowRow,
   patchKnowhowCell,
   batchPatchKnowhowCells,
+  knowhowCellConflictError,
+  validMutationSeq,
   knowhowTemplateUrl,
   patchKnowhowColumn,
+  type KnowhowCellConflict,
   type KnowhowHealthFilter,
   type KnowhowTableDetail,
 } from "./knowhow-model.ts";
+import { applyCellValues, useKnowhowCellSync } from "./knowhow-cell-sync.ts";
 import {
   orderColumnsForGrid,
   resolveRowTitleText,
@@ -113,6 +118,9 @@ import { KnowhowRowDrawer } from "./knowhow-row-drawer.tsx";
 import { useKnowhowRowCode } from "./use-knowhow-row-code.ts";
 import { useKnowhowConceptMatrix } from "./use-knowhow-concept-matrix.ts";
 import { useDialogFocus } from "./use-dialog-focus.ts";
+import { useCollabPanelRefresh } from "./use-collab-panel-refresh";
+import { CollabRefreshNotice } from "./collab-refresh-notice";
+import { CollabBar, type CollabBarProps } from "./collab-bar";
 import { transferKnowhowTable, KnowhowSourceCleanupError } from "./knowhow-transfer.ts";
 import { resolveCellCodeView } from "./knowhow-code-logic.ts";
 import {
@@ -132,6 +140,14 @@ export interface KnowhowPanelProps {
   /** notebook 内容写权限（page.tsx 传 `!readOnlyWorkspace`，P2-T2 起含组管理员）：
    * false=无写权，隐藏全部写入口（新建/导入/添加行/管理/重建投影/删除表/失败重试）。 */
   canEdit: boolean;
+  /**
+   * 整表级的破坏性动作（删除整张表、「移动」到别的笔记本、清理变更历史）。分享编辑 P1（决策
+   * D14）：点名编辑者 canEdit 为真，这三样却对他恒 404——只有库主与管理者能做
+   * （`workspaceCapabilities().canDestroyKnowhowTables`）。为 false 时这三个入口不渲染，不给
+   * 一个必然失败的按钮；行/列/格的删除与回退照旧跟 canEdit。缺省 = canEdit（本参数出现之前
+   * 的行为）。
+   */
+  canDestroyTables?: boolean;
   /** 关闭整个面板（page.tsx 用于收起挂载它的 knowhowOpen 态）。 */
   onClose: () => void;
   /** Task 12（引用跳转）：非空时挂载（或这两个 prop 变化时）自动打开该表，
@@ -142,11 +158,15 @@ export interface KnowhowPanelProps {
   initialTableId?: string | null;
   initialRowId?: string | null;
   initialHealthFilter?: KnowhowHealthFilter;
+  collabRevision?: number;
+  collaboration?: Omit<CollabBarProps, "notebookId">;
 }
 
 export function KnowhowPanel({
-  notebookId, apiBase, canEdit, onClose, initialTableId, initialRowId, initialHealthFilter,
+  notebookId, apiBase, canEdit, canDestroyTables: canDestroyTablesProp, onClose, initialTableId, initialRowId,
+  initialHealthFilter, collabRevision = 0, collaboration,
 }: KnowhowPanelProps) {
+  const canDestroyTables = canEdit && (canDestroyTablesProp ?? true);
   // 三个 owner hook（表列表 / 行代码 / 概念矩阵）各调用一次，用单一标识符持有，
   // 在使用点直接读 `.view.*` 或调命令：不解构、不逐字段摊平，也不把返回对象放进
   // 依赖数组或整体下传（每次渲染都是新对象）。调用位置决定 effect 顺序，是承重
@@ -222,6 +242,7 @@ export function KnowhowPanel({
   const [detail, setDetail] = useState<KnowhowTableDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailMissing, setDetailMissing] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const panelMountedRef = useRef(true);
   useEffect(() => {
@@ -260,6 +281,11 @@ export function KnowhowPanel({
   // Task 11（代码附件）：当前打开的代码查看/编辑浮层——与 cellModal/
   // optimizeRowId 平级的另一个顶层 modal 状态，堆叠在行详情抽屉之上。
   const [codeModal, setCodeModal] = useState<{ rowId: string; columnId: string } | null>(null);
+  const collabRefreshSafe = !importOpen && !createOpen && !manageOpen && !transferOpen && !appendOpen
+    && !cellModal && !codeModal && !optimizeRowId && !completeRowId && !reformatRowId
+    && !reformatTableOpen && !historyOpen && !confirmDelete && !deleting && !addingRow && !retryingReproject;
+  const collabRefreshSafeRef = useRef(collabRefreshSafe);
+  collabRefreshSafeRef.current = collabRefreshSafe;
 
   // stale-response guard（收尾修复）：loadDetail 与 loadRowCode（在
   // use-knowhow-row-code.ts，同一套写法）都可能被快速
@@ -270,21 +296,40 @@ export function KnowhowPanel({
   // load 回调内部而非仅 effect 内，让 effect 触发与操作后的手动刷新（addRow/
   // retryReproject/handleManageChanged/handleCellSave 等）共用同一套防倒灌。
   const detailRequestRef = useRef(0);
+  // 在途的那一次整表详情请求（null = 没有）。在途期间别的标签页广播来的单元格值先排队，
+  // 等这次请求落定（结果已 setDetail）再叠上去——否则请求带回的旧快照会把广播值覆盖掉，
+  // 下一次保存就会撞上本浏览器自己写的值（分享编辑 P1，D7；见 knowhow-cell-sync.ts）。
+  // 落定的那一刻由 useKnowhowCellSync 交出的 settleDetailRequest 收尾（hook 在下方才调用，
+  // 经 ref 接线）。
+  const detailInFlightRef = useRef<number | null>(null);
+  const settleDetailRequestRef = useRef<() => void>(() => undefined);
   const loadDetail = useCallback(
-    async (tableId: string): Promise<KnowhowTableDetail | null> => {
+    async (tableId: string, options?: { preserveViewOnFailure?: boolean; guard?: () => boolean; onMissing?: () => void }): Promise<KnowhowTableDetail | null> => {
       const requestId = ++detailRequestRef.current;
+      detailInFlightRef.current = requestId;
       setDetailLoading(true);
       setDetailError(null);
+      setDetailMissing(false);
       try {
         const data = await fetchKnowhowTable(notebookId, tableId);
-        if (detailRequestRef.current !== requestId) return null;
+        if (detailRequestRef.current !== requestId || (options?.guard && !options.guard())) return null;
         setDetail(data);
         return data;
-      } catch {
-        if (detailRequestRef.current === requestId) setDetailError("加载表格详情失败，请重试");
+      } catch (error) {
+        if (detailRequestRef.current === requestId && (!options?.guard || options.guard())) {
+          if (httpErrorStatus(error) === 404) {
+            setDetailMissing(true);
+            options?.onMissing?.();
+          } else if (!options?.preserveViewOnFailure) setDetailError("加载表格详情失败，请重试");
+        }
         return null;
       } finally {
         if (detailRequestRef.current === requestId) setDetailLoading(false);
+        // 成功、失败、被作废都算落定；被更晚的请求接替时不收尾（排队留给那一次）。
+        if (detailInFlightRef.current === requestId) {
+          detailInFlightRef.current = null;
+          settleDetailRequestRef.current();
+        }
       }
     },
     [notebookId],
@@ -347,6 +392,7 @@ export function KnowhowPanel({
     setSelectedTableId(null);
     setDetail(null);
     setDetailError(null);
+    setDetailMissing(false);
     setActionError(null);
     setQuery("");
     setOpenRowId(null);
@@ -432,19 +478,21 @@ export function KnowhowPanel({
   // Task 12：目标表/行是否陈旧——只在「当前选中的表就是这次跳转的目标表」时
   // 判定，避免用户跳转后又手动切到别的表时被这两个陈旧的 prop 值误伤。
   useEffect(() => {
-    if (!initialTableId || selectedTableId !== initialTableId) return;
-    if (detailError) {
-      // 表本身加载失败，大概率已被删除——回退列表而不是留在一个「重试」也
-      // 无法恢复的死胡同页面。
-      setJumpNotice("未能定位到引用指向的表格，它可能已被删除。");
+    if (detailMissing && collabRefreshSafe) {
+      // Only an authoritative 404 proves the table left this notebook.
+      // Temporary read failures retain the selection and any existing draft.
+      setJumpNotice(selectedTableId === initialTableId
+        ? "未能定位到引用指向的表格，它可能已被删除。"
+        : "这张表已被删除或移出当前笔记本。");
       backToList();
       return;
     }
+    if (!initialTableId || selectedTableId !== initialTableId) return;
     if (detail === supersededDetailRef.current) return; // 正在重拉，见声明处注释（失败仍走上面的回退）
     if (detail && initialRowId && !detail.rows.some((row) => row.id === initialRowId)) {
       setJumpNotice("引用指向的行未找到，可能已被删除或调整，已为你展开整表内容。");
     }
-  }, [detail, detailError, initialRowId, initialTableId, selectedTableId]);
+  }, [detail, detailMissing, collabRefreshSafe, initialRowId, initialTableId, selectedTableId]);
 
   function openTable(tableId: string, citedRowId?: string | null) {
     // 重开的就是当前这张表（引用跳转换到本表的另一行，S6）：拉详情 effect 只跟
@@ -456,6 +504,7 @@ export function KnowhowPanel({
     if (!reopening) {
       setDetail(null);
       setDetailError(null);
+      setDetailMissing(false);
       // 渲染时的选中值恰好就是这个 id（同一批先清空再选回）：两次提交之间 selectedTableId
       // 没变，拉详情 effect 不会重跑，只能在这里拉。正常换表时两者不等，照旧交给 effect。
       if (tableId === selectedTableId) loadDetail(tableId);
@@ -504,6 +553,7 @@ export function KnowhowPanel({
     setSelectedTableId(null);
     setDetail(null);
     setDetailError(null);
+    setDetailMissing(false);
     setActionError(null);
     setTransferNotice(null);
     // 刻意不清 deleteNotice：它让用户回列表重新打开那张表，回列表时还得看得见。
@@ -834,13 +884,15 @@ export function KnowhowPanel({
   // 注释），用这个长度判断选路径，避免再把 group 塞进第二个条件表达式（TS
   // 无法把 isBatch 变量的窄化跨表达式传回 group 本身）。
   //
-  // 并发防护（P1-b）：`expectedByRowId` 仅由**批量规整保存**传入（rowId ->
+  // 并发防护（P1-b）：`expectedByRowId` 由**批量规整保存**传入（rowId ->
   // 建批次那一刻该格的 originalMd 快照），触发**服务端事务内**比对——当前落库内容
-  // 与基线不一致就 409 拒写（nothing written），fan-out 整组 all-or-nothing。手动
-  // 格子编辑器（onSave）与「优化整行」接受（onAcceptCell）**不传**（undefined），
-  // 保持既有 last-write-wins：那是真人在主动编辑，不该被自己更早的快照挡下（本
-  // 修复刻意不改这条流的语义）。基线按 targets 顺序平行下发；某写目标缺基线时退化
-  // 成 ""（几乎必然判陈旧、保守跳过，不盲写）。
+  // 与基线不一致就 409 拒写（nothing written），fan-out 整组 all-or-nothing。分享编辑
+  // P1（决策 D7）起，手动格子编辑器（onSave）与「优化整行」接受（onAcceptCell）也带：
+  // 它们经 saveCellGuarded 进来，基线是打开编辑器/浮层时钉住的**存储值**、每次保存
+  // 成功后用响应里的写后值前移（knowhow-cell-sync.ts）——同一个人连续保存不会被自己
+  // 更早的快照挡下，这正是改动前 last-write-wins 想保住的那一点。只剩格子历史「恢复
+  // 此版本」不传、保持 last-write-wins。基线按 targets 顺序平行下发；某写目标缺基线时
+  // 退化成 ""（几乎必然判陈旧、保守跳过，不盲写）。
   //
   // 并发防护（P1 round-4）：`anchorGuard` 也仅由**批量规整保存**传入（快照 anchor 列
   // id + rowId -> 建批次那刻该行 anchor 快照值）——后端在同一事务内额外重读每行 anchor 列，
@@ -852,13 +904,14 @@ export function KnowhowPanel({
   // join 该 anchor 组，就只写原行、悄悄把已共享的组留成不一致（round-5 为多目标关掉的同类结构
   // 漂移，单例组漏在门外）。runSave 侧 `coversAnchorGroup` 门保证 anchorGuard 只对**整组写**
   // （合并共享列扇写 / 单例组）下发，故「带 anchorGuard ⟺ 该走 guarded 端点」恒成立；多行组的
-  // **非共享列**是有意子集写、不带守卫，仍走单格端点。**手动格子编辑 / 优化整行**不带 anchorGuard、
-  // 单目标恒落单格端点（无组可离、last-write-wins），逐字不变。
+  // **非共享列**是有意子集写、不带守卫，仍走单格端点。**手动格子编辑 / 优化整行**（D7，经
+  // saveCellGuarded）只在合并共享格扇写整组时带 anchorGuard，单目标恒落单格端点（无组可离），
+  // 带 expected_before。
   // origin（knowhow 表版本管理 Task 16 评审修复）：格子历史「恢复此版本」、
   // 手动编辑、批量规整保存共用这同一个函数——各流唯一的区别是变更流水上要留
   // 下什么 origin，不是"要不要走 anchor 分组批量写判定"（那套判定一视同仁）。
   // 省略时不进请求体、退回后端默认 "user"：手动编辑器与「优化整行」接受
-  // （onAcceptCell）既有调用点字节不变（真人在编辑，last-write-wins）。显式传
+  // （onAcceptCell，经 saveCellGuarded）不传。显式传
   // origin 的两条：① 恢复（本文件 KnowhowCellHistory 挂载处）传 "revert"；
   // ② **批量规整**（KnowhowReformatBatchModal 的 onSaveCell）传 "llm_reformat"
   // ——它是自动保存 LLM 规整结果的循环，不是人手一格复核，必须留下真实来源，
@@ -881,9 +934,9 @@ export function KnowhowPanel({
     //    全写、绝不从实时 detail 重算分组**。否则：detail 在弹窗打开期间刷新、某 anchor
     //    组分裂/合并时，规划校验的是旧成员、回调却按新分组只扇写代表行，保存循环仍把
     //    旧成员整组标 saved = 漏写却报成功。规划与扇写必须同源于同一份冻结快照。
-    //  · 手动格子编辑（onSave）/「优化整行」接受（onAcceptCell）**不传**——退回从
-    //    **实时** detail 重算分组的既有行为：那是真人在当前表上编辑，本就该按眼前的
-    //    分组扇写（与改动前逐字一致）。`group` 仅这条缺省路径会消费（批量路径照用显式
+    //  · 手动格子编辑（onSave）/「优化整行」接受（onAcceptCell）经 saveCellGuarded 传入的
+    //    写目标同样按**实时** detail 算（cellWriteTargets，与下面这行缺省分组同一判定）：
+    //    那是真人在当前表上编辑，本就该按眼前的分组扇写；格子历史恢复不传、走缺省。`group` 仅这条缺省路径会消费（批量路径照用显式
     //    写目标、不看它；仍无条件求值，成本等同改动前、无回归）。
     // 权威裁决在服务端：带守卫的批量写在**同一事务内逐行**校验成员归属 + expected_before，
     // 任一不符整体 409（nothing written）。故即便快照规划的写目标之一已被他人真正改动，
@@ -901,8 +954,8 @@ export function KnowhowPanel({
     //    精确相等 + expected_before」三重校验——否则**单例组**（建批次那刻仅一行、只有一个写目标）
     //    会走单格端点、无成员校验：若之后有兄弟行 join 该 anchor 组，只写原行、悄悄把已共享的组留成
     //    不一致（正是 round-5 为多目标单元关掉的同一类结构漂移，单例组此前漏在门外）。成员漂移即整批
-    //    409 → 落既有 stale-skip。**手动格子编辑 / 优化整行**不带 anchorGuard（也不带 targetRowIds），
-    //    单目标恒落下面的单格端点，逐字不变（last-write-wins，无组可离）。
+    //    409 → 落既有 stale-skip。**手动格子编辑 / 优化整行**（D7）只在合并共享格扇写整组时带
+    //    anchorGuard（打开编辑器时钉住的各行锚定值），单目标恒落下面的单格端点（无组可离）。
     const useBatchEndpoint = targets.length > 1 || Boolean(anchorGuard);
     const results = useBatchEndpoint
       ? await batchPatchKnowhowCells(notebookId, selectedTableId, {
@@ -926,7 +979,7 @@ export function KnowhowPanel({
         })
       : [
           // 单格路径：无 anchorGuard 的手动编辑落到这里，不带 anchor 守卫（见上方 split 说明及
-          // handleCellSave 头注释）。expectedBefore 仍随手动编辑的 last-write-wins 语义按需下发。
+          // handleCellSave 头注释）。expectedBefore 有就带（手动编辑 D7、规整），格子历史恢复不带。
           await patchKnowhowCell(
             notebookId,
             selectedTableId,
@@ -937,22 +990,25 @@ export function KnowhowPanel({
             origin,
           ),
         ];
-    setDetail((prev) => {
-      if (!prev) return prev;
-      const resultByRowId = new Map(results.map((result) => [result.rowId, result]));
-      return {
-        ...prev,
-        rows: prev.rows.map((row) => {
-          const result = resultByRowId.get(row.id);
-          if (!result) return row;
-          return {
-            ...row,
-            cells: { ...row.cells, [result.columnId]: result.contentMd },
-            projectionStatus: result.projectionStatus,
-          };
-        }),
-      };
-    });
+    // 写后存储值：前移基线并广播。旧访问的回包不能合并到用户后来重开的表上。
+    const accepted = knowhowCellSync.recordStored(results);
+    if (!accepted) return;
+    const needsLegacyRead = results.some((result) => !validMutationSeq(result.mutationSeq)
+      && (validMutationSeq(detail.mutationSeq) || validMutationSeq(detail.cellMutationSeqs?.[result.rowId]?.[result.columnId])));
+    if (needsLegacyRead) {
+      // Older servers already expose a table revision, but not a saved-cell
+      // revision. Never tag that unversioned result as a new commit or broadcast
+      // it over known data. Only this compatibility path needs a fresh read.
+      const fresh = await loadDetail(selectedTableId, { preserveViewOnFailure: true });
+      if (!fresh || !validMutationSeq(fresh.mutationSeq)) {
+        throw humanizedError("保存已完成，但最新内容暂时无法确认，当前编辑内容仍保留");
+      }
+      const conflict = knowhowCellSync.reconcileLegacyStored(results, fresh);
+      if (conflict) throw knowhowCellConflictError(conflict);
+    } else {
+      if (accepted.length === 0) return;
+      setDetail((prev) => prev && prev.id === selectedTableId ? applyCellValues(prev, accepted) : prev);
+    }
     // 收尾修复（浏览器 QA 实测）：格子内容一变，该格挂着的代码派生在后端立即
     // 转 stale——而保存成功路径此前只合并了格子内容，抽屉 chip / 代码浮层会
     // 一直停留在「已实现」直到重开抽屉。保存命中的行里若包含当前展开行
@@ -962,6 +1018,34 @@ export function KnowhowPanel({
     // 自带请求号 guard，与
     // 快速切行/连续保存并存时旧响应不会倒灌。
     if (openRowId && targets.includes(openRowId)) knowhowRowCode.loadRowCode(openRowId);
+  }
+
+  // 手动保存（格子编辑器「保存」/「保存并下一格」、「优化整行」接受）的乐观校验入口（分享
+  // 编辑 P1，决策 D7）：写目标按当前表数据算（与编辑器头部的分支数提示同源），每个写目标
+  // 带钉住的存储值作 expected_before，合并共享格扇写整组时再带各行钉住的锚定值；`overwrite`
+  // 是冲突提示里的「用我的覆盖」——以 409 时取回的当前值为基线重发。真正的写与结果合并
+  // 仍是 handleCellSave。
+  async function saveCellGuarded(rowId: string, columnId: string, contentMd: string, overwrite?: KnowhowCellConflict) {
+    if (!detail) return;
+    const baseline = knowhowCellSync.baselineFor(detail, rowId, columnId, overwrite);
+    await handleCellSave(
+      rowId, columnId, contentMd, baseline.expectedByRowId, baseline.targetRowIds, baseline.anchorGuard,
+    );
+  }
+
+  // 冲突提示里的「放弃我的」：冲突时服务端回传的就是这些格子此刻的存储值，直接写进表数据
+  // 并前移基线，不再整表重拉。
+  function discardCellConflict(conflict: KnowhowCellConflict) {
+    return knowhowCellSync.adoptCurrent(conflict.current);
+  }
+
+  // 「这一组已被重新分组，请刷新后再编辑」里的「刷新」：重拉整表，钉住的格子改钉到刷新后
+  // 的值（不改钉的话旧锚定值会让下一次保存再撞一次）。
+  async function refreshAfterCellConflict(): Promise<boolean> {
+    const fresh = await reloadTableDetail();
+    if (!fresh) return false;
+    knowhowCellSync.repinFrom(fresh);
+    return true;
   }
 
   // Task 11：打开代码浮层（抽屉 chip 的 onOpen，及"添加代码"安静入口共用同
@@ -1039,6 +1123,34 @@ export function KnowhowPanel({
     ? cellSummary(resolveRowTitleText(codeModalRow, detail.columns), 60) || rowFallbackTitle(codeModalRow.position)
     : "";
 
+  const collabRefresh = useCollabPanelRefresh(collabRevision, collabRefreshSafe,
+    async () => {
+      let missing = false;
+      const [listed, loaded] = await Promise.all([
+        knowhowTableList.loadTables(),
+        selectedTableId ? loadDetail(selectedTableId, {
+          preserveViewOnFailure: true,
+          guard: () => collabRefreshSafeRef.current,
+          onMissing: () => { missing = true; },
+        }) : Promise.resolve(true),
+      ]);
+      return Boolean(listed && (loaded || missing));
+    });
+
+  // 单元格乐观校验的基线与同浏览器标签页同步（分享编辑 P1，决策 D7）：编辑态打开时钉住
+  // 要写的格子、「优化整行」打开时钉住整行，频道按选中表开关。放在概念矩阵之前——它只
+  // 写 detail，不碰矩阵的确认态，矩阵 hook 仍是最后一个 hook。
+  const knowhowCellSync = useKnowhowCellSync({
+    tableId: selectedTableId,
+    detail,
+    setDetail,
+    editingRowId: cellModal?.mode === "edit" ? cellModal.rowId : null,
+    editingColumnId: cellModal?.mode === "edit" ? cellModal.columnId : null,
+    optimizeRowId,
+    detailInFlight: () => detailInFlightRef.current !== null,
+  });
+  settleDetailRequestRef.current = knowhowCellSync.settleDetailRequest;
+
   // 概念矩阵 owner：必须是 return 之前最后一个 hook 调用，让「切概念/关抽屉时复位
   // 删除确认态」的 effect 仍在面板所有 effect 之后执行（搬家前它就在这个位置）。
   // 上方 openTable / backToList / notebook 复位 / 引用跳转 / addBranch 对
@@ -1066,6 +1178,9 @@ export function KnowhowPanel({
           <X size={20} />
         </button>
       </div>
+
+      {collaboration && <CollabBar {...collaboration} notebookId={notebookId} />}
+      <CollabRefreshNotice refresh={collabRefresh} />
 
       {jumpNotice && (
         <div className="knowhow-jump-notice">
@@ -1116,6 +1231,7 @@ export function KnowhowPanel({
             error={detailError}
             actionError={actionError}
             canEdit={canEdit}
+            canDeleteTable={canDestroyTables}
             onDismissActionError={() => setActionError(null)}
             onRetryLoad={() => loadDetail(selectedTableId)}
             query={query}
@@ -1263,7 +1379,9 @@ export function KnowhowPanel({
             columnId={cellModal.columnId}
             rowTitle={cellModalRowTitle}
             affectedBranchCount={cellModalAffectedBranchCount}
-            onSave={handleCellSave}
+            onSave={saveCellGuarded}
+            onDiscardConflict={discardCellConflict}
+            onRefreshConflict={refreshAfterCellConflict}
             onNavigate={(rowId, columnId) => setCellModal({ rowId, columnId, mode: "edit" })}
             onClose={() => setCellModal(null)}
             // 「本行其他格子」点击切换——见 switchCell 定义处注释（保持 mode
@@ -1354,23 +1472,25 @@ export function KnowhowPanel({
           detail={detail}
           onClose={() => setManageOpen(false)}
           onChanged={handleManageChanged}
+          canPruneHistory={canDestroyTables}
         />
       )}
 
       {/* C3：「复制/移动到…」——不像 manageOpen 那样再加 canEdit 门：copy 只需
           对源笔记本有读权限，只读成员也该能把表复制到自己有写权限的另一个
           笔记本（工具栏按钮同理不整体挂在 canEdit 下，见 KnowhowTableGrid）。
-          真正的权限边界收在 allowMove——只有可写源才允许挑「移动」，交给
+          真正的权限边界收在 allowMove——只有管理源的权限才允许挑「移动」，交给
           DestinationPicker 内部据此隐藏移动单选项，与后端 source_check 的
           copy/move 分支（routes.py transfer_knowhow_table）对齐。 */}
       {transferOpen && detail && (
         <DestinationPicker
           sourceNotebookId={notebookId}
-          allowMove={canEdit}
+          // 「移动」会从本库删掉整张表：编辑者没有这一档（D14，后端 404），只给「复制」。
+          allowMove={canDestroyTables}
           // knowhow 表 transfer 的目标走 knowhow:write（admin）——组管理员可管理的共享库
           // 能接收(后端实测 200),故把它们列进候选(P2-T2 评审 P2-4)。
           allowManagedTargets
-          title={`复制/移动表：${detail.title}`}
+          title={`${canDestroyTables ? "复制/移动表" : "复制表"}：${detail.title}`}
           onCancel={() => setTransferOpen(false)}
           onSubmit={async (targetNotebookId, mode) => {
             try {
@@ -1453,7 +1573,9 @@ export function KnowhowPanel({
           row={optimizeRow}
           columns={detail.columns}
           rowTitle={optimizeRowTitle}
-          onAcceptCell={handleCellSave}
+          onAcceptCell={saveCellGuarded}
+          onDiscardConflict={discardCellConflict}
+          onRefreshConflict={refreshAfterCellConflict}
           onClose={() => setOptimizeRowId(null)}
         />
       )}

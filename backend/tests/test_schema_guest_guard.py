@@ -128,6 +128,8 @@ SCHEMA_OWNERS = {
         "write benchmark on its own explicit database path",
     "scripts/bench_scale_build_paging.py::_repository":
         "benchmark that refuses anything but a dedicated *_test database",
+    "scripts/bench_collab_pulse.py::execute":
+        "model-free benchmark creates its own random local PG database and always force-drops it",
     "scripts/measure_sync_capture_cost.py::_measure_sqlite":
         "cost measurement on its own bench database",
     "scripts/measure_sync_capture_cost.py::_measure_postgres":

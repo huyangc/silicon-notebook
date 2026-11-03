@@ -513,9 +513,6 @@
   "backend/app/repositories/postgres/governance_store.py": {
     "I001": 1
   },
-  "backend/app/repositories/postgres/group_store.py": {
-    "I001": 1
-  },
   "backend/app/repositories/postgres/hotpath_indexes.py": {
     "I001": 1
   },
@@ -616,9 +613,6 @@
     "I001": 1
   },
   "backend/app/repositories/sqlite/governance_store.py": {
-    "I001": 1
-  },
-  "backend/app/repositories/sqlite/group_store.py": {
     "I001": 1
   },
   "backend/app/repositories/sqlite/id_binding.py": {
@@ -3060,9 +3054,6 @@
   "backend/tests/test_w3_auth_sample_plugin.py": {
     "I001": 1
   },
-  "backend/tests/test_world_templates.py": {
-    "I001": 1
-  },
   "backend/tests/test_xlsx_chunk_granularity.py": {
     "I001": 1
   },
@@ -3109,9 +3100,6 @@
     "I001": 1
   },
   "scripts/diag_base_report.py": {
-    "I001": 1
-  },
-  "scripts/diag_db.py": {
     "I001": 1
   },
   "scripts/diag_incident.py": {

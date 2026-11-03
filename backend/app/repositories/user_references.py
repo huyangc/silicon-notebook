@@ -56,11 +56,20 @@ def _blocking(table: str, column: str, label: str, extra_where: str = "") -> Use
 
 
 USER_REFERENCE_COLUMNS: tuple[UserReference, ...] = (
+    UserReference("notebook_activity", "actor_id", "audit_kept"),
     UserReference("auth_sessions", "user_id", "scaffolding"),
     UserReference("user_profiles", "user_id", "scaffolding"),
     UserReference("model_service_status", "user_id", "scaffolding"),
     UserReference("ask_intent_handles", "owner_id", "scaffolding"),
     UserReference("answer_links", "owner_id", "scaffolding"),
+    # Auto user-memory suggestions (SQLite v106 / PostgreSQL 0087): the
+    # per-user switch and daily budget, the single-flight job rows and the
+    # hash-only fingerprints hold switches, counters and hashes -- never a
+    # memory -- so they go with the account and are not migrated (no FK).
+    UserReference("memory_suggest_users", "owner_id", "scaffolding"),
+    UserReference("memory_suggest_read_fences", "owner_id", "scaffolding"),
+    UserReference("memory_suggest_jobs", "owner_id", "scaffolding"),
+    UserReference("memory_suggest_fingerprints", "owner_id", "scaffolding"),
     UserReference("auth_identity_audit", "actor_id", "audit_kept"),
     UserReference("auth_identity_audit", "target_user_id", "audit_kept"),
     _blocking("notebooks", "created_by", "笔记本"),

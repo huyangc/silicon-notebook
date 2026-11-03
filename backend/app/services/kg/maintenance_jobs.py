@@ -19,11 +19,27 @@ import threading
 from typing import Callable, Dict
 
 from app.core.event_logging import EventLogger
+from app.core.request_context import get_request_user
+from app.domain.collaboration import KG_TERMINAL_PULSE_KINDS
 from app.repositories.ports import KgMaintenanceAlreadyRunning
+from app.services.collab_jobs import pulse_touch_for_job
+
+
+def _request_actor() -> "tuple[str, str]":
+    """``(user_id, name)`` of the request starting a pass, read from the request
+    context (zero I/O). The name is what other people are shown -- the display
+    name, falling back to the username, never ``audit_label`` (share-edit P1,
+    spec §5). ``("", "")`` outside a request."""
+    user = get_request_user()
+    if user is None:
+        return "", ""
+    name = str(user.display_name or "").strip() or str(user.username or "").strip()
+    return user.id, name
 
 
 class KgMaintenanceJobs:
     """Coordinate one per-notebook maintenance slot without owning any algorithm."""
+    _collab_touch = None
 
     RELINK_COUNTERS = {
         "isolated_before": 0,
@@ -159,13 +175,22 @@ class KgMaintenanceJobs:
         with self.lock:
             current = self.jobs.get(notebook_id)
             if current is not None and current["status"] == "running":
-                raise KgMaintenanceAlreadyRunning(notebook_id, current["kind"])
+                raise KgMaintenanceAlreadyRunning(
+                    notebook_id, current["kind"],
+                    actor_id=current.get("actor_id", ""),
+                    actor_name=current.get("actor_name", ""),
+                )
             displaced = current   # 终态槽条目——被拒时要放回去,不是删掉
+            actor_id, actor_name = _request_actor()
             job = {
                 "job_id": self._new_id(id_prefix),
                 "notebook_id": notebook_id,
                 "kind": kind,
                 "status": "running",
+                # 发起人(分享编辑 P1):别人撞上这个槽时 409 点名是谁在跑。
+                # status() 只投影计数字段,这两项不出这个进程内登记表。
+                "actor_id": actor_id,
+                "actor_name": actor_name,
                 **counters,
             }
             self.jobs[notebook_id] = job
@@ -180,13 +205,18 @@ class KgMaintenanceJobs:
             raise KgMaintenanceAlreadyRunning(notebook_id, "buildkg")
         return job, displaced
 
-    def active_kind(self, notebook_id: str) -> "str | None":
-        """正在跑的维护种类(无则 None)——build 侧交叉检查用(§2.1)。"""
+    def busy_refusal(self, notebook_id: str) -> "KgMaintenanceAlreadyRunning | None":
+        """The refusal a build-side admission raises while a pass holds the
+        slot: its kind and who started it (share-edit P1). None when idle."""
         with self.lock:
             current = self.jobs.get(notebook_id)
-            if current is not None and current["status"] == "running":
-                return str(current["kind"])
-            return None
+            if current is None or current["status"] != "running":
+                return None
+            return KgMaintenanceAlreadyRunning(
+                notebook_id, str(current["kind"]),
+                actor_id=current.get("actor_id", ""),
+                actor_name=current.get("actor_name", ""),
+            )
 
     def status(
         self, notebook_id: str, kind: str, counters: Dict[str, int]
@@ -226,10 +256,14 @@ class KgMaintenanceJobs:
             job["status"] = status
             if stats:
                 for name in job:
-                    if name in ("job_id", "notebook_id", "kind", "status"):
+                    if name in (
+                        "job_id", "notebook_id", "kind", "status",
+                        "actor_id", "actor_name",
+                    ):
                         continue
                     if name in stats:
                         job[name] = int(stats[name])
+        pulse_touch_for_job(self._collab_touch, notebook_id, "kg" if job.get("kind") == "conflict" else KG_TERMINAL_PULSE_KINDS, job.get("actor_id") or None, job.get("actor_name"))
 
     def start_notebook_relink(
         self, notebook_id: str, *, exempt_build_marker: bool = False

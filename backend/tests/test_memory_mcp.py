@@ -616,7 +616,18 @@ async def test_candidate_is_agent_recallable_across_owner_profiles_but_not_noteb
             hit = next(item for item in recalled["items"] if item["memory_id"] == memory_id)
             assert hit["status"] == "candidate"
             assert hit["unconfirmed"] is True
+            assert "suggested_by_system" not in hit
             assert hit["created_by_agent"] == "Claude Code"
+            with repository()._runtime.database.write() as db:
+                db.execute("UPDATE memory_items SET suggested_signal='repeated' WHERE id=?", (memory_id,))
+            suggested = _payload(await peer.call(
+                "search", {"include": "memory", "query": "kelvin guard-ring"}
+            ))
+            hit = next(item for item in suggested["items"] if item["memory_id"] == memory_id)
+            assert hit["suggested_by_system"] is True
+            assert hit["unconfirmed"] is True
+            formal = _payload(await peer.call("search", {"include": "formal", "query": "kelvin guard-ring"}))
+            assert memory_id not in {item.get("memory_id") for item in formal["items"]}
             mcp_env["service"].confirm_memory(memory_id, mcp_env["alice"].id)
             formal = _payload(await peer.call(
                 "search", {"query": "kelvin guard-ring"}
@@ -5828,6 +5839,55 @@ async def test_knowhow_code_write_is_allowed_in_a_read_only_shared_notebook(
 _MAINTENANCE = ["read", "manage"]
 
 
+@pytest.mark.anyio
+async def test_collaboration_touches_follow_successful_mcp_writes_only(
+    mcp_env, scheduled_jobs, scheduled_kg_jobs, monkeypatch,
+):
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    calls = []
+    monkeypatch.setattr(repo._runtime.collaboration, "touch_for_job", lambda *args: calls.append(args))
+    bind_chat_client(repo, "kg_extract", _KgExtractStub())
+    seeded = _seed_cited_source(repo, notebook_id, "collaboration-reparse")
+    async with OfficialMcpClient(mcp_env["app"], _agent_token(mcp_env, _SOURCE_FULL)) as client:
+        created = _payload(await client.call("add_source", {"title": "协作", "content_md": "共享内容"}))
+        assert not (await client.call("reparse_source", {"source_id": seeded["source_id"]})).isError
+        repo._runtime.source_store.set_status(created["source_id"], "parsed")
+        assert not (await client.call("delete_source", {"source_id": created["source_id"]})).isError
+        assert (await client.call("delete_source", {"source_id": seeded["source_id"]})).isError
+        assert not (await client.call("build", {"target": "kg"})).isError
+    assert [call[:2] for call in calls] == [(notebook_id, "sources")] * 2 + [(notebook_id, ("sources", "knowledge", "kg", "notebook")), (notebook_id, "kg")]
+    assert all(call[2] == mcp_env["alice"].id and call[3] for call in calls)
+    assert repo._runtime.sharing_store.list_recent_activity(notebook_id, 50) == []
+
+
+@pytest.mark.anyio
+async def test_mcp_source_delete_invalidates_derived_surfaces_without_activity_rows(mcp_env, scheduled_jobs):
+    from app.domain.collaboration import PulseActor
+
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    service = repo._runtime.collaboration
+    async with OfficialMcpClient(mcp_env["app"], _agent_token(mcp_env, _SOURCE_FULL)) as client:
+        source = _payload(await client.call("add_source", {"title": "待删除", "content_md": "body"}))["source_id"]
+        repo._runtime.source_store.set_status(source, "parsed")
+        repo.store_kg(notebook_id, source, [{"local_id": "node", "object_type": "concept", "payload": {"name": "removed"}, "evidence": []}], [])
+        cursor = service.pulse.cursor()
+        owner_before = {row["id"] for row in service.pulse.recent_owner_changes(notebook_id, mcp_env["alice"].id)}
+        assert not (await client.call("delete_source", {"source_id": source})).isError
+        result = service.pulse.poll(notebook_id, PulseActor("observer", "observer", "reader"), since=cursor, visible=True)
+        assert {change["kind"] for change in result["changes"]} == {"sources", "knowledge", "kg", "notebook"}
+        owner_records = [row for row in service.pulse.recent_owner_changes(notebook_id, mcp_env["alice"].id) if row["id"] not in owner_before]
+        assert [row["kind"] for row in owner_records] == ["sources"]
+        assert not _source_row_exists(repo, source)
+        with repo._connect() as db:
+            assert db.execute("SELECT COUNT(*) c FROM knowledge_objects WHERE source_id=?", (source,)).fetchone()["c"] == 0
+        cursor = service.pulse.cursor()
+        assert (await client.call("delete_source", {"source_id": source})).isError
+        assert service.pulse.cursor() == cursor
+    assert service.store.list_recent_activity(notebook_id, 50) == []
+
+
 @pytest.fixture
 def scheduled_kg_jobs(monkeypatch):
     """Capture build_kg's background submission instead of running a real
@@ -6150,6 +6210,46 @@ async def test_maintenance_writes_are_refused_in_a_read_only_shared_notebook(
         assert (await client.call("build", {"target": "kg"})).isError
         assert (await client.call("build", {"target": "index", })).isError
 
+    assert scheduled_kg_jobs == []
+
+
+@pytest.mark.anyio
+async def test_named_editor_gets_no_write_through_mcp(mcp_env, scheduled_kg_jobs):
+    """Decision D5 (share-edit P1): a named editor edits in the browser only.
+
+    Bob holds a ``(user, editor)`` grant on Alice's notebook -- the browser
+    lets him add sources and build the graph there -- but the Agent/MCP write
+    gate stays owner-only (``_writable_notebook``), exactly as for a group
+    admin: a long-lived token is a separate credential. Both calls are made to
+    WOULD-SUCCEED (kg_extract configured, base tier) so the refusal is the
+    owner gate's, not a domain refusal."""
+    from app.services.sqlite_repository import _now
+
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebook_grants "
+            "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("grant-mcp-editor", notebook_id, "user", mcp_env["bob"].id, "editor",
+             None, _now()),
+        )
+    assert repo._runtime.sharing.user_can_edit_notebook(notebook_id, mcp_env["bob"].id)
+    bind_chat_client(repo, "kg_extract", _KgExtractStub())
+    _mark_notebook_base_tier(repo, notebook_id)
+    bob_token = _agent_token(
+        mcp_env, _SOURCE_FULL, user="bob",
+        notebook_ids=[notebook_id, _bob_owned_notebook_id(mcp_env)],
+    )
+
+    async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
+        assert _error_code(await client.call("add_source", {
+            "title": "编辑者", "content_md": "编辑者经 MCP 写不进来",
+        })) == "owner_only"
+        assert _error_code(await client.call("build", {"target": "kg"})) == "owner_only"
+
+    assert len(repo.list_sources(notebook_id)) == 0
     assert scheduled_kg_jobs == []
 
 

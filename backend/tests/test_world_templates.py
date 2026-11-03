@@ -17,6 +17,7 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.repositories.ports import UploadedSourceFile
+from app.repositories.sqlite_functions import register_sqlite_functions
 from app.services.sqlite_repository import SQLiteRepository
 from tests import world_templates as wt
 from tests.world_templates import (
@@ -28,7 +29,6 @@ from tests.world_templates import (
     world_env,
     world_template,
 )
-
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "app"
 
@@ -334,6 +334,7 @@ def test_world_whose_wal_cannot_be_checkpointed_is_rejected(tmp_path_factory):
 def _build_running_ask_job(root: Path):
     payload = _build_notebook(root)
     connection = sqlite3.connect(str(root / wt.WORLD_DB_NAME))
+    register_sqlite_functions(connection)
     with connection:
         connection.execute(
             "INSERT INTO ask_jobs (id, notebook_id, status) VALUES (?, ?, 'running')",

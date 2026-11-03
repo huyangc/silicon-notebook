@@ -481,6 +481,7 @@ def compare_plans(repo, captured) -> dict[str, list[dict[str, Any]]]:
 _PK = {"pk_memory_items"}
 _OWNER_NB = {"idx_memory_owner_notebook_status"}
 _AGENT = {"idx_memory_agent_candidate"}
+_UNADOPTED = {"idx_memory_suggest_unadopted"}
 _TRGM = {
     "idx_memory_items_title_trgm",
     "idx_memory_items_content_md_trgm",
@@ -493,7 +494,7 @@ _EXPECTED_INDEXES: dict[str, dict[int, tuple[set[str], set[str]]]] = {
     # The read after the write is the live_only=False existence read now.
     "update_fields": {0: (_PK, _PK)},
     "transition": {0: (_PK, _PK), 1: (_PK, _PK)},
-    "export": {0: (_OWNER_NB, _OWNER_NB), 1: (_OWNER_NB, _OWNER_NB)},
+    "export": {0: (_OWNER_NB, _OWNER_NB), 1: (_UNADOPTED, _UNADOPTED), 2: (_OWNER_NB, _OWNER_NB)},
     # Owner-wide aggregate / options / count / page.
     "list_memories.all": {i: (_AGENT, _AGENT) for i in range(4)},
     "list_memories.notebook": {

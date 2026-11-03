@@ -7,6 +7,7 @@ import anyio
 from mcp.server.fastmcp import Context, FastMCP
 
 from app.services import background_jobs
+from app.services.collab_jobs import pulse_touch_for_mcp
 from app.api.kg_routes import _kg_maintenance_busy
 from app.repositories.ports import (
     KgBuildAlreadyRunning,
@@ -140,6 +141,6 @@ def register_maintenance_tools(
                     ) from None
                 return {"target": "index", **dict(result)}
 
-        return _budget_response(
-            await _run_with_progress(ctx, run, label="build")
-        )
+        result = await _run_with_progress(ctx, run, label="build")
+        pulse_touch_for_mcp(repo, notebook_id, "kg" if target == "kg" else "scale_index", principal)
+        return _budget_response(result)

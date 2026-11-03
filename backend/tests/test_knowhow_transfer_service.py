@@ -12,6 +12,20 @@ COLUMNS = [
     {"name": "现象识别", "role": "procedure"},
 ]
 
+
+@pytest.mark.parametrize("table,optional", [("sources", ("chunked_at", "navigation_scanned_at")), ("chunks", ("question_indexed_at",))])
+def test_pg_transfer_nullable_timestamp_round_trip_preserves_absence(table, optional):
+    from datetime import datetime, timezone
+
+    from app.repositories.postgres._store_utils import normalize_timestamp_row, sqlite_compatible_row
+
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    original = {"created_at": now, **{column: None for column in optional}, "text": "  unchanged  "}
+    snapshot = sqlite_compatible_row(original, timestamp_columns=("created_at", *optional))
+    inserted = normalize_timestamp_row(table, snapshot)
+    assert inserted == original
+    assert normalize_timestamp_row(table, {"text": "unrelated"}) == {"text": "unrelated"}
+
 class _FakeEmbedder:
     dim = 3
     def __init__(self):

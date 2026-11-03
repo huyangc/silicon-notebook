@@ -160,11 +160,11 @@ export const fetchConceptDetail = (nb: string, id: string, sourceNotebookId = ""
   );
 };
 
-export const fetchNodeContext = (nb: string, id: string, sourceNotebookId = "") => {
+export const fetchNodeContext = (nb: string, id: string, sourceNotebookId = "", signal?: AbortSignal) => {
   const query = sourceNotebookId ? `?source_notebook_id=${encodeURIComponent(sourceNotebookId)}` : "";
   return requestJson<NodeContext>(
     `/notebooks/${nb}/objects/${encodeURIComponent(id)}/context${query}`,
-    { ...options, logPath: `/notebooks/${nb}/objects/${kgDetailLogSegment(id)}/context${query}` },
+    { ...options, signal, logPath: `/notebooks/${nb}/objects/${kgDetailLogSegment(id)}/context${query}` },
   );
 };
 

@@ -731,6 +731,7 @@ class KgAnalysisService:
         zone: str = findings_view.ZONE_OPEN,
         limit: int = 50,
         offset: int = 0,
+        viewer_user_id: str = "",
     ) -> FindingsPage:
         """问题清单的一页(一个区,设计 2026-10-19 §3.4 / §3.5 / §8.4)。
 
@@ -743,7 +744,11 @@ class KgAnalysisService:
         要随用户在别处的处置即时变(删来源、驳回合并都不动账本)。
 
         账本里没有 `findings` 这一行时**连明细都不读**(`_detail_rows_are_readable`):
-        ``present=False`` 却回一页行,就是同一份响应既说「不在」又把内容发出去。"""
+        ``present=False`` 却回一页行,就是同一份响应既说「不在」又把内容发出去。
+
+        ``viewer_user_id``(分享编辑 P1,D14):每篇涉及来源的 ``uploaded_by_me`` 按它整形——
+        点名编辑者只能删本人上传的来源,前端据此只在那几篇旁给「删除来源…」。上传人 id 只在
+        服务端比对,不上 wire;缺省空串 = 一律 False。"""
         self._reject_inside_write_transaction("KG 分析问题清单")
         if zone not in findings_view.FINDING_ZONES:
             raise ValueError(
@@ -783,7 +788,8 @@ class KgAnalysisService:
                         row, status, reason, dismissed_at, states,
                         # 「报告之后重新解析过」以扫描开始的时刻为准(§3.5),旧 payload
                         # 没有这个键时退回账本行的发布时刻。
-                        entry["payload"].get("scanned_at") or entry["created_at"])
+                        entry["payload"].get("scanned_at") or entry["created_at"],
+                        viewer_user_id)
                     for row, status, reason, dismissed_at in window
                 ]
         payload = entry["payload"] if entry is not None else {}

@@ -34,9 +34,11 @@
    的全部边(`DELETE /groups/{gid}/shared-notebooks/{nb}`)。两个入口各自只需要自己
    那一半权限——组管理员管理共享给本组的全部内容,库主随时可以收回自己的库。
 
-`principal_type` 只收两个**群组**主体。`user` 主体继续走既有只读共享(share_token)
-流程、`everyone` 继续走 `POST /notebooks/{id}/tier`,两者都不经此端点:同一件事有两个
-写入口,迟早会有一个入口漏掉另一个入口的某条校验。
+`principal_type` 只收两个**群组**主体。`user` 主体(点名共享,分享编辑 P1)走
+`/notebooks/{id}/collaborators`(`notebook_collaborator_routes.py`,只归库主管),
+`everyone` 继续走 `POST /notebooks/{id}/tier`,两者都不经此端点:同一件事有两个写入口,
+迟早会有一个入口漏掉另一个入口的某条校验。这里的 `GET .../grants` 与
+`DELETE .../grants/{id}` 因此也不碰 `user` 行——两组端点合起来覆盖表内每一行。
 """
 from typing import List
 

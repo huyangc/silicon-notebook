@@ -908,6 +908,25 @@ def test_daemon_and_viz_failures_clear_build_markers(repo, monkeypatch):
     assert notebook.id not in scale.viz_building
 
 
+@pytest.mark.parametrize("outcome", ["success", "discarded", "failed"])
+def test_scale_terminal_touch_covers_every_worker_outcome(repo, monkeypatch, outcome):
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    observed = []
+    monkeypatch.setattr(scale, "_start_daemon", lambda _name, target: target())
+    monkeypatch.setattr(scale, "_resolve_mode", lambda *_: "full")
+
+    def build(*args, **kwargs):
+        if outcome == "failed":
+            raise RuntimeError("build failed")
+        return {"status": "discarded"} if outcome == "discarded" else {}
+
+    monkeypatch.setattr(scale.builder, "build", build)
+    monkeypatch.setattr(scale, "_collab_touch", lambda *args: observed.append((args, scale.building_lock.locked(), notebook.id in scale.building)))
+    scale._run_scale_op(notebook.id, "full")
+    assert observed == [((notebook.id, "scale_index", None, None), False, False)]
+
+
 def test_runtime_never_holds_state_locks_around_loader_builder_or_notification(
     repo, monkeypatch
 ):
@@ -1625,6 +1644,109 @@ def test_completed_build_hands_its_slot_to_the_parked_queue(repo, monkeypatch):
     assert sorted(worker.name for worker in workers) == sorted(
         f"scaleidx-{nb_id}" for nb_id in [holder.id] + [nb.id for nb in parked]
     )
+
+
+@pytest.mark.parametrize("queue", ["pending", "idle"])
+def test_slot_handoff_keeps_the_queued_submitter_instead_of_the_finishing_actor(repo, monkeypatch, queue):
+    from app.core.request_context import reset_request_user, set_request_user
+    from app.domain.collaboration import PulseActor
+    from app.models.identity import UserProfile
+    from app.services.collab_jobs import current_job_actor
+
+    scale = repo._runtime.scale_artifacts
+    holder, queued = _seed(repo), _seed(repo)
+    _base_tier(repo, holder)
+    _base_tier(repo, queued)
+    workers = _record_build_workers(scale, monkeypatch)
+    scale._scale_build_semaphore = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(scale, "_resolve_mode", lambda *_: "full")
+    monkeypatch.setattr(scale, "_ensure_scheduler", lambda: None)
+    monkeypatch.setattr("app.services.scale_artifact_runtime.offpeak_window_state", lambda *args: (True, None))
+    entered, finish = threading.Event(), threading.Event()
+    actors, terminals = [], []
+    collaboration = repo._runtime.collaboration
+    cursor = collaboration.pulse.cursor()
+
+    def build(notebook_id, **kwargs):
+        if notebook_id == holder.id:
+            entered.set()
+            assert finish.wait(10)
+        actors.append((notebook_id, current_job_actor().user_id))
+        return {}
+
+    monkeypatch.setattr(scale.builder, "build", build)
+    def terminal(nb, kind, actor_id=None, actor_name=None):
+        terminals.append((nb, current_job_actor().user_id))
+        collaboration.touch_for_job(nb, kind, actor_id, actor_name)
+
+    monkeypatch.setattr(scale, "_collab_touch", terminal)
+    try:
+        for actor, notebook in (("A", holder), ("B", queued)):
+            token = set_request_user(UserProfile(id=actor, username=actor, display_name=actor, email="", role="user"))
+            try:
+                if actor == "A":
+                    assert scale._run_scale_op(notebook.id, "full") is True
+                    assert entered.wait(5)
+                elif queue == "pending":
+                    assert scale._run_scale_op(notebook.id, "full") is False
+                else:
+                    assert scale.trigger(notebook.id, when="idle", mode="full")["status"] == "queued"
+            finally:
+                reset_request_user(token)
+    finally:
+        finish.set()
+        _join_build_workers(workers)
+    assert actors == [(holder.id, "A"), (queued.id, "B")]
+    assert terminals == [(holder.id, "A"), (queued.id, "B")]
+    peer = collaboration.pulse.poll(queued.id, PulseActor("A", "A", "editor"), since=cursor, visible=True)
+    assert [(change["kind"], change["actor_name"]) for change in peer["changes"]] == [("scale_index", "B")]
+    own = collaboration.pulse.poll(queued.id, PulseActor("B", "B", "editor"), since=cursor, visible=True)
+    assert own["changes"] == []
+
+
+@pytest.mark.parametrize("queue", ["pending", "idle"])
+def test_immediate_request_supersedes_old_queue_actor(repo, monkeypatch, queue):
+    from app.core.request_context import reset_request_user, set_request_user
+    from app.domain.collaboration import PulseActor
+    from app.models.identity import UserProfile
+    from app.services.collab_jobs import _QueueEntry, current_job_actor
+
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    entry = _QueueEntry("full", "2026-11-02T00:00:00Z", PulseActor("old", "旧请求", "editor"))
+    (scale._scale_pending if queue == "pending" else scale.idle_queue)[notebook.id] = entry
+    actors = []
+    monkeypatch.setattr(scale, "_start_daemon", lambda _name, target: target())
+    monkeypatch.setattr(scale, "_resolve_mode", lambda *_: "full")
+    monkeypatch.setattr(scale.builder, "build", lambda *args, **kwargs: actors.append(current_job_actor().user_id) or {})
+    token = set_request_user(UserProfile(id="new", username="new", display_name="新请求", email="", role="user"))
+    try:
+        assert scale._run_scale_op(notebook.id, "full", supersede_idle=True) is True
+    finally:
+        reset_request_user(token)
+    assert actors == ["new"]
+
+
+@pytest.mark.parametrize("queue", ["pending", "idle"])
+def test_legacy_two_tuple_queue_keeps_the_ambient_actor_compatibility(repo, monkeypatch, queue):
+    from app.core.request_context import reset_request_user, set_request_user
+    from app.models.identity import UserProfile
+    from app.services.collab_jobs import current_job_actor
+
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    (scale._scale_pending if queue == "pending" else scale.idle_queue)[notebook.id] = ("full", "2026-11-02T00:00:00Z")
+    observed = []
+    monkeypatch.setattr(scale, "_start_daemon", lambda _name, target: target())
+    monkeypatch.setattr(scale, "_resolve_mode", lambda *_: "full")
+    monkeypatch.setattr(scale.builder, "build", lambda *args, **kwargs: observed.append(current_job_actor().user_id) or {})
+    token = set_request_user(UserProfile(id="ambient", username="ambient", display_name="ambient", email="", role="user"))
+    try:
+        flags = {"claim_pending": True} if queue == "pending" else {"claim_idle": True}
+        assert scale._run_scale_op(notebook.id, "full", **flags) is True
+    finally:
+        reset_request_user(token)
+    assert observed == ["ambient"]
 
 
 # ---------------------------------------------------------------------------

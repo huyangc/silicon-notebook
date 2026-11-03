@@ -204,7 +204,10 @@ test("每一处 workspaceCapabilities 调用都把 sync_origin 交进去", () =>
   assert.ok(calls.length >= 4, "page.tsx 里的 workspaceCapabilities 调用点少了,守卫可能在空转");
   const offenders = calls
     .map((call) => call.arguments.map((argument) => compact(argument.getText(page))))
-    .filter((args) => args.length !== 4 || !args[3].endsWith("sync_origin??\"\""));
+    // 分享编辑 P1:第五个参数是 can_manage_notebook(管理档),与 sync_origin 一起逐处交进去。
+    .filter((args) => args.length !== 5
+      || !args[3].endsWith("sync_origin??\"\"")
+      || !args[4].endsWith("can_manage_notebook??false"));
   assert.deepEqual(
     offenders,
     [],

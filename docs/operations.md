@@ -6,6 +6,22 @@ This runbook covers logs, live diagnostics, MinerU, offline ingestion, retrieval
 
 ## Unified command entry
 
+### SQLite connections for offline maintenance
+
+Use the project's database, snapshot and merge commands for writable maintenance.
+SQLite v106 includes exact-UTC expression indexes using the deterministic
+`sn_utc_us` schema function. Application connections and the bundled offline
+backup, migration, shadow-validation and merge paths register it automatically.
+The app-free database diagnostic also registers an equivalent stdlib callback
+on its read-only snapshot so cascading-delete query plans remain available.
+For a custom Python connection that writes Ask rows, runs `VACUUM`, or performs
+`PRAGMA integrity_check` or `EXPLAIN QUERY PLAN DELETE` with cascades, call
+`app.repositories.sqlite_functions.register_sqlite_functions(connection)` before
+the operation, using the matching checkout and `PYTHONPATH=backend`. This pure
+registration changes no data and performs no SQL. Ordinary read-only `SELECT`,
+SQLite's backup API and `quick_check` do not require the callback; a standalone
+SQLite shell does not supply it for writes or full integrity checks.
+
 ### Upgrading chat context capacity
 
 Before starting the upgraded service, add actual endpoint limits
@@ -575,6 +591,99 @@ There is no maintenance command that rewrites existing ids in place, and none is
 (decided 2026-10-29): element ids are also named by citations in answer history, reports and
 share snapshots, and by the incremental sync change log, so an in-place rewrite would have to
 rewrite those too or leave their anchors dangling.
+
+## Automatic memory suggestion operations
+
+Personal mode, numeric rails and reader scopes are defined in
+[Automatic user-memory suggestions](./product-and-api.md#automatic-user-memory-suggestions);
+bindings, online index prebuild and rollback order are in the
+[deployment reference](./deployment-and-configuration.md#system-model-services-scheduling-and-diagnostics).
+Check `/api/system/config` for wiring and model readiness separately. A user's
+`manual` mode is normal, not a stalled job. Deployment/class gates stop new work;
+they do not stop candidate expiry.
+
+The unreleased SQLite v106 / PostgreSQL 0087 migration also creates local
+`memory_suggest_read_fences` and an enabled-user partial index. Fences contain only
+notebook/user ids and the latest complete read-loss instant; they prevent delayed
+old Ask completions replaying a previous membership. There is at most one row per
+pair, with no TTL. Notebook deletion cascades it; account cleanup treats it as
+scaffolding. It is excluded from notebook copies and cross-environment sync;
+shadow cutover preserves it and database merging retains only the primary side.
+No historic read-loss periods are reconstructed or backfilled during upgrade.
+
+PostgreSQL mode writes use a dedicated transaction advisory barrier exclusively;
+read-loss transactions share it, before any group/notebook/user/switch/job row
+locks. This prevents an uncommitted opt-in escaping the captured reader set.
+Different notebooks' revocations still run in parallel. Ordinary mode reads and
+answer-completion hooks take no such lock. These short, database-only transactions
+may briefly queue a low-frequency mode change behind a revocation; no model or
+provider operation runs while the barrier is held. Account-switch cleanup follows
+the exclusive side before row locks (after its existing auth advisory).
+The opt-in instant is sampled after acquiring the SQLite write lock or PostgreSQL
+mode barrier. Group membership gains (including invites and owner promotion) lock
+their granted notebooks after the group root, so overlapping gains and revocations
+cannot record a false read loss or discard a continuously readable window.
+Unsharing samples its read-loss instant after deleting the link memberships in
+that same transaction, separately from the preceding token update's instant.
+
+Use `AUTO_MEMORY_SUGGEST_ENABLED=false` to stop suggestion runs, or the clarified /
+repeated / corrected class switches to isolate one signal; corrected uses
+`AUTO_MEMORY_SUGGEST_CORRECTED_ENABLED`. Restart with the changed deployment
+settings. Unadopted drafts remain available for review and bounded expiry; ignored
+and expired rows are not automatically deleted. Storage can therefore grow even
+with the creation budget. Users may delete their own rows explicitly. Disabling
+with `delete_unadopted` reaches only still-candidate rows in currently readable
+notebooks, not inaccessible or rejected records.
+
+The server recovers running jobs alongside the existing agent-profile recovery,
+counts each interruption as a failed batch attempt, then schedules expiry after
+readiness. The existing periodic deletion-sweeper thread runs an independent
+expiry pass; a delete-sweep failure cannot suppress it. Claimed suggestion jobs
+also expire their owner's overdue drafts before backlog checks. Hygiene runs
+even when deployment or all class switches are off. There is no extra sweeper
+thread to start manually; offline repository clients must not run server recovery
+against an active job owner.
+
+`memory_suggest_run` records only owner/notebook ids, outcome, per-signal counts,
+deduplication/decline/write counts, model status and latency. `memory_lifecycle`
+adds `suggestion_created` and `suggestion_expired`, with `suggested_signal`.
+No question, answer, title, content or exception message belongs in these events.
+Investigate `failed` by its exception **class** / reason code, `model_unavailable`
+by bindings, and `backlog` / `daily_cap` as normal budget gates. A repeatedly
+failing or interrupted batch eventually reports **`model_status="gave_up"`** in
+the run event; it is not a `last_outcome="gave_up"` job state. Its cursor passes
+that batch, so later triggers can proceed. No automatic immediate retry occurs.
+
+Read-only, model-free aggregate inspection:
+
+```bash
+python scripts/auto_memory_stats.py --db .local/silicon_notebook.db
+python scripts/auto_memory_stats.py --database-url "$DATABASE_URL" --since 2026-10-01
+```
+
+An optional `--notebook-id` narrows scope. The script opens SQLite read-only with
+`query_only`, or a PostgreSQL read-only connection, and writes no rows. Its JSON
+contains signal/status totals, adoption/ignore/expiry funnel, matured deprecation
+cohorts, job outcomes/reason codes and persisted citation-card counts. It prints
+no content or memory ids. It cannot count retrieval hits that never became
+citation cards, and deleted rows cannot contribute to historical deprecation
+rates; treat these as explicit measurement limits. `--since` accepts an ISO date
+or datetime (naive means UTC); SQLite answer filtering compares stored timestamp
+text and can differ at mixed-offset boundaries. Prefer a consistent UTC snapshot
+when comparing cohorts. Do not treat these aggregates as an end-to-end answer
+quality evaluation; model-consuming evaluations require separate authorization.
+
+Evaluate `clarified`, `repeated` and `corrected` separately against the
+[D11 class-exit thresholds](./product-and-api.md#automatic-user-memory-suggestions).
+The third class has its own deployment switch; low adoption of one class does not
+require disabling the others. Use the per-class funnel's `adoption_rate` (adopted
+divided by adopted, ignored and expired decisions; pending rows are excluded),
+with retained aggregate evidence for cumulative proposals. A current database
+snapshot cannot reconstruct deleted proposals, so it cannot alone establish that
+the cumulative threshold was reached. This is an operator review, not an automatic
+shutdown. Record the decision in the
+[evaluation exit ledger](../fangan_todo.md#实验开关评估出口), change the relevant
+class switch and restart; existing suggestions remain reviewable and expiry continues.
 
 ## Ownerless Memory sources
 
@@ -4551,6 +4660,62 @@ source copy or model content was unavailable, already resolved/deleted, or clean
 permission to read the user's original source or model input by a different path. If a live
 record has reached expiry it is already outside the supported read contract even before a
 separate filesystem inventory notices cleanup.
+
+## Named editors (share-edit P1)
+
+An editor the owner adds under "点名共享" in the share dialog is one `(user, editor)` grant. Three operational facts:
+
+- **Account merge is blocked by editor grants**: an account holding any `user`-principal grant (editor grants
+  included) is `blocking` in the account-merge registry, so "合并统一认证账号" lists that category and refuses. Order:
+  ask the notebook owner to remove the person under "点名共享", merge, then re-add the kept account. There is no
+  automatic migration (it would change who can write the owner's notebook without the owner knowing).
+- **Cross-environment sync does not seed personal grants**: the importer skips the source's `user`-principal grants
+  (`skipped_user_grants` in the report). Legacy `(user,viewer)`/`(user,admin)` grants seeded into a mirror before
+  D16 are not cleaned up; the mirror's owner can revoke them under "点名共享".
+- **Rollback**: P1 changes no schema, so rolling back needs no migration. The previous version's three predicates
+  read an `editor` row as read-only (no escalation); those notebooks do not show in its notebook list; while the
+  rows exist the borrowed-mount "unshared gate" stays closed. Recommended clean-up after rolling back (safe online,
+  the same statement on PostgreSQL and SQLite):
+
+  ```sql
+  DELETE FROM notebook_grants WHERE principal_type='user' AND role='editor';
+  ```
+
+  It does not clear the editors' understanding overlays or observations (unreadable then and harmless, like the
+  "kept but invisible after revocation" state); for the same clean-up, have the owner remove the editors in the UI
+  **before** rolling back. Legacy `(user, viewer)` and `(user, admin)` rows are untouched.
+
+## Collaboration pulse operations
+
+Run one API worker and one instance for this deployment. Pulse epochs, revisions,
+presence and the owner-change ring are process-local. They are hints, not distributed
+subscriptions. Alternating instances can make a browser see repeated epoch resets;
+the browser stops automatic synchronization on an epoch return and reports
+`协作同步暂不可用`. Check worker/instance routing, correct the deployment, then reopen
+the notebook. Do not interpret an empty presence list as an access audit.
+
+The server derives a slower poll interval from recent connection-pool statistics
+without a SQL probe. Presence expiry follows that interval. Inspect pool saturation
+and request latency before changing thresholds; use the explicit, disposable
+`scripts/bench_collab_pulse.py` workflow for load evidence. Checkout latency includes
+connection creation and validation as well as waiting; it is not a pure lock-wait
+measurement. Exact controls and defaults belong to
+[the pulse contract](./product-and-api.md#collaboration-pulse).
+
+Non-owner changes are submitted to a bounded single-worker activity writer after
+successful writes; queue-full and write-failure diagnostics contain no content.
+They mean the history can be incomplete, not that the user's write failed. Recovery
+purges expired history using the configured retention period. Owner history is
+transient, CLI writes are not captured, and this history is not compliance auditing.
+Deleting a notebook removes its activity; account removal/merge retains the actor
+audit reference. Activity is local and does not transfer or synchronize.
+
+This feature has no deployment toggle. To take it offline, deploy a reviewed code
+change that disables detail eligibility; existing tables still belong to the upgraded
+schema. SQLite migrations are forward-only and PostgreSQL rejects a newer ledger:
+rolling back an older binary therefore requires restoring its pre-upgrade database
+backup (losing later writes), or keeping the upgraded schema with compatible code.
+Do not drop the activity table alone to simulate a rollback.
 
 ## External authentication enablement and rollback
 

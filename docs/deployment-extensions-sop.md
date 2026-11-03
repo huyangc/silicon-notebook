@@ -259,6 +259,8 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 
 The nine seams, and nothing else: `plugin_id`, `settings`, `require_notebook_capability`, `require_notebook_read`, `current_actor`, `user_error`, `url_sources`, `task_stream`, `emit_event`.
 
+`require_notebook_capability` judges against core's one capability table: since share-edit P1 the content-write capabilities (`sources:write`, `kg:write`, `knowhow:write` and the other four) are the **edit** tier, admitting named editors besides the owner and group admins; a plugin action meant for "owner or group admin only" should use an admin-tier capability such as `notebook:manage`.
+
 *Core does for you:*
 
 - **Authorization, per port.** `url_sources.import_urls` checks `sources:write` for the request's own user — resolved from core's request context, never from anything you pass — and refuses with the same 404 core's own endpoints use (existence is not disclosed). Past that check it is literally core's own URL-import function: the same capacity accounting, admin exemption, unconfigured-parser mapping and background parse scheduler.
@@ -314,6 +316,32 @@ Deployment plugins execute as trusted code in the backend process. The narrow Pr
 - A `ReflectActionContributor.invoke` runs on the same kind of private worker thread under the same hard-deadline discipline (`REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS`, shared by the availability check and the call itself — see [Reflect plugin actions](./product-and-api.md#reflect-plugin-actions-askreflect_action) for its default and its full budget accounting): the same `contextvars`/thread-local unavailability applies, and there is no seat for a notebook id, actor id, retrieval scope, or any other core port on `ReflectActionCallContext` — only `question`, the model's own already-validated `arguments`, a `cancellation` token, `deadline_monotonic`, and `max_items`. Return a `ReflectActionResult` (not a raw tuple, and not wrapped in `ContributorResult`); each `ReflectActionItem.excerpt` is exactly the text a citation card will show verbatim — it is never re-summarized, so put the quotable material there, not a paraphrase. Every string field is rendered on one line inside a `k<n>:`-keyed evidence block, so a value carrying a newline or another control character is folded to a single space rather than trusted to stay on its own line; `url` is admitted only when it is `http`/`https`. The framework validates your descriptor's shape at freeze time — an over-length string, a control character, a duplicate or reserved action/parameter name, or an enum with fewer than two values fails registration outright (`ExtensionRegistryError`, i.e. startup), never a silent clamp. `max_calls_per_run` on your descriptor is a ceiling the deployment's own `REASONING_MAX_PLUGIN_ACTIONS` policy can only lower, never raise.
 - An `AskEngineProvider` must cite only evidence handles returned by its own `retrieval` port. Forged, stale, or cross-run handles reject the answer; do not catch that rejection and retry with ungrounded prose.
 - An `ElementEnricher`'s availability probe and its `enrich()` call run together on one private worker thread under a hard deadline, exactly like `GapConsultContributor` — do not rely on `contextvars` or any core ContextVar surviving into that thread. `context.assets.read(ref)` only returns bytes during that same call: it always answers `None` once your `enrich()` has returned, timed out, or been abandoned, so never stash a ref or the reader itself for later use. A `description` you return must not contain control characters other than `\n`/`\t`; a credential or endpoint setting (API key, its env-var name, base URL) must never enter a candidate's `metadata` — non-secret provenance such as the model id is fine and is what the sample records.
+
+### Ask completion observers and memory suggestions
+
+`ask.completed_observer` has four core notification capabilities:
+`ask:agent_profile_completed_access`, `ask:retrieval_experience_completed_access`,
+`ask:search_profile_completed_access` and `ask:memory_suggest_completed_access`.
+An observer may request at most one; requesting several is rejected when the
+frozen host is built. The built-in order is agent profile → retrieval experience
+(reasoning only) → search profile → memory suggestions, serial after durable
+completion/delivery with one shared deadline and failure isolation. Observers
+must not retain a core connection; an exhausted budget can skip the last item.
+
+The new capability projects only opaque `access.notify()` for notebook Ask, with
+no actor/notebook identity or participant list. Existing identity projections
+remain unchanged. Core `CompletedAskNotification` appends
+`submitted_via:str=""`, `had_clarification:bool=False`, `ask_job_id:str=""` and
+checks exact runtime types, rejecting a numeric/string stand-in for a boolean.
+These are not SDK context fields; the core trigger counts eligible web Ask only.
+
+A stable, freshly authenticated manual-mode hint can skip only the **exact core
+built-in**. The port remains available: third-party contributions using that
+capability retain availability, SDK projection, notify and events. The private
+strict-bool skip attestation never reaches the SDK; direct notify rechecks the
+core gate. See [the product contract](./product-and-api.md#automatic-user-memory-suggestions)
+and architecture for invalidation/fallback. Plugins must not cache personal mode
+or imitate the core mode writer.
 
 ## 4. Step two — the frontend package
 

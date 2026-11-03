@@ -71,11 +71,14 @@ def seed(repo, *, postgres: bool) -> World:
             ("src-o", other, "Elsewhere", "markdown", "extracted", "parsed", T0),
         ):
             ins("sources", "id,notebook_id,title,source_type,status,parse_status,"
-                "chunked_at,created_at,updated_at",
+                "chunked_at,created_at,updated_at,uploaded_by",
                 # src-b imported later: ``created_at`` is F2's tie-break and must
                 # come back from its own column, not from another timestamp.
+                # src-a has a recorded uploader (share-edit P1, D14); the rest are
+                # unattributed (NULL reads as "").
                 (sid, notebook, title, stype, status, parse, chunked,
-                 T1 if sid == "src-b" else T0, T0))
+                 T1 if sid == "src-b" else T0, T0,
+                 "u-alice" if sid in ("src-a", "src-o") else None))
         for rid, sid, status, created in (
             ("er-a1", "src-a", "completed", T1),
             ("er-a2", "src-a", "completed", T2),
@@ -224,28 +227,29 @@ SOURCE_STATE_REQUEST = ["src-a", "src-b", "src-k", "src-m", "src-o", "src-gone",
 _ABSENT = {
     "exists": False, "title": "", "source_type": "", "status": "",
     "parse_status": "", "chunked_at": "", "last_extraction_at": "",
-    "last_extraction_status": "", "created_at": "",
+    "last_extraction_status": "", "created_at": "", "uploaded_by": "",
 }
 EXPECTED_SOURCE_STATES = {
     # er-a2 and er-a3 tie on created_at; the id breaks the tie, descending.
     "src-a": {"exists": True, "title": "Paper A", "source_type": "markdown",
               "status": "extracted", "parse_status": "parsed", "chunked_at": T0,
               "last_extraction_at": T2, "last_extraction_status": "failed",
-              "created_at": T0},
+              "created_at": T0, "uploaded_by": "u-alice"},
     "src-b": {"exists": True, "title": "Paper B", "source_type": "markdown",
               "status": "parsing", "parse_status": "parsing", "chunked_at": "",
               "last_extraction_at": T1, "last_extraction_status": "running",
-              "created_at": T1},
+              "created_at": T1, "uploaded_by": ""},
     # hidden synthetic sources: reported, titles blanked
     "src-k": {"exists": True, "title": "", "source_type": "knowhow",
               "status": "extracted", "parse_status": "parsed", "chunked_at": T0,
               "last_extraction_at": "", "last_extraction_status": "",
-              "created_at": T0},
+              "created_at": T0, "uploaded_by": ""},
     "src-m": {"exists": True, "title": "", "source_type": "memory",
               "status": "extracted", "parse_status": "parsed", "chunked_at": T0,
               "last_extraction_at": "", "last_extraction_status": "",
-              "created_at": T0},
-    # another notebook's source and a deleted one both read as absent
+              "created_at": T0, "uploaded_by": ""},
+    # another notebook's source (uploaded by the same user) and a deleted one
+    # both read as absent: the uploader of a source elsewhere is not reported
     "src-o": dict(_ABSENT),
     "src-gone": dict(_ABSENT),
 }

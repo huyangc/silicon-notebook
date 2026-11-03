@@ -6,6 +6,7 @@ import type {
 } from "./workspace-model";
 
 export const KG_RANGE_DEFAULT = 80;
+export const KG_NEIGHBOR_CAP = 50;
 
 export const KG_RANGE_STEPS: ReadonlyArray<{ value: number; label: string }> = [
   { value: 80, label: "核心 80" },

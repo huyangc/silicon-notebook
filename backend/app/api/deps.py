@@ -7,13 +7,17 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.config import get_settings
 from app.core.audit_actor import session_audit_principal
-from app.core.request_context import set_request_user, reset_request_user
+from app.core.request_context import get_request_user, set_request_user, reset_request_user
 from app.services.model_work import model_artifact_scope
+from app.services.memory_suggest_service import MemorySuggestService
 from app.models.identity import UserProfile
+from app.api.collab_marks import append_mark
 from app.bootstrap import application_extension_runtime, create_application_repository
 from app.domain.notebook_delete_grace import NOTEBOOK_PENDING_DELETE_CODE
 from app.domain.report_export import ReportExporterHostPort
+from app.repositories.access_level import NotebookAccess
 from app.repositories.global_ask_ports import GlobalAskAuthorityStorePort
+from app.repositories.memory_mode_epoch import stable_mode_epoch
 from app.repositories.ports import AdminQueryRepository, AnswerMemorySourceRepository, ExtensionToggleStorePort, GroupStorePort, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, NotebookStorePort, RetrievalExperienceStorePort, SourceRepository, AskStreamPort, McpMemoryRepository, MemoryRepository, WishStorePort
 
 
@@ -72,6 +76,38 @@ def notebook_transfer_jobs():
 
 def notebook_access_repository() -> NotebookAccessRepository:
     return repository()._runtime.sharing  # type: ignore[attr-defined]
+
+
+def collaboration_service():
+    return repository()._runtime.collaboration  # type: ignore[attr-defined]
+
+
+def mark_pulse(request: Request, notebook_id: str, capability: str, owner_id: str, user=None) -> None:
+    user = user or get_request_user()
+    if request is not None and user is not None:
+        append_mark(request, notebook_id, capability, owner_id, user, source="explicit")
+
+
+def record_committed_pulse(request, notebook_id, capability, owner_id, user, affected_kinds, *, activity=True):
+    """Publish a typed partial commit independently of the response status.
+
+    Authority and actor metadata were already resolved by the route. No new
+    reads occur, and a hint failure cannot replace the truthful outcome.
+    """
+    if request is None:
+        return
+    try:
+        mark = append_mark(request, notebook_id, capability, owner_id, user, source="explicit")
+        service = collaboration_service()
+        if activity:
+            template = getattr(request.scope.get("route"), "path_format", "")
+            service.record(mark, _CAPABILITY_PULSE_KIND[capability], request.method + " " + template, affected_kinds)
+        else:
+            # Source teardown can partially commit across transactions. A hint
+            # does not claim that the business table was successfully moved.
+            service.touch_for_job(notebook_id, affected_kinds, mark.actor.user_id, mark.actor.display_name, activity=False)
+    except Exception:
+        pass
 
 def notebook_sharing_repository() -> NotebookSharingRepository:
     return repository()._runtime.sharing  # type: ignore[attr-defined]
@@ -198,6 +234,8 @@ async def get_current_user(request: Request) -> AsyncIterator[UserProfile]:
     repo = identity_repository()
     token = _bearer_token(request)
     user: "UserProfile | None" = None
+    mode_epoch = stable_mode_epoch()
+    fresh_profile = True
     if token:
         user = await run_in_threadpool(repo.resolve_session, token)
         if user is None:
@@ -205,10 +243,20 @@ async def get_current_user(request: Request) -> AsyncIterator[UserProfile]:
     elif settings.auth_optional:
         if repo.auth.sso_namespace():
             raise HTTPException(status_code=401, detail="authentication required")
+        fresh_profile = get_request_user() is None
         user = await run_in_threadpool(repo.current_user)  # ContextVar 未设 → seeded admin
     else:
         raise HTTPException(status_code=401, detail="authentication required")
 
+    # Both identity adapters construct a request-owned profile on every DB
+    # read. An inherited ContextVar object is shared, so copy only that case
+    # before clearing its hint; never re-certify it with a newer epoch.
+    if not fresh_profile:
+        user = user.model_copy()
+    user._memory_mode_epoch = (
+        mode_epoch if fresh_profile and mode_epoch is not None
+        and mode_epoch == stable_mode_epoch() else None
+    )
     ctx_token = set_request_user(user)
     try:
         with model_artifact_scope(
@@ -233,7 +281,7 @@ async def require_notebook_write(
 
 
 async def require_notebook_delete(
-    notebook_id: str, user: UserProfile = Depends(get_current_user)
+    notebook_id: str, user: UserProfile = Depends(get_current_user), request: Request = None,
 ) -> str:
     """`DELETE /api/notebooks/{id}` 专属守卫（codex #659 R6 P2）:owner-only,
     但**不**要求 notebook 处于 live 状态——`require_notebook_write` 的
@@ -259,12 +307,14 @@ async def require_notebook_delete(
     )
     if not allowed:
         raise HTTPException(status_code=404, detail="Notebook not found")
+    if request is not None:
+        append_mark(request, notebook_id, "notebook:delete", user.id, user, source="guard")
     await _raise_if_mirrored(notebook_id)
     return notebook_id
 
 
 async def require_notebook_cancel_delete(
-    notebook_id: str, user: UserProfile = Depends(get_current_user)
+    notebook_id: str, user: UserProfile = Depends(get_current_user), request: Request = None,
 ) -> str:
     """`POST /api/notebooks/{id}/cancel-delete` 专属守卫:只认主人(裁决 B1,
     管理员、成员都不能撤销),且与 `require_notebook_delete` 一样**不**要求 live
@@ -276,6 +326,8 @@ async def require_notebook_cancel_delete(
     )
     if not allowed:
         raise HTTPException(status_code=404, detail="Notebook not found")
+    if request is not None:
+        append_mark(request, notebook_id, "notebook:delete", user.id, user, source="guard")
     await _raise_if_mirrored(notebook_id)
     return notebook_id
 
@@ -330,6 +382,24 @@ async def require_notebook_admin(
     return notebook_id
 
 
+async def require_notebook_edit(
+    notebook_id: str, user: UserProfile = Depends(get_current_user)
+) -> str:
+    """编辑守卫:owner ∪ `role IN ('admin','editor')` 的有效授权边(分享编辑 P1,
+    决策 D1)。非授权 → 404(不泄露存在性),与另外几道守卫同口径。谓词的唯一定义点
+    是两个后端的 `access_sql.NOTEBOOK_EDIT_SQL`,这里只是一跳委托。
+
+    编辑权 ⊇ 管理权,所以凡是挂这道守卫的能力,组管理员照旧放行;编辑者只多得到
+    这一档,`notebook:grant`/`notebook:manage` 仍是管理档(`require_notebook_admin`)。
+    """
+    allowed = await run_in_threadpool(
+        notebook_access_repository().user_can_edit_notebook, notebook_id, user.id
+    )
+    if not allowed:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    return notebook_id
+
+
 async def require_notebook_read(
     notebook_id: str, user: UserProfile = Depends(get_current_user)
 ) -> str:
@@ -358,18 +428,39 @@ async def require_notebook_read(
 # 分支,73 个端点声明里 ``Depends(require_notebook_capability("kg:write"))`` 这类
 # 调用点一个字都没动。
 #
-# 值域现在是 {"owner", "admin"}(见 test_notebook_capability_guard.py 的
+# 值域现在是 {"owner", "admin", "edit"}(见 test_notebook_capability_guard.py 的
 # value-domain 断言):
 #   * "owner" —— owner-only,`require_notebook_write` / `user_can_access_notebook`;
 #   * "admin" —— owner ∪ `role='admin'` 的有效授权边,`require_notebook_admin` /
-#     `user_can_admin_notebook`(谓词唯一定义点:`access_sql.NOTEBOOK_ADMIN_SQL`)。
+#     `user_can_admin_notebook`(谓词唯一定义点:`access_sql.NOTEBOOK_ADMIN_SQL`);
+#   * "edit" —— owner ∪ `role IN ('admin','editor')` 的有效授权边(分享编辑 P1,
+#     决策 D1),`require_notebook_edit` / `user_can_edit_notebook`(谓词唯一定义点:
+#     `access_sql.NOTEBOOK_EDIT_SQL`)。编辑权 ⊇ 管理权,所以把一格从 admin 挪到 edit
+#     对组管理员逐格不变,只多放行点名编辑者。
 #
-# ⚠ 翻转这张表时,还有四个**表外**的写谓词/写投影消费点必须逐处核对(它们不经这张
+# 分享编辑 P1 把**七个内容写**挪到 edit 档:sources/kg/scale_index/knowhow/knowledge/
+# catalog/agent_profile。`notebook:manage`(画像/tier)与 `notebook:grant`(授权边)
+# 留在 admin 档——编辑者改内容,不改库的身份,也不能把库再分享出去;新增
+# `notebook:collaborate`(编辑者名单)恒 owner(决策 D2)。
+#
+# ⚠ **身份局限**:围栏为 False 的能力(`notebook:grant`、`notebook:configure`、
+# `scale_index:write`、`agent_profile:write`、`notebook:export`、`reports:write`、
+# `notebook:collaborate`)由工厂返回**共用的裸档位守卫**,所以从一条路由的依赖对象
+# 只能反查出它的档位,反查不出能力名。按路由核对能力名的地方(路由级别清点表)必须
+# 显式写出能力名;等每个能力名都有自己的包装之后,这条局限才消失。
+#
+# ⚠ 翻转这张表时,还有几个**表外**的写谓词/写投影消费点必须逐处核对(它们不经这张
 # 表,漏掉就是「API 收写而 UI 只读」或「Agent 面与浏览器面口径分叉」)。P2-T2 的
 # 逐项处置记录在此,后续任务照此清单继续核对:
-#   1. `user_or_agent_scope` 的 session 分支(本文件下方)——Agent/MCP 面,
-#      **刻意不翻**:`architecture.md` 的 Sharing 边界登记了它独立的 owner-only
-#      取向(`mcp_server._writable_notebook`),浏览器面放宽不传导过去;
+#   1. `user_or_agent_scope` 的 session 分支(本文件下方)——它承载 Knowhow 单元格
+#      「代码附件」的浏览器写(`knowhow_agent_routes.py` 的 PUT/DELETE)。P2-T2 当时
+#      登记为**刻意不翻**(owner-only)。**分享编辑 P1 推翻了这条裁决(决策 D6)**:
+#      会话写分支改为按 `knowhow:write` 判。理由:同一张表的单元格内容写是
+#      `knowhow:write`,附件却恒 owner,于是组管理员(以及之后的编辑者)改得了格子
+#      改不了它的附件;而只读读者本来就能经 contribute 档 Agent 令牌写附件,owner-only
+#      从未真正把附件收窄到 owner。能力 × 角色矩阵里「组管理员 × 代码附件会话写」
+#      因此从 404 变成 2xx,是登记过的预期变化。**Agent 令牌分支不动**(scope 说了算),
+#      MCP 面仍是 owner-only(`mcp_server._writable_notebook`,决策 D5);
 #   2. `knowledge_routes.py` 的 `can_edit` 响应投影——驱动前端编辑控件显隐,
 #      **P2-T2 已改用 `notebook_capability_allowed("knowledge:write", ...)`**,
 #      从此随本表自动跟随,不再是第二份手写判定;
@@ -407,7 +498,10 @@ async def require_notebook_read(
 # ⚠ 第五个消费点是**前端投影**:`NotebookSummary.can_manage_content`
 # (`services/notebook_catalog.py`)。它不是授权判定(权威永远是这里的守卫),而是
 # 「要不要把写入口画出来」的 UI 信号;判定放宽而它不动,组管理员会看到一个 API 允许
-# 但界面藏起来的只读工作区。
+# 但界面藏起来的只读工作区。分享编辑 P1 起它的语义是**编辑权**(七个内容写能力,
+# `notebook_grant_confers_edit`),另加 `can_manage_notebook`(owner 或管理边:画像、
+# tier、授权边这些管理档入口,`notebook_grant_confers_admin`),两个投影分别对应
+# edit 档与 admin 档,点名编辑者前者为真、后者为假。
 #
 # ⚠ `reports:write` 现在**没有任何端点消费**(P1-T3b),条目刻意保留:
 # 报告的授权已经不是「一个 notebook 级能力」能表达的形状——9 个 report 写端点
@@ -440,8 +534,8 @@ async def require_notebook_read(
 #     那天,由那次改动显式决定它属于哪一档,而不是被这次批量翻格顺手带走。
 #
 # ⚠ notebook:configure 与 notebook:mount 都解析到 **owner 档**(与 notebook:delete 同,
-# 复用 require_notebook_write / user_can_access_notebook),所以能力值域仍是
-# {owner, admin}——它们不新增第三档,只是把 owner-only 端点从 notebook:manage 拆出来
+# 复用 require_notebook_write / user_can_access_notebook),所以它们不新增档位(第三档
+# edit 是分享编辑 P1 加的,与这两格无关),只是把 owner-only 端点从 notebook:manage 拆出来
 # 单独命名,好让「哪些端点恒 owner」在能力表上一眼可见、且不会被下一次批量翻格顺手带走。
 #
 # ⚠ **跨环境同步 §5 的两格再拆分**(docs/incremental-sync-design.md)。下方的
@@ -482,21 +576,27 @@ async def require_notebook_read(
 # notebook-export-import.md §7/§9)恒 **owner**:导出文件带走整本库的原文件、知识图谱
 # 与向量,可以在别的部署里导入成一本归导入者所有的新笔记本——这是 owner 对本库的对外
 # 处置,与链接分享(`notebook:configure`)同一理由,不随内容管理权翻给组管理员。
+#
+# `notebook:collaborate`(点名共享:编辑者名单的增删,分享编辑 P1,决策 D2)恒
+# **owner**:名单决定谁能改这本库的内容,只归库主管;组管理员与编辑者都不能把别人
+# 加成编辑者。
 _CAPABILITY_LEVELS: dict[str, str] = {
-    "sources:write": "admin",
-    "kg:write": "admin",
-    "knowhow:write": "admin",
-    "knowledge:write": "admin",
-    "catalog:write": "admin",
-    "scale_index:write": "admin",
+    "sources:write": "edit",
+    "kg:write": "edit",
+    "knowhow:write": "edit",
+    "knowledge:write": "edit",
+    "catalog:write": "edit",
+    "scale_index:write": "edit",
     "reports:write": "owner",
     "notebook:manage": "admin",
     "notebook:grant": "admin",
     "notebook:configure": "owner",
     "notebook:mount": "owner",
     "notebook:delete": "owner",
-    "agent_profile:write": "admin",
+    "agent_profile:write": "edit",
     "notebook:export": "owner",
+    "notebook:collaborate": "owner",
+    "notebook:activity": "edit",
 }
 
 
@@ -552,7 +652,9 @@ _CAPABILITY_LEVELS: dict[str, str] = {
 #   * `agent_profile:write` —— 理解底座是目标端用户用出来的,同样不在同步闭包里;
 #   * `notebook:export` —— 网页导出单本笔记本(`POST /notebooks/{id}/export`,恒 owner)
 #     只**读**这本库、写的是请求者自己的导出作业,不改同步层内容;导出镜像得到的是
-#     一份文件,导入它会成为一本独立的新笔记本(计划 §0、§9 推荐默认「镜像也允许导出」)。
+#     一份文件,导入它会成为一本独立的新笔记本(计划 §0、§9 推荐默认「镜像也允许导出」);
+#   * `notebook:collaborate` —— 编辑者名单是目标端自己的可见性,与 `notebook:grant`
+#     同一条理由(同步导入器也跳过 user 主体的授权边,决策 D16)。
 #
 # ⚠ 新增能力名时这张表**必须同时加一格**,否则 `require_notebook_capability` 当场
 # KeyError——与能力表同一条「响亮失败,不许落到宽松默认值」的口径。
@@ -573,6 +675,18 @@ _CAPABILITY_MIRROR_FENCE: dict[str, bool] = {
     "notebook:delete": True,
     "agent_profile:write": False,
     "notebook:export": False,
+    "notebook:collaborate": False,
+    "notebook:activity": False,
+}
+
+_CAPABILITY_PULSE_KIND = {
+    "sources:write": "sources", "kg:write": "kg", "knowhow:write": "knowhow",
+    "knowledge:write": "knowledge", "catalog:write": "catalog",
+    "scale_index:write": "scale_index", "agent_profile:write": "understanding",
+    "notebook:manage": "notebook", "notebook:grant": "notebook",
+    "notebook:configure": "notebook", "notebook:mount": "notebook",
+    "notebook:delete": "notebook", "notebook:collaborate": "notebook",
+    "notebook:export": "none", "reports:write": "none", "notebook:activity": "none",
 }
 
 
@@ -629,75 +743,44 @@ async def _raise_if_mirrored(notebook_id: str) -> None:
         raise HTTPException(status_code=_MIRRORED_STATUS, detail=_mirror_detail(origin))
 
 
-@lru_cache
-def require_notebook_capability(capability: str):
-    """按能力命名的 notebook 写守卫工厂。
+def notebook_capability_owner(capability: str, notebook_id: str, user_id: str) -> str | None:
+    """One existing authorization query also projects its notebook owner.
 
-    在**模块 import 时**(而不是第一次请求到达时)按 ``capability`` 查
-    ``_CAPABILITY_LEVELS``——路由文件里的调用点都写成
-    ``dependencies=[Depends(require_notebook_capability("sources:write"))]``,
-    这个字符串实参在路由装饰器求值那一刻(也就是模块 import 时)就被传进来,
-    未登记的能力名当场 ``KeyError``,逼着新端点显式登记,而不是漏迁移后
-    静默落到某个宽松默认值上、直到线上才暴露。
-
-    每一档都**直接复用**对应守卫的函数本体——同一个函数对象,行为逐字相同
-    (未授权 → 404,不泄露存在性)。刻意不在这里重写判定逻辑:两档各只有一份实现,
-    这个工厂只做「能力名 → 哪一份」的查表。
-
-    ⚠ 被 ``_CAPABILITY_MIRROR_FENCE`` 标记的能力**不**直接返回裸档位守卫,而是返回一个
-    按能力名缓存的包装依赖:先 await 那一份档位守卫(级别判定、404 口径一个字不改),
-    再看 ``request.method``——安全方法(GET/HEAD/OPTIONS)到此为止,非安全方法才多查
-    一次 ``sync_origin``,非空则 409。包装是**加法**——判定逻辑仍然只有档位守卫那一份,
-    这里只是在它之后串一条与权限正交的状态判定。
+    None alone means refused; a legacy NULL owner normalizes to an empty str.
     """
     level = _CAPABILITY_LEVELS[capability]
+    access = notebook_access_repository()
     if level == "owner":
-        level_guard = require_notebook_write
-    elif level == "admin":
-        level_guard = require_notebook_admin
-    else:
-        raise AssertionError(  # pragma: no cover
-            f"unknown notebook capability level: {level!r}"
-        )
-    if not _CAPABILITY_MIRROR_FENCE[capability]:
-        return level_guard
+        return user_id if access.user_can_access_notebook(notebook_id, user_id) else None
+    if level == "admin":
+        return access.owner_if_can_admin(notebook_id, user_id)
+    if level == "edit":
+        return access.owner_if_can_edit(notebook_id, user_id)
+    raise AssertionError(f"unknown notebook capability level: {level!r}")
 
-    async def guard(
-        request: Request,
-        notebook_id: str,
-        user: UserProfile = Depends(get_current_user),
-    ) -> str:
-        await level_guard(notebook_id, user)
-        # 安全方法豁免:围栏表答的是「这个能力的端点会不会改同步层内容」,而一个 GET
-        # 永远不会。完整理由(为什么豁免放在这里而不是把每条只读端点劈成新能力名)
-        # 写在 `_CAPABILITY_MIRROR_FENCE` 上方。
-        if request.method.upper() in _SAFE_METHODS:
-            return notebook_id
-        await _raise_if_mirrored(notebook_id)
+
+@lru_cache
+def require_notebook_capability(capability: str):
+    """Each capability owns one stable wrapper: admission, mark, then fence."""
+    level = _CAPABILITY_LEVELS[capability]
+    fenced = _CAPABILITY_MIRROR_FENCE[capability]
+    _CAPABILITY_PULSE_KIND[capability]
+
+    async def guard(request: Request, notebook_id: str,
+                    user: UserProfile = Depends(get_current_user)) -> str:
+        owner_id = await run_in_threadpool(notebook_capability_owner, capability, notebook_id, user.id)
+        if owner_id is None:
+            raise HTTPException(status_code=404, detail="Notebook not found")
+        append_mark(request, notebook_id, capability, owner_id, user, source="guard")
+        if request.method.upper() not in _SAFE_METHODS and fenced:
+            await _raise_if_mirrored(notebook_id)
         return notebook_id
 
-    guard.__doc__ = (
-        f"档位守卫 + 镜像写入围栏(能力名 {capability!r},级别 {level!r})。\n\n"
-        "顺序:级别判定(未授权 → 404,不泄露存在性)→ 安全方法直接放行 → "
-        "非安全方法查 sync_origin,非空 → 409 notebook_mirrored。"
-        "两张表见 api/deps.py 的 _CAPABILITY_LEVELS 与 _CAPABILITY_MIRROR_FENCE。"
-    )
-    # FastAPI 按 callable 身份做每请求依赖去重,而外层的 @lru_cache 保证同一能力名
-    # 恒返回这**同一个** ``guard`` 对象——两条性质缺一不可,由
-    # test_notebook_capability_guard 的身份断言钉住。名字带上能力名,好让
-    # /openapi.json 与异常回溯里分得清是哪一格拒绝的。
     guard.__name__ = f"require_{capability.replace(':', '_')}_unmirrored"
     guard.__qualname__ = guard.__name__
+    guard.__doc__ = f"Notebook capability {capability!r}, level {level!r}."
     return guard
 
-
-# 工厂挂 @lru_cache 的理由写在这里而不是工厂 docstring:P0 阶段每个能力都返回
-# 同一个 require_notebook_write 对象,缓存是 no-op;**P2-T2 起它真的在按档返回不同
-# 对象**(owner 档 → require_notebook_write,admin 档 → require_notebook_admin),
-# 而 FastAPI 的每请求依赖缓存按 callable **身份**去重——不缓存的话,同一路由声明两个
-# 能力依赖就会各拿一个新函数对象、多跑一次判定查询。P0 预埋的这一行现在开始兑现。
-# ⚠ 兑现的前提是**同一个能力名恒返回同一个对象**(不只是「同一档恒返回同一个」),
-# 那正是 lru_cache 的语义,由 test_notebook_capability_guard 的身份断言钉住。
 
 
 def notebook_capability_allowed(capability: str, notebook_id: str, user_id: str) -> bool:
@@ -725,7 +808,50 @@ def notebook_capability_allowed(capability: str, notebook_id: str, user_id: str)
         return notebook_access_repository().user_can_admin_notebook(
             notebook_id, user_id
         )
+    if level == "edit":
+        return notebook_access_repository().user_can_edit_notebook(
+            notebook_id, user_id
+        )
     raise AssertionError(f"unknown notebook capability level: {level!r}")  # pragma: no cover
+
+
+#: 每一档能力级别**放行**哪些访问级别(`NotebookAccess.level`)。由包含链
+#: 写 ⊆ 管理 ⊆ 编辑 ⊆ 读 直接读出:owner 档只认 owner,admin 档认 owner 与 admin,
+#: edit 档再加上 edit。与上面三条谓词逐格同义,由能力 × 角色矩阵测试钉住。
+_LEVEL_ADMITS: dict[str, frozenset[str]] = {
+    "owner": frozenset({"owner"}),
+    "admin": frozenset({"owner", "admin"}),
+    "edit": frozenset({"owner", "admin", "edit"}),
+}
+
+
+def notebook_capability_admits(capability: str, access: "NotebookAccess | None") -> bool:
+    return access is not None and access.level in _LEVEL_ADMITS[_CAPABILITY_LEVELS[capability]]
+
+
+def notebook_capability_level(
+    capability: str, notebook_id: str, user_id: str
+) -> "NotebookAccess | None":
+    """``notebook_capability_allowed`` 的「带级别」版本(分享编辑 P1):放行时返回
+    调用者的 ``NotebookAccess``(level 与库主 id),否则 None。
+
+    一条 ``notebook_access_level`` 语句答完——与 ``notebook_capability_allowed`` 的
+    语句数相同,却还能告诉调用点「放行的是编辑者还是管理档」。体内需要按调用者档位
+    再收窄的写路径(编辑者只能删本人上传的来源、不能整表删 Knowhow 等,决策 D14)用
+    它代替 ``notebook_capability_allowed``,不多发第二条查询。同一张能力表,未知能力名
+    同样当场 ``KeyError``。
+    """
+    admits = _LEVEL_ADMITS[_CAPABILITY_LEVELS[capability]]
+    access = notebook_access_repository().notebook_access_level(notebook_id, user_id)
+    if access is None or access.level not in admits:
+        return None
+    return access
+
+
+def notebook_edit_without_admin(access: "NotebookAccess | None") -> bool:
+    """调用者只有编辑档、没有管理档(点名编辑者,不是 owner 也不是组管理员)。
+    D14 的体内收窄用它判「这次放行要不要再收窄」。"""
+    return access is not None and access.level == "edit"
 
 
 def notebook_mirror_fence(capability: str, notebook_id: str) -> "str | None":
@@ -838,6 +964,7 @@ async def user_or_agent_scope(
     scope: str,
     *,
     write: bool = False,
+    owner_id: str | None = None,
     not_found_detail: str = "Notebook not found",
 ) -> AsyncIterator[RequestActor]:
     """The auth CORE behind require_user_or_agent (see that factory for the
@@ -868,9 +995,10 @@ async def user_or_agent_scope(
     sides by backend/tests/test_memory_mcp.py.
 
     Otherwise -> session Bearer (or the auth_optional seeded-admin
-    fallback): resolves the user like get_current_user, then applies
-    notebook_access_repository()'s existing owner-only (write=True) or
-    owner-or-reader (write=False) guard — ``scope`` is IGNORED for a session
+    fallback): resolves the user like get_current_user, then applies the
+    ``knowhow:write`` capability (write=True; decision D6 of the share-edit
+    design: the same tier as the cell content it is attached to — owner, group
+    admin, named editor) or the read predicate (write=False) — ``scope`` is IGNORED for a session
     user (design doc §⑥-4: "写入走新增 scope knowhow:code（用户界面走会话鉴
     权）" — a session's authority is notebook membership, never a scope).
 
@@ -903,6 +1031,8 @@ async def user_or_agent_scope(
         )
         marker = set_request_user(owner)
         try:
+            if write and owner_id is not None:
+                append_mark(request, notebook_id, "knowhow:write", owner_id, owner, source="guard")
             yield RequestActor(
                 user=owner, is_agent=True, identity_id=principal.owner_id,
                 actor_label=principal.profile_name,
@@ -911,12 +1041,17 @@ async def user_or_agent_scope(
             reset_request_user(marker)
     else:
         user = await _resolve_session_user(request)
-        guard = (
-            notebook_access_repository().user_can_access_notebook
-            if write
-            else notebook_access_repository().user_can_read_notebook
-        )
-        allowed = await run_in_threadpool(guard, notebook_id, user.id)
+        # 决策 D6(分享编辑 P1):会话写分支按 `knowhow:write` 判——与同一张表的单元格
+        # 内容写同一格能力,随能力表跟随(理由见 `_CAPABILITY_LEVELS` 上方表外消费点
+        # 第 1 条)。读分支仍是读权。
+        if write:
+            resolved_owner = await run_in_threadpool(notebook_capability_owner, "knowhow:write", notebook_id, user.id)
+            allowed = resolved_owner is not None
+        else:
+            allowed = await run_in_threadpool(
+                notebook_access_repository().user_can_read_notebook,
+                notebook_id, user.id,
+            )
         if not allowed:
             raise HTTPException(status_code=404, detail=not_found_detail)
         if write:
@@ -933,6 +1068,8 @@ async def user_or_agent_scope(
             await _raise_if_mirrored(notebook_id)
         marker = set_request_user(user)
         try:
+            if write:
+                append_mark(request, notebook_id, "knowhow:write", resolved_owner, user, source="guard")
             principal = session_audit_principal(user)
             yield RequestActor(
                 user=user, is_agent=False, identity_id=principal.identity_id,
@@ -1065,6 +1202,13 @@ def model_service_binding_summary() -> dict[str, bool]:
 
 
 from app.services.memory_service import MemoryService  # noqa: E402
+
+
+def memory_suggest_service() -> "MemorySuggestService":
+    """The per-user suggestion switch (``PATCH /me/memory-mode``), a runtime
+    seat the frozen facade surface does not carry -- reached like
+    ``memory_membership_service``."""
+    return repository()._runtime.memory_suggest_service  # type: ignore[attr-defined]
 
 
 def memory_membership_service() -> MemoryService:

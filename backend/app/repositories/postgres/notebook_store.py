@@ -21,6 +21,7 @@ from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.notebook_delete_job_store import NotebookDeleteJobStore
 from app.repositories.postgres.mount_sql import (
     MOUNT_BASE_NOT_LIVE_EXPR as _MOUNT_BASE_NOT_LIVE_EXPR,
+    MOUNT_CLOSES_WHEN_SHARED_EXPR as _MOUNT_CLOSES_WHEN_SHARED_EXPR,
     MOUNT_GATE_CLOSED_EXPR as _MOUNT_GATE_CLOSED_EXPR,
     MOUNT_JOIN as _MOUNT_JOIN,
     MOUNT_ORDER as _MOUNT_ORDER,
@@ -33,6 +34,7 @@ from app.domain.knowledge_contracts import USABLE_STATUSES  # noqa: F401
 from app.repositories.postgres.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 from app.repositories.postgres.memory_sql import memory_source_type_predicate
 from app.domain.memory_kg_isolation import NotebookHoldsMemory
+from app.repositories.ports import NotebookHasEditors
 
 # 「这本笔记本里有 Memory 来源」:发布为公共库的拒绝条件(M1,E4-3)。一个参数:笔记本 id。
 # A notebook import that never published, handed to the delete job by
@@ -45,6 +47,13 @@ _ABANDONED_IMPORT_SQL = (
 _HOLDS_MEMORY_SQL = (
     "SELECT 1 FROM sources hm WHERE hm.notebook_id = %s "
     f"AND {memory_source_type_predicate('hm.source_type')} LIMIT 1"
+)
+
+# 这本库还有点名编辑者(分享编辑 P1,PD-8):公共库对所有人只读,不能带着编辑者
+# 发布。与 `_HOLDS_MEMORY_SQL` 一样写进发布那条 UPDATE 自己的 NOT EXISTS。
+_HAS_EDITORS_SQL = (
+    "SELECT 1 FROM notebook_grants eg WHERE eg.notebook_id = %s "
+    "AND eg.principal_type = 'user' AND eg.role = 'editor' LIMIT 1"
 )
 
 
@@ -176,8 +185,15 @@ class NotebookStore:
 
     @staticmethod
     def list_mount_edges(
-        connection, notebook_id: str, viewer_id: str | None = None
+        connection, notebook_id: str, viewer_id: str | None = None,
+        *, with_closes_when_shared: bool = False,
     ) -> list[dict]:
+        # `with_closes_when_shared`:只有库主的 `/bases` 投影要这一列(理由见
+        # sqlite 那一份的 docstring),检索路径的语句与不带它时逐字相同。
+        closes = (
+            _MOUNT_CLOSES_WHEN_SHARED_EXPR + " AS closes_when_shared,"
+            if with_closes_when_shared else ""
+        )
         rows = connection.execute(
             "SELECT b.id AS id,b.name AS name,b.tier AS tier,b.status AS base_status,"
             "b.created_by AS base_owner,"
@@ -186,7 +202,9 @@ class NotebookStore:
             + _MOUNT_GATE_CLOSED_EXPR
             + " AS gate_closed,"
             + _MOUNT_BASE_NOT_LIVE_EXPR
-            + " AS base_not_live,(b.created_by=a.created_by) AS same_owner "
+            + " AS base_not_live,"
+            + closes
+            + "(b.created_by=a.created_by) AS same_owner "
             + _MOUNT_JOIN
             + _MOUNT_ORDER,
             (notebook_id,),
@@ -195,10 +213,14 @@ class NotebookStore:
         return [mount_edge_view(row, viewer_id) for row in rows]
 
     def list_mount_edges_for_notebook(
-        self, notebook_id: str, viewer_id: str | None = None
+        self, notebook_id: str, viewer_id: str | None = None,
+        *, with_closes_when_shared: bool = False,
     ) -> list[dict]:
         with self.database.connect() as connection:
-            return self.list_mount_edges(connection, notebook_id, viewer_id)
+            return self.list_mount_edges(
+                connection, notebook_id, viewer_id,
+                with_closes_when_shared=with_closes_when_shared,
+            )
 
     @staticmethod
     def mounted_by_count(connection, notebook_id: str) -> int:
@@ -383,15 +405,25 @@ class NotebookStore:
             connection.execute(
                 "SELECT 1 FROM notebooks WHERE id=%s FOR NO KEY UPDATE", (notebook_id,)
             ).fetchall()
+            # The editor half pairs with the editor grant's `FOR SHARE` on this
+            # row (`group_store.set_user_editor_grant`): the lock above waits for
+            # a grant in flight, and this statement's fresh snapshot then sees
+            # its edge (PD-8).
             cur = connection.execute(
                 "UPDATE notebooks SET tier=%s,updated_at=%s WHERE id=%s "
-                f"AND NOT EXISTS ({_HOLDS_MEMORY_SQL})",
-                (tier, self.now(), notebook_id, notebook_id),
+                f"AND NOT EXISTS ({_HOLDS_MEMORY_SQL}) "
+                f"AND NOT EXISTS ({_HAS_EDITORS_SQL})",
+                (tier, self.now(), notebook_id, notebook_id, notebook_id),
             )
-            if cur.rowcount == 0 and connection.execute(
-                _HOLDS_MEMORY_SQL, (notebook_id,)
-            ).fetchone() is not None:
-                raise NotebookHoldsMemory()
+            if cur.rowcount == 0:
+                if connection.execute(
+                    _HOLDS_MEMORY_SQL, (notebook_id,)
+                ).fetchone() is not None:
+                    raise NotebookHoldsMemory()
+                if connection.execute(
+                    _HAS_EDITORS_SQL, (notebook_id,)
+                ).fetchone() is not None:
+                    raise NotebookHasEditors(notebook_id)
 
     def indexing_pipeline_state(self, notebook_id: str) -> dict[str, str]:
         with self.database.connect() as connection:

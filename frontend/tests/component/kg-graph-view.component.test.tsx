@@ -31,6 +31,8 @@ type Props = Parameters<typeof KgGraphView>[0];
 function graphView(overrides: Partial<Props["kgGraph"]> = {}): Props["kgGraph"] {
   const base = {
     buildingKg: false,
+    busyNotice: "",
+    busyNoticeAction: null,
     conceptDetail: null,
     conceptDetailGeneration: 0,
     conceptMembersExhausted: false,
@@ -470,6 +472,38 @@ test("删除结果画在按钮紧挨着的下一行（role=status），成功/�
     expect(status.previousElementSibling).toBe(screen.getByRole("button", { name: "删除知识图谱" }));
     view.unmount();
   }
+});
+
+// 分享编辑 P1(D8):别人发起的任务占着维护槽时,服务端 409 点名发起人。那是侧栏这一组按钮的
+// 结果——落在按钮组里(role=status),不走页面顶部的状态条。整理被挡时说明跟着画布空态那句里的
+// 「整理知识图谱」。
+test("侧栏「补上关联 / 重新合并 / 全部重新分析」被占用时,点名说明落在这一组按钮下", () => {
+  for (const action of ["relink", "merge", "rebuild_all"] as const) {
+    const view = renderView({
+      kgGraph: graphView({ busyNotice: "张三发起的知识图谱分析正在运行", busyNoticeAction: action }),
+    });
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("张三发起的知识图谱分析正在运行");
+    const stack = status.closest(".kg-action-stack")!;
+    expect(stack).toBeTruthy();
+    expect(within(stack as HTMLElement).getByRole("button", { name: "补上关联" })).toBeInTheDocument();
+    expect(within(stack as HTMLElement).getByRole("button", { name: "重新合并" })).toBeInTheDocument();
+    view.unmount();
+  }
+  // 「整理」被挡:侧栏这一组不画(它不是这组按钮的结果)。
+  renderView({ kgGraph: graphView({ busyNotice: "张三发起的知识图谱分析正在运行", busyNoticeAction: "build" }) });
+  expect(document.querySelector(".kg-action-stack [role=status]")).toBeNull();
+});
+
+test("「整理」被占用时,点名说明落在画布空态那句的「整理知识图谱」旁", () => {
+  renderView({
+    kgCanvas: "empty",
+    kgGraph: graphView({ busyNotice: "张三发起的知识图谱分析正在运行", busyNoticeAction: "build" }),
+  });
+  const status = screen.getByRole("status");
+  expect(status).toHaveTextContent("张三发起的知识图谱分析正在运行");
+  expect(canvasEmpty()!.contains(status)).toBe(true);
+  expect(within(canvasEmpty() as HTMLElement).getByRole("button", { name: "整理知识图谱" })).toBeInTheDocument();
 });
 
 

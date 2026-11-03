@@ -146,7 +146,7 @@ Extension SDK 的 baseline-preserving retrieval host 会执行实时 capability 
 - 扫描 PDF、公式和图片的最高保真解析需要 MinerU；本地解析器提供确定性降级。
 - 模型回答和知识抽取需要对应工作负载绑定；离线模式仍可完成导入与确定性流程。
 - Ask 模式只有 `chunk`（默认）与 `reasoning`；已退役的 `graph`、`fast`、`global` 引擎 id 仍作为内置模式的别名解析；generated-question recall 由部署方显式开启且默认 `off`。
-- Memory 仅创建者可见；分享支持复制、只读加入和群组，不提供实时协同编辑。
+- Memory 仅创建者可见；分享支持复制、只读加入、群组和点名编辑者，协作提示显示在场并刷新有改动的区域。
 - Web/网络来源搜索仍是尚未开放的未来能力。
 
 ## 文档维护

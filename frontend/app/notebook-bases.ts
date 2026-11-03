@@ -9,7 +9,16 @@
 import { requestJson } from "./api-client.ts";
 
 export type NotebookRef = { id: string; name: string; tier: string };
-export type MountedBase = NotebookRef & { active: boolean; inactive_reason: string };
+/**
+ * `closes_when_shared`:此刻有效、且只靠「借入」那一臂有效的挂载边——这本笔记本一旦被
+ * 共享出去(含添加第一个编辑者),它对所有人失效。只由库主的 `GET .../bases` 计算;
+ * 旧后端不发,缺失按 false(分享编辑 P1,决策 D13)。
+ */
+export type MountedBase = NotebookRef & {
+  active: boolean;
+  inactive_reason: string;
+  closes_when_shared?: boolean;
+};
 
 /**
  * 可挂候选。`origin` 说的是「这个候选凭什么能挂」——base(公共知识库)/ mine

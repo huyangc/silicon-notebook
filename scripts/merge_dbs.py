@@ -29,6 +29,7 @@ from app.repositories.ports import (  # noqa: E402
     RETRIEVAL_EXPERIENCE_MAX_ENTRIES,
     RETRIEVAL_EXPERIENCE_NOTEBOOK_MAX_ENTRIES,
 )
+from app.repositories.sqlite_functions import register_sqlite_functions  # noqa: E402
 
 # --- 表分类(SCHEMA_VERSION=71) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
@@ -97,6 +98,10 @@ NOTEBOOK_SCOPED_TABLES = [
     # objects 等其余知识行完全一致——本次合并后, 副库那些观察行仍然是"关于
     # 这个 notebook 的一条真实记录", 没有理由丢弃, 按 notebook_id IN (sec_nb)
     # 筛即可与其余知识一起正常合并。
+    # v106 自动记忆建议的「不再提」指纹: 只存哈希、按 notebook_id 随库合并(存在
+    # 即不提), 与 memory_items 同一归属——副库那本库里提过的事, 合并后照样不再提。
+    "memory_suggest_fingerprints",
+    "notebook_activity",
 ]
 # notebook_bases 是"挂载方"拥有的行(notebook_id=挂载方, base_notebook_id=被挂的公共知识
 # 库), 按本类通用规则以 notebook_id IN (sec_nb) 筛——sec_nb 恒不含 shared_base(它并入
@@ -285,6 +290,13 @@ SKIP_SECONDARY_TABLES = [
     # v94 MCP 限时回答链接:绑定副库自己的 Agent token(agent_access_tokens 只保
     # primary),合进 primary 只会留下指向不存在 token 的死链。只保 primary。
     "answer_links",
+    # v106 自动记忆建议: 个人开关与每日额度(memory_suggest_users)、单飞作业行与
+    # 游标(memory_suggest_jobs)。开关与 users/user_profiles 同为主库优先, 但它是
+    # 「这个部署里谁开了」的运行态, 不与副库求并集; 作业行与 agent_profile_jobs
+    # 同类(一次运行的进程状态 + 阈值计数), 合进来等于把副库的活动记在主库账上。
+    # 合并后 user_profiles.memory_mode 按主库开关折叠(fold_memory_mode_to_switch),
+    # 展示值不会与开关分叉。
+    "memory_suggest_users", "memory_suggest_jobs", "memory_suggest_read_fences",
 ]
 
 # 导入后清空(引用可再生的 kg_index 产物, 逼部署侧干净重建)
@@ -559,6 +571,27 @@ def sweep_orphan_group_grants(conn: sqlite3.Connection) -> int:
     return cur.rowcount or 0
 
 
+def fold_memory_mode_to_switch(conn: sqlite3.Connection) -> int:
+    """把 `user_profiles.memory_mode` 折叠到主库的记忆建议开关上, 返回改动的行数。
+
+    `user_profiles` 是主库优先并集, 副库独有用户的 profile 行会原样进来, 可能写着
+    'suggest'; 而 `memory_suggest_users` 只保主库那份(SKIP_SECONDARY_TABLES)。
+    不折叠的话「我的」页显示已开启, 观察者端口与作业却读不到开关——展示值与开关
+    分叉。开关是唯一真相, 所以只要主库里没有 enabled=1 的开关行, 展示值一律写回
+    'manual'。这是 `PATCH /me/memory-mode` 之外唯一写 memory_mode 的语句(合并是
+    离线整库操作, 不经过那个入口)。
+    """
+    if not (_table_exists(conn, "user_profiles", "main")
+            and _table_exists(conn, "memory_suggest_users", "main")):
+        return 0
+    cur = conn.execute(
+        "UPDATE main.user_profiles SET memory_mode = 'manual' "
+        "WHERE memory_mode <> 'manual' AND user_id NOT IN "
+        "(SELECT owner_id FROM main.memory_suggest_users WHERE enabled = 1)"
+    )
+    return cur.rowcount or 0
+
+
 def _merge_global_ask(conn: sqlite3.Connection) -> None:
     """Preserve both owners' histories; fail on conflicting identity or request keys."""
     carry_attribution = _table_exists(conn, GLOBAL_ASK_ATTRIBUTION_TABLE, "sec") and _table_exists(
@@ -623,6 +656,7 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
     shutil.copy2(primary_db, out_db)
 
     conn = sqlite3.connect(out_db)
+    register_sqlite_functions(conn)
     try:
         assert_taxonomy_complete(conn)
         conn.execute("PRAGMA foreign_keys = OFF")  # 导入期不校验; 结束后统一 foreign_key_check
@@ -761,6 +795,10 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
         # `principal_id` 无外键, 见 sweep_orphan_group_grants 的说明)。
         with conn:
             orphan_grants = sweep_orphan_group_grants(conn)
+        # 记忆模式展示值折叠到主库开关(必须在 GLOBAL_UNION 之后:那一步才把副库
+        # 用户的 profile 行带进来)。
+        with conn:
+            row_counts["memory_mode_folded"] = fold_memory_mode_to_switch(conn)
 
         # codex #524 R1 P2:经验库并集后立刻按运行时同一淘汰序收容——两个各自
         # 合法 300 行的库并出最多 600 行,而普通读者只按 id 序取前 300、下一次
@@ -855,6 +893,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[迁移] primary applied={ap_applied} secondary applied={bp_applied}", file=sys.stderr)
 
         conn_p, conn_s = sqlite3.connect(prim_copy), sqlite3.connect(sec_copy)
+        register_sqlite_functions(conn_p)
+        register_sqlite_functions(conn_s)
         try:
             shared_base = preflight(conn_p, conn_s, args.assume_same_users)
             sec_nb = [r[0] for r in conn_s.execute(

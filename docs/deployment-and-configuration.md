@@ -805,6 +805,81 @@ Bind the new `report_context_compress` chat workload (「报告材料整理」) 
 its default thinking policy is disabled. It uses the report queue priority and
 may share an existing service, with no independent service concurrency budget.
 
+Bind the new `memory_suggest` chat workload (「记忆建议」) too: once a user turns on
+system suggestions on the memory page, a background run makes at most one bounded
+call that turns that user's own questions in a notebook into draft memories awaiting
+review. Its default thinking policy is disabled and it uses the background priority;
+it may share an existing chat service (the example binds it to `general`). Once
+enabled, the user's own questions, clarification answers and answer excerpts are
+sent to that service — assess the bound service for data egress accordingly. The
+strict check cuts both ways: a new build without `[bindings] memory_suggest`
+refuses to start (`[thinking]` may omit it; the default is `disabled`), and **an
+older build refuses a file that already names it** (to the older build it is an
+unknown id). Upgrade in this order:
+
+1. Stop the old version.
+2. In the file `MODEL_SERVICES_CONFIG` points to, add
+   `memory_suggest = "<a chat service id>"` to `[bindings]`; a deployment with a
+   `[thinking]` table may add `memory_suggest = "disabled"`. If the same upgrade
+   adds other workloads, add their bindings in this step as well. If that build
+   also introduces `kg_attr_enrich`, add both bindings together; do not put an
+   unregistered workload into a build that does not provide it.
+3. Self-check with the **new build** and continue only on exit code 0 (on a non-zero
+   exit the last line names the missing or extra bindings):
+   `PYTHONPATH=backend python -c "from app.core.config import get_settings; from app.services.model_registry import SystemModelServiceRegistry; SystemModelServiceRegistry.load(get_settings())"`.
+   It reads only `.env` and the model configuration file — no database connection,
+   no file writes, no threads. Do not substitute `import app.main`: that builds the
+   whole application, which also archives old log files and loads extensions.
+4. Start the new version.
+
+Before rolling back to an older version, remove both `memory_suggest` lines from
+`[bindings]` and `[thinking]`, or the older build refuses to start. The database
+migration of the same upgrade (SQLite v106 / PostgreSQL 0087: the suggestion
+column, indexes and four tables) is one-way: an older build refuses a database
+whose version is ahead of it, so rolling back means restoring the pre-upgrade
+database backup -- take one before upgrading.
+
+For a populated PostgreSQL database, use the **new checkout's** online builder
+before stopping the old service, after taking the backup:
+
+```bash
+PYTHONPATH=backend python scripts/build_hotpath_indexes.py
+PYTHONPATH=backend python scripts/build_hotpath_indexes.py --apply
+```
+
+It inspects/builds the accumulated registry, including batch 10's
+`idx_ask_jobs_memory_suggest_sample`; it has no per-batch selector. On older
+schemas, apply first adds any missing `ask_jobs.submitted_via`, `output` and
+`report_id` columns with the sealed migrations' defaults and `C` collation.
+Existing values are preserved, unknown historical submission surfaces remain
+unknown, and the builder does not advance the migration ledger. Apply uses
+`CREATE INDEX CONCURRENTLY`, so migration can reuse the correctly shaped index
+instead of building it under startup's write lock. Same-name shape mismatches and
+INVALID remnants are refused, not silently replaced; follow the tool's explicit
+repair instruction before rerunning. SQLite v106 builds matching exact-UTC
+expression indexes for sampling and raw conversation predecessors during migration.
+After startup, verify `/api/system/config` reports the expected suggestion wiring
+and model readiness. No suggestion run should occur before a user opts in.
+
+`AUTO_MEMORY_SUGGEST_ENABLED=false` stops triggering and writing, but not expiry of
+existing drafts. `AUTO_MEMORY_SUGGEST_CLARIFIED_ENABLED`,
+`AUTO_MEMORY_SUGGEST_REPEATED_ENABLED` and `AUTO_MEMORY_SUGGEST_CORRECTED_ENABLED`
+independently disable clarification, repeated-question and follow-up-correction
+suggestions; disabling every class closes the wiring gate. The corrected flag maps
+to `Settings.auto_memory_suggest_corrected_enabled`. These are advanced deployment controls,
+not personal preferences and not starter `.env` requirements. Cost controls are
+`AUTO_MEMORY_SUGGEST_TRIGGER`, `AUTO_MEMORY_SUGGEST_BACKLOG_MAX`,
+`AUTO_MEMORY_SUGGEST_DAILY_CAP`, `AUTO_MEMORY_SUGGEST_ITEMS_PER_RUN`,
+`AUTO_MEMORY_SUGGEST_CANDIDATES_PER_RUN`, the `QUESTION_MAX_CHARS`,
+`CLARIFICATION_MAX_CHARS`, `ANSWER_EXCERPT_MAX_CHARS`, `INPUT_MAX_CHARS` and
+`OUTPUT_MAX_TOKENS` settings with that same prefix, plus `EXPIRY_DAYS`,
+`DECLINED_TTL_DAYS` and `EXPIRY_SWEEP_LIMIT`. Numeric defaults and algorithm rails
+are owned by [Automatic user-memory suggestions](./product-and-api.md#automatic-user-memory-suggestions).
+All numeric settings reject non-positive values. The configured memory embedding
+service may also receive bounded question/clarification text for neighbor lookup;
+adoption uses the existing Memory embedding/KG workloads. Include those services
+when assessing data egress.
+
 **The binding table is checked at startup: one missing workload or one unknown
 id and the backend refuses to start.** Whenever `MODEL_SERVICES_CONFIG` is
 non-empty, `[bindings]` must cover every workload (all three kinds — chat,
@@ -2043,3 +2118,19 @@ Advanced budgets are `AUTH_TRANSACTION_TTL_SECONDS`, `AUTH_SSO_SESSION_SECONDS` 
 Keep W3-specific fields, TLS/CA details and secret names in the plugin's configuration reference. Reverse proxies, APM and frontend access logs must omit OAuth callback/handoff query values; core strips authentication queries from Uvicorn access records. This does not reconfigure upstream infrastructure.
 
 The production Settings check still requires a non-default `SILICON_NOTEBOOK_ADMIN_PASSWORD`; the built-in `admin` remains a local account that can be used once the plugin is disabled.
+
+## Collaboration pulse deployment
+
+Keep a single API worker and instance: collaboration hints and presence are held
+in process memory. There is no feature switch. Only notebook-detail eligibility
+starts browser polling; ordinary private notebooks and public-only readers remain
+idle. Pool pressure can slow polling without making presence expire prematurely.
+
+Advanced settings are `COLLAB_PULSE_INTERVAL_SECONDS`, `COLLAB_PULSE_SLOW_INTERVALS`,
+`COLLAB_PULSE_POOL_WAIT_SLOW_MS`, `COLLAB_PULSE_POOL_WAIT_VERY_SLOW_MS`,
+`COLLAB_PULSE_RING_SIZE`, `COLLAB_PULSE_MAX_NOTEBOOKS`,
+`NOTEBOOK_ACTIVITY_RETENTION_DAYS`, `NOTEBOOK_ACTIVITY_PANEL_LIMIT`, and
+`NOTEBOOK_ACTIVITY_QUEUE_SIZE`. They do not belong in the starter `.env.example`.
+The [product contract](./product-and-api.md#collaboration-pulse) owns defaults and
+validation relationships. [Operations](./operations.md#collaboration-pulse-operations)
+owns queue diagnostics, evidence and the schema-compatible rollback procedure.

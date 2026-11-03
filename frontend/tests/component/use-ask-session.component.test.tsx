@@ -34,6 +34,8 @@ vi.mock("../../app/ask-api.ts", async (importOriginal) => ({
 }));
 
 import { useAskSession } from "../../app/use-ask-session";
+import { useMemorySourceSession } from "../../app/use-memory-source-session";
+import { navigateMemorySuggestionAnswer } from "../../app/memory-suggestion-navigation";
 
 type HookValue = ReturnType<typeof useAskSession>;
 type HookOptions = Parameters<typeof useAskSession>[0];
@@ -191,6 +193,64 @@ function beginOwnedNotebook(workspaceEpoch = 1, startMode: string | null = "chun
   if (startMode !== null) act(() => value!.selectMode(startMode));
   return owner!;
 }
+
+test("记忆跨库原回答导航等待真实Ask owner的目标render提交，不能假定openNotebook已提交", async () => {
+  const root = { notebookId: null as string | null, epoch: 0 };
+  const signal = new AbortController().signal;
+  let ask!: HookValue;
+  let bridge!: ReturnType<typeof useMemorySourceSession>;
+  function CommitHarness({ notebookId }: { notebookId: string | null }) {
+    ask = useAskSession({ actorId: "user-a", notebookId, policy: DEFAULT_POLICY, effects });
+    bridge = useMemorySourceSession({ actorId: "user-a", notebookId, sessionSignal: signal, workspaceEpoch: root.epoch, currentNotebookId: () => root.notebookId, currentEpoch: () => root.epoch, openSession: (id) => ask.openSession(id, ++root.epoch), reportError: effects.reportError });
+    return <div data-testid="memory-source-session">{ask.conversationId ?? "none"}:{ask.turns.map((turn) => turn.response.answer_id).join(",")}</div>;
+  }
+  api.getConversation.mockResolvedValue(detail("memory-conversation", "target-notebook"));
+  const view = render(<CommitHarness notebookId={null} />);
+  let navigation!: ReturnType<typeof navigateMemorySuggestionAnswer>;
+  await act(async () => {
+    navigation = navigateMemorySuggestionAnswer({ notebookId: "target-notebook", conversationId: "memory-conversation", answerId: "answer-memory-conversation" }, {
+      actorId: "user-a", signal, currentActorId: () => "user-a", currentNotebookId: () => root.notebookId, currentEpoch: () => root.epoch,
+      openNotebook: async (id) => {
+        root.notebookId = id;
+        const owner = ask.beginNotebookTransition({ actorId: "user-a", notebookId: id, workspaceEpoch: ++root.epoch });
+        ask.finishNotebookTransition(owner!);
+        return true;
+      },
+      openSession: (id) => bridge.open("target-notebook", id),
+    });
+    await Promise.resolve();
+  });
+  // The actual hook refuses while its prop/ref still names the previous view.
+  let premature = true;
+  await act(async () => { premature = await ask.openSession("memory-conversation", root.epoch); });
+  expect(premature).toBe(false);
+  expect(api.getConversation).not.toHaveBeenCalled();
+  view.rerender(<CommitHarness notebookId="target-notebook" />);
+  let destination: Awaited<typeof navigation> = null;
+  await act(async () => { destination = await navigation; });
+  expect(destination).toMatchObject({ notebookId: "target-notebook", conversationId: "memory-conversation", answerId: "answer-memory-conversation", epoch: 2 });
+  expect(api.getConversation).toHaveBeenCalledExactlyOnceWith("memory-conversation");
+  expect(view.getByTestId("memory-source-session")).toHaveTextContent("memory-conversation:answer-memory-conversation");
+});
+
+test("记忆原回答等待目标commit时被新导航顶替，不向真实Ask owner发迟到读", async () => {
+  const root = { notebookId: "target-notebook", epoch: 1 };
+  const signal = new AbortController().signal;
+  let ask!: HookValue;
+  let bridge!: ReturnType<typeof useMemorySourceSession>;
+  function CommitHarness({ notebookId }: { notebookId: string | null }) {
+    ask = useAskSession({ actorId: "user-a", notebookId, policy: DEFAULT_POLICY, effects });
+    bridge = useMemorySourceSession({ actorId: "user-a", notebookId, sessionSignal: signal, workspaceEpoch: root.epoch, currentNotebookId: () => root.notebookId, currentEpoch: () => root.epoch, openSession: (id) => ask.openSession(id, ++root.epoch), reportError: effects.reportError });
+    return null;
+  }
+  const view = render(<CommitHarness notebookId={null} />);
+  let pending!: ReturnType<typeof bridge.open>;
+  act(() => { pending = bridge.open("target-notebook", "memory-conversation"); });
+  root.epoch++;
+  view.rerender(<CommitHarness notebookId={null} />);
+  await expect(pending).resolves.toMatchObject({ opened: false });
+  expect(api.getConversation).not.toHaveBeenCalled();
+});
 
 beforeEach(() => {
   value = null;

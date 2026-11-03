@@ -1,5 +1,6 @@
 """The deletion window's two new scans stay on the partial index (PostgreSQL
-twin of ``tests/test_notebook_delete_grace_plans.py``).
+twin of ``tests/test_notebook_delete_grace_plans.py``), and the notice's
+Memory counts stay on their indexes.
 
 ``QueryStore.pending_delete_notices`` (every bell snapshot, every notebook
 list load) and ``NotebookDeleteJobStore.list_due_pending`` (every sweep tick)
@@ -9,6 +10,17 @@ the generic plan (``EXPLAIN (GENERIC_PLAN)``, what a prepared statement may
 switch to) the notebooks side is ``idx_notebooks_pending_delete_due`` and no
 plan node scans ``notebooks`` sequentially: with nothing pending the
 statement reads an empty index.
+
+The notice list's "holds memory there" test is two counts bound to the (user,
+notebook) -- all rows against unadopted system suggestions, in the same
+statement (design §6.3; the shown ``memory_count`` is their difference). The
+corpus carries a slice of open suggestions so the partial index is not empty.
+Per-notebook sub-plans of ``memory_items`` are, in both plan modes: the "all
+rows" counts (aliases ``om`` / ``m``) read ``idx_memory_owner_notebook_status``,
+the unadopted counts (``ou`` / ``u``) read the partial
+``idx_memory_suggest_unadopted`` -- and nothing scans ``memory_items``
+sequentially. (Index-only or not depends on the visibility map, so the pin is
+run in both ``bystander_snapshot`` states and asserts only the index.)
 """
 from __future__ import annotations
 
@@ -67,8 +79,10 @@ def seed(repo: Any, *, pending: int) -> str:
         )
         db.execute(
             "INSERT INTO memory_items (id,notebook_id,created_by,origin,status,title,"
-            "content_md,created_at,updated_at) SELECT 'gp-m-'||g,'gp-nb-'||(g%%3000),"
-            "'gp-u-'||((g+1)%%60),'ask_answer','confirmed','t','b',%s,%s "
+            "content_md,suggested_signal,created_at,updated_at) "
+            "SELECT 'gp-m-'||g,'gp-nb-'||(g%%3000),'gp-u-'||((g+1)%%60),'ask_answer',"
+            "CASE WHEN g%%200=0 THEN 'candidate' ELSE 'confirmed' END,'t','b',"
+            "CASE WHEN g%%200=0 THEN 'clarified' END,%s,%s "
             "FROM generate_series(0,19999) g",
             (_NOW, _NOW),
         )
@@ -140,10 +154,35 @@ def _plans(repo: Any, sql: str, params: Any) -> dict[str, list[dict]]:
     }
 
 
+_ALL_ROWS_ALIASES = {"om", "m", "m_1"}
+_UNADOPTED_ALIASES = {"ou", "u"}
+
+
+def _assert_memory_counts_on_their_indexes(mode: str, nodes: list[dict]) -> None:
+    scans = [n for n in nodes if n.get("Relation Name") == "memory_items"]
+    text = json.dumps(scans)
+    assert scans and not any(n["Node Type"] == "Seq Scan" for n in scans), (mode, text)
+    by_alias: dict[str, list[dict]] = {}
+    for node in scans:
+        by_alias.setdefault(node["Alias"], []).append(node)
+    # The WHERE term (om / ou) and the select list (m / u / m_1) all show up.
+    assert {"om", "ou", "m", "u"} <= set(by_alias), (mode, text)
+    assert set(by_alias) <= _ALL_ROWS_ALIASES | _UNADOPTED_ALIASES, (mode, text)
+    for alias, alias_nodes in by_alias.items():
+        expected = (
+            "idx_memory_suggest_unadopted" if alias in _UNADOPTED_ALIASES
+            else "idx_memory_owner_notebook_status"
+        )
+        for node in alias_nodes:
+            assert node.get("Index Name") == expected, (mode, alias, text)
+
+
 @pytest.mark.parametrize("pending", [0, 5])
-def test_the_window_scans_read_the_partial_index(repo, pending):
+def test_the_window_scans_read_the_partial_index(repo, bystander_snapshot, pending):
     user = seed(repo, pending=pending)
     runtime = repo._runtime
+    with runtime.database.connect() as connection:
+        bystander_snapshot.assert_visibility_map_blocked(connection, "memory_items")
     with recorded(repo) as statements:
         runtime.queries.pending_delete_notices(user, now=_NOW)
         runtime.notebook_delete_jobs.list_due_pending(now=_NOW)
@@ -151,6 +190,8 @@ def test_the_window_scans_read_the_partial_index(repo, pending):
     assert len(window) == 2
     for sql, params in window:
         for mode, nodes in _plans(repo, sql, params).items():
+            if "FROM memory_items" in sql:
+                _assert_memory_counts_on_their_indexes(mode, nodes)
             on_notebooks = [n for n in nodes if n.get("Relation Name") == "notebooks"]
             text = json.dumps(nodes)
             assert on_notebooks, (mode, text)

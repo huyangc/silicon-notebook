@@ -1171,6 +1171,8 @@ export function AnswerView({
   onImportGapSuggestion,
   importGapSuggestionDisabledReason,
   memorySaved,
+  memorySuggested = false,
+  memorySuggestionsEnabled = false,
   onTestModel,
   onOpenModelStatus,
   testingModelServices,
@@ -1239,6 +1241,8 @@ export function AnswerView({
    *  时这个 prop 传不传都不影响渲染（按钮压根不出现）。 */
   importGapSuggestionDisabledReason?: string;
   memorySaved: boolean;
+  memorySuggested?: boolean;
+  memorySuggestionsEnabled?: boolean;
   onTestModel?: (serviceId: string) => Promise<ModelServiceStatusItem | null>;
   onOpenModelStatus?: (serviceId: string) => void;
   testingModelServices?: Record<string, boolean>;
@@ -1540,6 +1544,7 @@ export function AnswerView({
       {/* 复制回答是自足动作（只读 DOM + 剪贴板），任何调用方都能承接，所以它不带
           可选开关；保存记忆与反馈需要写回服务端，没有回调就不渲染。 */}
       <div className="answer-feedback">
+        {onSaveMemory && memorySuggested && !memorySaved && <span className="answer-memory-suggestion">有建议</span>}
         {onSaveMemory && (
           <button
             aria-label={memorySaved ? "已保存到记忆" : "保存到记忆"}
@@ -1561,6 +1566,7 @@ export function AnswerView({
               type="button"
             ><ThumbsUp size={16} /></button>
           )}
+          {onFeedback && onSaveMemory && memorySuggestionsEnabled && feedbackSent === "useful" && !memorySaved && <span className="answer-memory-hint">要把这条回答<button type="button" className="link-button inline-action" onClick={() => onSaveMemory(answer.answer_id)}>存为记忆</button>吗？</span>}
           {onFeedback && (
             <button
               aria-label="需改进"

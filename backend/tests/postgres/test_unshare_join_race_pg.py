@@ -100,8 +100,8 @@ def test_a_join_arriving_while_the_unshare_holds_the_row_is_refused(repo, monkey
     joiner = threading.Thread(target=join)
     real_kick = store.kick_all_members
 
-    def kick_then_let_the_join_in(connection, nb_id):
-        removed = real_kick(connection, nb_id)
+    def kick_then_let_the_join_in(connection, nb_id, *, now):
+        removed = real_kick(connection, nb_id, now=now)
         # The token UPDATE and the DELETE have both run; this transaction
         # still holds the notebook row. Start the join now and wait until it
         # is blocked on that row (or, without the lock, has finished).

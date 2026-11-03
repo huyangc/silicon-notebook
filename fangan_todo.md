@@ -223,16 +223,10 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       群组；统一认证 SSO（PR #837 工号直登或关联/新建账号，见 `fangan_done.md` §3；#876 补了管理员
       合并统一认证账号；插件代码已交付，真实 IDaaS 联调与生产切换属部署侧验收）；跨多个 notebook 的检索与问答
       （全局问答 #751–#755，见 `fangan_done.md` §41–§44）。
-- [ ] **分享的 edit 权限层与近实时协作**：写权限仍 owner-only；无 presence / revision 轮询
-      （管理员用户列表的「在线状态」是另一特性）。原 spec
-      `docs/superpowers/specs/2026-06-04-users-sharing-cowork-design.md` 的 D2 / D3 决策已被
-      账号系统取代，动手前须重写。2026-10-28 用户批准重写后的规格
-      `docs/superpowers/specs/2026-10-28-share-edit-collaboration-design_zh.md`，按推荐立项
-      （D1–D18 全部按推荐，P1 先、P2 后）。
-- [ ] **自动用户记忆**：`memory_mode` 固定 manual；Agentic Memory 已提供候选 / 巡固机制，是否
-      开放自动写入待决。2026-10-28 用户批准规格
-      `docs/superpowers/specs/2026-10-28-auto-user-memory-design_zh.md`，按推荐立项
-      （D1–D21 全部按推荐）。
+- [ ] **用户暂缓的人工与真实模型验收**：分享编辑、协作脉搏及自动记忆的本机实现与离线集成验证见
+      `fangan_done.md` §68–69。按用户要求，两个账号在生产形态 HTTP/IP 下的浏览器协作与
+      BroadcastChannel 验收，以及自动记忆 DeepSeek-flash 真实模型验收（计划 T16 / F8）尚未执行；
+      不把组件测试或进程内 API 压测当作上述验收通过。
 - [ ] **插件化 X 系列剩余**：X6（「有真实消费者才重开扩展点」）已收官——`ask.reflect_action`
       扩展点（#714）与 arXiv 样例插件的 `search_arxiv` 动作分两个 PR 合入，样例插件现在演示
       三个点。剩余：X7 等仍无真实消费者的点；X10 后端热更用户明确要求「完全热更或不做」；
@@ -255,6 +249,14 @@ PostgreSQL 侧走 trigram 而不是 tsvector），「企业能力」去掉已交
       `SELECTED_SOURCE_GRAPH_ROLLOUT_MODE`（默认 `shadow`）、`PPR_FACT_RERANK_ENABLED`、
       `KG_CANONICAL_FOLD_ENABLED`、`KG_ABOUT_DOWNWEIGHT_ENABLED`。出口只有两种：有放量证据则改默认值并
       删开关与旧分支；没有则删开关与旁路代码。评估尚未排期。
+
+- [ ] **D11 自动记忆建议按类评估后关闭低采纳类**：分别评估澄清、反复提问、追问纠正
+      （`clarified`、`repeated`、`corrected`），按[产品契约的累计提议量与采纳率阈值](docs/product-and-api_zh.md#自动用户记忆建议)
+      判定，达到退出线即关闭对应的 `AUTO_MEMORY_SUGGEST_CLARIFIED_ENABLED`、
+      `AUTO_MEMORY_SUGGEST_REPEATED_ENABLED` 或 `AUTO_MEMORY_SUGGEST_CORRECTED_ENABLED`，
+      不联动其他类别。[运维口径](docs/operations_zh.md#自动记忆建议运维)说明采纳率分母与删除后
+      统计限制；以生产只读聚合证据记录决定，尚未开展评估。上面的 8 个既有实验开关仍等待用户
+      提供生产只读诊断结果，不因新增此项改变默认值或评估结论。
 
 ### 其它残余
 

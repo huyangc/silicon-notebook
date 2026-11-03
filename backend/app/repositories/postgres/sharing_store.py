@@ -16,6 +16,7 @@ from app.domain.kg_merge_seed import (
     CONCEPT_SEED_VERSION, check_concept_seed_version, published_concept_seed_version,
 )
 from app.domain.promotion_source import presented_source_title
+from app.repositories.access_level import NotebookAccess, notebook_access_from_row
 from app.repositories.group_rows import (
     GROUP_GRANT_COUNT_SQL,
     GROUP_GRANT_EXISTS_SQL,
@@ -36,13 +37,21 @@ from app.repositories.postgres._store_utils import (
     utc_now,
 )
 from app.repositories.postgres.access_sql import (
+    NOTEBOOK_ADMIN_OWNER_SQL,
+    NOTEBOOK_EDIT_OWNER_SQL,
+    NOTEBOOK_COLLAB_PULSE_WANTED_SQL,
+    collab_pulse_wanted_params,
     MEMBER_PROBE_SQL,
+    NOTEBOOK_ACCESS_LEVEL_SQL,
     NOTEBOOK_ADMIN_SQL,
     NOTEBOOK_DELETE_OWNER_SQL,
+    NOTEBOOK_EDIT_SQL,
     NOTEBOOK_LIVE_SQL,
     NOTEBOOK_READ_SQL,
     NOTEBOOK_WRITE_SQL,
+    access_level_params,
     admin_access_params,
+    edit_access_params,
     read_access_clause,
     read_access_params,
 )
@@ -53,10 +62,13 @@ from app.repositories.copy_memory_evidence import (
 )
 from app.repositories.copy_stream import feed_table, no_pages, single_page
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.group_store import _clear_suggest_jobs_without_read_on
+from app.repositories.postgres.memory_suggest_read_period import lock_mode_read_period_on, readers_before_loss_on
 from app.repositories.postgres.knowhow_history_store import record_change
 from app.repositories.postgres import memory_sql
 from app.repositories.postgres.memory_sql import memory_source_readable
 from app.repositories.postgres.mount_sql import MOUNT_VALID_EXPR
+from app.repositories.postgres.read_authority_lock import lock_read_changes_on
 from app.repositories.postgres.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 from app.repositories.postgres.unified_kg_store import UnifiedKgStore
 
@@ -861,6 +873,8 @@ _IMPORT_DANGLING_SQL: tuple[tuple[str, str], ...] = (
 COPY_STREAM_PAGE_ROWS = 2000
 
 
+# notebook_activity is local history, excluded from every notebook copy/export
+# closure alongside process-owned job state; copying a library creates new history.
 class SharingStore:
     """PostgreSQL sharing/member rows and backend-neutral deep-copy primitives."""
 
@@ -906,7 +920,8 @@ class SharingStore:
 
         Lock order and conflict edges (do not paraphrase):
 
-        * The FIRST statement takes ``FOR UPDATE`` on the notebook row. A join
+        * After the shared mode/read-period barrier, the FIRST row lock is
+          ``FOR UPDATE`` on the notebook row. A join
           takes ``FOR KEY SHARE`` on that row, with the token in its
           predicate, before inserting (``insert_member_if_live``), and the two
           modes conflict. A join that locked first commits before this
@@ -926,6 +941,7 @@ class SharingStore:
           be holding (a join cannot hold a member row of this notebook
           without first holding ``FOR KEY SHARE`` on the notebook row)."""
         with self.database.write() as connection:
+            lock_mode_read_period_on(connection)
             connection.execute(
                 "SELECT 1 FROM notebooks WHERE id=%s FOR UPDATE", (notebook_id,)
             )
@@ -933,7 +949,7 @@ class SharingStore:
                 "UPDATE notebooks SET is_shared=0,share_token=NULL,updated_at=%s WHERE id=%s",
                 (self.now(), notebook_id),
             )
-            return self.kick_all_members(connection, notebook_id)
+            return self.kick_all_members(connection, notebook_id, now=self.now)
 
     def find_by_token(self, token: str) -> str | None:
         """codex #659 R11 P1：见 SQLite 孪生的完整理由（逐字同义）——并入
@@ -1075,6 +1091,62 @@ class SharingStore:
             ).fetchone()
         return row is not None
 
+    def user_can_edit_notebook(self, notebook_id: str, user_id: str) -> bool:
+        """编辑权:owner ∪ 编辑级有效授权边(分享编辑 P1,决策 D1)。谓词见
+        `access_sql.NOTEBOOK_EDIT_SQL`;与管理权、写权**并列**,三者各有引用者。"""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                NOTEBOOK_EDIT_SQL, (notebook_id, *edit_access_params(user_id))
+            ).fetchone()
+        return row is not None
+
+    def owner_if_can_edit(self, notebook_id: str, user_id: str) -> str | None:
+        with self.database.connect() as connection:
+            row = connection.execute(NOTEBOOK_EDIT_OWNER_SQL, (notebook_id, *edit_access_params(user_id))).fetchone()
+        return str(row["created_by"] or "") if row is not None else None
+
+    def owner_if_can_admin(self, notebook_id: str, user_id: str) -> str | None:
+        with self.database.connect() as connection:
+            row = connection.execute(NOTEBOOK_ADMIN_OWNER_SQL, (notebook_id, *admin_access_params(user_id))).fetchone()
+        return str(row["created_by"] or "") if row is not None else None
+
+    def collab_pulse_wanted(self, notebook_id: str, user_id: str) -> bool:
+        with self.database.connect() as connection:
+            row = connection.execute(NOTEBOOK_COLLAB_PULSE_WANTED_SQL, collab_pulse_wanted_params(notebook_id, user_id)).fetchone()
+        return row is not None
+
+    def insert_activity(self, activity: Mapping) -> None:
+        with self.database.write() as connection:
+            connection.execute(
+                "INSERT INTO notebook_activity (id,notebook_id,kind,capability,actor_id,actor_name,target,created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                tuple(activity[key] for key in ("id", "notebook_id", "kind", "capability", "actor_id", "actor_name", "target", "created_at")),
+            )
+
+    def list_recent_activity(self, notebook_id: str, limit: int) -> list[dict]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT id,notebook_id,kind,capability,actor_id,actor_name,target,created_at "
+                "FROM notebook_activity WHERE notebook_id=%s ORDER BY created_at DESC,id LIMIT %s",
+                (notebook_id, limit),
+            ).fetchall()
+        return [sqlite_compatible_row(dict(row), timestamp_columns=("created_at",)) for row in rows]
+
+    def purge_expired_activity(self, cutoff: str) -> int:
+        with self.database.write() as connection:
+            return connection.execute("DELETE FROM notebook_activity WHERE created_at<%s", (cutoff,)).rowcount
+
+    def notebook_access_level(
+        self, notebook_id: str, user_id: str
+    ) -> NotebookAccess | None:
+        """访问级别点查(PD-5):一条语句答出 owner/admin/edit/read 与库主 id。
+        谓词见 `access_sql.NOTEBOOK_ACCESS_LEVEL_SQL`;无权或库不存在/非存活为 None。"""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                NOTEBOOK_ACCESS_LEVEL_SQL, access_level_params(notebook_id, user_id)
+            ).fetchone()
+        return notebook_access_from_row(row)
+
     def user_can_read_notebook(self, notebook_id: str, user_id: str) -> bool:
         """读权:owner ∪ 只读成员 ∪ 有效授权边。谓词见 `access_sql.NOTEBOOK_READ_SQL`。"""
         with self.database.connect() as connection:
@@ -1184,21 +1256,27 @@ class SharingStore:
 
     def remove_member(self, notebook_id: str, user_id: str) -> None:
         with self.database.write() as connection:
+            lock_mode_read_period_on(connection)
+            lock_read_changes_on(connection, [notebook_id])
+            readers = readers_before_loss_on(connection, [notebook_id])
             connection.execute(
                 "DELETE FROM notebook_members WHERE notebook_id=%s AND user_id=%s",
                 (notebook_id, user_id),
             )
+            _clear_suggest_jobs_without_read_on(connection, [notebook_id], readers=readers, now=self.now())
 
     @staticmethod
-    def kick_all_members(connection, notebook_id: str) -> list[str]:
+    def kick_all_members(connection, notebook_id: str, *, now: TimestampInput | Callable[[], TimestampInput]) -> list[str]:
         """End every link membership of this notebook on the caller's write
         connection; returns the removed user ids (sorted). Does not open a
         transaction: its one caller, ``clear_share``, voids the token in the
         same one. Only ``notebook_members`` — grant edges are untouched."""
+        readers = readers_before_loss_on(connection, [notebook_id])
         rows = connection.execute(
             "DELETE FROM notebook_members WHERE notebook_id=%s RETURNING user_id",
             (notebook_id,),
         ).fetchall()
+        _clear_suggest_jobs_without_read_on(connection, [notebook_id], readers=readers, now=now() if callable(now) else now)
         return sorted(str(row["user_id"]) for row in rows)
 
     def list_members(self, notebook_id: str) -> list[dict]:

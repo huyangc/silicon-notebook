@@ -55,6 +55,7 @@ from app.migration.shadow.transform import (
 from app.migration.shadow.types import Manifest, TableSpec
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.schema_manifest import POSTGRES_ROWID_ORDINAL_TABLES
+from app.repositories.sqlite_functions import register_sqlite_functions
 
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -461,6 +462,7 @@ def _open_snapshot(
         raise ValueError("shadow snapshot content hash changed")
     uri = resolved.as_uri() + "?mode=ro&immutable=1"
     conn = sqlite3.connect(uri, uri=True)
+    register_sqlite_functions(conn)
     conn.row_factory = sqlite3.Row
     try:
         current_resolved = path.resolve(strict=True)

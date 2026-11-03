@@ -107,6 +107,7 @@ from app.repositories.ports import (
     RetrievalExperienceStorePort,
 )
 from app.services import background_jobs
+from app.services.collab_jobs import pulse_touch_for_job
 from app.services.kg.json_utils import safe_json
 from app.services.prompts import (
     RETRIEVAL_EXPERIENCE_SCHEMA_HINT,
@@ -326,6 +327,7 @@ class RetrievalExperienceDistillationService:
     200 libraries sharing zero batches; no priority meant the global chain
     starving. Neither can happen now.
     """
+    _collab_touch = None
 
     def __init__(
         self,
@@ -978,6 +980,8 @@ class RetrievalExperienceDistillationService:
             # ``claimed_here`` 与它无关——直接调 ``run()`` 也是真的跑过一批。
             with self._lock:
                 self._last_finished[partition] = time.monotonic()
+            if partition:
+                pulse_touch_for_job(self._collab_touch, partition, "understanding")
             if claimed_here:
                 with self._lock:
                     self._running = False

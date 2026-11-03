@@ -1824,6 +1824,65 @@ export function KnowhowPanelStyles() {
           color: #b91c1c;
         }
 
+        /* 分享编辑 P1（决策 D7）：保存撞上别人的改动时，格子编辑器 /「优化整行」里
+           就地出现的双版本对比（knowhow-cell-conflict.tsx）。两个版本复用
+           .kh-optimize-pane 的外框；原文按 Markdown 源码显示（pre），限高滚动，
+           不把编辑区挤出视口。 */
+        .kh-cell-conflict {
+          flex: 0 0 auto;
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          margin-bottom: 12px;
+          padding: 12px;
+          border: 1px solid #f0c0c0;
+          border-radius: 8px;
+          background: #fffafa;
+        }
+
+        .kh-cell-conflict-text {
+          margin: 0;
+          font-size: 13px;
+          color: #8a2a2a;
+        }
+
+        .kh-cell-conflict-versions {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 12px;
+        }
+
+        .kh-cell-conflict-md {
+          margin: 0;
+          max-height: 180px;
+          overflow: auto;
+          padding: 10px 12px;
+          font-size: 12.5px;
+          line-height: 1.55;
+          white-space: pre-wrap;
+          word-break: break-word;
+        }
+
+        .kh-cell-conflict-actions {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 12px;
+        }
+
+        .kh-cell-conflict-outcome {
+          margin-right: auto;
+          font-size: 12.5px;
+          font-weight: 600;
+          color: var(--green);
+        }
+
+        @media (max-width: 640px) {
+          .kh-cell-conflict-versions {
+            grid-template-columns: 1fr;
+          }
+        }
+
         /* -------------------------------------------------------------------
            Task 11（代码附件 UI，knowhow-code.tsx 的 KnowhowCodeChip /
            KnowhowCodeModal 共用）——登记在这里而非 knowhow-code.tsx 自己的

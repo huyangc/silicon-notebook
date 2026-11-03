@@ -8,6 +8,10 @@ import { requestJson } from "./api-client.ts";
 import { requestTaskStream } from "./request-task-stream.ts";
 import { humanizedError, logDiagnostic, toUserMessage } from "./errors.ts";
 import { FloatingModalCard } from "./floating-modal-card";
+import { MemorySuggestToggle, type MemorySuggestToggleProps } from "./memory-suggest-toggle";
+import { MemorySuggestionReceipt, MemorySuggestionStats, MemorySuggestionSummary } from "./memory-suggestion-card";
+import type { SuggestionAnswerTarget } from "./memory-suggestion-model";
+import { MEMORY_SUGGESTION_RESULT_MS, type MemorySuggestionReview } from "./use-memory-suggestion-review";
 import { PROMOTION_TARGET_NONE_REASON, resolvePromotionTarget, type MountedBase } from "./notebook-bases";
 import { PromotionTargetHint, type MountBasesAccess } from "./promotion-target-hint";
 import { PromotionTargetModal } from "./promotion-target-modal";
@@ -29,6 +33,7 @@ import {
   EVIDENCE_TYPE,
   EVIDENCE_STATUS,
   MEMORY_INPUT_LIMITS,
+  MEMORY_PAGE_SIZE,
   validateMemoryDraft,
   type MemoryScope,
 } from "./memory-model";
@@ -38,15 +43,13 @@ import { confirmedOnly, singleSourceNotebookId, summarizeTransferResults, type T
 import { DestinationPicker } from "./transfer-picker.tsx";
 import { label, EVIDENCE_LEVEL } from "./vocabulary";
 import type {
-  MemoryOrigin,
+  MemoryOriginFilter,
   MemoryPreview,
   MemoryRecord,
   MemoryStatus,
   PaginatedMemories,
 } from "./workspace-model";
 import "./memory-panel.css";
-
-const MEMORY_PAGE_SIZE = 20;
 
 async function memoryApi<T>(path: string, options: RequestInit = {}): Promise<T> {
   return requestJson(path, { ...options, tag: "memory", unauthorized: "clear-and-reload" });
@@ -187,6 +190,9 @@ export function MemoryPanel({
   onOpenPromotionQueue,
   mountBasesAccess,
   onMountBases,
+  memorySuggest,
+  suggestionReview,
+  onOpenAnswer,
 }: {
   scope: MemoryScope;
   notebookId: string | null;
@@ -215,6 +221,9 @@ export function MemoryPanel({
   mountBasesAccess?: (notebookId: string) => MountBasesAccess;
   /** 打开那本笔记本的设置并停在「参考库」一节。 */
   onMountBases?: (notebookId: string) => void;
+  memorySuggest?: Omit<MemorySuggestToggleProps, "sessionSignal">;
+  suggestionReview?: MemorySuggestionReview;
+  onOpenAnswer?: (target: SuggestionAnswerTarget) => Promise<boolean>;
 }) {
   // 晋升目标三态按记忆各自的 notebook 解析，两个 scope 共用同一套
   // resolvePromotionTarget 判定(不另写一份规则)。notebook 视图里所有记忆
@@ -237,7 +246,7 @@ export function MemoryPanel({
   const [status, setStatus] = useState<MemoryStatus | "all">(
     initialStatus ?? "all",
   );
-  const [origin, setOrigin] = useState<MemoryOrigin | "all">("all");
+  const [origin, setOrigin] = useState<MemoryOriginFilter | "all">("all");
   const [queryDraft, setQueryDraft] = useState("");
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
@@ -248,6 +257,7 @@ export function MemoryPanel({
   const [kgEligible, setKgEligible] = useState(false);
   const [extractKg, setExtractKg] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [suggestionNotice, setSuggestionNotice] = useState<{ id: string; message: string; failed: boolean } | null>(null);
   const [layout, setLayout] = useState<"grid" | "list">("grid");
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const [selectionMode, setSelectionMode] = useState(false);
@@ -275,6 +285,25 @@ export function MemoryPanel({
   const mountedRef = useRef(true);
   const mutationControllersRef = useRef(new Set<AbortController>());
   const navigationExpandedIdRef = useRef<string | null>(null);
+  // Every explicit edit/open/close owns a fresh generation, even when values are identical.
+  const editorOwnerRef = useRef<object>({});
+  const previousAdoptionRef = useRef(suggestionReview?.view.adoptionCompleted);
+
+  useEffect(() => {
+    const completion = suggestionReview?.view.adoptionCompleted;
+    const previous = previousAdoptionRef.current;
+    previousAdoptionRef.current = completion;
+    if (completion && completion !== previous && completion.memoryId === editingId && completion.editorOwner === editorOwnerRef.current) {
+      editorOwnerRef.current = {};
+      setEditingId(null);
+    }
+  }, [editingId, suggestionReview?.view.adoptionCompleted]);
+
+  useEffect(() => {
+    if (!suggestionNotice) return;
+    const timer = setTimeout(() => setSuggestionNotice(null), MEMORY_SUGGESTION_RESULT_MS);
+    return () => clearTimeout(timer);
+  }, [suggestionNotice]);
 
   useEffect(() => subscribeMemorySessionAbort(sessionSignal, () => {
     listControllerRef.current?.abort();
@@ -306,6 +335,7 @@ export function MemoryPanel({
     setOrigin("all");
     setQueryDraft("");
     setQuery("");
+    editorOwnerRef.current = {};
     setEditingId(null);
     setExpandedIds((previous) => {
       const next = new Set(previous);
@@ -340,6 +370,7 @@ export function MemoryPanel({
     try {
       await memoryApi(`/memories/${encodeURIComponent(memory.id)}`, { method: "DELETE", signal: controller.signal });
       if (controller.signal.aborted || !mountedRef.current) return;
+      if (memory.suggested_signal) suggestionReview?.commands.changed();
       setSelectedIds((prev) => { const next = new Set(prev); next.delete(memory.id); return next; });
       setRefresh((value) => value + 1);
     } catch (cause) {
@@ -364,6 +395,7 @@ export function MemoryPanel({
         signal: controller.signal,
       });
       if (controller.signal.aborted || !mountedRef.current) return;
+      suggestionReview?.commands.changed();
       setSelectedIds(new Set());
       setSelectionMode(false);
       setRefresh((value) => value + 1);
@@ -420,9 +452,10 @@ export function MemoryPanel({
       if (listControllerRef.current === controller) listControllerRef.current = null;
       if (listRequestEpochRef.current === epoch) listRequestEpochRef.current += 1;
     };
-  }, [notebookFilter, notebookId, origin, page, query, refresh, scope, sessionSignal, status]);
+  }, [notebookFilter, notebookId, origin, page, query, refresh, scope, sessionSignal, status, memorySuggest?.view.deletedRevision, suggestionReview?.view.revision]);
 
   function beginEdit(memory: MemoryRecord) {
+    editorOwnerRef.current = {};
     setEditingId(memory.id);
     setDraft(draftFor(memory));
     setExtractKg(true);
@@ -430,6 +463,7 @@ export function MemoryPanel({
 
   async function updateMemory(memory: MemoryRecord, action: "save" | "confirm" | "reject" | "deprecate") {
     if (busyId || sessionSignal.aborted) return;
+    const submittedEditor = editingId === memory.id ? editorOwnerRef.current : null;
     const controller = new AbortController();
     mutationControllersRef.current.add(controller);
     setBusyId(memory.id);
@@ -465,11 +499,19 @@ export function MemoryPanel({
         signal: controller.signal,
       });
       if (controller.signal.aborted || !mountedRef.current) return;
-      setEditingId(null);
+      if (submittedEditor && editorOwnerRef.current === submittedEditor) {
+        editorOwnerRef.current = {};
+        setEditingId((current) => current === memory.id ? null : current);
+      }
       setRefresh((value) => value + 1);
+      if (memory.suggested_signal) {
+        suggestionReview?.commands.changed();
+        setSuggestionNotice({ id: memory.id, message: action === "reject" ? "已忽略" : action === "save" ? "已保存修改" : "已完成", failed: false });
+      }
     } catch (cause) {
       if (!controller.signal.aborted && mountedRef.current) {
-        setError(toUserMessage(cause));
+        if (memory.suggested_signal) setSuggestionNotice({ id: memory.id, message: toUserMessage(cause), failed: true });
+        else setError(toUserMessage(cause));
       }
     } finally {
       mutationControllersRef.current.delete(controller);
@@ -673,6 +715,8 @@ export function MemoryPanel({
         </span>
       </header>
 
+      {memorySuggest && <MemorySuggestToggle {...memorySuggest} sessionSignal={sessionSignal} />}
+
       <div className="memory-filterbar">
         <form className="memory-search" onSubmit={submitSearch}>
           <Search size={16} />
@@ -709,13 +753,16 @@ export function MemoryPanel({
         </label>
         <label>
           来源
-          <select value={origin} onChange={(event) => { setOrigin(event.target.value as MemoryOrigin | "all"); setPage(0); }}>
+          <select value={origin} onChange={(event) => { setOrigin(event.target.value as MemoryOriginFilter | "all"); setPage(0); }}>
             <option value="all">全部</option>
             <option value="ask_answer">Ask 回答</option>
             <option value="external_agent">Agent 提议</option>
+            <option value="suggested">系统建议</option>
           </select>
         </label>
       </div>
+
+      {(memorySuggest?.enabled || origin === "suggested" || items.some((memory) => memory.suggested_signal)) && <MemorySuggestionStats sessionSignal={sessionSignal} revision={refresh + (suggestionReview?.view.revision ?? 0) + (memorySuggest?.view.deletedRevision ?? 0)} />}
 
       <div className="memory-toolbar">
         <button
@@ -842,9 +889,9 @@ export function MemoryPanel({
         <div className={`memory-list ${layout === "list" ? "is-list" : ""}`}>
           {items.map((memory) => {
             const statusMeta = memoryStatusMeta(memory.status);
-            const originMeta = memoryOriginMeta(memory.origin);
+            const originMeta = memory.suggested_signal ? { label: "系统建议", tone: "ask" } : memoryOriginMeta(memory.origin);
             const editing = editingId === memory.id;
-            const busy = busyId === memory.id;
+            const busy = busyId === memory.id || Boolean(suggestionReview?.view.busy);
             const promotionTarget = promotionTargetFor(memory);
             const provenanceRows = memoryProvenanceRows(memory);
             const citationReferences = memoryCitationReferences(memory);
@@ -925,16 +972,18 @@ export function MemoryPanel({
                     </span>
                   </div>
                   {canEditMemory(memory.status) && !editing && (
-                    <button type="button" className="memory-icon-action" onClick={() => beginEdit(memory)}>
-                      <Edit3 size={15} /> {memory.status === "candidate" ? "审核" : "编辑"}
+                    <button type="button" className="memory-icon-action" disabled={Boolean(busyId)} onClick={() => beginEdit(memory)}>
+                      <Edit3 size={15} /> {memory.status === "candidate" && !memory.suggested_signal ? "审核" : "编辑"}
                     </button>
                   )}
                 </div>
 
+                {memory.suggested_signal && <MemorySuggestionSummary memory={memory} onOpenAnswer={onOpenAnswer} sessionSignal={sessionSignal} />}
+
                 {editing ? (
                   <>
-                    <MemoryEditor draft={draft} setDraft={setDraft} />
-                    {memory.status === "candidate" && kgEligible && (
+                    <MemoryEditor draft={draft} setDraft={(next) => { editorOwnerRef.current = {}; setDraft(next); }} />
+                    {memory.status === "candidate" && !memory.suggested_signal && kgEligible && (
                       <label className="agent-check">
                         <input
                           type="checkbox"
@@ -973,6 +1022,10 @@ export function MemoryPanel({
                   <time dateTime={memory.updated_at}>更新于 {new Date(memory.updated_at).toLocaleString("zh-CN")}</time>
                   {!editing && (
                     <div className="memory-card-actions">
+                      {memory.suggested_signal && memory.status === "candidate" && suggestionReview && <>
+                        <button type="button" disabled={busy} onClick={() => suggestionReview.commands.open(memory, memory, scope === "notebook" ? kgEligible : undefined)}><Check size={14} />采纳</button>
+                        <button type="button" disabled={busy || Boolean(busyId)} onClick={() => updateMemory(memory, "reject")}><X size={14} />{busyId === memory.id ? "正在忽略…" : "忽略"}</button>
+                      </>}
                       {memory.status === "confirmed" && (
                         <>
                           {canPromoteMemory(memory) ? (
@@ -1028,12 +1081,12 @@ export function MemoryPanel({
                   )}
                   {editing && (
                     <div className="memory-actions">
-                      <button type="button" disabled={busy} onClick={() => setEditingId(null)}><X size={14} /> 取消</button>
+                      <button type="button" disabled={busyId === memory.id} onClick={() => { editorOwnerRef.current = {}; setEditingId(null); }}><X size={14} /> 取消</button>
                       {memory.status === "candidate" ? (
                         <>
-                          <button type="button" disabled={busy} className="danger" onClick={() => updateMemory(memory, "reject")}><Trash2 size={14} /> 拒绝</button>
+                          <button type="button" disabled={busy} className="danger" onClick={() => updateMemory(memory, "reject")}><Trash2 size={14} /> {memory.suggested_signal ? "忽略" : "拒绝"}</button>
                           <button type="button" disabled={busy} onClick={() => updateMemory(memory, "save")}><Edit3 size={14} /> 保存草稿</button>
-                          <button type="button" disabled={busy || !draft.title.trim() || !draft.content_md.trim()} className="primary" onClick={() => updateMemory(memory, "confirm")}><Check size={14} /> 确认收录</button>
+                          <button type="button" disabled={busy || !draft.title.trim() || !draft.content_md.trim()} className="primary" onClick={() => memory.suggested_signal && suggestionReview ? suggestionReview.commands.open(memory, { title: draft.title.trim(), content_md: draft.content_md.trim(), tags: tagsFromDraft(draft.tags) }, scope === "notebook" ? kgEligible : undefined, editorOwnerRef.current) : updateMemory(memory, "confirm")}><Check size={14} /> {memory.suggested_signal ? "采纳" : "确认收录"}</button>
                         </>
                       ) : (
                         <>
@@ -1044,11 +1097,15 @@ export function MemoryPanel({
                     </div>
                   )}
                 </footer>
+                {suggestionNotice?.id === memory.id && <p className="memory-suggestion-result" role={suggestionNotice.failed ? "alert" : "status"}>{suggestionNotice.message}</p>}
+                {suggestionReview && <MemorySuggestionReceipt memoryId={memory.id} review={suggestionReview} />}
               </article>
             );
           })}
         </div>
       )}
+      {suggestionNotice && !items.some((memory) => memory.id === suggestionNotice.id) && <p className="memory-suggestion-result" role={suggestionNotice.failed ? "alert" : "status"}>{suggestionNotice.message}</p>}
+      {suggestionReview && Object.entries(suggestionReview.view.receipts).filter(([id, receipt]) => !items.some((memory) => memory.id === id) && (scope === "global" ? !notebookFilter || notebookFilter === receipt.notebookId : notebookId === receipt.notebookId)).map(([id]) => <MemorySuggestionReceipt key={id} memoryId={id} review={suggestionReview} />)}
       <Pagination page={page} pageSize={MEMORY_PAGE_SIZE} total={total} busy={loading} onPage={setPage} label="记忆分页" />
       {pendingDelete && (
         <div className="utility-modal utility-modal-top" role="dialog" aria-modal="true" aria-label="确认删除">

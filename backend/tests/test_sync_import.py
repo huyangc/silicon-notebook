@@ -1064,6 +1064,53 @@ def test_a_user_named_only_by_a_grant_on_an_existing_mirror_is_not_created(
     assert "erin" not in report.user_mapping.unmatched
 
 
+def test_user_principal_grants_are_not_seeded(source, target, tmp_path):
+    """Decision D16 (share-edit P1): a named grant (``principal_type='user'``)
+    never lands in a mirror. Grants are seed-only, so a revocation at the
+    source would never reach it -- the person would keep reading here, keep
+    the mirror's unshared gate closed and block the account's merge. Only the
+    group and everyone grants are seeded; the two named ones (an editor and a
+    legacy viewer) are skipped and counted, and ``--create-missing-users``
+    mints no account for the two users only they name. The exporter still
+    ships them."""
+    _add_user(source["repo"], "user-a-dave", "dave")
+    _add_user(source["repo"], "user-a-erin", "erin")
+    with source["repo"]._write() as db:
+        for grant_id, principal_type, principal_id, role in (
+            ("grant-everyone", "everyone", "", "viewer"),
+            ("grant-editor", "user", "user-a-dave", "editor"),
+            ("grant-viewer", "user", "user-a-erin", "viewer"),
+        ):
+            db.execute(
+                "INSERT INTO notebook_grants(id,notebook_id,principal_type,"
+                "principal_id,role,created_by,created_at) VALUES(?,?,?,?,?,?,?)",
+                (grant_id, source["exported"], principal_type, principal_id, role,
+                 ALICE[0], MOMENT),
+            )
+    package = _export(source, tmp_path / "out-named")
+    shipped = {row["id"] for row in _rows(package, "notebook_grants")}
+    assert {"grant-editor", "grant-viewer"} <= shipped
+
+    report = _import(target, package, create_missing_users=True)
+
+    assert report.error == ""
+    with target["repo"]._connect() as db:
+        landed = {
+            row[0] for row in db.execute(
+                "SELECT principal_type FROM notebook_grants WHERE notebook_id=?",
+                (source["exported"],),
+            ).fetchall()
+        }
+    assert landed == {"group", "everyone"}
+    assert report.skipped_user_grants == 2
+    assert report.as_json()["skipped_user_grants"] == 2
+    assert report.tables["notebook_grants"].skipped == 2
+    assert _count(
+        target["repo"], "SELECT COUNT(*) FROM users WHERE username IN ('dave','erin')"
+    ) == 0
+    assert not {"dave", "erin"} & set(report.user_mapping.unmatched)
+
+
 def test_ascii_lower_folds_only_ascii_letters():
     from app.migration.sync.identity import ascii_lower
 

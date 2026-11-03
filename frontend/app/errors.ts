@@ -303,6 +303,12 @@ function pickUserDetail(raw: string): string {
 const TRUSTED_STRUCTURED_FAILURES: Readonly<Record<string, number>> = Object.freeze({
   // 目标端写入围栏(跨环境增量同步,docs/incremental-sync-design.md §5)。
   notebook_mirrored: 409,
+  // Knowhow 单元格乐观校验(分享编辑 P1,决策 D7;backend/app/api/knowhow_routes.py
+  // `_cell_conflict`):两人同时改同一格,后保存的一方拿到 reason/current,
+  // 编辑器据此就地给出双版本。message 是同一函数里两句中文字面量之一。
+  knowhow_cell_conflict: 409,
+  // 本人记忆建议模式的部署闸；system_routes.update_my_memory_mode 的固定提示。
+  memory_suggest_unavailable: 409,
 });
 
 /**

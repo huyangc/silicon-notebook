@@ -190,3 +190,16 @@ test("「关闭并管理来源」的聚焦请求落在搜索框上，聚焦后�
   expect(screen.getByRole("searchbox", { name: "搜索本库来源" })).not.toHaveFocus();
   expect(onSearchFocused).toHaveBeenCalledOnce();
 });
+
+
+// 分享编辑 P1(决策 D14):点名编辑者只能删除本人上传的来源。宿主按 sourceDeleteAllowed 给出
+// 逐篇判据,列表照它决定画不画删除按钮。
+test("canDeleteSource 为假的那一篇不渲染删除按钮,其余照常", () => {
+  renderPanel({
+    sources: [source("mine", { uploaded_by_me: true }), source("theirs", { uploaded_by_me: false })],
+    sourcesTotal: 2,
+    canDeleteSource: (item) => item.uploaded_by_me === true,
+  });
+  expect(screen.getByRole("button", { name: "删除来源：mine" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "删除来源：theirs" })).toBeNull();
+});

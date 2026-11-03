@@ -37,6 +37,7 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 # shadow preflight use this reverse-totality list to reject unrelated/live
 # targets and any newly added business table that lacks a reviewed mapping.
 POSTGRES_BUSINESS_TABLES = (
+    "notebook_activity",
     "agent_access_tokens",
     "agent_notebook_profile",
     "agent_observations",
@@ -107,6 +108,10 @@ POSTGRES_BUSINESS_TABLES = (
     "memory_items",
     "memory_provenance",
     "memory_revisions",
+    "memory_suggest_fingerprints",
+    "memory_suggest_jobs",
+    "memory_suggest_read_fences",
+    "memory_suggest_users",
     "mention_edges",
     "merge_review_jobs",
     "model_service_status",
@@ -545,7 +550,22 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # idx_source_elements_source_created / idx_source_elements_source_type, which
 # are dropped. Index only: no table, column, FK or unique-surface change, no
 # backfill.
+# SQLite v106 / PostgreSQL 0087 add auto user-memory suggestions:
+# memory_items.suggested_signal (nullable text, no CHECK), the partial
+# idx_memory_suggest_unadopted and idx_memory_suggest_expiry over memory_items,
+# and four local tables -- memory_suggest_users (owner_id primary key),
+# memory_suggest_jobs ((notebook_id, owner_id) primary key, status CHECK) and
+# memory_suggest_fingerprints ((notebook_id, owner_id, fingerprint) primary
+# key, kind CHECK), plus memory_suggest_read_fences (notebook_id, owner_id,
+# lost_at); the notebook-scoped tables FK notebooks ON DELETE CASCADE.
+# idx_memory_suggest_users_enabled bounds read-loss candidates to opt-ins. No owner FK,
+# no backfill, no new non-key unique surface.
+# PostgreSQL-only performance structure (hot-path batch 10, G20):
+# idx_ask_jobs_memory_suggest_sample bounds the two finished-web-answer sample
+# walks by (created_by, notebook_id, created_at, id); SQLite v106 instead
+# indexes deterministic sn_utc_us(created_at) for both owner/status sampling
+# and raw conversation predecessors, preserving the same exact UTC ordering.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=105,
-    postgres_version=86,
+    sqlite_version=107,
+    postgres_version=88,
 )

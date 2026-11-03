@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from app.core.config import Settings
 from app.core.request_context import get_request_user
+from app.domain.memory_suggest_contracts import normalize_memory_mode
 from app.models.identity import UserProfile
 from app.repositories.identity_errors import (
     BuiltinAdminDemotionError,
@@ -106,7 +107,11 @@ class IdentityStore:
             display_name=user["display_name"],
             role=user["role"],
             username=user["username"] if "username" in user.keys() else "",
-            memory_mode=profile["memory_mode"] if profile else "manual",
+            # 读侧兜底(G27):库里出现不认识的取值一律读成 manual——开关是
+            # opt-in,「不认识」最安全的读法就是「没开」。
+            memory_mode=normalize_memory_mode(
+                profile["memory_mode"] if profile else None
+            ),
             domain_focus=json.loads(profile["domain_focus"]) if profile else [],
             ui_mode=ui_mode,
             search_profile=search_profile,

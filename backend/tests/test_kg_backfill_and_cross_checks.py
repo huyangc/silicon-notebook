@@ -294,7 +294,7 @@ def test_build_in_flight_gates_maintenance_claim(repo):
         with pytest.raises(KgMaintenanceAlreadyRunning) as exc:
             service.kg_maintenance.start_notebook_relink(notebook.id)
         assert exc.value.holder == "buildkg"
-        assert service.kg_maintenance.active_kind(notebook.id) is None
+        assert service.kg_maintenance.busy_refusal(notebook.id) is None
     finally:
         with service.kg_building_lock:
             service.kg_building.discard(notebook.id)
@@ -354,13 +354,21 @@ def test_maintenance_in_flight_gates_build_and_standalone_delete(repo):
         service.kg_maintenance.settle(notebook.id, claimed["job_id"], "succeeded")
 
 
-def test_buildkg_holder_gets_the_build_vocabulary_409():
+def test_buildkg_holder_gets_the_build_vocabulary_409(monkeypatch):
     """409 文案泛化(§2.1):holder=buildkg 时给出与 build 侧逐字同款的
-    文案,而不是落进「整理知识图谱」的兜底。"""
-    from app.api.kg_routes import _kg_maintenance_busy
+    文案,而不是落进「整理知识图谱」的兜底。发起人查不到(或就是自己)时
+    不带名字(分享编辑 P1 的带名文案见 tests/test_editor_concurrency.py)。"""
+    from types import SimpleNamespace
 
-    detail = _kg_maintenance_busy(
-        KgMaintenanceAlreadyRunning("nb-x", "buildkg")).detail
+    from app.api import kg_routes
+    from app.models.identity import UserProfile
+
+    monkeypatch.setattr(kg_routes, "repository", lambda: SimpleNamespace(
+        _runtime=SimpleNamespace(kg_build_jobs=SimpleNamespace(
+            running_initiator=lambda notebook_id: None))))
+    detail = kg_routes._kg_maintenance_busy(
+        KgMaintenanceAlreadyRunning("nb-x", "buildkg"), "nb-x",
+        UserProfile(id="u-1", username="u1", email="", display_name="", role="user")).detail
     assert detail == "当前笔记本已有知识图谱分析任务正在运行"
 
 

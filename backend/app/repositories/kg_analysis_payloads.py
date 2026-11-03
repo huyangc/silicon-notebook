@@ -185,9 +185,13 @@ def mark_rows(
 
 # ``created_at`` (PR-2): the import time — F2's "equal object counts keep the
 # earlier import" tie-break, read in the same point lookup as the rest.
+# ``uploaded_by`` (share-edit P1, D14): who uploaded it, so the findings page can
+# tell a named editor which sources are theirs to delete. Server-side only: the
+# page shapes it into ``FindingLiveSource.uploaded_by_me`` for the requester and
+# the id itself never reaches the wire.
 SOURCE_STATE_FIELDS = (
     "title", "source_type", "status", "parse_status", "chunked_at",
-    "last_extraction_at", "last_extraction_status", "created_at",
+    "last_extraction_at", "last_extraction_status", "created_at", "uploaded_by",
 )
 _HIDDEN_SOURCE_TYPES = frozenset({"memory", "knowhow"})
 

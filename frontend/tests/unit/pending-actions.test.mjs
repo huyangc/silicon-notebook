@@ -208,3 +208,11 @@ test("notebook_transfer: an import whose notebook is published says so (the row 
   // 进行中的已发布导入仍不计未读(与后端 count 同口径)。
   assert.equal(transferInProgress({ ...base, state: "running", phase: "reembed" }), true);
 });
+
+test("分享编辑 P1:「被添加为编辑者」是改变访问权的推送,铃铛里有一句可点的话", async () => {
+  const { isAccessChangeEvent, NOTEBOOK_COLLABORATOR_GRANTED_EVENT } = await import("../../app/pending-actions.ts");
+  assert.equal(NOTEBOOK_COLLABORATOR_GRANTED_EVENT, "notebook_collaborator_granted");
+  assert.equal(isAccessChangeEvent("notebook_collaborator_granted"), true);
+  for (const other of ["index_done", "paper_meta_done", ""]) assert.equal(isAccessChangeEvent(other), false, other);
+  assert.equal(doneMessage("notebook_collaborator_granted", {}), "你被添加为一本笔记本的编辑者，点击查看");
+});

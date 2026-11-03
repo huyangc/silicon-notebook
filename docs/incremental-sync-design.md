@@ -87,6 +87,9 @@ id、归导入者所有、可编辑的本地笔记本，此后不会被任何同
   授权边引用到的组圈定；object_schemas 按被导出笔记本的 knowledge_objects 与
   notebook_object_schemas 引用到的 object_type 圈定——它的 notebook_id 自 v47 起恒为空，是
   环境级的管理员自定义类型表）。LOCAL 表没有 scope。导出器按它生成每张表的 SELECT。
+- `row_filter` / `follows_parent_filter`：表级与 scope 级之下的**按行**圈定（§3.4）。当前只有
+  memory_items 设行谓词（未采纳的系统建议不导出），memory_revisions、memory_provenance、
+  memory_embeddings 跟随父行。
 
 `synced_tables()` 按 shadow manifest 的 `copy_rank` 给出导入顺序，守卫测试用 PG 迁移里的
 外键边证明父表先于子表；声明的列名由建临时 SQLite 库做 PRAGMA 校验。下面是分类原则与
@@ -114,7 +117,7 @@ id、归导入者所有、可编辑的本地笔记本，此后不会被任何同
 | --- | --- | --- |
 | notebooks | created_by | 硬失败，整个包不导入（粒度是包不是笔记本：行相位按表提交，无法只剔一本） |
 | notebook_members | user_id | 跳过该行并记日志 |
-| notebook_grants | principal_id（PRINCIPAL）、created_by | principal 映射不到跳过该行并记日志，everyone 不需要映射；created_by 映射不到置为导入执行者 |
+| notebook_grants | principal_id（PRINCIPAL）、created_by | **`principal_type='user'` 的行一律跳过**（分享编辑 P1，决策 D16：点名到个人的授权含编辑者边，由目标端 owner 自己决定；seed-only 不传播撤销，种进来就撤不掉），计入导入报告 `skipped_user_grants`，也不为它们 `--create-missing-users` 建账号；群组主体映射不到跳过该行并记日志，everyone 不需要映射；created_by 映射不到置为导入执行者。D16 之前已种入镜像的遗留 `(user,viewer)`/`(user,admin)` 授权边不做清理，镜像的库主可在分享弹窗的「点名共享」区撤销 |
 | groups | created_by、owner_id、invite_created_by | 组按 name 匹配目标端已有组，导入从不建组也不更新组（§4）。导出端只带 `(id, name)` 两列（`database._PROJECTED_COLUMNS`）：组的创建者/所有者不进 users.jsonl，邀请令牌不出源环境；三列的规则只为策略表的完备性保留，不可达 |
 | group_members | group_id（GROUP）、user_id、added_by | 成员行只随本次导入创建的组播种，而导入从不建组，所以导出端干脆不带成员行（`export._EMPTY_ROW_TABLES`：行文件恒为空、表条目照留，源端成员名单与其用户投影都不出源环境）；目标端组的成员名单归目标端 |
 | notebook_bases、notebook_object_schemas、notebook_assets、knowhow_tables、knowhow_milestones | created_by | 映射不到置为导入执行者 |
@@ -136,11 +139,61 @@ knowhow_changes 与 knowhow_milestones 是编辑历史，归本层，但**默认
 | 分组 | 表 |
 | --- | --- |
 | 用户交互 | conversations、answers、ask_jobs、ask_trace_steps、feedback、reports、global_ask_conversations、global_ask_jobs、retrieval_experiences、agent_observations、agent_notebook_profile、retained_user_activity、wishes、wish_votes |
-| 运行态与作业 | kg_build_jobs、kg_rebuild_checkpoint、kg_cluster_scratch、kg_canonical_scratch、kg_relation_completion_state、merge_review_jobs、extraction_runs、catalog_jobs、catalog_candidates、promotion_candidates、concept_merge_candidates、kg_analysis_marks（v97/0077，图谱分析的「标为正常」与「补上关联已尝试」，与合并决定同口径）、source_paper_cards（v104/0085，论文卡片懒生成缓存，各环境自己生成）、kg_conflict_candidates、concept_whitelist、indexing_pipeline_stages、indexing_pipeline_stage_sources、source_index_backfills、knowledge_source_fact_backfills、chunk_element_backfills、notebook_delete_jobs、notebook_delete_files、agent_profile_jobs、notebook_share_requests |
+| 运行态与作业 | kg_build_jobs、kg_rebuild_checkpoint、kg_cluster_scratch、kg_canonical_scratch、kg_relation_completion_state、merge_review_jobs、extraction_runs、catalog_jobs、catalog_candidates、promotion_candidates、concept_merge_candidates、kg_analysis_marks（v97/0077，图谱分析的「标为正常」与「补上关联已尝试」，与合并决定同口径）、source_paper_cards（v104/0085，论文卡片懒生成缓存，各环境自己生成）、memory_suggest_users、memory_suggest_jobs、memory_suggest_fingerprints（v106/0087，自动记忆建议的个人开关、作业游标与「不再提」指纹，都是本环境运行态）、kg_conflict_candidates、concept_whitelist、indexing_pipeline_stages、indexing_pipeline_stage_sources、source_index_backfills、knowledge_source_fact_backfills、chunk_element_backfills、notebook_delete_jobs、notebook_delete_files、agent_profile_jobs、notebook_share_requests |
 | 身份与系统 | users、user_profiles、auth_*、agent_profiles、agent_access_tokens、agent_token_notebooks、model_service_status、system_model_service_status、app_settings、extension_runtime_toggles、command catalog |
 | 同步控制（PR-2 起，v83/0063） | sync_export_state（源端每个目标环境的导出水位）、sync_imports（目标端已引入的包与报告）、sync_import_progress（逐表断点） |
 
 users 不同步但导入时可能**创建**：见 §4。
+
+自动用户记忆（v106/0087）的四张新表——`memory_suggest_users`（个人开关与每日额度）、
+`memory_suggest_jobs`（单飞作业行与游标）、`memory_suggest_fingerprints`（「不再提」指纹）、
+`memory_suggest_read_fences`（最近一次彻底失权边界）——
+都是 LOCAL：另一环境按自己的近邻与模型兜底，可能再提一次同一件事，这是登记过的已知行为。
+`memory_items.suggested_signal` 是普通列，捕获只记行 id、导出读当前行，按 §6 导航页标记的先例
+不需要同步侧登记。
+
+### 3.4 行过滤：只同步已采纳的系统建议（自动用户记忆 D15 (a)）
+
+系统建议是 memory_items 里 `suggested_signal` 非空的行。**未采纳**的（`status` 为 `candidate` 或
+`rejected`）是本环境的草稿，不随同步走；**已采纳**的（`confirmed`，以及采纳后被弃用的
+`deprecated`）就是用户的记忆，照常同步。manifest 为此在表级、scope 级之外加两项按行圈定：
+
+- `row_filter`（memory_items）：导出的行必须满足的谓词——共享片段
+  `memory_sql.unadopted_suggestion` 的取反，即
+  `NOT (suggested_signal IS NOT NULL AND status IN ('candidate','rejected'))`。片段两后端逐字相同
+  （测试钉住），导出器在 SQLite 与 PostgreSQL 上用同一份 SQL。手动保存、Agent 候选
+  （`suggested_signal` 为空）不受影响。
+- `follows_parent_filter`（memory_revisions、memory_provenance、memory_embeddings）：子行只在父行
+  通过父表 `row_filter` 时导出，谓词读的是 scope 本来就做的父表 join（别名 `t1`）。父行被留下而
+  子行出包，导入的 `_verify_row_scopes` 会整包拒收；manifest 在模块加载时就检查这条形状规则：
+  被过滤表的每张 PARENT 子表都必须跟随，跟随者必须是被过滤表的 PARENT 子表，行谓词只能挂在
+  同步层的 NOTEBOOK scope 表上。
+
+两条导出路径都生效，且**只作用于 upsert**：
+
+- 全量（`export._write_table`）：表扫描的 keyset 查询多一个 `AND <谓词>`（`database._TableQuery.row_filter`）。
+- 增量（`export._incremental_rows`）：窗口压缩之后、转成行之前，`_drop_filtered_upserts` 按当前行
+  核对窗口里的 upsert，把「行还在、但不满足谓词」的删掉——被删的 upsert 不声明笔记本、不请求
+  文件。行已不在的 upsert 留给 `table_delta` 照旧降级为删除；父行不在的子行照旧放行。谓词按
+  `CASE WHEN … THEN 1 ELSE 0` 求值，NULL 与全量路径的 WHERE 一样算不通过。
+- **删除不过滤**：源端删掉一条从未同步过的草稿，删除条目照常进包；目标端 `_replay_delete_table`
+  找不到这一行就计为 `absent` 并跳过，不报错。过滤删除反而可能让目标端已收到的行永远删不掉。
+- 全量包的对账删除本来就豁免记忆四张表（§8），所以目标端在镜像上自己产生的草稿不会被全量包
+  带走。
+
+**父行后来才入选时的补发。** 建议创建时 provenance 与第 1 条修订已进入变更日志，但那一轮父行
+还是 candidate，三行都被过滤；之后用户采纳，增量窗口里只有父行的 UPDATE 和新修订——增量导出
+只读变更日志，早先的 provenance 与第 1 条修订不会自己回来。补法在存储层的采纳事务里
+（`MemoryStore.transition_with_revision(..., resync_children=True)`，`MemoryService.confirm` 与
+`create_from_answer` 的 CAS 采纳共用）：对该记忆的 provenance 与全部修订各做一次无变更
+`UPDATE`，两端捕获触发器在任何 UPDATE 上都记一条 upsert，下一个增量包就带上它们，目标端的
+`_stamp_memory_sync_origin` 因而有 provenance 可写。只在 `suggested_signal` 非空的采纳上执行；
+先读 `sync_capture_control`，捕获关闭时跳过（那时触发器本来也不记日志，事后靠全量包补齐）。
+向量在采纳后才生成，天然在父行入选之后，不需要补。
+
+用例：`tests/test_sync_memory_suggestions.py`（共享用例 `tests/sync_memory_suggestion_cases.py`，
+PG 孪生 `tests/postgres/test_sync_memory_suggestions_pg.py`）；形状规则：
+`tests/test_sync_manifest.py` 的行过滤段。
 
 ## 4. 身份映射
 

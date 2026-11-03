@@ -9,6 +9,7 @@ from psycopg import errors
 
 from app.core.config import Settings
 from app.core.request_context import get_request_user
+from app.domain.memory_suggest_contracts import normalize_memory_mode
 from app.models.identity import UserProfile
 from app.repositories.identity_errors import (
     BuiltinAdminDemotionError,
@@ -88,7 +89,10 @@ class IdentityStore:
             display_name=user_row["display_name"],
             role=user_row["role"],
             username=user_row.get("username", ""),
-            memory_mode=profile_row["memory_mode"] if profile_row else "manual",
+            # 读侧兜底(G27):同 SQLite 侧,不认识的取值读成 manual。
+            memory_mode=normalize_memory_mode(
+                profile_row["memory_mode"] if profile_row else None
+            ),
             domain_focus=json_value(
                 profile_row.get("domain_focus") if profile_row else None, []
             ),

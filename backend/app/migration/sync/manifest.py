@@ -41,6 +41,15 @@ More axes cut across those three classes:
   PostgreSQL primary key of their own. Empty everywhere else, meaning "the
   catalog primary key is the row identity" -- see
   ``app.migration.sync.capture.key_columns``.
+- ``row_filter`` / ``follows_parent_filter``: a per-ROW cut inside a synced
+  table, on top of the table- and scope-level ones above. ``row_filter`` is
+  the predicate a row must satisfy to be exported; ``follows_parent_filter``
+  makes a PARENT-scoped child travel only when its parent row passes the
+  parent's ``row_filter``. Both cut UPSERTS only, on both export paths (full
+  scan and change-log window); deletes are never filtered. Today exactly one
+  table is filtered: ``memory_items`` leaves its unadopted system suggestions
+  behind, and its three children follow (design D15 (a), see ``row_filter_for``
+  and docs/incremental-sync-design.md §3.4).
 
 A guard test (``tests/test_sync_manifest.py``) asserts this manifest is total
 over ``POSTGRES_BUSINESS_TABLES``: every business table must have exactly one
@@ -52,10 +61,12 @@ same change and update docs/incremental-sync-design.md §3.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
 from app.migration.shadow.manifest import MANIFEST as _SHADOW_MANIFEST
+from app.repositories.postgres.memory_sql import unadopted_suggestion
 from app.repositories.postgres.schema_manifest import POSTGRES_BUSINESS_TABLES
 
 
@@ -225,6 +236,35 @@ class TableSyncSpec:
     # ``app.migration.sync.capture_contract.capture_tables``. Meaningless for
     # LOCAL tables (never captured), which keep the default.
     since_schema: int = 84
+    # The predicate a row of THIS table must satisfy to be exported: given
+    # the SQL alias the export reads the row under, return a boolean SQL
+    # expression in the dialect both backends share. ``None`` (the normal
+    # case) exports every in-scope row. Applied to upserts only -- on the full
+    # path as an extra WHERE, on the incremental path by dropping the window's
+    # upserts whose current row exists and fails it -- and NEVER to deletes: a
+    # target that never received the row replays the delete as ``absent``
+    # (import_._replay_delete_table), so letting it through is harmless, while
+    # filtering it could strand a row the target did receive. Only a NOTEBOOK-
+    # scoped synced table may set it, and every PARENT-scoped child of it must
+    # set ``follows_parent_filter`` (checked below at import time).
+    row_filter: Callable[[str], str] | None = None
+    # PARENT scope only: export a row only when its PARENT row passes the
+    # parent's ``row_filter`` (read through the same parent join the scope
+    # already makes). Required for every child of a filtered table: a child
+    # whose parent stayed behind would make the importer's _verify_row_scopes
+    # refuse the whole package. Same upsert-only rule as ``row_filter``.
+    follows_parent_filter: bool = False
+
+
+def _not_an_unadopted_suggestion(alias: str) -> str:
+    """``memory_items``' row filter (design §6.6, D15 (a)): everything except
+    an UNADOPTED system suggestion -- the negation of the shared §6.3
+    fragment, so an adopted one (``confirmed`` or ``deprecated``) and every
+    row that is not a suggestion at all still travel. The PostgreSQL
+    module's fragment is plain SQL both backends parse identically
+    (``tests/test_sync_memory_suggestions.py`` pins it equal to the SQLite
+    copy)."""
+    return f"NOT {unadopted_suggestion(alias)}"
 
 
 # --- 3.1 同步层 (SYNCED) -----------------------------------------------
@@ -268,6 +308,7 @@ _SYNCED: tuple[TableSyncSpec, ...] = (
         "memory_embeddings",
         SyncClass.SYNCED,
         scope=TableScope(ScopeKind.PARENT, column="memory_id", parent_table="memory_items"),
+        follows_parent_filter=True,
     ),
     # KG（knowledge_objects.owner 是治理面板可编辑的自由文本标签，不是用户 id，
     # 不映射；source_candidate_id 指向 LOCAL 的 catalog_candidates，导入时置空）
@@ -350,6 +391,7 @@ _SYNCED: tuple[TableSyncSpec, ...] = (
         "memory_provenance",
         SyncClass.SYNCED,
         scope=TableScope(ScopeKind.PARENT, column="memory_id", parent_table="memory_items"),
+        follows_parent_filter=True,
     ),
     # 环境级自定义类型登记表（services/schema_registry.py）。
     # migrations/0025_notebook_object_schemas.sql 已经把非空 notebook_id 的
@@ -409,9 +451,12 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
         ),
         seed_only=True,
         notes=(
-            "principal_id 按行内 principal_type=user/group 选映射表；映射不到"
-            "跳过该行并记日志；everyone 不需要映射。created_by 映射不到置为"
-            "导入执行者。种子写入：首次创建笔记本后不再由导入更新/删除。"
+            "principal_id 按行内 principal_type=group/group_admins 选群组映射表；"
+            "映射不到跳过该行并记日志；everyone 不需要映射。principal_type=user "
+            "的点名授权（含编辑者）导入时一律跳过、计入报告 skipped_user_grants"
+            "（分享编辑决策 D16：种子写入不传播撤销，目标端自管点名共享），导出端"
+            "照旧导出。created_by 映射不到置为导入执行者。种子写入：首次创建笔记本"
+            "后不再由导入更新/删除。"
         ),
         scope=_NOTEBOOK_SCOPE,
     ),
@@ -531,8 +576,15 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
             "memory_provenance.payload_json 顶层写 sync_origin=<源环境> 标出"
             "（§11 已决，import_.MEMORY_SYNC_ORIGIN_KEY），前端据此显示"
             "「来源回答在 <源环境> 中」。"
+            "未采纳的系统建议（suggested_signal 非空且 candidate/rejected）不导出"
+            "（设计 §6.6 D15 (a)）：row_filter 只切 upsert，删除照常带；三张子表"
+            "follows_parent_filter 跟随父行。父行后来才被采纳时，采纳事务对 "
+            "provenance 与全部修订各做一次无变更 UPDATE，捕获触发器据此把它们"
+            "补进下一个增量窗口（MemoryStore.transition_with_revision 的 "
+            "resync_children）。"
         ),
         scope=_NOTEBOOK_SCOPE,
+        row_filter=_not_an_unadopted_suggestion,
     ),
     TableSyncSpec(
         "memory_revisions",
@@ -540,6 +592,7 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
         mapped_columns=(MappedColumn("changed_by", MappingKind.USER),),
         notes="映射不到置为导入执行者。",
         scope=TableScope(ScopeKind.PARENT, column="memory_id", parent_table="memory_items"),
+        follows_parent_filter=True,
     ),
     TableSyncSpec(
         "knowhow_milestones",
@@ -655,6 +708,15 @@ _LOCAL: tuple[TableSyncSpec, ...] = (
         "source_paper_cards", SyncClass.LOCAL,
         notes="论文卡片缓存（SQLite v104 / PostgreSQL 0085）：各环境按需懒生成，不跨环境",
     ),
+    # 自动用户记忆（SQLite v106 / PostgreSQL 0087）：开关与每日额度、单飞作业行
+    # （游标即本环境的采样窗口）、「不再提」指纹，都是本环境的运行态。另一环境会
+    # 按自己的近邻与模型兜底，可能再提一次同一件事（已知行为，设计 §5.1）。
+    # memory_items.suggested_signal 是普通列，无需登记（设计 §6.6）。
+    TableSyncSpec("memory_suggest_users", SyncClass.LOCAL, notes="自动记忆建议的个人开关与每日额度"),
+    TableSyncSpec("memory_suggest_jobs", SyncClass.LOCAL, notes="自动记忆建议的单飞作业行与游标"),
+    TableSyncSpec("memory_suggest_fingerprints", SyncClass.LOCAL, notes="自动记忆建议的「不再提」指纹"),
+    TableSyncSpec("memory_suggest_read_fences", SyncClass.LOCAL, notes="自动记忆建议的本环境最近失权边界"),
+    TableSyncSpec("notebook_activity", SyncClass.LOCAL, notes="本环境的协作最近改动提示，不跨环境"),
 )
 
 SYNC_MANIFEST: tuple[TableSyncSpec, ...] = _SYNCED + _SYNCED_WITH_MAPPING + _LOCAL
@@ -791,6 +853,59 @@ def carried_tables(*, knowhow_history: bool) -> tuple[str, ...]:
     return tuple(name for name in tables if name not in KNOWHOW_HISTORY_TABLES)
 
 
+def row_filter_for(name: str) -> tuple[int, Callable[[str], str]] | None:
+    """``(hop, predicate)`` the export applies to ``name``'s upserts, or
+    ``None`` when the table is not row-filtered.
+
+    ``hop`` names whose row ``predicate`` reads, in the exporter's own alias
+    numbering (``database._parent_join_clause``: ``t0`` is the exported row,
+    ``t<n>`` the n-th parent hop): 0 for a table with its own ``row_filter``,
+    1 for a ``follows_parent_filter`` child, whose parent is its first hop.
+    """
+    spec = spec_for(name)
+    if spec.row_filter is not None:
+        return 0, spec.row_filter
+    if spec.follows_parent_filter and spec.scope is not None:
+        parent = spec_for(spec.scope.parent_table).row_filter
+        if parent is not None:
+            return 1, parent
+    return None
+
+
+def _check_row_filters(specs: tuple[TableSyncSpec, ...]) -> None:
+    """The row-filter shape rules, enforced when this module loads so a
+    manifest edit that breaks one cannot reach an export: a filter lives on a
+    synced NOTEBOOK-scoped table; a follower is a synced PARENT child of a
+    filtered table; and EVERY PARENT child of a filtered table follows (one
+    that did not would export rows whose parent stayed behind, and the
+    importer refuses such a package outright)."""
+    problems: list[str] = []
+    by_name = {spec.name: spec for spec in specs}
+    for spec in specs:
+        local = spec.sync_class is SyncClass.LOCAL or spec.scope is None
+        if spec.row_filter is not None and (
+            local or spec.scope.kind is not ScopeKind.NOTEBOOK
+        ):
+            problems.append(f"{spec.name}: row_filter needs a synced NOTEBOOK-scoped table")
+        parent_filtered = (
+            not local
+            and spec.scope.kind is ScopeKind.PARENT
+            and by_name[spec.scope.parent_table].row_filter is not None
+        )
+        if spec.follows_parent_filter and not parent_filtered:
+            problems.append(
+                f"{spec.name}: follows_parent_filter needs a synced PARENT-scoped "
+                "table whose parent has a row_filter"
+            )
+        if parent_filtered and not spec.follows_parent_filter:
+            problems.append(
+                f"{spec.name}: its parent {spec.scope.parent_table!r} is row-filtered, "
+                "so it must set follows_parent_filter"
+            )
+    if problems:
+        raise ValueError("SYNC_MANIFEST row filters: " + "; ".join(problems))
+
+
 def local_tables() -> tuple[str, ...]:
     """LOCAL table names, in manifest declaration order. Derived from
     SYNC_MANIFEST the same way synced_tables() is, so the two stay in sync
@@ -808,3 +923,4 @@ if _business_names != _manifest_names:
         f"missing from SYNC_MANIFEST={_missing}, extra in SYNC_MANIFEST={_extra}. "
         "See tests/test_sync_manifest.py for the guard that also enforces this."
     )
+_check_row_filters(SYNC_MANIFEST)

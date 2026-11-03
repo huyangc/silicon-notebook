@@ -101,17 +101,24 @@ KG_ASK_RESERVE=3
 """
     (bundle / ".env").write_text(legacy_env, encoding="utf-8")
 
+    # The migration command requires explicit limits for every chat role;
+    # packaging must preserve those declared limits rather than infer them.
+    capacity_args = [
+        argument
+        for role in ("general", "reasoning", "rewrite", "kg")
+        for argument in (
+            "--context-window", f"{role}=131072",
+            "--max-output-tokens", f"{role}=32768",
+        )
+    ]
     result = subprocess.run(
         [
             str(bundled_python),
             "scripts/migrate_legacy_model_env.py",
             "--env",
             ".env",
+            *capacity_args,
             "--apply",
-            "--context-window", "general=32768",
-            "--max-output-tokens", "general=8192",
-            "--context-window", "rewrite=32768",
-            "--max-output-tokens", "rewrite=8192",
         ],
         cwd=bundle,
         text=True,
@@ -127,6 +134,10 @@ KG_ASK_RESERVE=3
     assert generated["bindings"]["report_sufficiency"] == "rewrite"
     assert generated["bindings"]["knowhow_optimize"] == "rewrite"
     assert generated["bindings"]["knowhow_complete"] == "rewrite"
+    for service in generated["services"].values():
+        if service["kind"] == "chat":
+            assert service["context_window_tokens"] == 131072
+            assert service["max_output_tokens"] == 32768
     assert "legacy-secret" not in result.stdout + result.stderr
     backup = bundle / ".env.pre-system-models.bak"
     assert backup.read_text(

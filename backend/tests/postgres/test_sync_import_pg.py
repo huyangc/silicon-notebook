@@ -613,6 +613,51 @@ def test_users_fold_ascii_case_and_groups_match_by_name_only_pg(
     )["n"] == 0
 
 
+def test_user_principal_grants_are_not_seeded(target, sync_key_source, tmp_path):
+    """Decision D16 on a PostgreSQL target (PG package): of a notebook's
+    group, everyone and two named grants, only the first two are seeded; the
+    named ones (an editor, a legacy viewer) are skipped and counted, and no
+    account is created for the users only they name."""
+    repo = sync_key_source["repo"]
+    notebook = _seed(repo, "named-grants", placeholder="%s", no_time=None)
+    _add_pg_user(repo, "user-src-dave", "dave")
+    _add_pg_user(repo, "user-src-erin", "erin")
+    _add_pg_group(repo, "grp-src-d16", "d16-team")
+    with repo._write() as db:
+        for grant_id, principal_type, principal_id, role in (
+            ("grant-d16-group", "group", "grp-src-d16", "viewer"),
+            ("grant-d16-everyone", "everyone", "", "viewer"),
+            ("grant-d16-editor", "user", "user-src-dave", "editor"),
+            ("grant-d16-viewer", "user", "user-src-erin", "viewer"),
+        ):
+            db.execute(
+                "INSERT INTO notebook_grants(id,notebook_id,principal_type,"
+                "principal_id,role,created_by,created_at) "
+                "VALUES (%s,%s,%s,%s,%s,'user-local',%s)",
+                (grant_id, notebook, principal_type, principal_id, role, MOMENT),
+            )
+    package = _export_sync_key_source(sync_key_source, tmp_path, "out-d16", notebook)
+    _add_pg_group(target["repo"], "grp-tgt-d16", "d16-team")
+
+    report = import_package(target["settings"], package, create_missing_users=True)
+
+    assert report.error == ""
+    landed = {
+        row["principal_type"] for row in _fetch(
+            target["repo"],
+            "SELECT principal_type FROM notebook_grants WHERE notebook_id=%s",
+            (notebook,),
+        )
+    }
+    assert landed == {"group", "everyone"}
+    assert report.skipped_user_grants == 2
+    assert report.tables["notebook_grants"].skipped == 2
+    assert _one(
+        target["repo"],
+        "SELECT COUNT(*) AS n FROM users WHERE username IN ('dave','erin')",
+    )["n"] == 0
+
+
 def test_knowhow_history_switch_and_memory_source_env_pg(
     target, sync_key_source, tmp_path
 ):

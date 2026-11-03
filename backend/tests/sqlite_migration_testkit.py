@@ -44,11 +44,34 @@ V78_AUTH_TABLES = {
 }
 
 
+def rollback_v107(db: sqlite3.Connection) -> None:
+    """Undo local collaboration activity, including both owned indexes."""
+    db.execute("DROP TABLE notebook_activity")
+
+
+def rollback_v106(db: sqlite3.Connection) -> None:
+    """Remove what SQLite migration 106 added: the four ``memory_suggest_*``
+    tables, its memory and exact-UTC Ask indexes and
+    ``memory_items.suggested_signal``. Callers lower ``user_version``
+    themselves."""
+    rollback_v107(db)
+    db.execute("DROP TABLE memory_suggest_fingerprints")
+    db.execute("DROP TABLE memory_suggest_read_fences")
+    db.execute("DROP TABLE memory_suggest_jobs")
+    db.execute("DROP TABLE memory_suggest_users")
+    db.execute("DROP INDEX idx_memory_suggest_expiry")
+    db.execute("DROP INDEX idx_memory_suggest_unadopted")
+    db.execute("DROP INDEX idx_ask_jobs_memory_suggest_utc")
+    db.execute("DROP INDEX idx_ask_jobs_conv_utc")
+    db.execute("ALTER TABLE memory_items DROP COLUMN suggested_signal")
+
+
 def rollback_v105(db: sqlite3.Connection) -> None:
     """Undo SQLite migration 105: drop the two reading-order indexes and put
     back the two ``(created_at, id)`` indexes it retired, spelled exactly as
-    their original migrations left them in sqlite_master. Callers lower
-    ``user_version`` themselves."""
+    their original migrations left them in sqlite_master. v106 is undone
+    first (newest-first). Callers lower ``user_version`` themselves."""
+    rollback_v106(db)
     db.execute("DROP INDEX idx_source_elements_reading_order")
     db.execute("DROP INDEX idx_source_elements_type_reading_order")
     db.execute(

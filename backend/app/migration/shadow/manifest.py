@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=105, postgres_version=86, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=107, postgres_version=88, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -901,6 +901,47 @@ _TABLES = (
     # the two backends, so a copied card would never match. LOCAL_EPHEMERAL,
     # no replication key.
     TableSpec("source_paper_cards", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 113),
+    # SQLite v106 / PostgreSQL 0087: auto user-memory suggestions. The new
+    # nullable memory_items.suggested_signal and the two partial memory_items
+    # indexes need no entry here (columns and indexes are parsed from the .sql
+    # by postgres_catalog.py; a plain text column needs no pipeline). The four
+    # tables are copied across the shadow pair like agent_profile_jobs: the
+    # per-user switch, the single-flight job rows (cursor and window) and the
+    # "never suggest again" fingerprints are user state of THIS deployment,
+    # and a cutover must neither reset an opted-in user nor re-suggest what
+    # was already proposed. memory_suggest_users has no foreign key at all;
+    # the other three FK onto notebooks (rank 15) only, so the appended ranks are
+    # FK-consistent, and nothing references any of them. Each replication key
+    # is the table's primary key, every column NOT NULL on both backends.
+    _table(
+        "memory_suggest_users",
+        ("owner_id",),
+        ReplicationKeyKind.DECLARED_PK,
+        114,
+        "timestamptz",
+    ),
+    _table(
+        "memory_suggest_jobs",
+        ("notebook_id", "owner_id"),
+        ReplicationKeyKind.DECLARED_PK,
+        115,
+        "timestamptz",
+    ),
+    _table(
+        "memory_suggest_fingerprints",
+        ("notebook_id", "owner_id", "fingerprint"),
+        ReplicationKeyKind.DECLARED_PK,
+        116,
+        "timestamptz",
+    ),
+    _table(
+        "memory_suggest_read_fences",
+        ("notebook_id", "owner_id"),
+        ReplicationKeyKind.DECLARED_PK,
+        117,
+        "timestamptz",
+    ),
+    _table("notebook_activity", ("id",), ReplicationKeyKind.DECLARED_PK, 118, "timestamptz"),
 )
 
 MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)

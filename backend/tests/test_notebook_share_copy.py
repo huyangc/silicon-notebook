@@ -1768,6 +1768,8 @@ def test_deep_copy_of_a_notebook_with_memories_carries_none_of_them(repo):
     new = repo._runtime.sharing.copy_notebook(memory_cases.NOTEBOOK, new_owner_id="user-deep-copy")
 
     view = memory_cases.read_copy(fetch, "?", new.id)
+    assert fetch("SELECT 1 FROM memory_suggest_read_fences WHERE notebook_id=?", (new.id,)) == []
+    assert fetch("SELECT 1 FROM memory_suggest_read_fences WHERE notebook_id=?", (memory_cases.NOTEBOOK,))
     memory_cases.assert_copy_has_no_memory(view)
     repo._runtime.sharing_store.validate_copy(memory_cases.NOTEBOOK, new.id)
     state = _kg_state(repo, new.id)

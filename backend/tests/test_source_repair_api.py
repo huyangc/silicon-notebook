@@ -115,6 +115,9 @@ def test_source_id_parse_binds_notebook_model_artifact_scope(tmp_path, monkeypat
     observed = []
 
     class _ScopedSourceRepository:
+        def source_parse_busy(self, source_id, *, timeout=0.0):
+            return repo.source_parse_busy(source_id, timeout=timeout)
+
         def parse_source(self, source_id):
             observed.append(make_model_work_context(
                 workload_id="source_summary",

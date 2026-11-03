@@ -22,12 +22,16 @@ E0 把「这条 Memory 派生行能不能给这个人看」与「这行知识算
 * 旧 `query_store._NOT_MEMORY_OWNED_SQL` 改为引用 `memory_derived_object` 后,取代码里的
   真聚合在同一份数据上给出硬编码的黄金结果,且新片段的否定与 E0 之前的手写文本逐行同义。
 """
+import inspect
 import re
+from pathlib import Path
+from typing import get_args
 
 import pytest
 
 from app.core.config import Settings
 from app.domain.knowledge_contracts import USABLE_STATUSES
+from app.models.memory import MemoryStatus
 from app.repositories.postgres import (
     memory_sql as pg_memory_sql,
     source_store as pg_source_store,
@@ -37,6 +41,7 @@ from app.repositories.sqlite import (
     query_store as sqlite_query_store,
     source_store as sqlite_source_store,
 )
+from app.repositories.sqlite import migrations as sqlite_migrations
 from app.repositories.sqlite.query_store import QueryStore
 from app.services.sqlite_repository import SQLiteRepository
 from tests import memory_sql_cases as cases
@@ -619,3 +624,49 @@ def test_query_store_aggregates_give_the_golden_results(world):
         names = queries.top_concept_names(db, cases.NOTEBOOK, USABLE_STATUSES, 24)
     assert counts == cases.QUERY_STORE_TYPE_COUNTS
     assert names == cases.QUERY_STORE_TOP_CONCEPTS
+
+
+# ------------------------------------------- 「未采纳的系统建议」(自动用户记忆)
+def test_unadopted_suggestion_fragment_is_mirrored_parameterless_and_matches_its_index():
+    """零参数、两后端逐字相同、状态集合是 MemoryStatus 的子集,且与迁移里
+    `idx_memory_suggest_unadopted` 的部分索引谓词同形(减项才能走那条部分索引)。"""
+    for alias in ("m", "mi", "Outer_2"):
+        text = memory_sql.unadopted_suggestion(alias)
+        assert "?" not in text and "%" not in text
+        assert pg_memory_sql.unadopted_suggestion(alias) == text
+    assert memory_sql.UNADOPTED_SUGGESTION_STATUSES == ("candidate", "rejected")
+    assert pg_memory_sql.UNADOPTED_SUGGESTION_STATUSES == ("candidate", "rejected")
+    assert set(memory_sql.UNADOPTED_SUGGESTION_STATUSES) <= set(get_args(MemoryStatus))
+    predicate = "suggested_signal IS NOT NULL AND status IN ('candidate', 'rejected')"
+    assert memory_sql.unadopted_suggestion("m") == (
+        "(m.suggested_signal IS NOT NULL AND m.status IN ('candidate', 'rejected'))"
+    )
+    assert predicate in inspect.getsource(sqlite_migrations.SqliteMigrator._migration_106)
+    pg_file = (
+        Path(pg_memory_sql.__file__).parent / "migrations" / "0087_memory_suggest.sql"
+    ).read_text(encoding="utf-8")
+    assert f"WHERE {predicate};" in pg_file
+    for bad in ("x y", "m;", ""):
+        with pytest.raises(ValueError):
+            memory_sql.unadopted_suggestion(bad)
+
+
+def test_unadopted_suggestion_fragment_selects_only_unadopted_suggestions(world):
+    """行为矩阵:只有带 suggested_signal 的 candidate/rejected 命中;手动记忆的
+    candidate/rejected 与已采纳(confirmed/deprecated)的建议都不命中。"""
+    owner = cases.OWNER
+    with world.write() as db:
+        for status in ("candidate", "confirmed", "rejected", "deprecated"):
+            for signal in (None, "clarified"):
+                memory_id = f"sug-{status}-{signal or 'manual'}"
+                db.execute(
+                    "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
+                    "content_md,suggested_signal,created_at,updated_at) "
+                    "VALUES (?,?,?,'ask_answer',?,'t','c',?,?,?)",
+                    (memory_id, cases.NOTEBOOK, owner, status, signal, NOW, NOW))
+        hits = {
+            row[0] for row in db.execute(
+                "SELECT id FROM memory_items m WHERE m.id LIKE 'sug-%' AND "
+                + memory_sql.unadopted_suggestion("m"))
+        }
+    assert hits == {"sug-candidate-clarified", "sug-rejected-clarified"}

@@ -1,7 +1,8 @@
 import { act, render } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
-import type { SourceSummary } from "../../app/workspace-model";
+import type { SourceElement, SourceSummary } from "../../app/workspace-model";
 import { sourceElementDomId } from "../../app/source-detail-state";
 
 const api = vi.hoisted(() => ({
@@ -18,7 +19,8 @@ vi.mock("../../app/source-api.ts", async (importOriginal) => ({
   ...api,
 }));
 
-import { useSourceLibrary, type SourceReparseOutcome } from "../../app/use-source-library";
+import { SOURCE_REPARSE_BUSY_HOLD_MS, useSourceLibrary, type SourceReparseOutcome } from "../../app/use-source-library";
+import { humanizedError } from "../../app/errors";
 
 function source(id: string, notebookId: string, parseStatus = "extracted"): SourceSummary {
   return {
@@ -1195,6 +1197,289 @@ test("a detail response cannot cross a notebook transition", async () => {
   expect(value!.highlightedElementId).toBe("");
 });
 
+function sourceElements(offset: number, count: number, text = "original"): SourceElement[] {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `element-${offset + index}`, source_id: "opened", element_type: "text",
+    location_label: `${offset + index}`, text: `${text} ${offset + index}`, metadata: {},
+  }));
+}
+
+test("collaboration refresh updates an off-page open detail and its accumulated element window", async () => {
+  render(<Harness />);
+  commitPage([source("sidebar", "notebook-a")]);
+  api.listSources.mockResolvedValue({ items: [source("sidebar", "notebook-a")], total_count: 151, offset: 100, limit: 50 });
+  act(() => { value!.setSourceQuery("needle"); value!.toggleSource("sidebar"); });
+  await act(async () => value!.loadSourcesPage({ page: 2, q: "needle" }));
+  api.getNotebookSource.mockResolvedValue({ ...source("opened", "notebook-a"), summary: "old metadata" });
+  api.getNotebookSourceElementsPage
+    .mockResolvedValueOnce({ items: sourceElements(40, 40), total_count: 160, offset: 40, limit: 40 })
+    .mockResolvedValueOnce({ items: sourceElements(80, 40), total_count: 160, offset: 80, limit: 40 });
+  await act(async () => { await value!.openSourceById("opened", "element-45"); });
+  await act(async () => value!.loadSourceElementPage("next"));
+  const selection = value!.sourceScopeSelection;
+  api.getNotebookSource.mockResolvedValue({ ...source("opened", "notebook-a"), summary: "fresh metadata" });
+  api.getNotebookSourceElementsPage.mockImplementation(async (_nb, _id, offset, limit) => ({
+    items: sourceElements(offset, limit, "fresh"), total_count: 160, offset, limit,
+  }));
+  let refreshed = false;
+  await act(async () => { refreshed = await value!.refreshForCollaboration(() => true); });
+  expect(refreshed).toBe(true);
+  expect(value!.sourceDetail?.summary).toBe("fresh metadata");
+  expect(value!.sourceElements).toEqual(sourceElements(40, 80, "fresh"));
+  expect(value!.sourceElementStartOffset).toBe(40);
+  expect(value!.highlightedElementId).toBe("element-45");
+  expect(value!.sourcesPage).toBe(2);
+  expect(value!.sourceQuery).toBe("needle");
+  expect(value!.sourceScopeSelection).toEqual(selection);
+});
+
+async function openDetailForCollaboration(offset = 0, total = 2, sourceNotebookId = "notebook-a") {
+  const sidebar = source("sidebar", "notebook-a");
+  commitPage([sidebar]);
+  api.listSources.mockResolvedValue({ items: [sidebar], total_count: 1, offset: 0, limit: 50 });
+  api.getNotebookSource.mockResolvedValue({ ...source("opened", sourceNotebookId), summary: "confirmed metadata" });
+  api.getNotebookSourceElementsPage.mockImplementation(async (_nb, _id, start, limit, anchor) => {
+    const actualOffset = anchor ? offset : start;
+    return { items: sourceElements(actualOffset, Math.max(0, Math.min(limit, total - actualOffset))), total_count: total, offset: actualOffset, limit };
+  });
+  await act(async () => { await value!.openSourceById("opened", `element-${offset}`); });
+}
+
+test.each([false, true])("a successful sources pulse invalidates consumers exactly once (page changed: %s)", async (changed) => {
+  render(<Harness />);
+  const sidebar = source("sidebar", "notebook-a");
+  commitPage([sidebar]);
+  api.listSources.mockResolvedValue({ items: [changed ? { ...sidebar, summary: "updated" } : sidebar], total_count: 1, offset: 0, limit: 50 });
+  const before = value!.contentRevision;
+  await act(async () => { expect(await value!.refreshForCollaboration(() => true)).toBe(true); });
+  expect(value!.contentRevision).toBe(before + 1);
+  api.listSources.mockRejectedValueOnce(sourceReadError(503));
+  await act(async () => { expect(await value!.refreshForCollaboration(() => true)).toBe(false); });
+  expect(value!.contentRevision).toBe(before + 1);
+});
+
+test("expanding sources reloads the current page and filter once and fences a later owner change", async () => {
+  render(<StrictMode><Harness /></StrictMode>);
+  const sidebar = source("sidebar", "notebook-a");
+  commitPage([sidebar]);
+  api.listSources.mockResolvedValue({ items: [sidebar], total_count: 151, offset: 100, limit: 50 });
+  act(() => { value!.setSourceQuery("needle"); value!.toggleSource("sidebar"); });
+  await act(async () => value!.loadSourcesPage({ page: 2 }));
+  const selection = value!.sourceScopeSelection;
+  const before = api.listSources.mock.calls.length;
+  act(() => { value!.setSourcesCollapsed(true); value!.setSourcesCollapsed(true); });
+  expect(api.listSources).toHaveBeenCalledTimes(before);
+  await act(async () => { value!.setSourcesCollapsed(false); value!.setSourcesCollapsed(false); });
+  expect(api.listSources).toHaveBeenCalledTimes(before + 1);
+  expect(api.listSources).toHaveBeenLastCalledWith("notebook-a", 100, 50, "needle", expect.any(AbortSignal));
+  expect(value!.sourcesPage).toBe(2);
+  expect(value!.sourceQuery).toBe("needle");
+  expect(value!.sourceScopeSelection).toEqual(selection);
+  act(() => value!.setSourcesCollapsed(false));
+  expect(api.listSources).toHaveBeenCalledTimes(before + 1);
+  act(() => value!.setSourcesCollapsed(true));
+  const old = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  api.listSources.mockReturnValueOnce(old.promise);
+  act(() => value!.setSourcesCollapsed(false));
+  act(() => value!.beginTransition());
+  commitPage([], "notebook-b");
+  const newRevision = value!.contentRevision;
+  await act(async () => { old.resolve({ items: [sidebar], total_count: 151, offset: 100, limit: 50 }); });
+  expect(value!.sources).toEqual([]);
+  expect(value!.sourcesPage).toBe(0);
+  expect(value!.contentRevision).toBe(newRevision);
+});
+
+test("a failed expansion keeps an inline retry for the same page and filter, single-flight", async () => {
+  render(<Harness />);
+  const sidebar = source("sidebar", "notebook-a");
+  commitPage([sidebar]);
+  api.listSources.mockResolvedValue({ items: [sidebar], total_count: 151, offset: 100, limit: 50 });
+  act(() => value!.setSourceQuery("needle"));
+  await act(async () => value!.loadSourcesPage({ page: 2 }));
+  const beforeRevision = value!.contentRevision;
+  api.listSources.mockRejectedValueOnce(sourceReadError(503));
+  act(() => value!.setSourcesCollapsed(true));
+  await act(async () => value!.setSourcesCollapsed(false));
+  expect(value!.sourceListRefreshPending).toBe(true);
+  expect(value!.sourceListRefreshNotice).toBe("暂时没能刷新，当前内容仍保留");
+  expect(value!.contentRevision).toBe(beforeRevision);
+  const next = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  api.listSources.mockReturnValueOnce(next.promise);
+  const reads = api.listSources.mock.calls.length;
+  let refreshing!: Promise<boolean>;
+  await act(async () => {
+    refreshing = value!.refreshSourceList();
+    expect(await value!.refreshSourceList()).toBe(false);
+  });
+  expect(api.listSources).toHaveBeenCalledTimes(reads + 1);
+  expect(api.listSources).toHaveBeenLastCalledWith("notebook-a", 100, 50, "needle", expect.any(AbortSignal));
+  await act(async () => {
+    next.resolve({ items: [sidebar], total_count: 151, offset: 100, limit: 50 });
+    expect(await refreshing).toBe(true);
+  });
+  expect(value!.sourceListRefreshPending).toBe(false);
+  expect(value!.sourceListRefreshNotice).toBe("已刷新");
+  expect(value!.contentRevision).toBe(beforeRevision + 1);
+});
+
+test("a newer search satisfies an expansion refresh without a late false failure or lost invalidation", async () => {
+  render(<Harness />);
+  const sidebar = source("sidebar", "notebook-a");
+  commitPage([sidebar]);
+  const old = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  api.listSources.mockReturnValueOnce(old.promise).mockResolvedValue({ items: [sidebar], total_count: 1, offset: 0, limit: 50 });
+  const before = value!.contentRevision;
+  act(() => value!.setSourcesCollapsed(true));
+  act(() => value!.setSourcesCollapsed(false));
+  act(() => value!.setSourceQuery("new search"));
+  await act(async () => value!.searchSources());
+  expect(value!.sourceListRefreshPending).toBe(false);
+  expect(value!.contentRevision).toBe(before + 1);
+  await act(async () => { old.resolve({ items: [source("stale", "notebook-a")], total_count: 1, offset: 0, limit: 50 }); });
+  expect(value!.sources).toEqual([sidebar]);
+  expect(value!.sourceListRefreshPending).toBe(false);
+  expect(value!.sourceListRefreshNotice).toBe("已刷新");
+});
+
+function sourceReadError(status: number) {
+  const error = humanizedError("这份来源暂时无法读取");
+  Object.defineProperty(error, Symbol.for("silicon-notebook.errors.httpStatus"), { value: status });
+  return error;
+}
+
+test.each(["metadata", "elements"])("an authoritative collaboration %s 404 closes the deleted detail and its elements", async (endpoint) => {
+  render(<Harness />);
+  await openDetailForCollaboration();
+  if (endpoint === "metadata") api.getNotebookSource.mockRejectedValueOnce(sourceReadError(404));
+  else api.getNotebookSourceElementsPage.mockRejectedValueOnce(sourceReadError(404));
+  let refreshed = false;
+  await act(async () => { refreshed = await value!.refreshForCollaboration(() => true); });
+  expect(refreshed).toBe(true);
+  expect(value!.sourceDetail).toBeNull();
+  expect(value!.sourceElements).toEqual([]);
+  expect(value!.sourceElementsLoading).toBe(false);
+  expect(value!.highlightedElementId).toBe("");
+});
+
+test.each(["metadata", "elements"])("a collaboration %s 503 preserves the confirmed snapshot and leaves a local retry", async (endpoint) => {
+  render(<Harness />);
+  await openDetailForCollaboration();
+  const oldDetail = value!.sourceDetail;
+  const oldElements = value!.sourceElements;
+  if (endpoint === "metadata") api.getNotebookSource.mockRejectedValueOnce(sourceReadError(503));
+  else api.getNotebookSourceElementsPage.mockRejectedValueOnce(sourceReadError(503));
+  let refreshed = true;
+  await act(async () => { refreshed = await value!.refreshForCollaboration(() => true); });
+  expect(refreshed).toBe(false);
+  expect(value!.sourceDetail).toBe(oldDetail);
+  expect(value!.sourceElements).toBe(oldElements);
+  expect(value!.sourceElementsLoading).toBe(false);
+  expect(value!.sourceDetailRefreshPending).toBe(true);
+  expect(value!.sourceDetailRefreshNotice).toBe("暂时没能刷新，当前内容仍保留");
+  await act(async () => { refreshed = await value!.refreshForCollaboration(() => true); });
+  expect(refreshed).toBe(true);
+  expect(value!.sourceDetailRefreshPending).toBe(false);
+});
+
+test("collaboration clamps a reparsed element window that no longer reaches its old offset", async () => {
+  render(<Harness />);
+  await openDetailForCollaboration(80, 160);
+  api.getNotebookSourceElementsPage.mockImplementation(async (_nb, _id, offset, limit) => ({
+    items: offset === 0 ? sourceElements(0, 7, "reparsed") : [], total_count: 7, offset, limit,
+  }));
+  let refreshed = false;
+  await act(async () => { refreshed = await value!.refreshForCollaboration(() => true); });
+  expect(refreshed).toBe(true);
+  expect(value!.sourceElementStartOffset).toBe(0);
+  expect(value!.sourceElementsTotal).toBe(7);
+  expect(value!.sourceElements).toEqual(sourceElements(0, 7, "reparsed"));
+  expect(value!.highlightedElementId).toBe("element-80");
+});
+
+test("metadata failure stops a sibling window read before it starts another element page", async () => {
+  render(<Harness />);
+  await openDetailForCollaboration(40, 160);
+  await act(async () => value!.loadSourceElementPage("next"));
+  const elements = deferred<{ items: SourceElement[]; total_count: number; offset: number; limit: number }>();
+  api.getNotebookSource.mockRejectedValueOnce(sourceReadError(503));
+  api.getNotebookSourceElementsPage.mockReturnValueOnce(elements.promise);
+  await act(async () => { expect(await value!.refreshForCollaboration(() => true)).toBe(false); });
+  const reads = api.getNotebookSourceElementsPage.mock.calls.length;
+  await act(async () => { elements.resolve({ items: sourceElements(40, 40), total_count: 160, offset: 40, limit: 40 }); });
+  expect(api.getNotebookSourceElementsPage).toHaveBeenCalledTimes(reads);
+  expect(value!.sourceElements).toHaveLength(80);
+  expect(value!.sourceDetailRefreshPending).toBe(true);
+});
+
+test.each(["closed", "borrowed"])("a sources pulse does not read %s detail content", async (mode) => {
+  render(<Harness />);
+  await openDetailForCollaboration(0, 2, mode === "borrowed" ? "reference-book" : "notebook-a");
+  if (mode === "closed") act(() => value!.closeSourceDetail());
+  api.getNotebookSource.mockClear();
+  api.getNotebookSourceElementsPage.mockClear();
+  await act(async () => { expect(await value!.refreshForCollaboration(() => true)).toBe(true); });
+  expect(api.getNotebookSource).not.toHaveBeenCalled();
+  expect(api.getNotebookSourceElementsPage).not.toHaveBeenCalled();
+});
+
+test.each(["close", "switch-source", "book-ABA", "actor-ABA", "upload", "reparse", "guard"] as const)("collaboration detail reads reject a later %s owner or write", async (change) => {
+  const panel = render(<Harness />);
+  await openDetailForCollaboration();
+  const held = deferred<SourceSummary>();
+  api.getNotebookSource.mockReturnValueOnce(held.promise);
+  let safe = true;
+  let refresh!: Promise<boolean>;
+  act(() => { refresh = value!.refreshForCollaboration(() => safe); });
+  if (change === "close") act(() => value!.closeSourceDetail());
+  if (change === "switch-source") {
+    api.getNotebookSource.mockResolvedValue(source("another", "notebook-a"));
+    await act(async () => { await value!.openSourceById("another"); });
+  }
+  if (change === "book-ABA") {
+    act(() => { value!.beginTransition(); });
+    commitPage([], "notebook-b");
+    act(() => { value!.beginTransition(); });
+    commitPage([], "notebook-a");
+  }
+  if (change === "actor-ABA") {
+    panel.rerender(<Harness actorId="user-b" />);
+    panel.rerender(<Harness actorId="user-a" />);
+    commitPage([]);
+  }
+  if (change === "upload") act(() => { value!.commitUploadedSources(value!.captureOwner(), [source("upload", "notebook-a")], 1); });
+  if (change === "reparse") {
+    api.parseSource.mockResolvedValue(source("opened", "notebook-a"));
+    await act(async () => value!.reparseSource());
+  }
+  if (change === "guard") safe = false;
+  let refreshed = true;
+  await act(async () => { held.resolve({ ...source("opened", "notebook-a"), summary: "late wrong snapshot" }); refreshed = await refresh; });
+  expect(refreshed).toBe(false);
+  expect(value!.sourceDetail?.summary).not.toBe("late wrong snapshot");
+  expect(value!.sourceElementsLoading).toBe(false);
+});
+
+test("a pulse does not supersede a source the user is opening or a pending element page", async () => {
+  render(<Harness />);
+  await openDetailForCollaboration();
+  const opening = deferred<SourceSummary>();
+  api.getNotebookSource.mockReturnValueOnce(opening.promise);
+  let open!: Promise<boolean>;
+  act(() => { open = value!.openSourceById("another"); });
+  await act(async () => { expect(await value!.refreshForCollaboration(() => true)).toBe(false); });
+  await act(async () => { opening.resolve(source("another", "notebook-a")); await open; });
+  expect(value!.sourceDetail?.id).toBe("another");
+  const page = deferred<{ items: SourceElement[]; total_count: number; offset: number; limit: number }>();
+  api.getNotebookSourceElementsPage.mockReturnValueOnce(page.promise);
+  let loading!: Promise<void>;
+  act(() => { loading = value!.loadSourceElementPage("next"); });
+  await act(async () => { expect(await value!.refreshForCollaboration(() => true)).toBe(false); });
+  await act(async () => { page.resolve({ items: sourceElements(2, 2), offset: 2, total_count: 4, limit: 40 }); await loading; });
+  expect(value!.sourceElements).toHaveLength(4);
+  expect(value!.sourceElementsLoading).toBe(false);
+});
+
 test("latest source page wins without an extra list request", async () => {
   const older = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
   const newer = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
@@ -1806,4 +2091,38 @@ test("a public library's promotion sources are never polled and never take a doc
     await value!.deleteSource(promotions[1]);
   });
   expect(value!.notebookDocumentCount).toBe(15);
+});
+
+// 分享编辑 P1(D8):另一位协作者刚提交了同一篇的重新解析,后端回 409「这份来源正在解析，
+// 请等它完成」。这是「重新解析」按钮的结果:落在按钮旁(reparseBusyText)、自带计时消失,
+// 不经 reportError / 顶部状态条。
+test("单篇重新解析撞上 409:原因落在按钮旁并按自己的计时消失,不报错、不写状态条", async () => {
+  vi.useFakeTimers();
+  api.getNotebookSource.mockResolvedValue(source("here", "notebook-a"));
+  api.getNotebookSourceElementsPage.mockResolvedValue({ items: [], total_count: 0, offset: 0, limit: 40 });
+  render(<Harness />);
+  commitPage([source("here", "notebook-a")]);
+  await act(async () => { await value!.openSourceById("here"); });
+  api.parseSource.mockRejectedValueOnce(humanizedError("这份来源正在解析，请等它完成", 409));
+
+  await act(async () => value!.reparseSource());
+  expect(value!.reparseBusyText).toBe("这份来源正在解析，请等它完成");
+  expect(value!.reparsingSource).toBe(false);
+  expect(effects.reportError).not.toHaveBeenCalled();
+  expect(effects.setStatusText).not.toHaveBeenCalled();
+
+  await act(async () => vi.advanceTimersByTimeAsync(SOURCE_REPARSE_BUSY_HOLD_MS + 50));
+  expect(value!.reparseBusyText).toBe("");
+});
+
+test("单篇重新解析的其他失败照旧走 reportError", async () => {
+  api.getNotebookSource.mockResolvedValue(source("here", "notebook-a"));
+  api.getNotebookSourceElementsPage.mockResolvedValue({ items: [], total_count: 0, offset: 0, limit: 40 });
+  render(<Harness />);
+  commitPage([source("here", "notebook-a")]);
+  await act(async () => { await value!.openSourceById("here"); });
+  api.parseSource.mockRejectedValueOnce(humanizedError("服务暂时不可用，请稍后再试", 503));
+  await act(async () => value!.reparseSource());
+  expect(effects.reportError).toHaveBeenCalled();
+  expect(value!.reparseBusyText).toBe("");
 });

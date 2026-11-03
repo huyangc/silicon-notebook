@@ -22,7 +22,7 @@ import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -35,6 +35,7 @@ from app.migration.sync.database import (
     _ID_BATCH,
     _Source,
     SyncExportError,
+    _TableQuery,
     _batched,
     _exported_columns,
     _global_scope,
@@ -49,6 +50,7 @@ from app.migration.sync.manifest import (
     MappingKind,
     ScopeKind,
     carried_tables,
+    row_filter_for,
     spec_for,
 )
 from app.migration.sync.package import (
@@ -448,7 +450,9 @@ def _write_table(
 ) -> tuple[tuple[str, ...], int]:
     """Write ``rows/<table>.jsonl`` and return ``(columns, row count)``. The
     file is created even when the table contributes nothing, so the package's
-    file set is a function of the manifest alone."""
+    file set is a function of the manifest alone. A row-filtered table (and a
+    child that follows its parent's filter) carries only the rows that pass
+    (``_with_row_filter``)."""
     columns = _exported_columns(source, source.columns(conn, table), table)
     encode = _row_encoder(table, columns)
     user_columns, principal_columns = _identity_columns(table)
@@ -458,7 +462,7 @@ def _write_table(
         if scope.kind is ScopeKind.GLOBAL
         else notebooks
     )
-    query = _table_query(source, conn, table, columns)
+    query = _with_row_filter(table, _table_query(source, conn, table, columns))
     written = 0
     with writer.lines(rows_path(table)) as write:
         for batch in _batched(list(keys), _ID_BATCH):
@@ -467,6 +471,65 @@ def _write_table(
                 write(json_line(encode(row)))
                 written += 1
     return columns, written
+
+
+def _with_row_filter(table: str, query: _TableQuery) -> _TableQuery:
+    """``query`` narrowed by the manifest's row filter (``row_filter_for``),
+    unchanged for an unfiltered table. The predicate reads ``t<hop>``: the
+    row itself, or -- for a child that follows its parent -- the parent row
+    the scope's own join already brings in as ``t1``."""
+    found = row_filter_for(table)
+    if found is None:
+        return query
+    hop, predicate = found
+    return replace(query, row_filter=predicate(f"t{hop}"))
+
+
+def _drop_filtered_upserts(
+    source: _Source,
+    conn: Any,
+    table: str,
+    changes: dict[str, Any],
+    key_columns: Sequence[str],
+) -> None:
+    """Remove from one table's compacted window every UPSERT whose current
+    row exists and fails the manifest's row filter -- the incremental twin of
+    ``_with_row_filter``, applied before ``incremental.table_delta`` so a
+    dropped row declares no notebook and requests no file.
+
+    Deletes are left alone (design §6.6): the target replays a delete of a row
+    it never received as ``absent``. An upsert whose row is already gone is
+    left alone too, so ``table_delta`` still downgrades it to a delete; so is
+    a child whose parent row is missing, exactly as an unfiltered export
+    would treat it. The filter is evaluated as ``CASE WHEN ... THEN 1 ELSE
+    0``, so a NULL verdict drops the row here just as the full path's WHERE
+    leaves it out."""
+    found = row_filter_for(table)
+    if found is None:
+        return
+    hop, predicate = found
+    upserts = sorted(
+        text for text, change in changes.items()
+        if change.operation == incremental.OPERATION_UPSERT
+    )
+    if not upserts:
+        return
+    if len(key_columns) != 1:
+        raise SyncExportError(
+            f"{table}: a row-filtered table needs a single-column key, has {key_columns}"
+        )
+    key = key_columns[0]
+    joins = _parent_join_clause(source, conn, table)[0] if hop else ""
+    head = (
+        f"SELECT t0.{_quoted(key)}, CASE WHEN {predicate(f't{hop}')} THEN 1 ELSE 0 END "
+        f"AS row_filter_keep FROM {_quoted(table)} t0 {joins}"
+    ).rstrip()
+    for batch in incremental.key_batches(upserts, 1):
+        params = [changes[text].key[key] for text in batch]
+        where = f"t0.{_quoted(key)} IN ({','.join('?' for _ in params)})"
+        for row in source.fetch(conn, f"{head} WHERE {where}", params):
+            if not int(row["row_filter_keep"]):
+                changes.pop(incremental.key_text(incremental.row_key(row, key_columns)))
 
 
 def _write_users(
@@ -1434,6 +1497,10 @@ def _incremental_rows(
     deterministic but NOT foreign-key-safe ordering; replaying deletes in a
     safe order is PR-3c's problem, which has the target's catalog to do it
     with.
+
+    A row-filtered table's window loses the upserts whose row fails the
+    manifest's filter before it is turned into rows (``_drop_filtered_upserts``);
+    its deletes travel unfiltered.
     """
     compensation = incremental.compensation_rows(source, conn, watermark)
     notebook_state = incremental.NotebookState(source, conn)
@@ -1491,6 +1558,7 @@ def _incremental_rows(
             changes = incremental.compact(
                 source, conn, table, watermark, compensation
             )
+            _drop_filtered_upserts(source, conn, table, changes, key_columns)
             with writer.lines(rows_path(table)) as write:
                 sink = _RowSink(
                     write, users, table, columns,

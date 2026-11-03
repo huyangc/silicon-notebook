@@ -2393,6 +2393,9 @@ def _normalize_api_serialization(
         return FIXED_TIME
     if key == "created_label" and isinstance(value, str):
         return "fixture-date"
+    if key == "pulse_cursor" and isinstance(value, str):
+        # The live opaque epoch/revision is intentionally process-specific.
+        return "fixture-pulse-cursor"
     if isinstance(value, dict):
         return {
             item_key: _normalize_api_serialization(

@@ -125,6 +125,8 @@ def _memory_rows(
                 "content": record.content_md,
                 "status": record.status,
                 "unconfirmed": record.status == "candidate",
+                **({"suggested_by_system": True}
+                   if record.status == "candidate" and record.suggested_signal is not None else {}),
                 "formal_notebook_conclusion": record.status == "confirmed",
                 "created_by_agent": profiles.get(
                     record.agent_profile_id or "", ""

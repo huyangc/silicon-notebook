@@ -20,6 +20,7 @@ import type { QueryIntentContract } from "./ask-intent-model.ts";
 import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
 import type {
   AskResponse,
+  AnswerMemoryLinksResponse,
   ConversationDetail,
   ConversationShareResponse,
   ConversationSummary,
@@ -300,16 +301,22 @@ export const submitFeedback = (
   body: JSON.stringify({ rating, comment }),
 });
 
-export const fetchAnswerMemoryLinks = (
+export const fetchAnswerMemoryLinks = async (
   nb: string,
   answerIds: string[],
   signal?: AbortSignal,
-) => requestJson<{ links: Record<string, string> }>(
-  `/notebooks/${nb}/answer-memory-links`,
-  {
-    ...options,
-    method: "POST",
-    body: JSON.stringify({ answer_ids: answerIds }),
-    signal,
-  },
-);
+): Promise<AnswerMemoryLinksResponse> => {
+  const result = await requestJson<{
+    links: Record<string, string>;
+    states?: AnswerMemoryLinksResponse["states"];
+  }>(
+    `/notebooks/${nb}/answer-memory-links`,
+    {
+      ...options,
+      method: "POST",
+      body: JSON.stringify({ answer_ids: answerIds }),
+      signal,
+    },
+  );
+  return { links: result.links, states: result.states ?? {} };
+};

@@ -8,6 +8,10 @@
  * 只由 KnowhowPanel 渲染，挂载点仍在面板 JSX 的原位置，所以弹窗的 DOM 叠放
  * 顺序、effect 顺序和传入回调的身份都不变。样式仍由 knowhow-panel-styles.tsx
  * 的 `<style jsx global>` 提供，本文件不含 styled-jsx。
+ *
+ * 分享编辑 P1（决策 D7）在搬家之后加了一块：「接受」撞上别人的改动（409）时，在当前格
+ * 就地给出双版本（knowhow-cell-conflict.tsx），「用我的覆盖」/「放弃我的」分别等同于带新
+ * 基线的接受 / 跳过。
  */
 "use client";
 
@@ -23,12 +27,15 @@ import {
 } from "lucide-react";
 import { useFloatingWindow } from "./use-floating-window.ts";
 import {
+  knowhowCellConflictOf,
   optimizeKnowhowCell,
+  type KnowhowCellConflict,
   type KnowhowRow,
   type KnowhowColumn,
 } from "./knowhow-model.ts";
 import { extractErrorMessage } from "./knowhow-import-logic.ts";
 import { KnowhowMarkdown } from "./knowhow-cell-editor.tsx";
+import { KnowhowCellConflictNotice } from "./knowhow-cell-conflict.tsx";
 import {
   ACCEPT_SUGGESTION_LABEL,
   OPTIMIZE_ORIGINAL_LABEL,
@@ -51,6 +58,7 @@ import {
   initRowOptimizeQueue,
   isRowOptimizeQueueFinished,
   markCurrentInProgress,
+  reopenAcceptCurrent,
   retryCurrent,
   rowOptimizeProgress,
   skipCurrent,
@@ -85,9 +93,16 @@ interface KnowhowRowOptimizeModalProps {
   columns: KnowhowColumn[];
   rowTitle: string;
   /** 接受：真正落库(patchKnowhowCell 或合并格批量走 batchPatchKnowhowCells)
-   * +把结果合并回 detail 状态——复用面板自己的 handleCellSave，与格子浮窗
-   * 保存走同一条路径，不重复实现。 */
-  onAcceptCell: (rowId: string, columnId: string, contentMd: string) => Promise<void>;
+   * +把结果合并回 detail 状态——与格子浮窗保存走同一条路径，不重复实现。
+   *
+   * 分享编辑 P1（决策 D7）：面板带着打开本浮层时钉住的各格存储值做乐观校验；别人在这期间
+   * 改过这一格时 reject 的异常上挂着冲突（knowhowCellConflictOf），本弹窗在当前格就地给出
+   * 双版本。第 4 参 `overwrite` 只在「用我的覆盖」时传：面板以它的 current 为基线重发。 */
+  onAcceptCell: (rowId: string, columnId: string, contentMd: string, overwrite?: KnowhowCellConflict) => Promise<void>;
+  /** 冲突里点「放弃我的」：面板把冲突时取回的当前存储值写进表数据并前移基线。 */
+  onDiscardConflict?: (conflict: KnowhowCellConflict) => void;
+  /** 「这一组已被重新分组」里点「刷新」：面板重拉整表并改钉基线；resolve(false) = 没拉成。 */
+  onRefreshConflict?: () => Promise<boolean>;
   onClose: () => void;
 }
 
@@ -99,10 +114,18 @@ export function KnowhowRowOptimizeModal({
   columns,
   rowTitle,
   onAcceptCell,
+  onDiscardConflict,
+  onRefreshConflict,
   onClose,
 }: KnowhowRowOptimizeModalProps) {
   const [queue, setQueue] = useState<RowOptimizeQueueState>(() => initRowOptimizeQueue(row, columns));
   const [acceptBusy, setAcceptBusy] = useState(false);
+  // 「接受」撞上别人的改动（409，D7）：冲突属于哪一格、双版本里「我的版本」（这一格的建议），
+  // serial 让每一次新冲突重挂提示组件（它自带进行中/结果态）。
+  const [cellConflict, setCellConflict] = useState<
+    { conflict: KnowhowCellConflict; columnId: string; mineMd: string; serial: number } | null
+  >(null);
+  const conflictSerialRef = useRef(0);
   const startedRef = useRef(false);
   const mountedRef = useRef(true);
   const optimizeControllerRef = useRef<AbortController | null>(null);
@@ -203,10 +226,64 @@ export function KnowhowRowOptimizeModal({
       if (next && !advanced.aborted) void fireOptimizeFor(next);
     } catch (err) {
       if (!mountedRef.current) return;
-      setQueue((state) => failAcceptCurrent(state, extractErrorMessage(err, "保存失败，请重试")));
+      const conflict = knowhowCellConflictOf(err);
+      if (conflict) {
+        setQueue((state) => reopenAcceptCurrent(state));
+        showCellConflict(conflict, current.columnId, current.suggestionMd ?? "");
+      } else {
+        setQueue((state) => failAcceptCurrent(state, extractErrorMessage(err, "保存失败，请重试")));
+      }
     } finally {
       if (mountedRef.current) setAcceptBusy(false);
     }
+  }
+
+  function showCellConflict(conflict: KnowhowCellConflict, columnId: string, mineMd: string) {
+    conflictSerialRef.current += 1;
+    setCellConflict({ conflict, columnId, mineMd, serial: conflictSerialRef.current });
+  }
+
+  function conflictTheirsMd(conflict: KnowhowCellConflict, columnId: string): string {
+    return (conflict.current.find((value) => value.rowId === row.id && value.columnId === columnId)
+      ?? conflict.current.find((value) => value.columnId === columnId))?.contentMd ?? "";
+  }
+
+  // 「用我的覆盖」：以冲突时的当前值为基线重发这一格的建议；写成即与「接受」同样落地并推进
+  // 到下一格（队列里这一格变成「已接受」，就在提示旁边），又撞上冲突就换上新的冲突。
+  async function handleConflictOverwrite(conflict: KnowhowCellConflict, columnId: string, mineMd: string) {
+    if (acceptBusy || current?.columnId !== columnId || current.status !== "ready") return false;
+    setAcceptBusy(true);
+    const busyState = beginAcceptCurrent(queue);
+    setQueue(busyState);
+    try {
+      await onAcceptCell(row.id, columnId, mineMd, conflict);
+    } catch (err) {
+      if (!mountedRef.current) return false;
+      setQueue((state) => reopenAcceptCurrent(state));
+      const next = knowhowCellConflictOf(err);
+      if (!next) throw err;
+      showCellConflict(next, columnId, mineMd);
+      return false;
+    } finally {
+      if (mountedRef.current) setAcceptBusy(false);
+    }
+    if (!mountedRef.current) return true;
+    const advanced = completeAcceptCurrent(busyState);
+    setQueue(advanced);
+    const following = currentRowOptimizeItem(advanced);
+    if (following && !advanced.aborted) void fireOptimizeFor(following);
+    return true;
+  }
+
+  // 「放弃我的」：接受对方的版本（面板更新表数据与基线），这一格按「跳过」推进。
+  function handleConflictDiscard(conflict: KnowhowCellConflict, columnId: string) {
+    onDiscardConflict?.(conflict);
+    if (current?.columnId !== columnId) return;
+    const advanced = skipCurrent(queue);
+    if (advanced === queue) return;
+    setQueue(advanced);
+    const following = currentRowOptimizeItem(advanced);
+    if (following && !advanced.aborted) void fireOptimizeFor(following);
   }
 
   function handleSkip() {
@@ -313,6 +390,19 @@ export function KnowhowRowOptimizeModal({
                 </div>
               )}
 
+              {cellConflict && (
+                <KnowhowCellConflictNotice
+                  key={cellConflict.serial}
+                  reason={cellConflict.conflict.reason}
+                  theirsMd={conflictTheirsMd(cellConflict.conflict, cellConflict.columnId)}
+                  mineMd={cellConflict.mineMd}
+                  onOverwrite={() => handleConflictOverwrite(cellConflict.conflict, cellConflict.columnId, cellConflict.mineMd)}
+                  onDiscard={() => handleConflictDiscard(cellConflict.conflict, cellConflict.columnId)}
+                  onRefresh={onRefreshConflict ?? (async () => false)}
+                  onSettled={() => setCellConflict(null)}
+                />
+              )}
+
               {current && current.status === "error" && <p className="kh-inline-error">{current.errorMessage}</p>}
 
               {finished && <p className="kh-row-context-empty">{ROW_OPTIMIZE_DONE_TEXT}</p>}
@@ -321,7 +411,15 @@ export function KnowhowRowOptimizeModal({
         </div>
 
         <footer className="kh-modal-footer">
-          {current && current.status === "ready" ? (
+          {current && current.status === "ready" && cellConflict?.columnId === current.columnId ? (
+            // 这一格的冲突还没选版本：接受/跳过的出口在上方的双版本提示里（「用我的覆盖」/
+            // 「放弃我的」），这里只留关闭。
+            <div className="kh-footer-actions">
+              <button type="button" onClick={requestClose} disabled={acceptBusy}>
+                {ROW_OPTIMIZE_CLOSE_LABEL}
+              </button>
+            </div>
+          ) : current && current.status === "ready" ? (
             <div className="kh-footer-actions">
               <button type="button" onClick={handleSkip} disabled={acceptBusy}>
                 {ROW_OPTIMIZE_SKIP_LABEL}

@@ -260,13 +260,16 @@ class FindingImpact(BaseModel):
 
 class FindingLiveSource(BaseModel):
     """读这一页时问题涉及的来源**此刻**的样子(主键点查)。隐藏来源(Memory / knowhow)
-    的标题置空。``processing`` = 正在排队 / 解析 / 抽取。"""
+    的标题置空。``processing`` = 正在排队 / 解析 / 抽取。``uploaded_by_me``(分享编辑 P1,
+    D14)= 请求者本人上传的这本库的来源;点名编辑者只能删这些,前端按它给「删除来源…」。
+    未记上传人、不在本库(``exists=False``)一律 False;上传人 id 不上 wire。"""
 
     source_id: str
     exists: bool
     title: str = ""
     source_type: str = ""
     processing: bool = False
+    uploaded_by_me: bool = False
 
 
 class FindingRow(BaseModel):

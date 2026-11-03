@@ -575,13 +575,42 @@ class AuthStoreContract:
             identity, "INSERT INTO model_service_status(user_id,service,config_fingerprint,status,trigger,checked_at) VALUES (?,?,?,?,?,?)",
             (mistaken.id, "general", "fp", "ok", "manual_test", now),
         )
+        # Auto user-memory suggestions: the switch, a job row and a
+        # fingerprint, on a notebook the surviving account owns.
+        execute(
+            identity, "INSERT INTO notebooks(id,name,created_by,created_at,updated_at) VALUES (?,?,?,?,?)",
+            ("nb-merge", "n", old.id, now, now),
+        )
+        execute(
+            identity, "INSERT INTO memory_suggest_users(owner_id,enabled,updated_at) VALUES (?,?,?)",
+            (mistaken.id, 1, now),
+        )
+        execute(
+            identity, "INSERT INTO memory_suggest_jobs(notebook_id,owner_id,cursor_created_at,window_started_at,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+            ("nb-merge", mistaken.id, now, now, now, now),
+        )
+        execute(
+            identity, "INSERT INTO memory_suggest_fingerprints(notebook_id,owner_id,fingerprint,kind,created_at) VALUES (?,?,?,?,?)",
+            ("nb-merge", mistaken.id, "fp-1", "proposed", now),
+        )
         scaffolding = [ref for ref in USER_REFERENCE_COLUMNS if ref.kind == "scaffolding"]
+        execute(
+            identity, "INSERT INTO memory_suggest_read_fences(notebook_id,owner_id,lost_at) VALUES (?,?,?)",
+            ("nb-merge", mistaken.id, now),
+        )
+        # Collaboration history is audit_kept: it may outlive the account
+        # and must not prevent merging an otherwise unused mistaken account.
+        execute(identity,
+                "INSERT INTO notebook_activity(id,notebook_id,kind,capability,actor_id,actor_name,target,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                ("activity-merge", "nb-merge", "sources", "sources:write", mistaken.id, "同事", "PATCH /template", now))
         for ref in scaffolding:
             assert row(identity, f"SELECT count(*) AS n FROM {ref.table} WHERE {ref.column}=?", (mistaken.id,))["n"] > 0, ref
         # The lookup folds ASCII case like every other username lookup.
         result = identity.auth.merge_sso_account(old.id, "w0012345", actor_id="user-local")
         assert result == {"id": old.id, "username": "W0012345", "status": "active", "removed_user_id": mistaken.id}
         assert row(identity, "SELECT 1 FROM users WHERE id=?", (mistaken.id,)) is None
+        assert row(identity, "SELECT actor_id FROM notebook_activity WHERE id=?", ("activity-merge",))["actor_id"] == mistaken.id
         for ref in scaffolding:
             assert row(identity, f"SELECT count(*) AS n FROM {ref.table} WHERE {ref.column}=?", (mistaken.id,))["n"] == 0, ref
         kept = row(identity, "SELECT * FROM users WHERE id=?", (old.id,))
@@ -654,6 +683,38 @@ class AuthStoreContract:
         ]
         assert snapshot() == before
         assert identity.resolve_session(token).id == mistaken.id
+
+    def test_merge_account_holding_editor_edge_is_blocked(self, identity):
+        """Decision D18 (share-edit P1): a named editor grant names the account
+        (``notebook_grants.principal_id`` with ``principal_type='user'``, a
+        blocking reference), so an account holding one cannot be merged away --
+        the owner removes the editor first. Nothing is written."""
+        host = sso_on(identity)
+        host.enabled = False
+        old, _ = identity.register_user_with_session("a12345678", "pw")
+        owner, _ = identity.register_user_with_session("o12345678", "pw")
+        host.enabled = True
+        mistaken, _ = identity.auth.create(choice(identity, "W0012345"), PROOF, session_seconds=600)
+        now = identity.auth._now()
+        execute(
+            identity,
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("nb-d18", "D18", "", "Semiconductor", "draft", owner.id, now, now),
+        )
+        execute(
+            identity,
+            "INSERT INTO notebook_grants(id,notebook_id,principal_type,principal_id,role,"
+            "created_by,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("gnt-d18", "nb-d18", "user", mistaken.id, "editor", owner.id, now),
+        )
+        with pytest.raises(AccountMergeBlocked, match="merge_source_has_data") as caught:
+            identity.auth.merge_sso_account(old.id, "W0012345", actor_id="user-local")
+        assert caught.value.items == [{"label": "笔记本共享与成员", "unit": "条", "count": 1}]
+        assert row(identity, "SELECT count(*) AS n FROM users WHERE id=?", (mistaken.id,))["n"] == 1
+        assert row(
+            identity, "SELECT count(*) AS n FROM notebook_grants WHERE id='gnt-d18'"
+        )["n"] == 1
 
     def test_merge_rejections(self, identity):
         host = sso_on(identity)

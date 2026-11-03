@@ -93,6 +93,18 @@ const APPROVED_MESSAGE_READS = Object.freeze({
     count: 1,
     reason: "validated source-cleanup guidance is copied into its typed error",
   },
+  "memory-panel.tsx|<module>.MemoryPanel|property|message": {
+    count: 2,
+    reason: "suggestionNotice is application-owned per-card copy: fixed Chinese success or toUserMessage on a caught failure, never a raw exception",
+  },
+  "memory-suggestion-card.tsx|<module>.MemorySuggestionAdoptionModal|property|message": {
+    count: 2,
+    reason: "typed review receipts contain fixed phase-result copy or failures already passed through toUserMessage by useMemorySuggestionReview",
+  },
+  "memory-suggestion-card.tsx|<module>.MemorySuggestionReceipt|property|message": {
+    count: 2,
+    reason: "the same application-owned review receipt is checked and rendered; its writer humanizes every caught exception",
+  },
   // ModelFailure.message 不是异常文本,是后端 model_safety 闭集里的稳定 code
   // (upstream_error / malformed_response / …)。三处读取都只把它当查表键:先过
   // STABLE_CODE 形状闸,再经 label() 映射成词表里的中文,未知值退中性短语;

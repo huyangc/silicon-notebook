@@ -10,7 +10,10 @@ from app.api.deps import (
     get_current_user,
     mirrored_notebook_error,
     notebook_access_repository,
-    notebook_capability_allowed,
+    notebook_capability_level,
+    notebook_capability_owner,
+    mark_pulse,
+    notebook_edit_without_admin,
     notebook_mirror_fence,
     notebook_store_port,
     repository,
@@ -29,12 +32,14 @@ from app.models.sources import (
     PaginatedSources,
     ReparseSourcesRequest,
     RepairScheduledResult,
+    ReparseScheduledResult,
     ScopedSourceDetail,
     SourceDetail,
     SourceElement,
     SourceImportRequest,
     SourceSummary,
     UploadedSourceSummary,
+    shape_source_for,
 )
 from app.repositories.ports import (
     DocumentCapacityExceeded,
@@ -261,9 +266,12 @@ def document_capacity_message(current: int, limit: int, adding: int) -> str:
     抽出来是因为它现在有两个出处:浏览器路由的 409(下面),和 MCP 的 Agent 建源工具
     (它抛的是 ValueError,`user_error` 的 HTTP 载体在那条路上没有意义)。同一个条件在
     两个界面上说两种话——尤其一中一英——用户和 Agent 就会以为遇到了两个不同的限制。
-    纯中文模板,只插三个整数,无内部黑话(界面词只说「文档」)。"""
+    纯中文模板,只插三个整数,无内部黑话(界面词只说「文档」)。
+
+    上限按**库主**算(`_document_capacity_limit`):点名编辑者上传时占的是 owner 的
+    额度,所以开头一句说「这本笔记本」的上限,不暗示是调用者自己的上限(分享编辑 P1)。"""
     return (
-        f"该笔记本最多可添加 {limit} 篇文档，当前已有 {current} 篇，"
+        f"已达到这本笔记本的文档上限：最多 {limit} 篇，当前已有 {current} 篇，"
         f"无法再添加 {adding} 篇。"
     )
 
@@ -310,20 +318,28 @@ def list_sources(
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     q: str = Query(""),
+    user: UserProfile = Depends(get_current_user),
 ) -> PaginatedSources:
-    return source_repository().list_sources_page(notebook_id, offset=offset, limit=limit, q=q)
+    page = source_repository().list_sources_page(notebook_id, offset=offset, limit=limit, q=q)
+    for item in page.items:
+        shape_source_for(user.id, item)
+    return page
 
 
 @router.post("/notebooks/{notebook_id}/sources/import", response_model=List[SourceSummary], dependencies=[Depends(require_notebook_capability("sources:write"))])
 def import_sources(
     notebook_id: str,
     payload: SourceImportRequest,
+    user: UserProfile = Depends(get_current_user),
 ) -> List[SourceSummary]:
     try:
         for file in payload.files:
             _validate_source_file(file.file_name)
         _enforce_document_capacity(notebook_id, len(payload.files))
-        return source_repository().import_sources(notebook_id, payload)
+        return [
+            shape_source_for(user.id, item)
+            for item in source_repository().import_sources(notebook_id, payload)
+        ]
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -385,16 +401,20 @@ def import_url_sources(
 def add_url_sources(
     notebook_id: str,
     payload: AddUrlSourcesRequest,
+    user: UserProfile = Depends(get_current_user),
 ) -> AddUrlSourcesResult:
     from app.services.source_ingestion import trusted_proxy_origin_set
 
-    return import_url_sources(
+    result = import_url_sources(
         notebook_id,
         payload.urls,
         trusted_proxy_origins=trusted_proxy_origin_set(
             get_settings().url_import_trusted_proxy_hosts
         ),
     )
+    for item in result.created:
+        shape_source_for(user.id, item)
+    return result
 
 
 # response_model 是 SourceSummary 的子类：字段只增不减（多一个 reused），旧客户端
@@ -409,6 +429,7 @@ def add_url_sources(
 async def upload_sources(
     notebook_id: str,
     request: Request,
+    user: UserProfile = Depends(get_current_user),
 ) -> List[UploadedSourceSummary]:
     max_bytes = get_settings().source_upload_max_bytes
     # A full notebook must fail before any multipart bytes are consumed. Other
@@ -461,7 +482,7 @@ async def upload_sources(
                 ),
                 capacity_limit=capacity_limit,
             )
-            uploaded.extend(result)
+            uploaded.extend(shape_source_for(user.id, item) for item in result)
         return uploaded
     except DocumentCapacityExceeded as exc:
         # 竞态兜底:预检放行后、这个文件插入前,并发请求占走了名额,store 在建源
@@ -484,13 +505,13 @@ def get_source(source_id: str, user: UserProfile = Depends(get_current_user)) ->
     if not notebook_access_repository().user_can_read_source(source_id, user.id):
         raise HTTPException(status_code=404, detail="Source not found")
     try:
-        return source_repository().get_source(source_id)
+        return shape_source_for(user.id, source_repository().get_source(source_id))
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
 
 
 @router.post("/sources/{source_id}/parse", response_model=SourceSummary)
-def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> SourceSummary:
+def parse_source(source_id: str, user: UserProfile = Depends(get_current_user), request: Request = None) -> SourceSummary:
     # notebook_id 不是这个端点 URL 上的路径参数(URL 只带 source_id),守卫没法
     # 挂在静态的 Depends(require_notebook_capability(...)) 上——先反查
     # notebook_id,再按同一张能力表判 "sources:write"(见
@@ -504,9 +525,8 @@ def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) 
     notebook_id = notebook_access_repository().source_notebook_id(
         source_id, visible_only=True
     )
-    if notebook_id is None or not notebook_capability_allowed(
-        "sources:write", notebook_id, user.id
-    ):
+    owner_id = None if notebook_id is None else notebook_capability_owner("sources:write", notebook_id, user.id)
+    if owner_id is None:
         raise HTTPException(status_code=404, detail="Source not found")
     # 镜像写入围栏,与装饰器端点同序:权限先判(未授权仍 404,不泄露存在性),
     # 通过之后才谈「这本库的内容还允不允许被改」。重解析会重写 chunks/elements,
@@ -514,6 +534,7 @@ def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) 
     mirrored = notebook_mirror_fence("sources:write", notebook_id)
     if mirrored:
         raise mirrored_notebook_error(mirrored)
+    _refuse_busy_parse(source_id)
     try:
         # 晋升出处来源(PR-E8)可见、可删除,但没有文件可解析:重新解析会先按证据
         # 清掉它支撑的晋升对象。权限通过之后才说原因(未授权仍是上面的 404)。
@@ -528,26 +549,49 @@ def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) 
             notebook_id=notebook_id,
             parent_id=source_id,
         ):
-            return source_repository().parse_source(source_id)
+            result = shape_source_for(user.id, source_repository().parse_source(source_id))
+            mark_pulse(request, notebook_id, "sources:write", owner_id, user)
+            return result
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
 
 
+#: 「这份来源是不是正在解析」探测等多久(秒)。与 MCP ``reparse_source`` 同一个值:
+#: 只是探一下解析管线持有的分块锁,不等解析结束。
+SOURCE_PARSE_BUSY_PROBE_SECONDS = 0.5
+
+
+def _source_parse_busy(source_id: str) -> bool:
+    return source_repository().source_parse_busy(
+        source_id, timeout=SOURCE_PARSE_BUSY_PROBE_SECONDS
+    )
+
+
+def _refuse_busy_parse(source_id: str) -> None:
+    """单篇重新解析的单飞(分享编辑 P1,决策 D8):这份来源正在解析时 409,不再把
+    整份解析+嵌入+抽取再跑一遍(两个人同时点、或一个人双击)。探测与真正开跑之间的
+    窗口仍由 ``process_source`` 的分块锁兜底——最坏是重复工作,不会交错写(同 MCP
+    ``reparse_source`` 的已登记结论)。权限与镜像围栏都先判过,不泄露存在性。"""
+    if _source_parse_busy(source_id):
+        raise user_error(409, "这份来源正在解析，请等它完成")
+
+
 @router.post(
     "/notebooks/{notebook_id}/sources/reparse",
-    response_model=RepairScheduledResult,
+    response_model=ReparseScheduledResult,
     dependencies=[Depends(require_notebook_capability("sources:write"))],
 )
 def reparse_sources(
     notebook_id: str, payload: ReparseSourcesRequest
-) -> RepairScheduledResult:
+) -> ReparseScheduledResult:
     """体检修复(H2 空源 / H3 缺分块):批量重新解析。逐个后台 submit_job(process_source)
     ——复用既有摄取管线(含 P1.5 的活跃租约 + 分块串行锁),**不**另造摄取路径。
     ⚠ 每个 source_id 必须真属于本 notebook 才排入(防越权:
     ``require_notebook_capability("sources:write")`` 只守 notebook,不守 body 里
     带来的任意 source_id)。不属于本库/不存在的静默跳过,回执只含实际排入的。
     ⚠ **先去重 + 限量**再排(codex):重复 id 会把同一源的解析/嵌入/KG 昂贵管线在无界队列里并发
-    排多次;超大列表同理会灌满执行器。dict.fromkeys 保序去重;超 _REPARSE_MAX 直接 400 拒绝。"""
+    排多次;超大列表同理会灌满执行器。dict.fromkeys 保序去重;超 _REPARSE_MAX 直接 400 拒绝。
+    此刻正在解析的来源不排入,回执的 ``skipped_busy`` 列出它们(决策 D8,同单篇 409)。"""
     unique_ids = list(dict.fromkeys(payload.source_ids))
     if len(unique_ids) > _REPARSE_MAX:
         raise HTTPException(
@@ -559,6 +603,7 @@ def reparse_sources(
     # admission inside the worker to close the queue-to-execution race.
     repo.require_indexing_pipeline_write(notebook_id)
     scheduled: List[str] = []
+    skipped_busy: List[str] = []
     for source_id in unique_ids:
         try:
             src = repo.get_source(source_id)
@@ -572,9 +617,12 @@ def reparse_sources(
         # 晋升出处来源(PR-E8)同理:没有文件,重解析只会清掉它支撑的晋升对象。
         if src.type in _HIDDEN_SOURCE_TYPES or src.type == PROMOTION_SOURCE_TYPE:
             continue
+        if _source_parse_busy(source_id):
+            skipped_busy.append(source_id)
+            continue
         kg_scheduler.submit_job(repo.process_source, source_id)
         scheduled.append(source_id)
-    return RepairScheduledResult(scheduled=scheduled)
+    return ReparseScheduledResult(scheduled=scheduled, skipped_busy=skipped_busy)
 
 
 def _backfill_vectors_job(repo, notebook_id: str) -> None:
@@ -833,9 +881,14 @@ def get_source_in_scope(
     # ⚠ 响应模型不是 SourceDetail:代理读取会把参考库的来源交给一个对该库既非 owner
     # 也非成员的用户,`file_path`(后端绝对路径)和 `error_message`(原始异常串,同样
     # 可能带绝对路径)不能跟着出去。理由与取舍见 ScopedSourceDetail 的 docstring。
-    return ScopedSourceDetail.of(
+    detail = ScopedSourceDetail.of(
         _participant_scoped_source(notebook_id, source_id, user.id)
     )
+    # 同库来源按请求者整形 uploaded_by_me(D14 的删除入口要它);跨库代理读取的
+    # 参考库来源在本库里没有删除入口,保持 False。
+    if detail.notebook_id == notebook_id:
+        shape_source_for(user.id, detail)
+    return detail
 
 
 @router.get(
@@ -877,22 +930,31 @@ def source_elements_page_in_scope(
 
 
 @router.delete("/sources/{source_id}", status_code=204)
-def delete_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> None:
+def delete_source(source_id: str, user: UserProfile = Depends(get_current_user), request: Request = None) -> None:
     # 同 parse_source 上面的注释:notebook_id 不在 URL 上,守卫在函数体内先反查
     # 再按同一张能力表判 "sources:write"。隐藏合成源同 parse_source:不可寻址,404。
     notebook_id = notebook_access_repository().source_notebook_id(
         source_id, visible_only=True
     )
-    if notebook_id is None or not notebook_capability_allowed(
-        "sources:write", notebook_id, user.id
-    ):
+    # 带级别的判定(一条语句,与 notebook_capability_allowed 同):点名编辑者只能删
+    # 本人上传的来源(分享编辑 P1,决策 D14 / PD-9),判定在删除事务锁住的那一行上
+    # (`uploader_must_be`),别人的来源与上传人为空的历史行一律同一个 404。
+    access = (
+        None if notebook_id is None
+        else notebook_capability_level("sources:write", notebook_id, user.id)
+    )
+    if access is None:
         raise HTTPException(status_code=404, detail="Source not found")
     # 镜像写入围栏,与 parse_source 逐字同款(同一条理由,同一个顺序)。
     mirrored = notebook_mirror_fence("sources:write", notebook_id)
     if mirrored:
         raise mirrored_notebook_error(mirrored)
     try:
-        source_repository().delete_source(source_id)
+        source_repository().delete_source(
+            source_id,
+            uploader_must_be=user.id if notebook_edit_without_admin(access) else None,
+        )
+        mark_pulse(request, notebook_id, "sources:write", access.owner_id, user)
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
 

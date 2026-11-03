@@ -164,6 +164,9 @@ export type KgFindingLiveSource = {
   source_type: string;
   /** 正在排队 / 解析 / 抽取。 */
   processing: boolean;
+  /** 这篇是不是请求者本人上传的(分享编辑 P1,D14)。编辑者只能删本人上传的来源,「删除来源…」
+   *  按它门控;缺失按「不是本人」处理(只影响编辑者,库主与管理者不看它)。 */
+  uploaded_by_me?: boolean;
 };
 
 export type KgFindingRow = {

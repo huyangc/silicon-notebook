@@ -54,6 +54,7 @@ from app.models.knowledge import (
 )
 from app.repositories.ports import (
     GovernanceStorePort,
+    KgCandidateAlreadyDecided,
     KnowledgeStorePort,
     MemoryStorePort,
     RepositoryRow,
@@ -912,7 +913,7 @@ class KnowledgeGovernanceService:
         if row is None:
             raise KeyError(f"conflict candidate {candidate_id!r} not found")
         if row["status"] != "pending":
-            raise ValueError(
+            raise KgCandidateAlreadyDecided(
                 f"conflict candidate {candidate_id!r} is already decided "
                 f"(status={row['status']!r})"
             )
@@ -955,7 +956,7 @@ class KnowledgeGovernanceService:
         if row is None:
             raise KeyError(f"conflict candidate {candidate_id!r} not found")
         if row["status"] != "pending":
-            raise ValueError(
+            raise KgCandidateAlreadyDecided(
                 f"conflict candidate {candidate_id!r} is already decided "
                 f"(status={row['status']!r})"
             )

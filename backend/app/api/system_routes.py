@@ -10,6 +10,8 @@ from app.api.deps import (
     admin_query_repository,
     get_current_user,
     identity_repository,
+    memory_suggest_service,
+    model_provider_if_initialized,
     model_service_binding_summary,
     model_status_service,
     pending_actions_service,
@@ -17,19 +19,16 @@ from app.api.deps import (
     user_error,
 )
 from app.core.config import SOURCE_UPLOAD_MAX_FILES_PER_BATCH, get_settings
-from app.models.notebooks import NotebookDeletionNotices
 from app.models.identity import (
+    MemoryModeResponse,
+    MemoryModeUpdate,
     PasswordChangeRequest,
     SearchProfileUpdate,
     UiModeUpdate,
     UserProfile,
 )
-from app.repositories.identity_errors import (
-    AuthStoreError,
-    BuiltinAdminPasswordError,
-    PasswordMismatchError,
-)
 from app.models.model_services import ModelServicesStatus
+from app.models.notebooks import NotebookDeletionNotices
 from app.models.sources import DetectDocTypesRequest, DetectedDocType
 from app.models.system import (
     ReleaseNotesHistoryResponse,
@@ -38,6 +37,16 @@ from app.models.system import (
     SystemConfiguration,
     SystemExtensionContribution,
     SystemExtensionsResponse,
+)
+from app.repositories.identity_errors import (
+    AuthStoreError,
+    BuiltinAdminPasswordError,
+    PasswordMismatchError,
+)
+from app.services.memory_suggest_service import MemorySuggestUnavailableError
+from app.services.memory_suggest_wiring import (
+    memory_suggest_model_ready,
+    memory_suggest_wiring_active,
 )
 from app.services.model_status import ModelStatusService
 from app.services.parser_registry import (
@@ -97,6 +106,48 @@ def update_my_ui_mode(
     """自助切换界面模式偏好("auto"|"advanced")；只写调用者自己的 user_profiles
     行，不做 admin 校验。合法值由 pydantic Literal 在到达这里之前已经拒绝。"""
     return identity_repository().set_user_ui_mode(user.id, payload.ui_mode)
+
+
+@router.patch(
+    "/me/memory-mode",
+    response_model=MemoryModeResponse,
+    responses={
+        409: {
+            "description": "`memory_suggest_unavailable`: turning suggestions on while "
+            "this deployment cannot run them (`auto_memory_suggest_enabled` false); "
+            "nothing was written.",
+        },
+    },
+)
+def update_my_memory_mode(
+    payload: MemoryModeUpdate,
+    user: UserProfile = Depends(get_current_user),
+) -> MemoryModeResponse:
+    """自助切换记忆建议开关(``manual`` | ``suggest``),只写调用者自己。这是
+    ``memory_mode`` 唯一的写入口(``MemorySuggestService.set_mode``)。
+
+    - 部署开关关闭时请求开启 → 409 ``memory_suggest_unavailable``,什么都不写;
+    - 关闭(``manual``)时可带 ``delete_unadopted=true``:模式切换提交之后,删除本人
+      在仍可读的各库里**还在等处理**的系统建议(``candidate``),已忽略、已过期的
+      (``rejected``)一律保留;返回本次删除的条数。开启时该字段不起作用。"""
+    try:
+        change = memory_suggest_service().set_mode(
+            user.id, payload.memory_mode, delete_unadopted=payload.delete_unadopted
+        )
+    except MemorySuggestUnavailableError:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "memory_suggest_unavailable",
+                "message": "这项功能当前未开启，请联系管理员开启记忆建议",
+            },
+        )
+    except KeyError:
+        raise user_error(404, "账号不存在，请重新登录")
+    return MemoryModeResponse(
+        user=user.model_copy(update={"memory_mode": change.memory_mode}),
+        deleted_suggestion_count=change.deleted_suggestion_count,
+    )
 
 
 @router.get("/me/release-notes", response_model=ReleaseNotesResponse)
@@ -214,6 +265,10 @@ def system_configuration(
         agent_profile_enabled=settings.agent_profile_enabled,
         user_search_profile_enabled=settings.user_search_profile_enabled,
         notebook_transfer_max_bytes=settings.notebook_transfer_web_max_bytes,
+        auto_memory_suggest_enabled=memory_suggest_wiring_active(settings),
+        auto_memory_suggest_model_ready=memory_suggest_model_ready(
+            model_provider_if_initialized()
+        ),
     )
 
 

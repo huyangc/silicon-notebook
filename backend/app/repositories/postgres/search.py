@@ -7,6 +7,7 @@ from typing import Sequence
 
 from psycopg import sql
 
+from app.domain.memory_suggest_contracts import ORIGIN_SUGGESTED
 from app.repositories.lexical_query import has_cjk
 from app.repositories.like_pattern import LIKE_ESCAPE_CHAR, escape_like_pattern
 from app.repositories.promotion_title_sql import (
@@ -1120,9 +1121,16 @@ def _memory_match_predicates(
     if scope.statuses:
         predicates.append("status=ANY(%s)")
         params.append(list(scope.statuses))
-    if scope.origin is not None:
+    if scope.origin == ORIGIN_SUGGESTED:
+        # The list filter's virtual origin: rows with a suggested_signal
+        # (their stored origin stays ask_answer) -- the same predicate as the
+        # store's no-query path.
+        predicates.append("suggested_signal IS NOT NULL")
+    elif scope.origin is not None:
         predicates.append("origin=%s")
         params.append(scope.origin)
+        if scope.origin == "ask_answer":
+            predicates.append("suggested_signal IS NULL")
     predicates.append(live_read_access_exists_clause("memory_items"))
     params.extend(read_access_params(scope.viewer_id))
     probes = memory_match_probes(query, phrase_queries)

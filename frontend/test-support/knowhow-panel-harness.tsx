@@ -43,6 +43,7 @@ export function wireDetail(detail: KnowhowTableDetail) {
     title: detail.title,
     description: detail.description,
     anchor_column_id: detail.anchorColumnId,
+    ...(detail.mutationSeq !== undefined ? { mutation_seq: detail.mutationSeq } : {}),
     columns: detail.columns.map((column) => ({
       id: column.id, name: column.name, position: column.position, kind: column.role,
     })),
@@ -63,8 +64,9 @@ export function wireSummary(table: Partial<KnowhowTableSummary> & { id: string; 
   };
 }
 
-export function wirePatchResult(rowId: string, columnId: string, contentMd: string) {
-  return { row_id: rowId, column_id: columnId, content_md: contentMd, projection_status: "pending" };
+export function wirePatchResult(rowId: string, columnId: string, contentMd: string, mutationSeq?: number) {
+  return { row_id: rowId, column_id: columnId, content_md: contentMd, projection_status: "pending",
+    ...(mutationSeq !== undefined ? { mutation_seq: mutationSeq } : {}) };
 }
 
 /** A record-style table (no anchor column): two rows, the first fully filled. */
@@ -264,6 +266,62 @@ export function installFakeKnowhowServer(): FakeKnowhowServer {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Same-browser tab channel
+// ---------------------------------------------------------------------------
+
+// The panel shares saved cell values between tabs of one browser over
+// `BroadcastChannel("knowhow-cell:<table_id>")` (share-edit P1, decision D7).
+// Node ships a real, process-wide BroadcastChannel; left in place, a save in one
+// test could reach a panel of the next test (or, under a thread pool, another
+// file). Every suite therefore gets a fresh in-memory bus: messages reach the
+// other open channels of the same name on a macrotask turn (like the browser),
+// never the sender, and `posted` records each message for assertions.
+export type FakeBroadcastBus = {
+  posted: Array<{ name: string; data: unknown }>;
+  /** Open channels by name (closed ones removed). */
+  open: (name: string) => number;
+};
+
+export function installFakeBroadcastChannel(): FakeBroadcastBus {
+  const channels = new Set<FakeChannel>();
+  const posted: FakeBroadcastBus["posted"] = [];
+
+  class FakeChannel {
+    readonly name: string;
+    onmessage: ((event: MessageEvent) => void) | null = null;
+    private closed = false;
+
+    constructor(name: string) {
+      this.name = name;
+      channels.add(this);
+    }
+
+    postMessage(data: unknown): void {
+      if (this.closed) throw new DOMException("closed", "InvalidStateError");
+      posted.push({ name: this.name, data });
+      const copy = structuredClone(data);
+      for (const peer of channels) {
+        if (peer === this || peer.name !== this.name) continue;
+        setTimeout(() => {
+          if (!peer.closed) peer.onmessage?.({ data: copy } as MessageEvent);
+        }, 0);
+      }
+    }
+
+    close(): void {
+      this.closed = true;
+      channels.delete(this);
+    }
+  }
+
+  vi.stubGlobal("BroadcastChannel", FakeChannel);
+  return {
+    posted,
+    open: (name) => [...channels].filter((channel) => channel.name === name).length,
+  };
+}
+
 /** Routes the read endpoints every panel scenario needs. */
 export function routeTable(
   server: FakeKnowhowServer,
@@ -314,17 +372,19 @@ export function captureConsole(): { unexpectedErrors: unknown[][] } {
 /**
  * Registers the per-test plumbing every panel characterization suite shares:
  * fresh storages (floating-window geometry and cell drafts live there), a fresh
- * fake server, and the after-test checks (no unrouted request, no unexpected
+ * fake server, a fresh same-browser tab channel bus, and the after-test checks (no unrouted request, no unexpected
  * console.error).
  */
-export function registerKnowhowPanelSuite(): { server: () => FakeKnowhowServer } {
+export function registerKnowhowPanelSuite(): { server: () => FakeKnowhowServer; bus: () => FakeBroadcastBus } {
   let server: FakeKnowhowServer;
+  let bus: FakeBroadcastBus;
   let consoleState: { unexpectedErrors: unknown[][] };
   beforeEach(() => {
     window.localStorage.clear();
     window.sessionStorage.clear();
     consoleState = captureConsole();
     server = installFakeKnowhowServer();
+    bus = installFakeBroadcastChannel();
   });
   afterEach(() => {
     try {
@@ -336,7 +396,7 @@ export function registerKnowhowPanelSuite(): { server: () => FakeKnowhowServer }
       vi.unstubAllGlobals();
     }
   });
-  return { server: () => server };
+  return { server: () => server, bus: () => bus };
 }
 
 // ---------------------------------------------------------------------------

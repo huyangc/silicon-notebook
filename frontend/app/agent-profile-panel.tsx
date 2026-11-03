@@ -52,6 +52,8 @@ import {
 import { Bot, ChevronDown, Lightbulb, RefreshCw, Search, Sparkles } from "lucide-react";
 
 import { toUserMessage } from "./errors.ts";
+import { useCollabPanelRefresh } from "./use-collab-panel-refresh";
+import { CollabRefreshNotice } from "./collab-refresh-notice";
 import {
   clearAgentObservations,
   clearExperiencePartition,
@@ -726,7 +728,7 @@ function ActionNoteLine({ note }: { note: ActionNote }) {
  *   注定 409 的按钮比没有按钮更糟(#616 R3 的原话)。`can_manage=false` 同理——
  *   读权成员照样看得见条目(条目对全体成员可见是拍板过的),只是不能动它们。
  */
-function ExperienceSection({ notebookId }: { notebookId: string }) {
+function ExperienceSection({ notebookId, collabRevision }: { notebookId: string; collabRevision: number }) {
   const [data, setData] = useState<ExperiencePartitionResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -736,25 +738,44 @@ function ExperienceSection({ notebookId }: { notebookId: string }) {
   const [clearNote, setClearNote] = useActionNote();
   const [confirmingClear, setConfirmingClear] = useState(false);
   const loadEpochRef = useRef(0);
+  const [expanded, setExpanded] = useState(false);
+  const [expandedRevision, setExpandedRevision] = useState(0);
+  const seenRevisionRef = useRef(collabRevision);
+  const refreshSafeRef = useRef(false);
+  // Collapsed cards read authoritatively on their next expansion. Only a
+  // revision received while this card is open creates local refresh work.
+  useEffect(() => {
+    if (seenRevisionRef.current === collabRevision) return;
+    seenRevisionRef.current = collabRevision;
+    if (expanded) setExpandedRevision(collabRevision);
+  }, [collabRevision, expanded]);
+  useEffect(() => () => { loadEpochRef.current += 1; }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (guard?: () => boolean) => {
     const epoch = ++loadEpochRef.current;
     setLoading(true);
     setError("");
     try {
       const next = await fetchExperiencePartition(notebookId);
-      if (epoch === loadEpochRef.current) setData(next);
+      if (epoch !== loadEpochRef.current || (guard && !guard())) return false;
+      setData(next);
+      return true;
     } catch (err) {
-      if (epoch === loadEpochRef.current) {
+      if (epoch === loadEpochRef.current && (!guard || guard())) {
         setError(toUserMessage(err, "没能读到检索经验，请稍后重试"));
       }
+      return false;
     } finally {
       if (epoch === loadEpochRef.current) setLoading(false);
     }
   }, [notebookId]);
 
   function onToggle(event: SyntheticEvent<HTMLDetailsElement>) {
+    setExpanded(event.currentTarget.open);
     if (!event.currentTarget.open) {
+      // An expansion is a fresh read scope, including when it is reopened
+      // before a collaboration request from the previous scope settles.
+      loadEpochRef.current += 1;
       // 收起 = 放弃这一步。两步确认停在「确认清空」上而卡片被收起时,下次展开
       // 迎面就是一颗破坏性按钮的确认态,而用户并不记得自己按过第一下。
       setConfirmingClear(false);
@@ -769,12 +790,39 @@ function ExperienceSection({ notebookId }: { notebookId: string }) {
     // 代价是一次多余的读:反复开合会逐次发请求。这是有界的(一次点击一次轻查询),
     // 而且慢读不会串——代次守卫让只有最新那一次的结果被采用。懒加载那条红线仍然
     // 成立:展开之前一个请求都不发。
-    void load();
   }
 
   // 两个动作互斥:清空在飞时整理没有意义(整理的输入正在被删),整理在飞时清空会
   // 把刚排上的那一批的结果删成半截。
   const busy = distilling || clearing;
+  const refreshSafe = expanded && !busy && !confirmingClear;
+  refreshSafeRef.current = refreshSafe;
+  const collabRefresh = useCollabPanelRefresh(expandedRevision,
+    refreshSafeRef.current, () => load(() => refreshSafeRef.current));
+  const { pending: collabPending, busy: refreshing, refresh: refreshExperience } = collabRefresh;
+  const previouslyExpandedRef = useRef(false);
+  const queuedOpenRef = useRef(false);
+  useEffect(() => {
+    const opening = expanded && !previouslyExpandedRef.current;
+    previouslyExpandedRef.current = expanded;
+    if (!refreshSafe) queuedOpenRef.current = false;
+    if (opening) {
+      if (collabPending) queuedOpenRef.current = refreshSafe;
+      else void load();
+    }
+    // A reopened card must wait for the old single-flight refresh to release
+    // its slot, then read once for this opening. A later editing pause drops
+    // the automatic intent; the pending inline refresh remains available.
+    const drainOpen = () => {
+      if (!queuedOpenRef.current || refreshing || !refreshSafeRef.current
+        || document.visibilityState === "hidden") return;
+      queuedOpenRef.current = false;
+      void refreshExperience();
+    };
+    drainOpen();
+    document.addEventListener("visibilitychange", drainOpen);
+    return () => document.removeEventListener("visibilitychange", drainOpen);
+  }, [expanded, load, collabPending, refreshing, refreshExperience, refreshSafe]);
 
   async function startDistill() {
     // 忙碌位在 await **之前**置上:请求在飞的那段窗口按钮也不能连点。
@@ -829,6 +877,7 @@ function ExperienceSection({ notebookId }: { notebookId: string }) {
         <ChevronDown size={16} className="understanding-summary-chevron" aria-hidden="true" />
       </summary>
       <div className="understanding-module-body">
+        {expanded && <CollabRefreshNotice refresh={collabRefresh} />}
         {error ? (
           <p className="understanding-note is-error" role="alert">{error}</p>
         ) : null}
@@ -939,10 +988,12 @@ function ExperienceSection({ notebookId }: { notebookId: string }) {
  */
 export function AgentProfilePanel({
   notebookId,
+  collabRevision = 0,
   onOpenSource,
   resolveSourceTitle,
 }: {
   notebookId: string;
+  collabRevision?: number;
   /**
    * 打开一份资料的详情。由 page.tsx 接到**引用卡走的同一条**打开路径上
    * (`onOpenSourceElement`),不另造弹窗;缺省时依据 chip 仍显示、只是不可点。
@@ -978,10 +1029,12 @@ export function AgentProfilePanel({
   // effect 闭包里,deps 不变就不重启——第二条链在第一条快耗尽预算时启动,会
   // 只分到剩下的一两拍。epoch 进 deps,新认领即重启 effect、计数归零。
   const [pollEpoch, setPollEpoch] = useState(0);
+  const understandingReadEpochRef = useRef(0);
 
   const load = useCallback(async () => {
+    const requestId = ++understandingReadEpochRef.current;
     const next = await fetchUnderstanding(notebookId);
-    setData(next);
+    if (requestId === understandingReadEpochRef.current) setData(next);
     return next;
   }, [notebookId]);
 
@@ -992,12 +1045,16 @@ export function AgentProfilePanel({
     });
   }, [load]);
 
+  const collabRefresh = useCollabPanelRefresh(collabRevision,
+    Object.keys(drafts).length === 0 && savingLabels.size === 0 && !confirmingLabel,
+    async () => { await load(); return true; });
+
   useEffect(() => {
     let cancelled = false;
     load().catch((err) => {
       if (!cancelled) setError(toUserMessage(err, "没能读到这个库的理解，请稍后重试"));
     });
-    return () => { cancelled = true; };
+    return () => { cancelled = true; understandingReadEpochRef.current += 1; };
   }, [load]);
 
   // 忙碌判据把两条证据取或:本地刚认领的那一格(点完立刻生效,不等第一次轮询),
@@ -1187,13 +1244,14 @@ export function AgentProfilePanel({
             开关(两条链路不是同一个部署项),这一把关掉时那一份可能照常在攒,
             而且已经攒下的条目本来就允许清空——在这里整块不挂,等于让一份用户
             有权删除的数据在浏览器里既看不到也删不掉。 */}
-        <ExperienceSection notebookId={notebookId} />
+        <ExperienceSection notebookId={notebookId} collabRevision={collabRevision} />
       </div>
     );
   }
 
   return (
     <div className="understanding-panel">
+      <CollabRefreshNotice refresh={collabRefresh} />
       {error ? (
         <p className="understanding-note is-error" role="alert">{error}</p>
       ) : null}
@@ -1245,7 +1303,7 @@ export function AgentProfilePanel({
         resolveSourceTitle={resolveSourceTitle}
       />
       <AgentObservationSection notebookId={notebookId} />
-      <ExperienceSection notebookId={notebookId} />
+      <ExperienceSection notebookId={notebookId} collabRevision={collabRevision} />
     </div>
   );
 }

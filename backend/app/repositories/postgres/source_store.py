@@ -18,7 +18,9 @@ from app.models.sources import (
     INDEXING_CHUNK_FALLBACK_WARNING_PREFIX,
     has_indexing_chunk_fallback_warning,
     has_pdf_python_fallback_warning,
+    carry_uploader,
     paper_meta_status,
+    source_with_uploader,
 )
 from app.domain.source_display import summary_display_title
 from app.domain.source_positions import normalize_positions, positions_page
@@ -947,13 +949,13 @@ class SourceStore:
             summary = self.source_from_row(
                 connection, row, paper_meta=paper_meta
             )
-        return SourceDetail(
+        return carry_uploader(SourceDetail(
             **summary.model_dump(),
             file_path=row["file_path"],
             error_message=row["error_message"],
             paper_meta=self.paper_meta_model(paper_meta),
             updated_at=iso_timestamp(row["updated_at"]),
-        )
+        ), summary)
 
     def source_exists(self, source_id: str) -> bool:
         with self.database.connect() as connection:
@@ -2234,7 +2236,8 @@ class SourceStore:
         connection, source_ids: Sequence[str]
     ) -> list[dict]:
         """``FOR UPDATE`` the existing rows among ``source_ids``, in id order,
-        and return ``{id, notebook_id, source_type, file_path, is_memory}``
+        and return ``{id, notebook_id, source_type, file_path, uploaded_by,
+        is_memory}``
         for each (``is_memory`` is ``memory_sql``'s Memory-source predicate).
 
         The batch form of ``source_exists_for_update_tx`` (without its
@@ -2246,7 +2249,7 @@ class SourceStore:
         if not ids:
             return []
         rows = connection.execute(
-            "SELECT id,notebook_id,source_type,file_path,"
+            "SELECT id,notebook_id,source_type,file_path,uploaded_by,"
             f"({memory_source_type_predicate()}) AS is_memory FROM sources "
             "WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
             (ids,),
@@ -2397,6 +2400,7 @@ class SourceStore:
             venue=meta["venue"] if meta else None,
         )
         summary.paper_meta_status = self._paper_meta_status_for(row, meta)
+        source_with_uploader(summary, row["uploaded_by"] if "uploaded_by" in row.keys() else "")
         return summary
 
     def sources_from_rows(
@@ -2518,6 +2522,7 @@ class SourceStore:
                 venue=meta["venue"] if meta else None,
             )
             summary.paper_meta_status = self._paper_meta_status_for(row, meta)
+            source_with_uploader(summary, row["uploaded_by"] if "uploaded_by" in row.keys() else "")
             output.append(summary)
         return output
 

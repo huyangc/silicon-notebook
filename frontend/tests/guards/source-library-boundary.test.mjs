@@ -79,6 +79,9 @@ test("source-library hook is narrow and does not depend on other workspace domai
     "./source-api.ts",
     "./source-delete-state.ts",
     "./source-detail-state.ts",
+    // Shared collaboration receipt duration; no collaboration owner or I/O
+    // enters the source owner through this protocol constant.
+    "./collab-refresh.ts",
     "./source-page-state.ts",
     "./source-scope.ts",
     "./workspace-model.ts",
@@ -90,6 +93,8 @@ test("source-library hook is narrow and does not depend on other workspace domai
     "./source-reparse-request.ts",
   ]);
   assert.deepEqual(modules.filter((module) => !allowed.has(module)), []);
+  assert.deepEqual(importsIn(hook).filter((item) => item.module === "./collab-refresh.ts")
+    .map((item) => item.imported), ["COLLAB_CHANGE_NOTICE_MS"]);
   for (const [leaf, reachable] of [
     ["source-management.ts", []],
     ["document-limit.ts", ["./source-management.ts"]],

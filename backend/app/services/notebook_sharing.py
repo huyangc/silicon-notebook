@@ -9,10 +9,12 @@ from typing import Callable, Iterable, TYPE_CHECKING
 
 from app.models.notebooks import NotebookSummary
 from app.domain.repository import RepositoryCompatibilitySeams
+from app.repositories.access_level import NotebookAccess
 from app.repositories.ports import (
     AgentObservationStorePort,
     AgentProfileStorePort,
     AskStateStorePort,
+    MemorySuggestStorePort,
     NotebookTooLargeToCopyError,
     RepositoryDatabasePort,
     SharingStorePort,
@@ -272,6 +274,7 @@ class NotebookSharingService:
         profiles: "AgentProfileStorePort | None" = None,
         observations: "AgentObservationStorePort | None" = None,
         ask_state: "AskStateStorePort | None" = None,
+        memory_suggest: "MemorySuggestStorePort | None" = None,
     ) -> None:
         self._store = store
         self._copies = copies
@@ -294,6 +297,11 @@ class NotebookSharingService:
         # E7-4: the one read behind ``user_owns_answer`` (answer -> conversation
         # creator). ``None`` = not wired: the check then answers False, never True.
         self._ask_state = ask_state
+        # Auto user-memory suggestions: the removed members' job rows (their
+        # sampling windows) go with their access, so a re-added member starts
+        # a new window (plan G17). ``None`` = not wired, fail-open like the
+        # seats above.
+        self._memory_suggest = memory_suggest
 
     # ---------------------------------------------------------------- share
     def share_notebook(self, notebook_id: str) -> dict:
@@ -506,6 +514,26 @@ class NotebookSharingService:
         """
         return self._store.user_can_admin_notebook(notebook_id, user_id)
 
+    def user_can_edit_notebook(self, notebook_id: str, user_id: str) -> bool:
+        """编辑权:owner ∪ 编辑级有效授权边(分享编辑 P1)。谓词唯一定义点
+        `access_sql.NOTEBOOK_EDIT_SQL`,一跳委托 store,理由同上。"""
+        return self._store.user_can_edit_notebook(notebook_id, user_id)
+
+    def notebook_access_level(
+        self, notebook_id: str, user_id: str
+    ) -> NotebookAccess | None:
+        """访问级别点查(PD-5),一跳委托 store(`NOTEBOOK_ACCESS_LEVEL_SQL`)。"""
+        return self._store.notebook_access_level(notebook_id, user_id)
+
+    def owner_if_can_edit(self, notebook_id: str, user_id: str) -> str | None:
+        return self._store.owner_if_can_edit(notebook_id, user_id)
+
+    def owner_if_can_admin(self, notebook_id: str, user_id: str) -> str | None:
+        return self._store.owner_if_can_admin(notebook_id, user_id)
+
+    def collab_pulse_wanted(self, notebook_id: str, user_id: str) -> bool:
+        return self._store.collab_pulse_wanted(notebook_id, user_id)
+
     def user_can_read_notebook(self, notebook_id: str, user_id: str) -> bool:
         """读权:owner ∪ 只读成员 ∪ 有效授权边(user/group/group_admins/everyone)。
 
@@ -560,6 +588,7 @@ class NotebookSharingService:
     def add_member(self, notebook_id: str, user_id: str) -> None:
         return self._store.add_member(notebook_id, user_id)
 
+    # 测试观察点：模拟另一执行者撤权及清理覆盖层；本人退出由 Memory store 原子完成。
     def remove_member(self, notebook_id: str, user_id: str) -> None:
         """Drop the membership row, then discard that member's private
         understanding overlay for this notebook.
@@ -614,14 +643,16 @@ class NotebookSharingService:
         self._clear_member_profiles(notebook_id, [user_id])
 
     def _clear_member_profiles(self, notebook_id: str, user_ids: Iterable[str]) -> None:
-        """Discard both halves of these members' overlays: the block rows
-        (``clear_all``) AND the job/status rows (``clear_job_rows``), then
-        their agent observations.
+        """Discard these members' auto-memory suggestion job rows (their
+        sampling windows, plan G17), both halves of their overlays -- the
+        block rows (``clear_all``) AND the job/status rows
+        (``clear_job_rows``) -- and then their agent observations.
 
         One implementation for one member and for many (kick-all review
         2026-10-23): each table is cleared for the whole set in ONE write
-        transaction, so removing every link member costs three transactions,
-        not three per member; ``remove_member`` passes a one-element set.
+        transaction, so removing every link member costs four transactions
+        (suggestion job rows, overlay job rows, overlay blocks, observations),
+        not four per member; ``remove_member`` passes a one-element set.
 
         Agentic Memory P1 (T5 repair round). Clearing only the blocks left a
         stale ``agent_profile_jobs`` row behind — most visibly its
@@ -651,6 +682,18 @@ class NotebookSharingService:
         owners = [user_id for user_id in user_ids if user_id]
         if not owners:
             return
+        # The suggestion job rows go first, for the same reason as the
+        # overlay job rows below: an in-flight suggestion run CASes on its
+        # job row before writing, so deleting it first stops any further write.
+        memory_suggest = getattr(self, "_memory_suggest", None)
+        if memory_suggest is not None:
+            try:
+                memory_suggest.clear_job_rows(notebook_id, owners)
+            except Exception as exc:  # access change already committed
+                _log.warning(
+                    "memory suggestion job cleanup failed: %s",
+                    type(exc).__name__,
+                )
         if self._profiles is not None:
             self._clear_profile_halves(notebook_id, owners)
         # codex #535 R6 P2:观察行同批清空——它们是这个人自己的 Agent 在本库

@@ -11,14 +11,29 @@ from psycopg.errors import DeadlockDetected, SerializationFailure
 from app.models.memory import MemoryRevision, MemoryWrite
 from app.models.identity import AgentProfile, AgentTokenAccess, AgentTokenSummary
 from app.models.memory import (
+    MemberExitCompletion,
+    MemberExitCounts,
     MemberExitSnapshot,
     MemoryExportSnapshot,
     MemoryNotebookOption,
     MemoryRecord,
     PaginatedMemories,
+    SuggestionWriteResult,
 )
 from app.core.json_safety import strict_json_dumps
 from app.core.memory_inputs import MemoryExportTooLarge
+from app.domain.memory_suggest_contracts import (
+    JOB_STATUS_RUNNING,
+    ORIGIN_SUGGESTED,
+    REVISION_REASON_SUGGESTED,
+    REVOKED_CLAIM_LOST,
+    SIGNAL_CLARIFIED,
+    SKIP_NO_READ_ACCESS,
+    SKIP_NOTEBOOK_UNAVAILABLE,
+    SKIP_USER_DISABLED,
+    SUGGESTED_SIGNALS,
+    SuggestionRevoked,
+)
 from app.domain.notebook_delete_grace import (
     WINDOW_CLOSED,
     WINDOW_OPEN,
@@ -51,8 +66,10 @@ from app.repositories.postgres.access_sql import (
     read_access_after_group_exit_clause,
     read_access_clause,
     live_read_access_exists_clause,
+    read_access_except_grant_clause,
     read_access_exists_clause,
     read_access_params,
+    read_except_grant_params,
 )
 from app.repositories.postgres import memory_sql
 from app.repositories.postgres.database import PostgresDatabase
@@ -60,7 +77,14 @@ from app.repositories.postgres.governance_store import GovernanceStore
 from app.repositories.postgres.memory_sql import (
     memory_derived_object,
     memory_source_type_predicate,
+    unadopted_suggestion,
 )
+from app.repositories.postgres.memory_suggest_store import (
+    DECLINED_FINGERPRINT_UPSERT_SQL,
+    PROPOSED_FINGERPRINT_UPSERT_SQL,
+)
+from app.repositories.postgres.read_authority_lock import lock_live_reader_on, lock_read_changes_on
+from app.repositories.postgres.memory_suggest_read_period import lock_mode_read_period_on, record_read_loss_on
 from app.repositories.postgres.search import (
     MemoryCandidateScope,
     memory_candidate_ids,
@@ -106,6 +130,24 @@ def _bulk_memory_ids(memory_ids: Sequence[str]) -> list[str]:
 def _strict_json_value(value: Any, *, field: str) -> Any:
     """Validate application-owned JSON and return a Jsonb-ready value."""
     return json.loads(strict_json_dumps(value, field=field))
+
+
+def _check_suggestion_writes(
+    writes: Sequence[MemoryWrite], *, notebook_id: str, owner_id: str
+) -> None:
+    """What ``create_suggestions_with_initial_revision`` accepts (SQLite twin
+    identical): open ``ask_answer`` candidates of this owner and notebook,
+    each with a known ``suggested_signal``; a ``clarified`` one binds no
+    answer, so it never occupies ``idx_memory_answer_once``."""
+    for write in writes:
+        if write.notebook_id != notebook_id or write.created_by != owner_id:
+            raise ValueError("a suggestion write must belong to this owner and notebook")
+        if write.origin != "ask_answer" or write.status != "candidate":
+            raise ValueError("a suggestion is an ask_answer candidate")
+        if write.suggested_signal not in SUGGESTED_SIGNALS:
+            raise ValueError(f"unknown suggested_signal: {write.suggested_signal!r}")
+        if write.suggested_signal == SIGNAL_CLARIFIED and write.source_answer_id:
+            raise ValueError("a clarified suggestion binds no answer")
 
 
 # 「无主的 Memory 来源」:`source_type` 是 memory,而它指回的 Memory 不再是一条已确认的
@@ -529,6 +571,7 @@ class MemoryStore:
             created_at=iso_timestamp(row["created_at"]),
             updated_at=iso_timestamp(row["updated_at"]),
             provenance=_json_object(row["payload_json"] if "payload_json" in keys else "{}"),
+            suggested_signal=row["suggested_signal"] if "suggested_signal" in keys else None,
         )
 
     @staticmethod
@@ -539,8 +582,18 @@ class MemoryStore:
             f"{alias}.status,{alias}.promotion_state,{alias}.title,"
             f"{alias}.content_md,{alias}.tags_json,{alias}.confirmed_by,"
             f"{alias}.confirmed_at,{alias}.embedding_status,{alias}.embedding_error,"
-            f"{alias}.created_at,{alias}.updated_at,p.payload_json"
+            f"{alias}.created_at,{alias}.updated_at,{alias}.suggested_signal,p.payload_json"
         )
+
+    @staticmethod
+    def _origin_clause(origin: str, alias: str = "m") -> tuple[str, tuple]:
+        """The list filter's origin predicate: the virtual ``suggested`` is
+        "has a suggested_signal"; Ask answers are only non-suggested rows."""
+        if origin == ORIGIN_SUGGESTED:
+            return f"{alias}.suggested_signal IS NOT NULL", ()
+        if origin == "ask_answer":
+            return f"{alias}.origin=%s AND {alias}.suggested_signal IS NULL", (origin,)
+        return f"{alias}.origin=%s", (origin,)
 
     @staticmethod
     def _read_access_clause(alias: str = "m") -> str:
@@ -559,17 +612,30 @@ class MemoryStore:
     ) -> dict[str, Any]:
         bounded_limit = max(1, min(3, int(limit)))
         with self.database.connect() as db:
+            # "Your memories" (design §6.3): the original count, minus the
+            # unadopted suggestions, in ONE statement -- the first half is the
+            # pre-suggestion statement verbatim, the subtrahend reads the
+            # partial idx_memory_suggest_unadopted; GREATEST guards against a
+            # negative difference.
             counts = db.execute(
+                "SELECT GREATEST(0,o.total-u.unadopted) AS total,o.confirmed,"
+                "GREATEST(0,o.candidate-u.unadopted_candidate) AS candidate FROM ("
                 "SELECT COUNT(*) AS total,"
                 "COALESCE(SUM(CASE WHEN status='confirmed' THEN 1 ELSE 0 END),0) AS confirmed,"
                 "COALESCE(SUM(CASE WHEN status='candidate' THEN 1 ELSE 0 END),0) AS candidate "
-                "FROM memory_items WHERE created_by=%s AND notebook_id=%s",
-                (user_id, notebook_id),
+                "FROM memory_items WHERE created_by=%s AND notebook_id=%s) o,("
+                "SELECT COUNT(*) AS unadopted,"
+                "COALESCE(SUM(CASE WHEN us.status='candidate' THEN 1 ELSE 0 END),0) "
+                "AS unadopted_candidate FROM memory_items us "
+                "WHERE us.created_by=%s AND us.notebook_id=%s "
+                f"AND {unadopted_suggestion('us')}) u",
+                (user_id, notebook_id, user_id, notebook_id),
             ).fetchone()
             rows = db.execute(
-                "SELECT id,title,status,updated_at FROM memory_items "
+                "SELECT id,title,status,updated_at FROM memory_items m "
                 "WHERE created_by=%s AND notebook_id=%s "
                 "AND status IN ('confirmed','candidate') "
+                f"AND NOT {unadopted_suggestion('m')} "
                 "ORDER BY updated_at DESC,id COLLATE \"C\" DESC LIMIT %s",
                 (user_id, notebook_id, bounded_limit),
             ).fetchall()
@@ -624,8 +690,8 @@ class MemoryStore:
         statement = (
             "INSERT INTO memory_items "
             "(id,notebook_id,created_by,agent_profile_id,source_answer_id,origin,"
-            "status,title,content_md,tags_json,confirmed_by,confirmed_at,created_at,updated_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+            "status,title,content_md,tags_json,confirmed_by,confirmed_at,created_at,updated_at,"
+            "suggested_signal) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
         )
         if write.source_answer_id is not None:
             statement += (
@@ -649,6 +715,7 @@ class MemoryStore:
                 normalize_timestamp(write.confirmed_at) if write.confirmed_at else None,
                 normalize_timestamp(write.created_at),
                 normalize_timestamp(write.updated_at),
+                write.suggested_signal,
             ),
         )
         if write.source_answer_id is not None and cursor.fetchone() is None:
@@ -768,6 +835,125 @@ class MemoryStore:
             self._ensure_initial_revision_on(db, item, created, changed_by, reason)
         return item
 
+    def create_suggestions_with_initial_revision(
+        self,
+        *,
+        notebook_id: str,
+        owner_id: str,
+        claim_token: str,
+        writes: Sequence[MemoryWrite],
+        proposed_fingerprints: Sequence[str],
+        now: str,
+        declined_fingerprints: Sequence[str] = (),
+        declined_expires_at: str | None = None,
+    ) -> SuggestionWriteResult:
+        """Write one run's system suggestions (design §4.2 step 8) in ONE
+        write transaction, re-checking under row locks that the run may still
+        write. In order:
+
+        1. read access with locks: the notebook row ``FOR SHARE`` (and live),
+           then — unless ``owner_id`` owns it — the membership row or a grant
+           edge ``FOR SHARE`` (the three-segment probe; a removal or exit
+           committing first makes this fail, one starting later waits);
+        2. the owner's switch: ``memory_suggest_users`` ``enabled = 1``
+           ``FOR SHARE``;
+        3. the job row ``FOR UPDATE``: still ``running`` under
+           ``claim_token`` (turning the switch off, an exit or a loss of read
+           access deletes it; a stale run sees another token).
+           Lock order switch row before job row, as ``note_signal`` (B11).
+
+        Any of them failing raises ``SuggestionRevoked(reason)`` and nothing
+        is written. Then 4. the ``proposed`` fingerprints and the
+        ``declined`` negative cache expiring ``declined_expires_at`` (the same
+        upserts as ``MemorySuggestStore.write_fingerprints``, design §5.1,
+        stamped ``now``; in this transaction, after the lock checks, so a
+        revoked run caches nothing -- review P3-2), and 5. each write as a ``candidate`` row with its
+        provenance and one revision (reason ``suggested``, changed by the
+        owner, G12). A write whose ``source_answer_id`` the owner already has
+        a memory of (``idx_memory_answer_once``) is skipped and counted in
+        ``deduped`` — the transaction goes on.
+
+        Every write must be a ``candidate`` ``ask_answer`` row of this owner
+        and notebook with a ``suggested_signal``; a ``clarified`` one binds no
+        answer (``source_answer_id`` None). Anything else is a ``ValueError``
+        before the transaction starts."""
+        _check_suggestion_writes(writes, notebook_id=notebook_id, owner_id=owner_id)
+        if not claim_token:
+            raise ValueError("claim_token must be non-empty")
+        fingerprints = list(dict.fromkeys(str(value) for value in proposed_fingerprints if value))
+        declined = list(dict.fromkeys(str(value) for value in declined_fingerprints if value))
+        if declined and not declined_expires_at:
+            raise ValueError("declined fingerprints need an expiry")
+        created: list[MemoryRecord] = []
+        deduped = 0
+        with self.database.write() as db:
+            self._lock_suggestion_scope_on(db, notebook_id, owner_id, claim_token)
+            if fingerprints:
+                execute_many(
+                    db,
+                    PROPOSED_FINGERPRINT_UPSERT_SQL,
+                    [
+                        (notebook_id, owner_id, value, normalize_timestamp(now))
+                        for value in fingerprints
+                    ],
+                )
+            if declined:
+                execute_many(
+                    db,
+                    DECLINED_FINGERPRINT_UPSERT_SQL,
+                    [
+                        (
+                            notebook_id, owner_id, value,
+                            normalize_timestamp(declined_expires_at),
+                            normalize_timestamp(now),
+                        )
+                        for value in declined
+                    ],
+                )
+            for write in writes:
+                item, inserted = self._insert_memory_on(db, write)
+                if not inserted:
+                    deduped += 1
+                    continue
+                self._ensure_initial_revision_on(
+                    db, item, True, owner_id, REVISION_REASON_SUGGESTED
+                )
+                created.append(item)
+        return SuggestionWriteResult(created=tuple(created), deduped=deduped)
+
+    @staticmethod
+    def _lock_suggestion_scope_on(
+        db: object, notebook_id: str, owner_id: str, claim_token: str
+    ) -> None:
+        """Steps 1–3 of ``create_suggestions_with_initial_revision``. Read
+        access is locked through the same ``lock_live_reader_on`` chain as
+        ``note_signal`` (live notebook row, then the membership row or the
+        grant edge -- with its group membership row -- ``FOR SHARE``), so a
+        concurrent removal, grant delete or group leave serialises with
+        this write; then the switch row, then the job row (B11 lock order)."""
+        readable = lock_live_reader_on(db, notebook_id, owner_id)
+        if readable is None:
+            raise SuggestionRevoked(SKIP_NOTEBOOK_UNAVAILABLE)
+        if not readable:
+            raise SuggestionRevoked(SKIP_NO_READ_ACCESS)
+        switch = db.execute(
+            "SELECT 1 FROM memory_suggest_users WHERE owner_id=%s AND enabled=1 FOR SHARE",
+            (owner_id,),
+        ).fetchone()
+        if switch is None:
+            raise SuggestionRevoked(SKIP_USER_DISABLED)
+        job = db.execute(
+            "SELECT status, claim_token FROM memory_suggest_jobs "
+            "WHERE notebook_id=%s AND owner_id=%s FOR UPDATE",
+            (notebook_id, owner_id),
+        ).fetchone()
+        if (
+            job is None
+            or job["status"] != JOB_STATUS_RUNNING
+            or job["claim_token"] != claim_token
+        ):
+            raise SuggestionRevoked(REVOKED_CLAIM_LOST)
+
     @staticmethod
     def _validation(
         normalized: dict[str, Any], *, trusted: bool, reason: str
@@ -865,10 +1051,52 @@ class MemoryStore:
     def create_answer_with_initial_revision(
         self, write: MemoryWrite, changed_by: str, reason: str
     ) -> MemoryRecord:
+        return self._save_answer(write, changed_by, reason, replace_rejected=False)
+
+    def replace_rejected_suggestion_with_answer(
+        self, write: MemoryWrite, changed_by: str, reason: str
+    ) -> MemoryRecord:
+        """Design §5.3 row 2 / D16: "save to Memory" on an answer whose
+        memory is the caller's DISMISSED system suggestion (``rejected``, with
+        a ``suggested_signal``) replaces it. One write transaction — the same
+        one ``create_answer_with_initial_revision`` runs, with the same access
+        and answer-ownership checks and the same insert: the old row is
+        deleted (its provenance and revisions cascade; a dismissed suggestion
+        never had a vector, a derived source or a promotion) and ``write`` is
+        inserted as a plain manual memory (pass it with ``suggested_signal``
+        None). Fingerprints are not touched (``proposed`` is permanent).
+
+        When the existing row is anything else by the time this transaction
+        locks it (an open suggestion, an adopted one, a manual or agent
+        memory — including the manual one a concurrent replace just wrote),
+        this is a no-op returning that row, exactly like
+        ``create_answer_with_initial_revision``; with no row at all it is a
+        plain save. Errors are those of ``create_answer_with_initial_revision``
+        (``KeyError`` = no access / not the answer's author → 404,
+        ``ValueError`` = a concurrent access change → 409).
+
+        Lock order (review P3-3): because it deletes a Memory row, read access
+        (notebook, then membership or grant, ``FOR SHARE``) is locked BEFORE
+        the existing row ``FOR UPDATE`` -- the order of ``finish_member_exit``
+        -- so the two queue instead of deadlocking. A caller without access
+        therefore gets ``KeyError`` even where a row exists."""
+        return self._save_answer(write, changed_by, reason, replace_rejected=True)
+
+    def _save_answer(
+        self, write: MemoryWrite, changed_by: str, reason: str, *, replace_rejected: bool
+    ) -> MemoryRecord:
         if not write.source_answer_id:
             raise KeyError("source_answer_id")
         try:
             with self.database.write(isolation_level="serializable") as db:
+                if replace_rejected:
+                    # The replace DELETEs a Memory row, so it takes the
+                    # canonical order notebook → membership → memory row
+                    # (finish_member_exit's, which deletes drafts under the
+                    # membership lock): read access first, the row after
+                    # (review P3-3). The plain save keeps its order: it only
+                    # ever locks an existing row to return it at once.
+                    self._lock_answer_save_access_on(db, write)
                 existing = db.execute(
                     f"SELECT {self._select_columns()} FROM memory_items m "
                     "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
@@ -879,30 +1107,19 @@ class MemoryStore:
                     item = self._record(existing)
                     if item.notebook_id != write.notebook_id:
                         raise KeyError(write.source_answer_id)
-                    return item
-                # ⚠ 三段式带 FOR SHARE 行锁,刻意不合并——理由同
-                # create_candidate_with_initial_revision 处的注释。
-                notebook = db.execute(
-                    "SELECT created_by FROM notebooks WHERE id=%s FOR SHARE",
-                    (write.notebook_id,),
-                ).fetchone()
-                granted = None
-                if notebook is not None and notebook["created_by"] != write.created_by:
-                    granted = db.execute(
-                        MEMBER_PROBE_FOR_SHARE_SQL,
-                        (write.notebook_id, write.created_by),
-                    ).fetchone()
-                    if granted is None:
-                        granted = db.execute(
-                            GRANT_PROBE_FOR_SHARE_SQL,
-                            grant_probe_params(
-                                write.notebook_id, write.created_by
-                            ),
-                        ).fetchone()
-                if notebook is None or (
-                    notebook["created_by"] != write.created_by and granted is None
-                ):
-                    raise KeyError(write.source_answer_id)
+                    if not (
+                        replace_rejected
+                        and item.suggested_signal
+                        and item.status == "rejected"
+                    ):
+                        return item
+                    # Rolled back with everything else if a check below fails.
+                    db.execute(
+                        "DELETE FROM memory_items WHERE id=%s AND created_by=%s",
+                        (item.id, write.created_by),
+                    )
+                if not replace_rejected:
+                    self._lock_answer_save_access_on(db, write)
                 row = db.execute(
                     "SELECT a.question,a.payload,a.conversation_id FROM answers a "
                     # the author, re-checked in this transaction like read access
@@ -942,6 +1159,33 @@ class MemoryStore:
             if self._answer_save_scope_exists(write):
                 raise ValueError("concurrent notebook access change") from None
             raise KeyError(write.source_answer_id) from None
+
+    @staticmethod
+    def _lock_answer_save_access_on(db: Any, write: MemoryWrite) -> None:
+        """Read access of a save from an answer, locked: the notebook row,
+        then -- unless the saver owns it -- the membership row or a grant
+        edge, each ``FOR SHARE``; ``KeyError`` (404) without access."""
+        # ⚠ 三段式带 FOR SHARE 行锁,刻意不合并——理由同
+        # create_candidate_with_initial_revision 处的注释。
+        notebook = db.execute(
+            "SELECT created_by FROM notebooks WHERE id=%s FOR SHARE",
+            (write.notebook_id,),
+        ).fetchone()
+        granted = None
+        if notebook is not None and notebook["created_by"] != write.created_by:
+            granted = db.execute(
+                MEMBER_PROBE_FOR_SHARE_SQL,
+                (write.notebook_id, write.created_by),
+            ).fetchone()
+            if granted is None:
+                granted = db.execute(
+                    GRANT_PROBE_FOR_SHARE_SQL,
+                    grant_probe_params(write.notebook_id, write.created_by),
+                ).fetchone()
+        if notebook is None or (
+            notebook["created_by"] != write.created_by and granted is None
+        ):
+            raise KeyError(write.source_answer_id)
 
     @staticmethod
     def _answer_save_scope_locked_on(db: object, write: MemoryWrite, row: object):
@@ -1118,10 +1362,56 @@ class MemoryStore:
                 "SELECT m.source_answer_id,m.id FROM memory_items m "
                 "WHERE m.notebook_id=%s AND m.created_by=%s "
                 f"AND m.source_answer_id IN ({placeholders}) "
+                f"AND NOT {unadopted_suggestion('m')} "
                 f"AND {self._read_access_clause()}",
                 (notebook_id, user_id, *unique_ids, *read_access_params(user_id)),
             ).fetchall()
         return {str(row["source_answer_id"]): str(row["id"]) for row in rows}
+
+    def answer_memory_link_rows(
+        self, notebook_id: str, user_id: str, answer_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """One read behind ``answer-memory-links``: ``links`` maps an answer
+        to the user's memory saved from it, leaving unadopted suggestions out
+        (exactly ``answer_memory_links``); ``states`` carries every such row,
+        drafts included, as ``{memory_id, status, suggested}``."""
+        unique_ids = list(
+            dict.fromkeys(str(answer_id) for answer_id in answer_ids if answer_id)
+        )
+        if not unique_ids:
+            return {"links": {}, "states": {}}
+        if len(unique_ids) > 200:
+            raise ValueError("answer_ids may contain at most 200 unique values")
+        placeholders = ",".join("%s" for _ in unique_ids)
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT m.source_answer_id,m.id,m.status,m.suggested_signal,"
+                f"{unadopted_suggestion('m')} AS unadopted FROM memory_items m "
+                "WHERE m.notebook_id=%s AND m.created_by=%s "
+                f"AND m.source_answer_id IN ({placeholders}) "
+                f"AND {self._read_access_clause()}",
+                (notebook_id, user_id, *unique_ids, *read_access_params(user_id)),
+            ).fetchall()
+        links: dict[str, str] = {}
+        states: dict[str, dict[str, Any]] = {}
+        # The answer index normally admits one row. If a projection ever
+        # supplies duplicates, choose an adopted row first and break ties
+        # by identity, so links and states always describe the same memory.
+        for row in sorted(rows, key=lambda row: (
+            str(row["status"]) not in ("confirmed", "deprecated"),
+            bool(row["unadopted"]), str(row["id"]),
+        )):
+            answer_id = str(row["source_answer_id"])
+            if answer_id in states:
+                continue
+            states[answer_id] = {
+                "memory_id": str(row["id"]),
+                "status": str(row["status"]),
+                "suggested": row["suggested_signal"] is not None,
+            }
+            if not row["unadopted"]:
+                links[answer_id] = str(row["id"])
+        return {"links": links, "states": states}
 
     def memory_by_agent_request(
         self,
@@ -1196,9 +1486,8 @@ class MemoryStore:
         target: str | None,
         changed_by: str,
         reason: str,
+        resync_children: bool = False,
     ) -> MemoryRecord:
-        allowed = {"title", "content_md", "tags"}
-        values = {key: value for key, value in fields.items() if key in allowed}
         with self.database.write() as db:
             row = self._lock_memory_aggregate_on(
                 db, memory_id, expected_creator=user_id, require_live=True
@@ -1208,84 +1497,132 @@ class MemoryStore:
                 raise ValueError(
                     f"invalid memory transition: {row['status']} -> {destination}"
                 )
-
-            title = values.get("title", row["title"])
-            content_md = values.get("content_md", row["content_md"])
-            tags = (
-                [str(item) for item in values["tags"]]
-                if "tags" in values
-                else _json_list(row["tags_json"])
-            )
-            status = target or row["status"]
-            now = self.now()
-            promotion_state = str(row["promotion_state"])
-            invalidates_proposal = bool(values) or target in {
-                "rejected",
-                "deprecated",
-            }
-            if invalidates_proposal and promotion_state == "proposed":
-                supersede_reason = (
-                    "superseded_by_memory_edit"
-                    if values
-                    else "superseded_by_memory_terminal_status"
-                )
-                self._supersede_active_promotion_on(
-                    db,
-                    memory_id,
-                    changed_by,
-                    now,
-                    _json_object(row["payload_json"]),
-                    reason=supersede_reason,
-                )
-                promotion_state = "none"
-            assignments = [
-                "title=%s",
-                "content_md=%s",
-                "tags_json=%s",
-                "status=%s",
-                "promotion_state=%s",
-                "updated_at=%s",
-            ]
-            params: list[Any] = [
-                title,
-                content_md,
-                jsonb(_strict_json_value(tags, field="tags")),
-                status,
-                promotion_state,
-                normalize_timestamp(now),
-            ]
-            if values or target == "confirmed":
-                assignments.extend(
-                    ["embedding_status='pending'", "embedding_error=''"]
-                )
-            if target == "confirmed":
-                assignments.extend(["confirmed_by=%s", "confirmed_at=%s"])
-                params.extend([user_id, normalize_timestamp(now)])
-            placeholders = ",".join("%s" for _ in expected)
-            params.extend([memory_id, user_id, *sorted(expected)])
-            cursor = db.execute(
-                f"UPDATE memory_items SET {','.join(assignments)} "
-                f"WHERE id=%s AND created_by=%s AND status IN ({placeholders})",
-                params,
-            )
-            if cursor.rowcount != 1:  # pragma: no cover - shared write lock guard
-                raise ValueError(f"concurrent memory transition for {memory_id}")
-            self._append_revision_on(
-                db,
-                memory_id,
-                {
-                    "title": title,
-                    "content_md": content_md,
-                    "tags": tags,
-                    "status": status,
-                    "promotion_state": promotion_state,
-                },
-                changed_by,
-                reason,
+            self._write_mutation_on(
+                db, row, user_id, fields=fields, expected=expected, target=target,
+                changed_by=changed_by, reason=reason, resync_children=resync_children,
             )
         # The write above already checked the notebook is live under its lock;
         # a delete committing since must not turn a landed write into a 404.
         return self.memory_for_user(memory_id, user_id, live_only=False)
+
+    def _write_mutation_on(
+        self,
+        db: object,
+        row: Mapping[str, Any],
+        user_id: str,
+        *,
+        fields: Mapping[str, Any],
+        expected: set[str],
+        target: str | None,
+        changed_by: str,
+        reason: str,
+        resync_children: bool,
+    ) -> None:
+        """The UPDATE and its revision for a row the caller locked through
+        ``_lock_memory_aggregate_on`` and whose status it checked against
+        ``expected``. ``resync_children``: see ``_resync_suggestion_children_on``."""
+        memory_id = str(row["id"])
+        allowed = {"title", "content_md", "tags"}
+        values = {key: value for key, value in fields.items() if key in allowed}
+        title = values.get("title", row["title"])
+        content_md = values.get("content_md", row["content_md"])
+        tags = (
+            [str(item) for item in values["tags"]]
+            if "tags" in values
+            else _json_list(row["tags_json"])
+        )
+        status = target or row["status"]
+        now = self.now()
+        promotion_state = str(row["promotion_state"])
+        invalidates_proposal = bool(values) or target in {
+            "rejected",
+            "deprecated",
+        }
+        if invalidates_proposal and promotion_state == "proposed":
+            supersede_reason = (
+                "superseded_by_memory_edit"
+                if values
+                else "superseded_by_memory_terminal_status"
+            )
+            self._supersede_active_promotion_on(
+                db,
+                memory_id,
+                changed_by,
+                now,
+                _json_object(row["payload_json"]),
+                reason=supersede_reason,
+            )
+            promotion_state = "none"
+        assignments = [
+            "title=%s",
+            "content_md=%s",
+            "tags_json=%s",
+            "status=%s",
+            "promotion_state=%s",
+            "updated_at=%s",
+        ]
+        params: list[Any] = [
+            title,
+            content_md,
+            jsonb(_strict_json_value(tags, field="tags")),
+            status,
+            promotion_state,
+            normalize_timestamp(now),
+        ]
+        if values or target == "confirmed":
+            assignments.extend(
+                ["embedding_status='pending'", "embedding_error=''"]
+            )
+        if target == "confirmed":
+            assignments.extend(["confirmed_by=%s", "confirmed_at=%s"])
+            params.extend([user_id, normalize_timestamp(now)])
+        placeholders = ",".join("%s" for _ in expected)
+        params.extend([memory_id, user_id, *sorted(expected)])
+        cursor = db.execute(
+            f"UPDATE memory_items SET {','.join(assignments)} "
+            f"WHERE id=%s AND created_by=%s AND status IN ({placeholders})",
+            params,
+        )
+        if cursor.rowcount != 1:  # pragma: no cover - shared write lock guard
+            raise ValueError(f"concurrent memory transition for {memory_id}")
+        self._append_revision_on(
+            db,
+            memory_id,
+            {
+                "title": title,
+                "content_md": content_md,
+                "tags": tags,
+                "status": status,
+                "promotion_state": promotion_state,
+            },
+            changed_by,
+            reason,
+        )
+        if resync_children and row["suggested_signal"]:
+            self._resync_suggestion_children_on(db, memory_id)
+
+    @staticmethod
+    def _resync_suggestion_children_on(db: object, memory_id: str) -> int:
+        """D15(a) re-send at adoption (design §6.6 (a) 2): one no-op UPDATE of
+        this Memory's provenance row and of every revision row, so the change
+        capture trigger (``0064``: ``AFTER INSERT OR DELETE OR UPDATE``, no
+        ``WHEN``) logs an upsert for each and the next incremental package
+        carries the children a suggestion's first export filtered out. Skipped
+        while ``sync_capture_control`` is closed (the triggers would log
+        nothing; the UPDATEs would only be wasted writes). Returns how many
+        rows were touched."""
+        gate = db.execute(
+            "SELECT 1 FROM sync_capture_control WHERE singleton = 1 AND enabled"
+        ).fetchone()
+        if gate is None:
+            return 0
+        touched = db.execute(
+            "UPDATE memory_provenance SET id = id WHERE memory_id = %s", (memory_id,)
+        ).rowcount
+        touched += db.execute(
+            "UPDATE memory_revisions SET id = id WHERE memory_id = %s", (memory_id,)
+        ).rowcount
+        return int(touched)
 
     def _lock_memory_aggregate_on(
         self,
@@ -1467,7 +1804,12 @@ class MemoryStore:
         fields: Mapping[str, Any] | None,
         changed_by: str,
         reason: str,
+        resync_children: bool = False,
     ) -> MemoryRecord:
+        """``resync_children=True`` (the adoption entries only): when the row
+        is a system suggestion and change capture is open, also touch its
+        provenance and revision rows in this transaction
+        (``_resync_suggestion_children_on``)."""
         return self._mutate_with_revision(
             memory_id,
             user_id,
@@ -1476,7 +1818,59 @@ class MemoryStore:
             target=target,
             changed_by=changed_by,
             reason=reason,
+            resync_children=resync_children,
         )
+
+    def adopt_suggestion_from_answer(
+        self,
+        notebook_id: str,
+        user_id: str,
+        answer_id: str,
+        *,
+        fields: Mapping[str, Any],
+        changed_by: str,
+        reason: str,
+    ) -> MemoryRecord | None:
+        """Design §5.3 row 1: "save to Memory" on an answer that holds the
+        caller's open system suggestion adopts THAT row. One write
+        transaction: lock the row like ``confirm`` does
+        (``_lock_memory_aggregate_on``, notebook live), compare-and-set
+        ``candidate -> confirmed`` with the submitted ``fields``
+        (title / content_md / tags), append the revision and re-send the
+        children (``resync_children``) — exactly the store half of
+        ``transition_with_revision(..., resync_children=True)``.
+
+        Returns the confirmed record, or ``None`` when there is nothing to
+        adopt: no row of this caller binds ``answer_id``, or the row is not
+        (any more) an open suggestion of ``notebook_id`` — a plain memory, an
+        agent candidate, an adopted or dismissed suggestion, another
+        notebook. ``None`` writes nothing; the caller re-reads
+        ``memory_by_answer`` and takes the matching row of the §5.3 table.
+        ``KeyError`` when the caller lost read access or the notebook is not
+        live (the same 404 as ``confirm``)."""
+        with self.database.write() as db:
+            routing = db.execute(
+                "SELECT id FROM memory_items WHERE created_by=%s AND source_answer_id=%s",
+                (user_id, answer_id),
+            ).fetchone()
+            if routing is None:
+                return None
+            row = self._lock_memory_aggregate_on(
+                db, routing["id"], expected_creator=user_id, require_live=True
+            )
+            if (
+                row["status"] != "candidate"
+                or not row["suggested_signal"]
+                or row["notebook_id"] != notebook_id
+                or row["source_answer_id"] != answer_id
+            ):
+                return None
+            self._write_mutation_on(
+                db, row, user_id, fields=fields, expected={"candidate"},
+                target="confirmed", changed_by=changed_by, reason=reason,
+                resync_children=True,
+            )
+        return self.memory_for_user(routing["id"], user_id, live_only=False)
 
     # 测试观察点:修订历史观察点(生产不读修订列表)
     def revisions_for_user(self, memory_id: str, user_id: str) -> list[MemoryRevision]:
@@ -1923,8 +2317,30 @@ class MemoryStore:
         with self.database.write() as db:
             return len(self._hard_delete_on(db, user_id, unique))
 
+    def delete_open_suggestions(
+        self, user_id: str, memory_ids: Sequence[str]
+    ) -> list[str]:
+        """``bulk_delete_memories`` restricted to OPEN system suggestions
+        (``suggested_signal`` set, ``status='candidate'``), judged on the
+        locked row: one adopted or dismissed meanwhile is left alone. Open
+        suggestions are never embedded nor extracted (only adoption does
+        that), so no derived row exists to remove first. Returns the ids
+        deleted."""
+        unique = _bulk_memory_ids(memory_ids)
+        if not unique:
+            return []
+        with self.database.write() as db:
+            return list(
+                self._hard_delete_on(db, user_id, unique, open_suggestions_only=True)
+            )
+
     def _hard_delete_on(
-        self, db: object, user_id: str, memory_ids: Sequence[str]
+        self,
+        db: object,
+        user_id: str,
+        memory_ids: Sequence[str],
+        *,
+        open_suggestions_only: bool = False,
     ) -> list[str]:
         """Delete the caller's own Memory rows and withdraw their live proposals.
 
@@ -1939,9 +2355,15 @@ class MemoryStore:
         callers that pre-filter. The derived source and KG rows are NOT
         touched here — ``MemoryService`` removes them first, before this row
         disappears."""
+        # ``open_suggestions_only``: the status test sits on the locked row
+        # (FOR UPDATE re-checks it against the latest version).
+        only_open = (
+            " AND suggested_signal IS NOT NULL AND status='candidate'"
+            if open_suggestions_only else ""
+        )
         rows = db.execute(
             "SELECT id,notebook_id FROM memory_items "
-            "WHERE created_by=%s AND id=ANY(%s) ORDER BY id FOR UPDATE",
+            f"WHERE created_by=%s AND id=ANY(%s){only_open} ORDER BY id FOR UPDATE",
             (user_id, list(memory_ids)),
         ).fetchall()
         by_notebook: dict[str, list[str]] = {}
@@ -2008,46 +2430,165 @@ class MemoryStore:
     def member_exit_snapshot(
         self, notebook_id: str, user_id: str, *, claim: bool
     ) -> MemberExitSnapshot:
-        """What leaving ``notebook_id`` would delete of ``user_id``'s Memory.
+        """Read disclosure or claim only personal-memory ids; never mutate.
 
-        ``claim=False`` is the disclosure read: counts only. ``claim=True`` is
-        the exit's first step: under the membership row lock (see
-        ``_member_exit_state_on``) it returns the ids to delete, so the count
-        the leaver acknowledged is checked against exactly the rows that will
-        be deleted — a Memory saved after the disclosure changes the count.
-        Every status counts: the exit deletes candidates, rejected and
-        deprecated rows too."""
+        Suggestions are counted separately, then deleted only by a successful
+        finish that still leaves the user without read access. Adoption after
+        this claim consequently keeps that memory and makes exit incomplete.
+        """
+        with (self.database.write() if claim else self.database.connect()) as db:
+            token, keeps = self._member_exit_state_on(db, notebook_id, user_id, lock=claim)
+            return self._exit_memory_snapshot_on(db, notebook_id, user_id, token, keeps, claim)
+
+    # ------------------------------------------------ 退出协作(分享编辑 P1)
+    @staticmethod
+    def _exit_memory_snapshot_on(
+        db: object, notebook_id: str, user_id: str, token: Any, keeps: bool, claim: bool
+    ) -> MemberExitSnapshot:
+        if token is None or keeps:
+            return MemberExitSnapshot(token is not None, keeps, 0, membership_token=token)
         if claim:
-            with self.database.write() as db:
-                token, keeps = self._member_exit_state_on(
-                    db, notebook_id, user_id, lock=True
+            rows = db.execute(
+                f"SELECT m.id, {unadopted_suggestion('m')} AS unadopted FROM memory_items m "
+                "WHERE m.notebook_id=%s AND m.created_by=%s ORDER BY m.created_at,m.id",
+                (notebook_id, user_id),
+            ).fetchall()
+            ids = tuple(row["id"] for row in rows if not row["unadopted"])
+            suggestions = sum(1 for row in rows if row["unadopted"])
+            return MemberExitSnapshot(True, False, len(ids), ids, token, suggestions)
+        counts = MemoryStore._exit_memory_counts(db, notebook_id, user_id)
+        return MemberExitSnapshot(True, False, counts.memory_count, suggestion_count=counts.suggestion_count)
+
+    @staticmethod
+    def _exit_memory_counts(db: object, notebook_id: str, user_id: str) -> MemberExitCounts:
+        """Count personal records and unadopted drafts in one snapshot."""
+        row = db.execute(
+            "SELECT (SELECT COUNT(*) FROM memory_items WHERE notebook_id=%s AND created_by=%s) AS c, "
+            "(SELECT COUNT(*) FROM memory_items us WHERE us.created_by=%s AND us.notebook_id=%s "
+            f"AND {unadopted_suggestion('us')}) AS s",
+            (notebook_id, user_id, user_id, notebook_id),
+        ).fetchone()
+        suggestions = int(row["s"])
+        return MemberExitCounts(max(0, int(row["c"]) - suggestions), suggestions)
+
+    def _finish_memory_exit_on(
+        self, db: object, notebook_id: str, user_id: str, keeps: bool, allow_suggestion_delete: bool
+    ) -> MemberExitCompletion:
+        """Held access locks serialize adoption and last-edge removal."""
+        if keeps:
+            return MemberExitCompletion(0, True, keeps_access=True)
+        counts = self._exit_memory_counts(db, notebook_id, user_id)
+        if counts.memory_count or (counts.suggestion_count and not allow_suggestion_delete):
+            return MemberExitCompletion(
+                counts.memory_count, False, remaining_suggestion_count=counts.suggestion_count
+            )
+        deleted = db.execute(
+            "DELETE FROM memory_items WHERE notebook_id=%s AND created_by=%s "
+            f"AND {unadopted_suggestion('memory_items')}",
+            (notebook_id, user_id),
+        ).rowcount
+        return MemberExitCompletion(0, True, deleted_suggestion_count=int(deleted))
+
+    @staticmethod
+    def _clear_exit_suggest_metadata_on(db: object, notebook_id: str, user_id: str) -> None:
+        """After the last-edge fence: jobs, then fingerprints, like account cleanup."""
+        db.execute(
+            "DELETE FROM memory_suggest_jobs WHERE notebook_id=%s AND owner_id=%s",
+            (notebook_id, user_id),
+        )
+        db.execute(
+            "DELETE FROM memory_suggest_fingerprints WHERE notebook_id=%s AND owner_id=%s",
+            (notebook_id, user_id),
+        )
+
+    @staticmethod
+    def _grant_exit_state_on(
+        db: object, notebook_id: str, user_id: str, *, lock: bool
+    ) -> tuple[Any, bool]:
+        """``(grant_id, keeps_access)`` for the user's own named grant
+        (``principal_type='user'``) on this notebook; ``(None, False)`` without
+        one. ``keeps_access`` is the read predicate with THAT grant row taken
+        out (``read_access_except_grant_clause``, PD-13): ownership, a
+        membership row or any other grant still count. Like the member exit's
+        own check it ignores the lifecycle.
+
+        ``lock`` takes the grant row ``FOR UPDATE``: every Memory write by a
+        reader holding a named grant holds that row ``FOR SHARE`` for its whole
+        transaction (the locked grant probe of ``access_sql``), so while it is held no
+        Memory of this user can be created or changed here."""
+        grant = db.execute(
+            "SELECT id FROM notebook_grants WHERE notebook_id=%s "
+            "AND principal_type='user' AND principal_id=%s"
+            + (" FOR UPDATE" if lock else ""),
+            (notebook_id, user_id),
+        ).fetchone()
+        if grant is None:
+            return None, False
+        keeps = db.execute(
+            "SELECT 1 FROM notebooks nb WHERE nb.id=%s AND "
+            + read_access_except_grant_clause(),
+            read_except_grant_params(notebook_id, user_id, grant["id"]),
+        ).fetchone() is not None
+        return grant["id"], keeps
+
+    def grant_exit_snapshot(
+        self, notebook_id: str, user_id: str, *, claim: bool
+    ) -> MemberExitSnapshot:
+        """Read disclosure or claim only personal-memory ids; never mutate.
+
+        Suggestions are counted separately, then deleted only by a successful
+        finish that still leaves the user without read access. Adoption after
+        this claim consequently keeps that memory and makes exit incomplete.
+        """
+        with (self.database.write() if claim else self.database.connect()) as db:
+            token, keeps = self._grant_exit_state_on(db, notebook_id, user_id, lock=claim)
+            return self._exit_memory_snapshot_on(db, notebook_id, user_id, token, keeps, claim)
+
+    @staticmethod
+    def _lock_exit_edges_on(db: object, notebook_id: str, user_id: str) -> None:
+        """Both self-exits exclusively lock root, membership, then named grant. Locking
+        only the edge being removed lets each exit observe the other one and
+        both commit without the final Memory disclosure. The same root also
+        serializes independent group/grant read-path revocations."""
+        lock_read_changes_on(db, [notebook_id])
+        db.execute(
+            "SELECT added_at FROM notebook_members "
+            "WHERE notebook_id=%s AND user_id=%s FOR UPDATE",
+            (notebook_id, user_id),
+        ).fetchone()
+        db.execute(
+            "SELECT id FROM notebook_grants WHERE notebook_id=%s "
+            "AND principal_type='user' AND principal_id=%s FOR UPDATE",
+            (notebook_id, user_id),
+        ).fetchone()
+
+    def finish_grant_exit(
+        self, notebook_id: str, user_id: str, grant_token: Any, *,
+        allow_suggestion_delete: bool = True,
+    ) -> MemberExitCompletion:
+        """End only the claimed edge, with common-lock authority revalidation.
+
+        A surviving read path preserves every memory and its per-member state.
+        Otherwise no adopted/personal memory may remain. A caller that has not
+        acknowledged an exit cannot silently delete newly discovered drafts.
+        """
+        with self.database.write() as db:
+            lock_mode_read_period_on(db)
+            self._lock_exit_edges_on(db, notebook_id, user_id)
+            token, keeps = self._grant_exit_state_on(db, notebook_id, user_id, lock=False)
+            if token is None or token != grant_token:
+                return MemberExitCompletion(0, False)
+            completion = self._finish_memory_exit_on(
+                db, notebook_id, user_id, keeps, allow_suggestion_delete
+            )
+            if completion.ended:
+                db.execute(
+                    "DELETE FROM notebook_grants WHERE id=%s", (grant_token,),
                 )
-                ids: tuple[str, ...] = ()
-                if token is not None and not keeps:
-                    ids = tuple(
-                        row["id"]
-                        for row in db.execute(
-                            "SELECT id FROM memory_items "
-                            "WHERE notebook_id=%s AND created_by=%s "
-                            "ORDER BY created_at,id",
-                            (notebook_id, user_id),
-                        ).fetchall()
-                    )
-            return MemberExitSnapshot(
-                token is not None, keeps, len(ids), ids, membership_token=token
-            )
-        with self.database.connect() as db:
-            token, keeps = self._member_exit_state_on(
-                db, notebook_id, user_id, lock=False
-            )
-            count = 0
-            if token is not None and not keeps:
-                count = int(db.execute(
-                    "SELECT COUNT(*) AS c FROM memory_items "
-                    "WHERE notebook_id=%s AND created_by=%s",
-                    (notebook_id, user_id),
-                ).fetchone()["c"])
-        return MemberExitSnapshot(token is not None, keeps, count)
+                record_read_loss_on(db, [(notebook_id, user_id)], now=self.now())
+                if not completion.keeps_access:
+                    self._clear_exit_suggest_metadata_on(db, notebook_id, user_id)
+        return completion
 
     def group_exit_memory_preview(
         self, group_id: str, user_id: str, *, now: Any = None
@@ -2057,13 +2598,16 @@ class MemoryStore:
         their ``group_members`` row in that group is gone
         (``read_access_after_group_exit_clause``: ownership, a membership
         row, a personal or everyone grant and grants through OTHER groups
-        still count), each with how many of the user's Memory items (every
-        status, as the notebook exit and the export count them) it holds.
+        still count), each with how many of "your memories" it holds: every
+        status except the unadopted system suggestions (design §6.3).
         Leaving deletes nothing, so this is a plain read. Notebooks without
-        the user's Memory are not listed; a non-member gets nothing (the
-        ``gm`` row drives the query). One statement: the user's Memory is
-        counted per notebook through ``idx_memory_owner_notebook_status``
-        before either predicate runs.
+        any of your memories are not listed; a non-member gets nothing (the
+        ``gm`` row drives the query). One statement: the original per-notebook
+        count (the pre-suggestion subquery verbatim, through
+        ``idx_memory_owner_notebook_status``) LEFT JOIN the per-notebook
+        unadopted count (through the partial ``idx_memory_suggest_unadopted``)
+        and subtract; notebooks whose difference is 0 drop out before either
+        access predicate runs.
 
         Notebooks inside their deletion window are listed too, flagged
         ``pending_delete`` with their ``delete_after`` (ruling B12; SQLite
@@ -2079,14 +2623,21 @@ class MemoryStore:
                 "SELECT nb.id AS notebook_id, nb.name AS name, "
                 "nb.status AS status, nb.delete_after AS delete_after, "
                 "own.memory_count AS memory_count FROM group_members gm "
-                "CROSS JOIN (SELECT notebook_id, COUNT(*) AS memory_count "
-                "FROM memory_items WHERE created_by=%s GROUP BY notebook_id) own "
+                "CROSS JOIN (SELECT al.notebook_id, "
+                "al.memory_count - COALESCE(dr.unadopted, 0) AS memory_count FROM ("
+                "SELECT notebook_id, COUNT(*) AS memory_count "
+                "FROM memory_items WHERE created_by=%s GROUP BY notebook_id) al "
+                "LEFT JOIN (SELECT us.notebook_id, COUNT(*) AS unadopted "
+                "FROM memory_items us WHERE us.created_by=%s "
+                f"AND {unadopted_suggestion('us')} GROUP BY us.notebook_id) dr "
+                "ON dr.notebook_id=al.notebook_id "
+                "WHERE al.memory_count - COALESCE(dr.unadopted, 0) > 0) own "
                 "JOIN notebooks nb ON nb.id=own.notebook_id "
                 "WHERE gm.group_id=%s AND gm.user_id=%s "
                 f"AND (nb.{NOTEBOOK_LIVE_SQL} OR "
                 f"{notebook_delete_window_open_sql('nb')}) AND {readable_now} "
                 f"AND NOT {readable_after}",
-                (user_id, group_id, user_id, instant),
+                (user_id, user_id, group_id, user_id, instant),
             ).fetchall()
         return [
             {
@@ -2104,46 +2655,33 @@ class MemoryStore:
         ]
 
     def finish_member_exit(
-        self, notebook_id: str, user_id: str, membership_token: Any
-    ) -> tuple[int, bool]:
-        """End the membership this exit claimed — atomically with the check
-        that none of the leaver's Memory is left.
+        self, notebook_id: str, user_id: str, membership_token: Any, *,
+        allow_suggestion_delete: bool = True,
+    ) -> MemberExitCompletion:
+        """End only the claimed edge, with common-lock authority revalidation.
 
-        One transaction under the membership row lock. Returns
-        ``(remaining, ended)``:
-
-        * the row is gone, or is not the claimed one (its ``added_at`` differs
-          from ``membership_token``: someone removed the member and added
-          them back while the purge ran) → ``(0, False)``: the claimed
-          membership has already ended, and a membership created after it
-          is never touched — nor counted;
-        * the claimed row, and Memory of the leaver exists here (saved while
-          the purge ran) → ``(count, False)``: the membership stays, nothing
-          unacknowledged is ever deleted;
-        * otherwise the row is deleted → ``(0, True)``.
-
-        The row delete lives here, not in the sharing store, because it must
-        commit together with that count."""
+        A surviving read path preserves every memory and its per-member state.
+        Otherwise no adopted/personal memory may remain. A caller that has not
+        acknowledged an exit cannot silently delete newly discovered drafts.
+        """
         with self.database.write() as db:
-            member = db.execute(
-                "SELECT added_at FROM notebook_members "
-                "WHERE notebook_id=%s AND user_id=%s FOR UPDATE",
-                (notebook_id, user_id),
-            ).fetchone()
-            if member is None or member["added_at"] != membership_token:
-                return 0, False
-            remaining = int(db.execute(
-                "SELECT COUNT(*) AS c FROM memory_items "
-                "WHERE notebook_id=%s AND created_by=%s",
-                (notebook_id, user_id),
-            ).fetchone()["c"])
-            if remaining:
-                return remaining, False
-            db.execute(
-                "DELETE FROM notebook_members WHERE notebook_id=%s AND user_id=%s",
-                (notebook_id, user_id),
+            lock_mode_read_period_on(db)
+            self._lock_exit_edges_on(db, notebook_id, user_id)
+            token, keeps = self._member_exit_state_on(db, notebook_id, user_id, lock=False)
+            if token is None or token != membership_token:
+                return MemberExitCompletion(0, False)
+            completion = self._finish_memory_exit_on(
+                db, notebook_id, user_id, keeps, allow_suggestion_delete
             )
-        return 0, True
+            if completion.ended:
+                db.execute(
+                    "DELETE FROM notebook_members WHERE notebook_id=%s AND user_id=%s",
+                    (notebook_id, user_id),
+                )
+                record_read_loss_on(db, [(notebook_id, user_id)], now=self.now())
+                if not completion.keeps_access:
+                    self._clear_exit_suggest_metadata_on(db, notebook_id, user_id)
+        return completion
 
     def derived_memory_sources(
         self, refs: Sequence[tuple[str, str]]
@@ -2252,9 +2790,12 @@ class MemoryStore:
         max_bytes: int,
         now: Any = None,
     ) -> MemoryExportSnapshot:
-        """This user's own Memory in one notebook, every status, oldest first
-        (``created_at``, then id), read in ONE read-only REPEATABLE READ
-        transaction: the count and every keyset page see the same snapshot,
+        """This user's own Memory in one notebook -- "your memories": every
+        status except the unadopted system suggestions, whose number the same
+        snapshot reports as ``omitted_suggestion_count`` (design §6.3) --
+        oldest first (``created_at``, then id), read in ONE read-only
+        REPEATABLE READ transaction: the counts and every keyset page see the
+        same snapshot,
         so a concurrent purge (the member's exit, a hard or bulk delete, a
         transfer's move) can never cut the result short. The transaction lasts
         as long as the server's reads, never the client's download: the
@@ -2288,6 +2829,15 @@ class MemoryStore:
             total = int(db.execute(
                 f"SELECT count(*) AS n FROM memory_items m WHERE {where}", params
             ).fetchone()["n"])
+            # Drafts are not exported (design §6.3); how many were left out
+            # is read in the same snapshot for the export header.
+            omitted_where, omitted_params = self._export_where(
+                notebook_id, user_id, instant, unadopted=True
+            )
+            omitted = int(db.execute(
+                f"SELECT count(*) AS n FROM memory_items m WHERE {omitted_where}",
+                omitted_params,
+            ).fetchone()["n"])
             items: list[MemoryRecord] = []
             size = 0
             after: tuple[Any, str] | None = None
@@ -2313,14 +2863,17 @@ class MemoryStore:
                 instant_text(standing["delete_after"]) if state == WINDOW_OPEN else None
             ),
             items=tuple(items),
+            omitted_suggestion_count=omitted,
         )
 
     def _export_where(
-        self, notebook_id: str, user_id: str, now: Any
+        self, notebook_id: str, user_id: str, now: Any, *, unadopted: bool = False
     ) -> tuple[str, list[Any]]:
-        # 读权 ∧ (存活 ∨ 删除窗口开放):窗口期内仍可导出本人记忆。
+        # 读权 ∧ (存活 ∨ 删除窗口开放):窗口期内仍可导出本人记忆。未采纳的系统
+        # 建议不导出;``unadopted=True`` 反过来只取它们(导出头里的「另有 N 条」)。
         clauses = [
             "m.notebook_id=%s", "m.created_by=%s", export_access_exists_clause("m"),
+            unadopted_suggestion("m") if unadopted else f"NOT {unadopted_suggestion('m')}",
         ]
         return " AND ".join(clauses), [
             notebook_id, user_id, *read_access_params(user_id), now,
@@ -2379,8 +2932,9 @@ class MemoryStore:
             clauses.append("m.status=%s")
             params.append(status)
         if origin:
-            clauses.append("m.origin=%s")
-            params.append(origin)
+            origin_sql, origin_params = self._origin_clause(origin)
+            clauses.append(origin_sql)
+            params.extend(origin_params)
         where = " AND ".join(clauses)
         with self.database.connect() as db:
             filtered_total: int | None = None

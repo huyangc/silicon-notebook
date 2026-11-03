@@ -10,6 +10,11 @@ from app.models.memory import MemoryHit, MemoryRecord
 from app.services.embedding import FakeEmbedder
 from app.services.memory_retrieval import MemoryRetriever
 
+#: The stored statuses of an unadopted system suggestion (design 6.3: the
+#: ``suggested_signal IS NOT NULL AND status IN ('candidate','rejected')``
+#: SQL fragment, spelled out here because the eval has no database).
+UNADOPTED_SUGGESTION_STATUSES = frozenset({"candidate", "rejected"})
+
 
 def _dcg(relevances: list[int]) -> float:
     return sum(rel / math.log2(index + 2) for index, rel in enumerate(relevances))
@@ -30,12 +35,27 @@ def evaluate_cases(
     Ownership/notebook isolation is checked against fixture repository metadata,
     not fields invented on ``MemoryHit`` (whose production contract deliberately
     excludes owner and notebook identity).
+
+    The formal plane is ``("confirmed",)``: a notebook-plane hit that is not
+    confirmed -- by its own ``status`` or by the stored status in ``item_scope``
+    -- counts in ``candidate_to_notebook_leaks``. ``unadopted_suggestion_leaks``
+    is the subset the metadata identifies as an unadopted system suggestion
+    (``suggested_signal`` set, stored status ``candidate`` or ``rejected``;
+    design 6.3), reported separately so a regression names its cause.
+
+    A case may list ``distractors`` (confirmed-but-wrong memories on the same
+    topic, e.g. an adopted suggestion with wrong content). It counts in
+    ``distractor_displacements`` when one of them is ranked ahead of the first
+    expected memory, or when no expected memory made the top ``k`` while a
+    distractor did; ``distractor_cases`` is how many cases carry distractors
+    (so a zero is not vacuous).
     """
     rows = list(cases)
     recalls: list[float] = []
     reciprocal_ranks: list[float] = []
     ndcgs: list[float] = []
     candidate_leaks = cross_user = cross_notebook = 0
+    unadopted_leaks = displacements = distractor_cases = 0
     scope = item_scope or {}
     for case in rows:
         expected = {str(item) for item in case.get("expected", [])}
@@ -51,11 +71,26 @@ def evaluate_cases(
         ideal = [1] * min(len(expected), k)
         denom = _dcg(ideal)
         ndcgs.append(_dcg(rels) / denom if denom else 1.0)
+        distractors = {str(item) for item in case.get("distractors", [])}
+        if distractors:
+            distractor_cases += 1
+            first_distractor = next(
+                (index for index, item in enumerate(ranked_ids, 1) if item in distractors), 0
+            )
+            if first_distractor and (not first or first_distractor < first):
+                displacements += 1
         for item in returned:
             memory_id = str(_returned_field(item, "memory_id"))
-            if case.get("plane") == "notebook" and _returned_field(item, "status") == "candidate":
-                candidate_leaks += 1
             metadata = scope.get(memory_id, {})
+            if case.get("plane") == "notebook":
+                stored_status = metadata.get("status") or _returned_field(item, "status")
+                unadopted = bool(metadata.get("suggested_signal")) and (
+                    stored_status in UNADOPTED_SUGGESTION_STATUSES
+                )
+                if _returned_field(item, "status") != "confirmed" or stored_status != "confirmed":
+                    candidate_leaks += 1
+                if unadopted:
+                    unadopted_leaks += 1
             if metadata and metadata.get("created_by") != str(case.get("user_id", "")):
                 cross_user += 1
             if metadata and metadata.get("notebook_id") != str(case.get("notebook_id", "")):
@@ -66,8 +101,11 @@ def evaluate_cases(
         "mrr": sum(reciprocal_ranks) / count,
         "ndcg": sum(ndcgs) / count,
         "candidate_to_notebook_leaks": candidate_leaks,
+        "unadopted_suggestion_leaks": unadopted_leaks,
         "cross_user_leaks": cross_user,
         "cross_notebook_leaks": cross_notebook,
+        "distractor_cases": distractor_cases,
+        "distractor_displacements": displacements,
     }
 
 
@@ -78,6 +116,7 @@ def _record(
     status: str,
     title: str,
     content: str,
+    suggested_signal: str | None = None,
 ) -> MemoryRecord:
     return MemoryRecord(
         id=memory_id,
@@ -91,6 +130,7 @@ def _record(
         created_at="2026-01-01T00:00:00Z",
         updated_at="2026-01-01T00:00:00Z",
         provenance={"fixture": memory_id},
+        suggested_signal=suggested_signal,
     )
 
 
@@ -119,6 +159,43 @@ _FIXTURE_RECORDS = (
         "memory-bob-power", "bob", "power", "confirmed",
         "Power integrity decision", "power integrity decoupling",
     ),
+    # Auto user-memory suggestions (design 7.1), in a world of their own so the
+    # alice/bob rows above -- and the Agent A/B harness built on them -- keep
+    # their numbers. carol/clock holds one correct manual memory, two ADOPTED
+    # suggestions with deliberately wrong content on the same topic (the
+    # distractors: confirmed, so they ARE in the formal plane and must merely
+    # not out-rank the right memory), and two UNADOPTED suggestions whose text
+    # matches the gold query best (the leak probes: candidate and rejected must
+    # never reach the formal plane, so either showing up would rank first).
+    _record(
+        "memory-clock-correct", "carol", "clock", "confirmed",
+        "Clock uncertainty guidance",
+        "include clock uncertainty margin in setup analysis",
+    ),
+    _record(
+        "memory-clock-wrong-clarified", "carol", "clock", "confirmed",
+        "Clock uncertainty note",
+        "clock uncertainty setup analysis can skip the margin",
+        suggested_signal="clarified",
+    ),
+    _record(
+        "memory-clock-wrong-repeated", "carol", "clock", "confirmed",
+        "Clock uncertainty reminder",
+        "clock uncertainty setup analysis never needs a margin",
+        suggested_signal="repeated",
+    ),
+    _record(
+        "memory-clock-suggest-candidate", "carol", "clock", "candidate",
+        "Clock uncertainty suggestion",
+        "include clock uncertainty margin in setup analysis suggestion",
+        suggested_signal="clarified",
+    ),
+    _record(
+        "memory-clock-suggest-rejected", "carol", "clock", "rejected",
+        "Clock uncertainty dismissed suggestion",
+        "include clock uncertainty margin in setup analysis dismissed",
+        suggested_signal="repeated",
+    ),
 )
 
 
@@ -128,7 +205,12 @@ class _FixtureMemoryStore:
     def __init__(self, records: Sequence[MemoryRecord] = _FIXTURE_RECORDS) -> None:
         self.records = tuple(records)
         self.scope_by_id = {
-            item.id: {"created_by": item.created_by, "notebook_id": item.notebook_id}
+            item.id: {
+                "created_by": item.created_by,
+                "notebook_id": item.notebook_id,
+                "status": item.status,
+                "suggested_signal": item.suggested_signal or "",
+            }
             for item in self.records
         }
 

@@ -86,6 +86,22 @@ test("窄屏(前提不成立处)必须放开换行,否则标题被挤没", () =>
     "标题没有独占一行,换行也救不了它");
 });
 
+test("退出按钮的布局只作用于有退出动作的顶栏与交叉态按钮组(分享编辑 P1)", () => {
+  // 交叉态(链接成员 + 点名编辑者)这一行挂两颗退出,实测 1440px 下标题被压到 14px。让位的是
+  // 浮动控件:工具栏不再长出空白,两颗按钮收成紧凑尺寸;内容框(.workspace-title)的分配规则
+  // 不动(owner / 群组共享形态一像素不变)。
+  assert.match(block(".workspace-header:has(.reader-badge-action) .workspace-toolbar"),
+    /flex-grow:\s*0/, "挂着退出按钮时工具栏仍在长空白,标题区拿不到那 ~200px");
+  const compactPair = block(
+    ".reader-badge-row:has(.reader-badge-action + .reader-badge-action) .reader-badge-action",
+  );
+  // 保留两个可用的退出动作;字号、高度与间距交给真实浏览器验收,不把像素值当行为契约。
+  assert.doesNotMatch(compactPair, /(?:display:\s*none|visibility:\s*hidden|pointer-events:\s*none)/,
+    "交叉态布局不能把任一退出动作藏起来或禁用");
+  // 只在挂着退出按钮的形态生效:工具栏的基础规则仍是可伸展的(其余形态照旧)。
+  assert.match(block(".workspace-toolbar"), /flex:\s*1 1 auto/);
+});
+
 test("空转保护:这三条选择器确实都在被检查的那份 CSS 里", () => {
   for (const selector of [".reader-badge-row", ".reader-badge-title", ".reader-badge-chip"]) {
     assert.ok(css.includes(`\n${selector} {`), `${selector} 不在 globals.css 里`);

@@ -115,8 +115,8 @@ class KnowhowCellPatch(BaseModel):
     # compare-and-write in one transaction (see routes.patch_knowhow_cell →
     # update_knowhow_cells_guarded_atomic) — the stored content_md must still
     # equal this baseline or the write is refused with 409, nothing written.
-    # The batch-reformat save path sends it; the MANUAL cell editor omits it
-    # (None) to keep its existing last-write-wins semantics.
+    # The web manual editor and batch-reformat path send it. Omitting it
+    # retains last-write-wins compatibility for other callers.
     expected_before: Optional[str] = None
     # knowhow 表版本管理 Task 12 (design doc §8.1 tail): who/what produced this
     # write, recorded verbatim onto the knowhow_changes row the store already
@@ -135,6 +135,7 @@ class KnowhowCellPatchResult(BaseModel):
     column_id: str
     content_md: str
     projection_status: str
+    mutation_seq: int
 
 
 # --- followup A: batch cell write, one DB transaction (anchor-grouping spec
@@ -153,7 +154,8 @@ class KnowhowCellsBatchPatch(BaseModel):
     # all-or-nothing compare-and-write: if ANY target's stored content no longer
     # equals its baseline the entire group is refused (409, nothing written) —
     # never a half-written concept group. Omitted (None) → legacy
-    # update_knowhow_cells last-write-wins (the manual editor's shared-cell save).
+    # update_knowhow_cells last-write-wins for callers that omit the baseline;
+    # the web manual editor supplies per-row baselines for shared-cell saves.
     expected_before: Optional[List[str]] = None
     # Concurrency P1 (round-4): OPTIONAL anchor baseline guard, POSITIONALLY
     # PARALLEL to row_ids (expected_anchor[i] is row_ids[i]'s snapshot anchor

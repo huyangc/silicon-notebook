@@ -82,7 +82,11 @@ const PANEL_HOOK_ORDER = [
   "useEffect[notebookId]", // notebook 复位(必须先于引用跳转)
   "useEffect[initialTableId, initialRowId]", // 引用跳转:openTable
   "useEffect[initialRowId, detail]", // detail 到达后分流
-  "useEffect[detail, detailError, initialRowId, initialTableId, selectedTableId]", // 陈旧引用提示
+  "useEffect[detail, detailMissing, collabRefreshSafe, initialRowId, initialTableId, selectedTableId]", // 明确缺失才回清单；编辑期间保留草稿
+  "useCollabPanelRefresh", // 外部脉搏不打断本面板编辑；既有矩阵确认复位仍最后执行
+  // 单元格乐观校验的基线与同浏览器标签页同步(分享编辑 P1,决策 D7):钉住基线要读「打开编辑器
+  // 那一次渲染」的 detail,收到广播只写 detail;不碰矩阵确认态,所以排在矩阵 hook 之前。
+  "useKnowhowCellSync",
   "useKnowhowConceptMatrix", // 最后:矩阵确认态复位 effect 仍最后执行
 ];
 
@@ -253,7 +257,7 @@ function hookCallLabel(call, sourceFile) {
     const deps = call.arguments[1];
     return `${name}${deps ? flatText(deps, sourceFile) : "<无依赖数组>"}`;
   }
-  return /^useKnowhow[A-Z]/.test(name) ? name : null;
+  return /^useKnowhow[A-Z]/.test(name) || name === "useCollabPanelRefresh" ? name : null;
 }
 
 function statementHookCall(statement) {
@@ -530,9 +534,11 @@ function Panel({ notebookId }) {
   useEffect(() => { detailRequestRef.current += 1; selectedTableIdRef.current = null; setSelectedTableId(null); }, [notebookId]);
   useEffect(() => { jump(); }, [initialTableId, initialRowId]);
   useEffect(() => { route(); }, [initialRowId, detail]);
-  useEffect(() => { stale(); }, [detail, detailError, initialRowId, initialTableId, selectedTableId]);
+  useEffect(() => { stale(); }, [detail, detailMissing, collabRefreshSafe, initialRowId, initialTableId, selectedTableId]);
   function openTable(tableId) { selectedTableIdRef.current = tableId; setSelectedTableId(tableId); }
   const openRow = rows.find((row) => row.id === openRowId);
+  const collabRefresh = useCollabPanelRefresh(0, true, refresh);
+  const knowhowCellSync = useKnowhowCellSync({ tableId: selectedTableId });
   const knowhowConceptMatrix = useKnowhowConceptMatrix({ notebookId });
   return (
     <section className="knowhow-view">

@@ -34,6 +34,9 @@ export type KgBuildJobStatus = {
 /** API/view models shared by the workspace orchestrator and extracted panels. */
 export type NotebookSummary = {
   id: string;
+  /** Only the detail route decides pulse eligibility; null patch/list values retain the current gate. */
+  collab_pulse?: boolean | null;
+  pulse_cursor?: string | null;
   name: string;
   purpose: string;
   primary_domain: string;
@@ -97,6 +100,26 @@ export type NotebookSummary = {
    */
   can_manage_content?: boolean;
   /**
+   * 本用户对这本库是否持有**管理权**（分享编辑与协作 P1）:owner ∨ 一条 admin 授权边。
+   *
+   * 点名共享引入编辑者之后,`can_manage_content` 答的是「有编辑权」(owner ∪ admin 边 ∪
+   * editor 边),而改名/tier/群组授权是管理档——编辑者没有。缺失/false = 无管理权（旧后端
+   * 不发它时收起管理入口）。读法同样只有 `workspaceCapabilities` 一处。
+   */
+  can_manage_notebook?: boolean;
+  /**
+   * 调用者在这本库上**点名授权**(`principal_type='user'`)的角色:`"editor"`,或同步/历史
+   * 留下的 `"viewer"` / `"admin"`;没有点名授权为空串(群组成员、链接成员、owner)。徽章
+   * 「可编辑」只认 `"editor"`;非空时退出入口走 `DELETE /collaborators/{me}`。
+   */
+  collaborator_role?: "" | "editor" | "viewer" | "admin";
+  /**
+   * 持有点名授权的同时是否**还有成员行**(经链接加入)。只在 `collaborator_role` 非空时有
+   * 意义(否则恒 false,退出照旧走成员关系)。为真时两条出口并存:退出点名授权与退出共享
+   * (成员关系)各删各的(规格 §4.4「交叉态两个退出」)。
+   */
+  collaborator_is_member?: boolean;
+  /**
    * 这本笔记本是从**哪个环境同步过来的镜像**（跨环境增量同步，
    * `docs/incremental-sync-design.md` §5）。非空 = 镜像，值是源环境标识；缺失/空串 =
    * 本地库，与本字段出现之前逐字一致（旧后端不发它）。
@@ -131,6 +154,9 @@ export type NotebookSummary = {
 };
 
 export type MemoryOrigin = "ask_answer" | "external_agent";
+/** suggested 是列表筛选；建议的存储 origin 仍为 ask_answer。 */
+export type MemoryOriginFilter = MemoryOrigin | "suggested";
+export type SuggestedSignal = "clarified" | "repeated" | "corrected";
 export type MemoryStatus = "candidate" | "confirmed" | "rejected" | "deprecated";
 export type MemoryPromotionState = "none" | "proposed" | "approved" | "rejected";
 
@@ -141,6 +167,7 @@ export type MemoryRecord = {
   agent_profile_id?: string | null;
   source_answer_id?: string | null;
   origin: MemoryOrigin;
+  suggested_signal?: SuggestedSignal | null;
   status: MemoryStatus;
   promotion_state: MemoryPromotionState;
   title: string;
@@ -153,6 +180,17 @@ export type MemoryRecord = {
   created_at: string;
   updated_at: string;
   provenance: Record<string, unknown>;
+};
+
+export type AnswerMemoryState = {
+  memory_id: string;
+  status: MemoryStatus;
+  suggested: boolean;
+};
+
+export type AnswerMemoryLinksResponse = {
+  links: Record<string, string>;
+  states: Record<string, AnswerMemoryState>;
 };
 
 export type MemoryOverviewItem = {
@@ -307,6 +345,10 @@ export type SourceSummary = {
   kg_analyzed_empty?: boolean;
   /** 该来源是否由 Agent 经 MCP 接入通道添加。可选：旧后端缺字段按 false 处理。 */
   agent_created?: boolean;
+  /** 这份来源是不是**请求者本人**上传的(分享编辑 P1,决策 D14)。编辑者只能删除本人上传的
+   *  来源,删除入口按它门控(`sourceDeleteAllowed`)。旧后端不发 → undefined → 按「不是本人」
+   *  处理,只影响编辑者(owner 与组管理员不看它)。 */
+  uploaded_by_me?: boolean;
   authors?: string[];
   pub_year?: number | null;
   venue?: string | null;
@@ -374,6 +416,8 @@ export type CheckupResponse = {
 export type RepairScheduledResult = {
   scheduled: string[];
   accepted: boolean;
+  /** 批量重新解析里因同一篇正在解析而跳过的来源 id(分享编辑 P1,D8)。旧后端不发。 */
+  skipped_busy?: string[];
 };
 
 export type PaginatedKnowledge = {

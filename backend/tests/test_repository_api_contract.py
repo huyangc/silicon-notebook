@@ -49,6 +49,9 @@ def _normalize_runtime(value, replacements, temporary_root, key=""):
         return "2024-01-02T03:04:05"
     if key == "created_label" and isinstance(value, str):
         return "fixture-date"
+    if key == "pulse_cursor" and isinstance(value, str):
+        # Opaque process epoch/revision is verified by the pulse scenarios.
+        return "fixture-pulse-cursor"
     if isinstance(value, dict):
         return {
             item_key: _normalize_runtime(

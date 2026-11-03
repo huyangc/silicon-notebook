@@ -174,6 +174,65 @@
           "title": "ActivityCursor",
           "type": "object"
         },
+        "ActivityItem": {
+          "properties": {
+            "actor_id": {
+              "title": "Actor Id",
+              "type": "string"
+            },
+            "actor_name": {
+              "title": "Actor Name",
+              "type": "string"
+            },
+            "capability": {
+              "title": "Capability",
+              "type": "string"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "sources",
+                "kg",
+                "knowhow",
+                "knowledge",
+                "catalog",
+                "notebook",
+                "understanding",
+                "scale_index",
+                "none"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "target": {
+              "title": "Target",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "notebook_id",
+            "kind",
+            "capability",
+            "actor_id",
+            "actor_name",
+            "target",
+            "created_at"
+          ],
+          "title": "ActivityItem",
+          "type": "object"
+        },
         "ActivityReport": {
           "description": "一条「报告」活动条目,数据来自 reports。",
           "properties": {
@@ -252,52 +311,6 @@
             "created_at"
           ],
           "title": "ActivityReport",
-          "type": "object"
-        },
-        "ActivityResponse": {
-          "properties": {
-            "has_more": {
-              "default": false,
-              "title": "Has More",
-              "type": "boolean"
-            },
-            "items": {
-              "items": {
-                "discriminator": {
-                  "mapping": {
-                    "ask": "#/components/schemas/ActivityAsk",
-                    "report": "#/components/schemas/ActivityReport",
-                    "source": "#/components/schemas/ActivitySource"
-                  },
-                  "propertyName": "type"
-                },
-                "oneOf": [
-                  {
-                    "$ref": "#/components/schemas/ActivityAsk"
-                  },
-                  {
-                    "$ref": "#/components/schemas/ActivitySource"
-                  },
-                  {
-                    "$ref": "#/components/schemas/ActivityReport"
-                  }
-                ]
-              },
-              "title": "Items",
-              "type": "array"
-            },
-            "next_cursor": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/ActivityCursor"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "title": "ActivityResponse",
           "type": "object"
         },
         "ActivitySource": {
@@ -2160,6 +2173,7 @@
           "type": "object"
         },
         "AnswerMemoryLinksResponse": {
+          "description": "``links``: answer -> the caller's memory saved from it, unadopted\nsystem suggestions left out (the shape older clients read, unchanged).\n``states``: answer -> every such memory, drafts included (design §5.3,\nG15) -- \"has a suggestion\" vs \"saved\".",
           "properties": {
             "links": {
               "additionalProperties": {
@@ -2167,9 +2181,46 @@
               },
               "title": "Links",
               "type": "object"
+            },
+            "states": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/AnswerMemoryState"
+              },
+              "title": "States",
+              "type": "object"
             }
           },
           "title": "AnswerMemoryLinksResponse",
+          "type": "object"
+        },
+        "AnswerMemoryState": {
+          "description": "One answer's memory as ``answer-memory-links`` reports it in\n``states``: drafts included (``suggested`` and ``status`` say which).",
+          "properties": {
+            "memory_id": {
+              "title": "Memory Id",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "candidate",
+                "confirmed",
+                "rejected",
+                "deprecated"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "suggested": {
+              "default": false,
+              "title": "Suggested",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "memory_id",
+            "status"
+          ],
+          "title": "AnswerMemoryState",
           "type": "object"
         },
         "ArtifactView": {
@@ -3502,6 +3553,113 @@
           "title": "CitationKnowhowRef",
           "type": "object"
         },
+        "CollaboratorItem": {
+          "description": "One named grant, as the owner sees it.",
+          "properties": {
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
+            "display_name": {
+              "default": "",
+              "title": "Display Name",
+              "type": "string"
+            },
+            "granted_by_username": {
+              "default": "",
+              "title": "Granted By Username",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "role": {
+              "title": "Role",
+              "type": "string"
+            },
+            "user_id": {
+              "title": "User Id",
+              "type": "string"
+            },
+            "username": {
+              "title": "Username",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "user_id",
+            "username",
+            "role"
+          ],
+          "title": "CollaboratorItem",
+          "type": "object"
+        },
+        "CollaboratorList": {
+          "description": "``GET /notebooks/{id}/collaborators``. The owner gets every named grant\n(``items``); a caller holding a named editor grant gets the editors' names\nonly (``editors``). ``view`` says which of the two this is.",
+          "properties": {
+            "editors": {
+              "default": [],
+              "items": {
+                "$ref": "#/components/schemas/EditorName"
+              },
+              "title": "Editors",
+              "type": "array"
+            },
+            "items": {
+              "default": [],
+              "items": {
+                "$ref": "#/components/schemas/CollaboratorItem"
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "view": {
+              "enum": [
+                "owner",
+                "editor"
+              ],
+              "title": "View",
+              "type": "string"
+            }
+          },
+          "required": [
+            "view"
+          ],
+          "title": "CollaboratorList",
+          "type": "object"
+        },
+        "CollaboratorPutResult": {
+          "description": "``PUT /notebooks/{id}/collaborators/{user_id}``. ``changed=False``: the\nuser already was an editor (idempotent, nobody is notified again).",
+          "properties": {
+            "changed": {
+              "title": "Changed",
+              "type": "boolean"
+            },
+            "grant": {
+              "$ref": "#/components/schemas/CollaboratorItem"
+            },
+            "previous_role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Previous Role"
+            }
+          },
+          "required": [
+            "grant",
+            "changed"
+          ],
+          "title": "CollaboratorPutResult",
+          "type": "object"
+        },
         "CommandCatalogApplyRequest": {
           "description": "确认请求。`candidate_ids` 与 `all_pending` 二选一,不是各自独立的开关:\n两者同时非空/为真会被路由层拒成 422(R13,codex PR #412 评审第 13 轮),不再\n像早前那样静默偏向 `all_pending` 而悄悄吞掉调用方明确写出的 `candidate_ids`。",
           "properties": {
@@ -4651,6 +4809,25 @@
           "title": "EdgeReviewRequest",
           "type": "object"
         },
+        "EditorName": {
+          "description": "Decision D17: what an editor sees of the other editors.",
+          "properties": {
+            "display_name": {
+              "default": "",
+              "title": "Display Name",
+              "type": "string"
+            },
+            "username": {
+              "title": "Username",
+              "type": "string"
+            }
+          },
+          "required": [
+            "username"
+          ],
+          "title": "EditorName",
+          "type": "object"
+        },
         "Evidence": {
           "properties": {
             "confidence": {
@@ -4945,7 +5122,7 @@
           "type": "object"
         },
         "FindingLiveSource": {
-          "description": "读这一页时问题涉及的来源**此刻**的样子(主键点查)。隐藏来源(Memory / knowhow)\n的标题置空。``processing`` = 正在排队 / 解析 / 抽取。",
+          "description": "读这一页时问题涉及的来源**此刻**的样子(主键点查)。隐藏来源(Memory / knowhow)\n的标题置空。``processing`` = 正在排队 / 解析 / 抽取。``uploaded_by_me``(分享编辑 P1,\nD14)= 请求者本人上传的这本库的来源;点名编辑者只能删这些,前端按它给「删除来源…」。\n未记上传人、不在本库(``exists=False``)一律 False;上传人 id 不上 wire。",
           "properties": {
             "exists": {
               "title": "Exists",
@@ -4969,6 +5146,11 @@
               "default": "",
               "title": "Title",
               "type": "string"
+            },
+            "uploaded_by_me": {
+              "default": false,
+              "title": "Uploaded By Me",
+              "type": "boolean"
             }
           },
           "required": [
@@ -7095,6 +7277,10 @@
               "title": "Content Md",
               "type": "string"
             },
+            "mutation_seq": {
+              "title": "Mutation Seq",
+              "type": "integer"
+            },
             "projection_status": {
               "title": "Projection Status",
               "type": "string"
@@ -7108,7 +7294,8 @@
             "row_id",
             "column_id",
             "content_md",
-            "projection_status"
+            "projection_status",
+            "mutation_seq"
           ],
           "title": "KnowhowCellPatchResult",
           "type": "object"
@@ -8589,10 +8776,15 @@
           "type": "object"
         },
         "MemberExitResult": {
-          "description": "``DELETE /notebooks/{id}/membership`` 200: the exit finished; this\nrequest deleted ``deleted_memory_count`` Memories (counted by the\nserver).",
+          "description": "``DELETE /notebooks/{id}/membership`` 200: the exit finished; this\nrequest deleted ``deleted_memory_count`` of \"your memories\" and\n``deleted_suggestion_count`` unadopted system suggestions (both counted by\nthe server).",
           "properties": {
             "deleted_memory_count": {
               "title": "Deleted Memory Count",
+              "type": "integer"
+            },
+            "deleted_suggestion_count": {
+              "default": 0,
+              "title": "Deleted Suggestion Count",
               "type": "integer"
             }
           },
@@ -8653,10 +8845,15 @@
           "type": "object"
         },
         "MemoryExitDisclosure": {
-          "description": "``GET /notebooks/{id}/membership/exit-disclosure``.",
+          "description": "``GET /notebooks/{id}/membership/exit-disclosure``: ``memory_count`` of\n\"your memories\" the exit deletes (the number to acknowledge) and\n``suggestion_count`` unadopted system suggestions it deletes besides\n(G10; 0 for anyone who never turned suggestions on).",
           "properties": {
             "memory_count": {
               "title": "Memory Count",
+              "type": "integer"
+            },
+            "suggestion_count": {
+              "default": 0,
+              "title": "Suggestion Count",
               "type": "integer"
             }
           },
@@ -8664,6 +8861,48 @@
             "memory_count"
           ],
           "title": "MemoryExitDisclosure",
+          "type": "object"
+        },
+        "MemoryModeResponse": {
+          "description": "``PATCH /me/memory-mode`` 200: the caller's profile with the mode now\nstored, and how many suggestions still waiting for review this request\ndeleted (0 unless ``delete_unadopted`` was set while turning off).",
+          "properties": {
+            "deleted_suggestion_count": {
+              "default": 0,
+              "title": "Deleted Suggestion Count",
+              "type": "integer"
+            },
+            "user": {
+              "$ref": "#/components/schemas/UserProfile"
+            }
+          },
+          "required": [
+            "user"
+          ],
+          "title": "MemoryModeResponse",
+          "type": "object"
+        },
+        "MemoryModeUpdate": {
+          "additionalProperties": false,
+          "description": "``PATCH /me/memory-mode`` request body (auto user-memory, plan G14).\n\n``memory_mode`` is validated as a Literal here only — ``UserProfile.\nmemory_mode`` stays ``str`` and the stores fold unknown stored values to\n``manual`` (G27). ``delete_unadopted`` is honoured only when switching to\n``manual``: it deletes the user's suggestions still waiting for review\n(``candidate``), never the dismissed or expired ones.",
+          "properties": {
+            "delete_unadopted": {
+              "default": false,
+              "title": "Delete Unadopted",
+              "type": "boolean"
+            },
+            "memory_mode": {
+              "enum": [
+                "manual",
+                "suggest"
+              ],
+              "title": "Memory Mode",
+              "type": "string"
+            }
+          },
+          "required": [
+            "memory_mode"
+          ],
+          "title": "MemoryModeUpdate",
           "type": "object"
         },
         "MemoryNotebookOption": {
@@ -8900,6 +9139,17 @@
               ],
               "title": "Status",
               "type": "string"
+            },
+            "suggested_signal": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Suggested Signal"
             },
             "tags": {
               "items": {
@@ -9506,6 +9756,11 @@
               "title": "Active",
               "type": "boolean"
             },
+            "closes_when_shared": {
+              "default": false,
+              "title": "Closes When Shared",
+              "type": "boolean"
+            },
             "id": {
               "title": "Id",
               "type": "string"
@@ -9914,6 +10169,32 @@
               "title": "Can Manage Content",
               "type": "boolean"
             },
+            "can_manage_notebook": {
+              "default": false,
+              "title": "Can Manage Notebook",
+              "type": "boolean"
+            },
+            "collab_pulse": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Collab Pulse"
+            },
+            "collaborator_is_member": {
+              "default": false,
+              "title": "Collaborator Is Member",
+              "type": "boolean"
+            },
+            "collaborator_role": {
+              "default": "",
+              "title": "Collaborator Role",
+              "type": "string"
+            },
             "counts": {
               "additionalProperties": {
                 "type": "integer"
@@ -10043,6 +10324,17 @@
             "primary_domain": {
               "title": "Primary Domain",
               "type": "string"
+            },
+            "pulse_cursor": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Pulse Cursor"
             },
             "purpose": {
               "title": "Purpose",
@@ -11568,6 +11860,122 @@
           "title": "PublicTurn",
           "type": "object"
         },
+        "PulseChange": {
+          "properties": {
+            "actor_name": {
+              "title": "Actor Name",
+              "type": "string"
+            },
+            "at": {
+              "title": "At",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "sources",
+                "kg",
+                "knowhow",
+                "knowledge",
+                "catalog",
+                "notebook",
+                "understanding",
+                "scale_index",
+                "none"
+              ],
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "actor_name",
+            "at"
+          ],
+          "title": "PulseChange",
+          "type": "object"
+        },
+        "PulseRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "since": {
+              "default": "",
+              "title": "Since",
+              "type": "string"
+            },
+            "visible": {
+              "default": true,
+              "title": "Visible",
+              "type": "boolean"
+            }
+          },
+          "title": "PulseRequest",
+          "type": "object"
+        },
+        "PulseResponse": {
+          "properties": {
+            "changes": {
+              "items": {
+                "$ref": "#/components/schemas/PulseChange"
+              },
+              "title": "Changes",
+              "type": "array"
+            },
+            "cursor": {
+              "title": "Cursor",
+              "type": "string"
+            },
+            "next_interval_s": {
+              "title": "Next Interval S",
+              "type": "integer"
+            },
+            "other_reader_count": {
+              "title": "Other Reader Count",
+              "type": "integer"
+            },
+            "reset": {
+              "title": "Reset",
+              "type": "boolean"
+            },
+            "viewers": {
+              "items": {
+                "$ref": "#/components/schemas/PulseViewer"
+              },
+              "title": "Viewers",
+              "type": "array"
+            }
+          },
+          "required": [
+            "cursor",
+            "reset",
+            "other_reader_count",
+            "next_interval_s"
+          ],
+          "title": "PulseResponse",
+          "type": "object"
+        },
+        "PulseViewer": {
+          "properties": {
+            "display_name": {
+              "title": "Display Name",
+              "type": "string"
+            },
+            "role": {
+              "title": "Role",
+              "type": "string"
+            },
+            "user_id": {
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "user_id",
+            "display_name",
+            "role"
+          ],
+          "title": "PulseViewer",
+          "type": "object"
+        },
         "QueryIntentAmbiguity": {
           "properties": {
             "id": {
@@ -12098,6 +12506,34 @@
             }
           },
           "title": "RepairScheduledResult",
+          "type": "object"
+        },
+        "ReparseScheduledResult": {
+          "description": "``POST .../sources/reparse`` 的回执:``RepairScheduledResult`` 加一列\n``skipped_busy``——此刻正在解析、这次没有排入的 source_id(分享编辑 P1,决策 D8:\n两个人同时点重新解析,第二次不再把整份管线再跑一遍)。字段只增不减。",
+          "properties": {
+            "accepted": {
+              "default": false,
+              "title": "Accepted",
+              "type": "boolean"
+            },
+            "scheduled": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Scheduled",
+              "type": "array"
+            },
+            "skipped_busy": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Skipped Busy",
+              "type": "array"
+            }
+          },
+          "title": "ReparseScheduledResult",
           "type": "object"
         },
         "ReparseSourcesRequest": {
@@ -13053,6 +13489,11 @@
               "title": "Type",
               "type": "string"
             },
+            "uploaded_by_me": {
+              "default": false,
+              "title": "Uploaded By Me",
+              "type": "boolean"
+            },
             "venue": {
               "anyOf": [
                 {
@@ -13385,6 +13826,16 @@
         },
         "SharedByMeItem": {
           "properties": {
+            "collaborators": {
+              "items": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "title": "Collaborators",
+              "type": "array"
+            },
             "group_count": {
               "default": 0,
               "title": "Group Count",
@@ -13653,6 +14104,11 @@
               "default": "",
               "title": "Updated At",
               "type": "string"
+            },
+            "uploaded_by_me": {
+              "default": false,
+              "title": "Uploaded By Me",
+              "type": "boolean"
             },
             "venue": {
               "anyOf": [
@@ -14091,6 +14547,11 @@
               "title": "Type",
               "type": "string"
             },
+            "uploaded_by_me": {
+              "default": false,
+              "title": "Uploaded By Me",
+              "type": "boolean"
+            },
             "venue": {
               "anyOf": [
                 {
@@ -14519,6 +14980,14 @@
               "title": "Agent Profile Enabled",
               "type": "boolean"
             },
+            "auto_memory_suggest_enabled": {
+              "title": "Auto Memory Suggest Enabled",
+              "type": "boolean"
+            },
+            "auto_memory_suggest_model_ready": {
+              "title": "Auto Memory Suggest Model Ready",
+              "type": "boolean"
+            },
             "notebook_transfer_max_bytes": {
               "exclusiveMinimum": 0.0,
               "title": "Notebook Transfer Max Bytes",
@@ -14592,7 +15061,9 @@
             "source_images_enabled",
             "agent_profile_enabled",
             "user_search_profile_enabled",
-            "notebook_transfer_max_bytes"
+            "notebook_transfer_max_bytes",
+            "auto_memory_suggest_enabled",
+            "auto_memory_suggest_model_ready"
           ],
           "title": "SystemConfiguration",
           "type": "object"
@@ -15374,6 +15845,11 @@
               "title": "Type",
               "type": "string"
             },
+            "uploaded_by_me": {
+              "default": false,
+              "title": "Uploaded By Me",
+              "type": "boolean"
+            },
             "venue": {
               "anyOf": [
                 {
@@ -15714,6 +16190,65 @@
             "vote_count"
           ],
           "title": "WishVoteResult",
+          "type": "object"
+        },
+        "app__models__admin__ActivityResponse": {
+          "properties": {
+            "has_more": {
+              "default": false,
+              "title": "Has More",
+              "type": "boolean"
+            },
+            "items": {
+              "items": {
+                "discriminator": {
+                  "mapping": {
+                    "ask": "#/components/schemas/ActivityAsk",
+                    "report": "#/components/schemas/ActivityReport",
+                    "source": "#/components/schemas/ActivitySource"
+                  },
+                  "propertyName": "type"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ActivityAsk"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ActivitySource"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ActivityReport"
+                  }
+                ]
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "next_cursor": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ActivityCursor"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "title": "ActivityResponse",
+          "type": "object"
+        },
+        "app__models__collab__ActivityResponse": {
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/components/schemas/ActivityItem"
+              },
+              "title": "Items",
+              "type": "array"
+            }
+          },
+          "title": "ActivityResponse",
           "type": "object"
         }
       }
@@ -16458,7 +16993,7 @@
               "content": {
                 "application/json": {
                   "schema": {
-                    "$ref": "#/components/schemas/ActivityResponse"
+                    "$ref": "#/components/schemas/app__models__admin__ActivityResponse"
                   }
                 }
               },
@@ -20537,6 +21072,48 @@
           "summary": "Me"
         }
       },
+      "/api/me/memory-mode": {
+        "patch": {
+          "description": "自助切换记忆建议开关(``manual`` | ``suggest``),只写调用者自己。这是\n``memory_mode`` 唯一的写入口(``MemorySuggestService.set_mode``)。\n\n- 部署开关关闭时请求开启 → 409 ``memory_suggest_unavailable``,什么都不写;\n- 关闭(``manual``)时可带 ``delete_unadopted=true``:模式切换提交之后,删除本人\n  在仍可读的各库里**还在等处理**的系统建议(``candidate``),已忽略、已过期的\n  (``rejected``)一律保留;返回本次删除的条数。开启时该字段不起作用。",
+          "operationId": "update_my_memory_mode_api_me_memory_mode_patch",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryModeUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryModeResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "409": {
+              "description": "`memory_suggest_unavailable`: turning suggestions on while this deployment cannot run them (`auto_memory_suggest_enabled` false); nothing was written."
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update My Memory Mode"
+        }
+      },
       "/api/me/notebook-deletions": {
         "get": {
           "description": "正在删除窗口里、与调用者有关的笔记本(主人,或在那里有记忆的读者——裁决\nB3),按截止时刻升序。笔记本列表顶部「即将永久删除的笔记本」区块读它;铃铛\n里的 `notebook_pending_delete` 条目是同一份投影。",
@@ -20848,7 +21425,8 @@
                   {
                     "enum": [
                       "ask_answer",
-                      "external_agent"
+                      "external_agent",
+                      "suggested"
                     ],
                     "type": "string"
                   },
@@ -21793,6 +22371,45 @@
           "summary": "Update Notebook"
         }
       },
+      "/api/notebooks/{notebook_id}/activity": {
+        "get": {
+          "operationId": "activity_api_notebooks__notebook_id__activity_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/app__models__collab__ActivityResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Activity"
+        }
+      },
       "/api/notebooks/{notebook_id}/agent-observations": {
         "delete": {
           "operationId": "clear_agent_observations_api_notebooks__notebook_id__agent_observations_delete",
@@ -21993,6 +22610,7 @@
       },
       "/api/notebooks/{notebook_id}/answer-memory-links": {
         "post": {
+          "description": "``links`` (unadopted suggestions left out, the shape older clients\nread) and ``states`` (drafts included) in one read, through the runtime\nseat (G15).",
           "operationId": "answer_memory_links_api_notebooks__notebook_id__answer_memory_links_post",
           "parameters": [
             {
@@ -22694,6 +23312,214 @@
             }
           },
           "summary": "Notebook Checkup"
+        }
+      },
+      "/api/notebooks/{notebook_id}/collaborators": {
+        "get": {
+          "operationId": "list_collaborators_api_notebooks__notebook_id__collaborators_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/CollaboratorList"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Collaborators"
+        }
+      },
+      "/api/notebooks/{notebook_id}/collaborators/{user_id}": {
+        "delete": {
+          "operationId": "delete_collaborator_api_notebooks__notebook_id__collaborators__user_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "acknowledged_memory_count",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Acknowledged Memory Count"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemberExitResult"
+                  }
+                }
+              },
+              "description": "The exit finished; this request deleted `deleted_memory_count` of \"your memories\" and `deleted_suggestion_count` unadopted system suggestions (counted by the server)."
+            },
+            "204": {
+              "description": "Nothing to delete: the membership ended (or was already absent)."
+            },
+            "409": {
+              "description": "`exit_disclosure_required` `{code, memory_count, suggestion_count}`: the acknowledgement differs from the count; nothing deleted, membership unchanged. `exit_incomplete` `{code, deleted_memory_count, deleted_suggestion_count, memory_count}`: that many were deleted, Memories saved (or suggestions adopted) during the exit remain; still a member."
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            },
+            "503": {
+              "description": "`exit_incomplete` `{code, deleted_memory_count, deleted_suggestion_count, memory_count}`: the purge failed part-way; still a member; what was deleted stays deleted; retry is safe."
+            }
+          },
+          "summary": "Delete Collaborator"
+        },
+        "put": {
+          "operationId": "put_collaborator_api_notebooks__notebook_id__collaborators__user_id__put",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/CollaboratorPutResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Put Collaborator"
+        }
+      },
+      "/api/notebooks/{notebook_id}/collaborators/{user_id}/exit-disclosure": {
+        "get": {
+          "description": "The caller themself only (PD-11): personal Memory and unadopted\nsuggestions counted apart. Both zero when another read path survives or\nthe caller holds no named grant here.",
+          "operationId": "collaborator_exit_disclosure_api_notebooks__notebook_id__collaborators__user_id__exit_disclosure_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryExitDisclosure"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Collaborator Exit Disclosure"
         }
       },
       "/api/notebooks/{notebook_id}/concepts/{canonical_id}/detail": {
@@ -23658,7 +24484,7 @@
       },
       "/api/notebooks/{notebook_id}/kg-analysis/findings": {
         "get": {
-          "description": "问题清单的一页:``open`` 待处理(含「已处理,更新后核验」)/ ``passed``(用户已判定\n不是同一个的 F4、补上关联已无可补的 F5)/ ``dismissed``(已标为正常)。每行带读侧\n派生的 ``status`` 与涉及来源此刻的样子(主键点查,≤ 一页)。与 /sources 一样不记忆化。",
+          "description": "问题清单的一页:``open`` 待处理(含「已处理,更新后核验」)/ ``passed``(用户已判定\n不是同一个的 F4、补上关联已无可补的 F5)/ ``dismissed``(已标为正常)。每行带读侧\n派生的 ``status`` 与涉及来源此刻的样子(主键点查,≤ 一页),其中 ``uploaded_by_me``\n按请求者整形(D14:编辑者只能删本人上传的)。与 /sources 一样不记忆化。",
           "operationId": "kg_analysis_findings_api_notebooks__notebook_id__kg_analysis_findings_get",
           "parameters": [
             {
@@ -24603,7 +25429,7 @@
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}": {
         "delete": {
-          "description": "Cascade-delete (task brief: \"连投影产物+隐藏源\"). Ordering: fetch+\ncross-notebook-check first (404 without touching anything), THEN the\nprojector's cleanup of everything ever derived from the hidden source\n(relations/objects/chunks/elements/the source row itself — safe no-op when\nhidden_source_id is None, e.g. a table created but never projected), and\nONLY THEN the store's own cascade delete (columns/rows/cells via ON DELETE\nCASCADE). Projection-teardown-first so a crash BETWEEN the two phases\nleaves a still-deletable table whose projection is already clean, rather\nthan an orphaned hidden source with no table left to trigger its cleanup.",
+          "description": "Cascade-delete (task brief: \"连投影产物+隐藏源\"). Ordering: fetch+\ncross-notebook-check first (404 without touching anything), THEN the\nprojector's cleanup of everything ever derived from the hidden source\n(relations/objects/chunks/elements/the source row itself — safe no-op when\nhidden_source_id is None, e.g. a table created but never projected), and\nONLY THEN the store's own cascade delete (columns/rows/cells via ON DELETE\nCASCADE). Projection-teardown-first so a crash BETWEEN the two phases\nleaves a still-deletable table whose projection is already clean, rather\nthan an orphaned hidden source with no table left to trigger its cleanup.\n\nA named editor may not delete a whole table (share-edit P1, decision D14):\nit is a hard delete, its change history goes with it and nothing can bring\nit back -- the same 404 a missing table gets.",
           "operationId": "delete_knowhow_table_api_notebooks__notebook_id__knowhow__table_id__delete",
           "parameters": [
             {
@@ -25209,7 +26035,7 @@
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/history/prune": {
         "post": {
-          "description": "删掉最老的连续前缀（spec §8.1 行 8 / §7.7）。``before_days`` 换算成\nISO 截止时间：用与本仓库各 store 模块的 ``_now()`` 相同的\"去掉微秒的\nnaive 本地时间 isoformat\"形状，才能和 ``knowhow_changes.created_at``\n做字面量字符串比较——两者格式必须一致，否则 SQL 里的字符串 ``<``\n比较会失真。\n\n§7.1 的已知代价在这里兑现：被清理掉的历史很可能是某些图片在库里唯一还\n\"活着\"的引用来源，删完之后这些图片才终于可能被判定为孤儿——所以清理\n完成后主动触发一次绕过节流的资产清扫（``min_interval=0``），而不是干等\n下一次自然节流窗口才释放磁盘；后台执行，不拖慢这次清理请求本身的响应。",
+          "description": "删掉最老的连续前缀（spec §8.1 行 8 / §7.7）。``before_days`` 换算成\nISO 截止时间：用与本仓库各 store 模块的 ``_now()`` 相同的\"去掉微秒的\nnaive 本地时间 isoformat\"形状，才能和 ``knowhow_changes.created_at``\n做字面量字符串比较——两者格式必须一致，否则 SQL 里的字符串 ``<``\n比较会失真。\n\n§7.1 的已知代价在这里兑现：被清理掉的历史很可能是某些图片在库里唯一还\n\"活着\"的引用来源，删完之后这些图片才终于可能被判定为孤儿——所以清理\n完成后主动触发一次绕过节流的资产清扫（``min_interval=0``），而不是干等\n下一次自然节流窗口才释放磁盘；后台执行，不拖慢这次清理请求本身的响应。\n\n点名编辑者不能清理历史（分享编辑 P1，决策 D14）：被清掉的版本无从恢复。",
           "operationId": "prune_knowhow_history_api_notebooks__notebook_id__knowhow__table_id__history_prune_post",
           "parameters": [
             {
@@ -25662,7 +26488,7 @@
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}": {
         "patch": {
-          "description": "Returns {row_id,column_id,content_md,projection_status} so the caller\ncan refresh just this row's sync badge without re-fetching the whole\ntable. row_id/column_id validity is checked twice, deliberately: the\ntable-scoped membership check (belongs to THIS table_id, not merely SOME\ntable) and the store's own validate_cell_target (same-table pairing) —\nboth funnel into the same 400 \"格子定位不合法\" so a client sees one\nconsistent error regardless of which check actually caught it.\n\nknowhow 表版本管理 Task 12: ``body.origin`` is validated FIRST — a pure\nin-memory check with no DB lookups, and a hard 400 on anything outside\nVALID_ORIGINS (never a lenient default; see KnowhowCellPatch.origin's own\ndocstring for why).",
+          "description": "Returns {row_id,column_id,content_md,projection_status,mutation_seq} so the caller\ncan refresh just this row's sync badge without re-fetching the whole\ntable. row_id/column_id validity is checked twice, deliberately: the\ntable-scoped membership check (belongs to THIS table_id, not merely SOME\ntable) and the store's own validate_cell_target (same-table pairing) —\nboth funnel into the same 400 \"格子定位不合法\" so a client sees one\nconsistent error regardless of which check actually caught it.\n\nknowhow 表版本管理 Task 12: ``body.origin`` is validated FIRST — a pure\nin-memory check with no DB lookups, and a hard 400 on anything outside\nVALID_ORIGINS (never a lenient default; see KnowhowCellPatch.origin's own\ndocstring for why).",
           "operationId": "patch_knowhow_cell_api_notebooks__notebook_id__knowhow__table_id__rows__row_id__cells__column_id__patch",
           "parameters": [
             {
@@ -26623,7 +27449,7 @@
       },
       "/api/notebooks/{notebook_id}/membership": {
         "delete": {
-          "description": "本人退出共享:结束自己的成员关系(幂等,不影响他人)。成员记录是本人读这本库的最后\n途径时,同时永久删除本人在这本库里的全部记忆及其派生数据。\n\n服务端在成员行锁下领取此刻要删的记忆,条数 C;`acknowledged_memory_count`(缺省按 0)\n必须等于 C:\n- 不等(含 C=0 而确认数大于 0:期间已不是成员、有了授权或把记忆移走了)→ 409\n  `exit_disclosure_required`(带 C),什么都不删、成员关系不变;\n- C=0 → 204,成员关系结束(或本来就不在),什么都不删;\n- C>0 且全部删完、收尾成功 → 200 `{\"deleted_memory_count\": d}`,d 是本次请求实际删除\n  的条数;\n- 删了 d 条(d>0),但期间又保存了未确认的 r 条 → 409 `exit_incomplete`(带 d、r),\n  仍是成员;\n- 中途失败 → 503 `exit_incomplete`(带 d、r,d 可以为 0),仍是成员,已删的不会恢复,\n  可以重试(重试从重新告知条数开始)。\n客户端断开不影响结果:每一步各自提交,下一次告知如实报告剩下的条数。",
+          "description": "本人退出共享:结束自己的成员关系(幂等,不影响他人)。成员记录是本人读这本库的最后\n途径时,同时永久删除本人在这本库里的全部记忆及其派生数据。\n\n服务端在成员行锁下领取此刻要删的「你的记忆」,条数 C(未采纳的系统建议另计 S,\n不需要确认);`acknowledged_memory_count`(缺省按 0)必须等于 C:\n- 不等(含 C=0 而确认数大于 0:期间已不是成员、有了授权或把记忆移走了)→ 409\n  `exit_disclosure_required`(带 C 与 S),什么都不删(含建议作业行)、成员关系不变;\n- 什么都没删(C=0 且 S=0)→ 204,成员关系结束(或本来就不在);\n- 删完、收尾成功 → 200 `{\"deleted_memory_count\": d, \"deleted_suggestion_count\": s}`,\n  都是本次请求实际删除的条数(只有建议、没有你的记忆时也返回 200);\n- 期间又保存了记忆、或把某条建议采纳了(r 条)→ 收尾什么都不删、仍是成员:删过\n  d>0 条时 409 `exit_incomplete`(带 d、r),一条都没删时 409\n  `exit_disclosure_required`(带 r 与剩下的建议数);\n- 中途失败 → 503 `exit_incomplete`(带 d、r,d 可以为 0),仍是成员,已删的不会恢复,\n  可以重试(重试从重新告知条数开始)。\n`exit_incomplete` 里的 `deleted_suggestion_count` 恒为 0:建议只在收尾成功时删除。\n客户端断开不影响结果:每一步各自提交,下一次告知如实报告剩下的条数。",
           "operationId": "leave_notebook_route_api_notebooks__notebook_id__membership_delete",
           "parameters": [
             {
@@ -26662,13 +27488,13 @@
                   }
                 }
               },
-              "description": "The exit finished; this request deleted `deleted_memory_count` Memories (counted by the server)."
+              "description": "The exit finished; this request deleted `deleted_memory_count` of \"your memories\" and `deleted_suggestion_count` unadopted system suggestions (counted by the server)."
             },
             "204": {
               "description": "Nothing to delete: the membership ended (or was already absent)."
             },
             "409": {
-              "description": "`exit_disclosure_required` `{code, memory_count}`: the acknowledgement differs from the count; nothing deleted, membership unchanged. `exit_incomplete` `{code, deleted_memory_count, memory_count}`: that many were deleted, Memories saved during the exit remain; still a member."
+              "description": "`exit_disclosure_required` `{code, memory_count, suggestion_count}`: the acknowledgement differs from the count; nothing deleted, membership unchanged. `exit_incomplete` `{code, deleted_memory_count, deleted_suggestion_count, memory_count}`: that many were deleted, Memories saved (or suggestions adopted) during the exit remain; still a member."
             },
             "422": {
               "content": {
@@ -26681,7 +27507,7 @@
               "description": "Validation Error"
             },
             "503": {
-              "description": "`exit_incomplete` `{code, deleted_memory_count, memory_count}`: the purge failed part-way; still a member; what was deleted stays deleted; retry is safe."
+              "description": "`exit_incomplete` `{code, deleted_memory_count, deleted_suggestion_count, memory_count}`: the purge failed part-way; still a member; what was deleted stays deleted; retry is safe."
             }
           },
           "summary": "Leave Notebook Route"
@@ -26689,7 +27515,7 @@
       },
       "/api/notebooks/{notebook_id}/membership/exit-disclosure": {
         "get": {
-          "description": "退出前告知:退出会永久删除调用者本人在这本库里的多少条记忆(各种状态都算)。\n不是成员、或退出后仍能凭所有者身份/授权读这本库时为 0。",
+          "description": "退出前告知:退出会永久删除调用者本人在这本库里的多少条「你的记忆」\n(``memory_count``,除未采纳的系统建议外各种状态都算,退出时要确认的就是这个数),\n以及另外多少条未采纳的系统建议(``suggestion_count``,不需要单独确认)。\n不是成员、或退出后仍能凭所有者身份/授权读这本库时两者都为 0。",
           "operationId": "membership_exit_disclosure_route_api_notebooks__notebook_id__membership_exit_disclosure_get",
           "parameters": [
             {
@@ -26771,7 +27597,8 @@
                   {
                     "enum": [
                       "ask_answer",
-                      "external_agent"
+                      "external_agent",
+                      "suggested"
                     ],
                     "type": "string"
                   },
@@ -27426,6 +28253,55 @@
             }
           },
           "summary": "Backfill Paper Metadata"
+        }
+      },
+      "/api/notebooks/{notebook_id}/pulse": {
+        "post": {
+          "operationId": "pulse_api_notebooks__notebook_id__pulse_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PulseRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/PulseResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Pulse"
         }
       },
       "/api/notebooks/{notebook_id}/question-suggestions": {
@@ -28916,7 +29792,7 @@
       },
       "/api/notebooks/{notebook_id}/sources/reparse": {
         "post": {
-          "description": "体检修复(H2 空源 / H3 缺分块):批量重新解析。逐个后台 submit_job(process_source)\n——复用既有摄取管线(含 P1.5 的活跃租约 + 分块串行锁),**不**另造摄取路径。\n⚠ 每个 source_id 必须真属于本 notebook 才排入(防越权:\n``require_notebook_capability(\"sources:write\")`` 只守 notebook,不守 body 里\n带来的任意 source_id)。不属于本库/不存在的静默跳过,回执只含实际排入的。\n⚠ **先去重 + 限量**再排(codex):重复 id 会把同一源的解析/嵌入/KG 昂贵管线在无界队列里并发\n排多次;超大列表同理会灌满执行器。dict.fromkeys 保序去重;超 _REPARSE_MAX 直接 400 拒绝。",
+          "description": "体检修复(H2 空源 / H3 缺分块):批量重新解析。逐个后台 submit_job(process_source)\n——复用既有摄取管线(含 P1.5 的活跃租约 + 分块串行锁),**不**另造摄取路径。\n⚠ 每个 source_id 必须真属于本 notebook 才排入(防越权:\n``require_notebook_capability(\"sources:write\")`` 只守 notebook,不守 body 里\n带来的任意 source_id)。不属于本库/不存在的静默跳过,回执只含实际排入的。\n⚠ **先去重 + 限量**再排(codex):重复 id 会把同一源的解析/嵌入/KG 昂贵管线在无界队列里并发\n排多次;超大列表同理会灌满执行器。dict.fromkeys 保序去重;超 _REPARSE_MAX 直接 400 拒绝。\n此刻正在解析的来源不排入,回执的 ``skipped_busy`` 列出它们(决策 D8,同单篇 409)。",
           "operationId": "reparse_sources_api_notebooks__notebook_id__sources_reparse_post",
           "parameters": [
             {
@@ -28944,7 +29820,7 @@
               "content": {
                 "application/json": {
                   "schema": {
-                    "$ref": "#/components/schemas/RepairScheduledResult"
+                    "$ref": "#/components/schemas/ReparseScheduledResult"
                   }
                 }
               },
@@ -31816,6 +32692,10 @@
       "base_kg_notebook_ids": [],
       "base_notebooks": [],
       "can_manage_content": true,
+      "can_manage_notebook": true,
+      "collab_pulse": false,
+      "collaborator_is_member": false,
+      "collaborator_role": "",
       "counts": {
         "cases": 0,
         "checklist_items": 0,
@@ -31847,6 +32727,7 @@
       "paper_meta_backfilling": false,
       "paper_meta_missing": true,
       "primary_domain": "Semiconductor",
+      "pulse_cursor": "fixture-pulse-cursor",
       "purpose": "Freeze serialization",
       "shared_from": "",
       "source_types": [],
@@ -31924,6 +32805,7 @@
         }
       },
       "shared_by_me": {
+        "collaborators": [],
         "group_count": 0,
         "id": "nb-api",
         "members": [],
@@ -31969,6 +32851,7 @@
       "title": "fixture.md",
       "type": "markdown",
       "updated_at": "2024-01-02T03:04:05",
+      "uploaded_by_me": true,
       "venue": null
     }
   },

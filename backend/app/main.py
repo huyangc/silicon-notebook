@@ -560,6 +560,8 @@ def create_app() -> FastAPI:
     # wraps them (last added = outermost).
     app.add_middleware(_QueryTimeoutStreamObserver)
     app.add_middleware(AuthenticationStreamGuard, is_valid=stream_credential_is_valid)
+    from app.api.collab_pulse_middleware import CollabPulseMiddleware
+    app.add_middleware(CollabPulseMiddleware)
 
     app.add_middleware(
         CORSMiddleware,

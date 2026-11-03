@@ -35,6 +35,8 @@ Red lines preserved verbatim from the facade:
   rebuild.
 """
 from __future__ import annotations
+from app.services.collab_jobs import pulse_touch_for_job
+from app.domain.collaboration import KG_BUILD_TERMINAL_PULSE_KINDS
 
 import contextvars
 import hashlib
@@ -648,6 +650,7 @@ class _UnifiedKgRebuildRun:
 
 
 class KnowledgeLifecycleService:
+    _collab_touch = None
     def __init__(
         self,
         *,
@@ -960,11 +963,11 @@ class KnowledgeLifecycleService:
                 if notebook_id in self.kg_building:
                     raise KgBuildAlreadyRunning(notebook_id)
                 self.kg_building.add(notebook_id)
-            maintenance_kind = self.kg_maintenance.active_kind(notebook_id)
-            if maintenance_kind is not None:
+            maintenance_busy = self.kg_maintenance.busy_refusal(notebook_id)
+            if maintenance_busy is not None:
                 with self.kg_building_lock:
                     self.kg_building.discard(notebook_id)
-                raise KgMaintenanceAlreadyRunning(notebook_id, maintenance_kind)
+                raise maintenance_busy
         try:
             return self._delete_notebook_kg_fenced(notebook_id)
         finally:
@@ -983,7 +986,7 @@ class KnowledgeLifecycleService:
         · The slot's claim ran ``_kg_build_active`` under
           ``kg_cross_admission_lock``, so no build/rebuild/indexing-pipeline
           job was admitted when it was taken; from then on
-          ``prepare_notebook_kg_job`` checks ``kg_maintenance.active_kind``
+          ``prepare_notebook_kg_job`` checks ``kg_maintenance.busy_refusal``
           under the SAME lock and refuses with holder ``"delete"``. Build
           admission is therefore excluded for this job's whole span exactly
           as the marker would exclude it.
@@ -3430,6 +3433,8 @@ class KnowledgeLifecycleService:
         latency_ms: int = 0,
     ) -> None:
         """Emit only the reviewed task metadata; never prompts or diagnostics."""
+        if kind in {"kg_build_succeeded", "kg_build_failed"}:
+            pulse_touch_for_job(self._collab_touch, job["notebook_id"], KG_BUILD_TERMINAL_PULSE_KINDS, job.get("created_by") or None)
         self.event_log.emit(
             {
                 "kind": kind,
@@ -3621,11 +3626,11 @@ class KnowledgeLifecycleService:
                 if notebook_id in self.kg_building:
                     raise KgBuildAlreadyRunning(notebook_id)
                 self.kg_building.add(notebook_id)
-            maintenance_kind = self.kg_maintenance.active_kind(notebook_id)
-            if maintenance_kind is not None:
+            maintenance_busy = self.kg_maintenance.busy_refusal(notebook_id)
+            if maintenance_busy is not None:
                 with self.kg_building_lock:
                     self.kg_building.discard(notebook_id)
-                raise KgMaintenanceAlreadyRunning(notebook_id, maintenance_kind)
+                raise maintenance_busy
         try:
             # target_limit/retry_partial 刻意不再下传(批 3·W4 T-W4-1):准入
             # 半程已不枚举目标,这两个参数只影响 worker 自己的计数与主循环,

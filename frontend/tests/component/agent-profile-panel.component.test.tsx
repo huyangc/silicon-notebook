@@ -9,7 +9,7 @@
 //   · 重新整理:点完立刻不可点并换成「整理中…」,解除**只认服务端证据**;
 //   · 409:后端那句人话原样上屏,并重取一次拿到新的 revision;
 //   · 总闸:关掉时入口按钮一个节点都不渲染。
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -940,6 +940,123 @@ function experienceCard(): HTMLElement {
   return screen.getByText("检索经验").closest("details") as HTMLElement;
 }
 
+test("检索经验：展开的卡片随协作提示刷新，折叠时保持懒读", async () => {
+  const user = userEvent.setup();
+  const { rerender } = render(<AgentProfilePanel notebookId="nb1" collabRevision={0} />);
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+  rerender(<AgentProfilePanel notebookId="nb1" collabRevision={1} />);
+  expect(mockFetchExperiences).not.toHaveBeenCalled();
+  await openExperiences(user);
+  await screen.findByText("型号写全了也常常查不到");
+  mockFetchExperiences.mockResolvedValue(experiences({ entries: [{ ...experiences().entries[0], rationale: "同事更新后的检索经验" }] }));
+  rerender(<AgentProfilePanel notebookId="nb1" collabRevision={2} />);
+  await screen.findByText("同事更新后的检索经验");
+  expect(mockFetchExperiences).toHaveBeenCalledTimes(2);
+  await user.click(screen.getByText("检索经验"));
+  await waitFor(() => expect(experienceCard()).not.toHaveAttribute("open"));
+  rerender(<AgentProfilePanel notebookId="nb1" collabRevision={3} />);
+  expect(mockFetchExperiences).toHaveBeenCalledTimes(2);
+});
+
+test("检索经验：清空确认期间保留本地动作，取消后可就地刷新", async () => {
+  const user = userEvent.setup();
+  const { rerender } = render(<AgentProfilePanel notebookId="nb1" collabRevision={0} />);
+  await openExperiences(user);
+  await screen.findByText("型号写全了也常常查不到");
+  await user.click(within(experienceCard()).getByRole("button", { name: "清空" }));
+  mockFetchExperiences.mockResolvedValue(experiences({ entries: [] }));
+  rerender(<AgentProfilePanel notebookId="nb1" collabRevision={1} />);
+  expect(within(experienceCard()).getByRole("button", { name: "确认清空" })).toBeVisible();
+  expect(mockFetchExperiences).toHaveBeenCalledTimes(1);
+  await user.click(within(experienceCard()).getByRole("button", { name: "取消" }));
+  expect(mockFetchExperiences).toHaveBeenCalledTimes(1);
+  await user.click(within(experienceCard()).getByRole("button", { name: "刷新" }));
+  await screen.findByText("还没有攒下经验，多提几次问题后再来看");
+  expect(mockClearExperiences).not.toHaveBeenCalled();
+});
+
+test("检索经验：协作读取期间开始的确认不会被晚到快照覆盖", async () => {
+  const user = userEvent.setup();
+  const { rerender } = render(<AgentProfilePanel notebookId="nb1" collabRevision={0} />);
+  await openExperiences(user);
+  await screen.findByText("型号写全了也常常查不到");
+  let release!: (next: ExperiencePartitionResponse) => void;
+  mockFetchExperiences.mockReturnValueOnce(new Promise((resolve) => { release = resolve; }));
+  rerender(<AgentProfilePanel notebookId="nb1" collabRevision={1} />);
+  await waitFor(() => expect(mockFetchExperiences).toHaveBeenCalledTimes(2));
+  await user.click(within(experienceCard()).getByRole("button", { name: "清空" }));
+  await act(async () => { release(experiences({ can_manage: false, entries: [] })); });
+  expect(within(experienceCard()).getByRole("button", { name: "确认清空" })).toBeVisible();
+  expect(screen.getByText("型号写全了也常常查不到")).toBeVisible();
+  expect(within(experienceCard()).getByRole("button", { name: "刷新" })).toBeVisible();
+});
+
+test.each(["success", "failure", "confirmation", "hidden"] as const)("检索经验：协作读取中收起再展开，旧回包不能代替本次展开的新读取（%s）", async (outcome) => {
+  const user = userEvent.setup();
+  const { rerender } = render(<AgentProfilePanel notebookId="nb1" collabRevision={0} />);
+  await openExperiences(user);
+  await screen.findByText("型号写全了也常常查不到");
+  let releaseOld!: (next: ExperiencePartitionResponse) => void;
+  let releaseFresh!: (next: ExperiencePartitionResponse) => void;
+  let failFresh!: (reason: Error) => void;
+  mockFetchExperiences
+    .mockReturnValueOnce(new Promise((resolve) => { releaseOld = resolve; }))
+    .mockReturnValueOnce(new Promise((resolve, reject) => { releaseFresh = resolve; failFresh = reject; }));
+  rerender(<AgentProfilePanel notebookId="nb1" collabRevision={1} />);
+  await waitFor(() => expect(mockFetchExperiences).toHaveBeenCalledTimes(2));
+  await user.click(screen.getByText("检索经验"));
+  await waitFor(() => expect(experienceCard()).not.toHaveAttribute("open"));
+  await user.click(screen.getByText("检索经验"));
+  await waitFor(() => expect(experienceCard()).toHaveAttribute("open"));
+  // Reopening queues a fresh read; it must not overlap the held network call.
+  expect(mockFetchExperiences).toHaveBeenCalledTimes(2);
+  if (outcome === "confirmation") await user.click(within(experienceCard()).getByRole("button", { name: "清空" }));
+  const visibility = outcome === "hidden" ? vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden") : null;
+  if (visibility) act(() => document.dispatchEvent(new Event("visibilitychange")));
+  await act(async () => {
+    releaseOld(experiences({ entries: [{ ...experiences().entries[0], rationale: "收起前的旧快照" }] }));
+  });
+  expect(screen.queryByText("收起前的旧快照")).toBeNull();
+  if (outcome === "confirmation") {
+    expect(mockFetchExperiences).toHaveBeenCalledTimes(2);
+    expect(within(experienceCard()).getByRole("button", { name: "确认清空" })).toBeVisible();
+    await user.click(within(experienceCard()).getByRole("button", { name: "取消" }));
+    expect(mockFetchExperiences).toHaveBeenCalledTimes(2);
+    await user.click(within(experienceCard()).getByRole("button", { name: "刷新" }));
+  }
+  if (visibility) {
+    expect(mockFetchExperiences).toHaveBeenCalledTimes(2);
+    visibility.mockReturnValue("visible");
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+  }
+  await waitFor(() => expect(mockFetchExperiences).toHaveBeenCalledTimes(3));
+  const fresh = experiences({ entries: [{ ...experiences().entries[0], rationale: "重新展开后的最新经验" }] });
+  if (outcome === "failure") {
+    await act(async () => { failFresh(new Error("temporary")); });
+    await screen.findByText("没能读到检索经验，请稍后重试");
+    expect(mockFetchExperiences).toHaveBeenCalledTimes(3);
+    mockFetchExperiences.mockResolvedValueOnce(fresh);
+    await user.click(within(experienceCard()).getByRole("button", { name: "刷新" }));
+  } else {
+    await act(async () => { releaseFresh(fresh); });
+  }
+  await screen.findByText("重新展开后的最新经验");
+  expect(within(experienceCard()).queryByRole("button", { name: "刷新" })).toBeNull();
+  visibility?.mockRestore();
+});
+
+test("检索经验：理解总闸关闭时，已展开的经验仍接收协作刷新", async () => {
+  mockFetch.mockResolvedValue(response({ enabled: false }));
+  const user = userEvent.setup();
+  const { rerender } = render(<AgentProfilePanel notebookId="nb1" collabRevision={0} />);
+  await user.click(await screen.findByText("检索经验"));
+  await screen.findByText("型号写全了也常常查不到");
+  mockFetchExperiences.mockResolvedValue(experiences({ entries: [] }));
+  rerender(<AgentProfilePanel notebookId="nb1" collabRevision={1} />);
+  await screen.findByText("还没有攒下经验，多提几次问题后再来看");
+  expect(mockFetchExperiences).toHaveBeenCalledTimes(2);
+});
+
 test("检索经验：折叠面板默认收起，展开前一次请求都不发", async () => {
   render(<AgentProfilePanel notebookId="nb1" />);
   await screen.findByRole("heading", { name: "AI 对这个库的理解" });
@@ -1275,4 +1392,49 @@ test("Agent 记录：调用取满上限时提示还有更早的没显示", async
   await user.click(screen.getByText("Agent 记录"));
 
   expect(await screen.findByText("仅显示最近 20 次")).toBeInTheDocument();
+});
+
+test("协作刷新保留理解草稿，保存结束后才按就地请求读取新版本", async () => {
+  const user = userEvent.setup();
+  const { rerender } = render(<AgentProfilePanel notebookId="nb1" collabRevision={0} />);
+  const input = await screen.findByRole("textbox", { name: "这个库大致是什么" });
+  fireEvent.change(input, { target: { value: "我的未保存描述" } });
+  rerender(<AgentProfilePanel notebookId="nb1" collabRevision={1} />);
+  expect(screen.getByText(/有新的改动/)).toBeVisible();
+  expect(mockFetch).toHaveBeenCalledTimes(1);
+  expect(input).toHaveValue("我的未保存描述");
+  mockFetch.mockResolvedValue(response({ base: [block("corpus_shape", "我的未保存描述", 5)] }));
+  await user.click(within(input.closest(".item")!).getByRole("button", { name: "保存" }));
+  await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
+  mockFetch.mockResolvedValue(response({ base: [block("corpus_shape", "同事补充的新版描述", 6)] }));
+  await user.click(screen.getByRole("button", { name: "刷新" }));
+  await waitFor(() => expect(input).toHaveValue("同事补充的新版描述"));
+  expect(screen.getByText("已刷新")).toBeVisible();
+});
+
+test("协作新快照落定后，迟到的首次理解读取不能覆盖它", async () => {
+  let releaseInitial!: (value: UnderstandingResponse) => void;
+  mockFetch.mockReturnValueOnce(new Promise((resolve) => { releaseInitial = resolve; }));
+  const { rerender } = render(<AgentProfilePanel notebookId="nb1" collabRevision={0} />);
+  await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+  mockFetch.mockResolvedValue(response({ base: [block("corpus_shape", "最新协作描述", 9)] }));
+  rerender(<AgentProfilePanel notebookId="nb1" collabRevision={1} />);
+  const input = await screen.findByRole("textbox", { name: "这个库大致是什么" });
+  expect(input).toHaveValue("最新协作描述");
+  await act(async () => { releaseInitial(response({ base: [block("corpus_shape", "迟到旧描述", 4)] })); });
+  expect(input).toHaveValue("最新协作描述");
+});
+
+test("理解面板在飞读取期间收到下一版协作信号时会继续读取最新快照", async () => {
+  const { rerender } = render(<AgentProfilePanel notebookId="nb1" collabRevision={0} />);
+  await screen.findByRole("textbox", { name: "这个库大致是什么" });
+  let releaseFirst!: (value: UnderstandingResponse) => void;
+  mockFetch.mockReturnValueOnce(new Promise((resolve) => { releaseFirst = resolve; }));
+  rerender(<AgentProfilePanel notebookId="nb1" collabRevision={1} />);
+  await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
+  mockFetch.mockResolvedValue(response({ base: [block("corpus_shape", "第二版协作描述", 6)] }));
+  rerender(<AgentProfilePanel notebookId="nb1" collabRevision={2} />);
+  await act(async () => { releaseFirst(response({ base: [block("corpus_shape", "第一版协作描述", 5)] })); });
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "这个库大致是什么" })).toHaveValue("第二版协作描述"));
+  expect(mockFetch).toHaveBeenCalledTimes(3);
 });

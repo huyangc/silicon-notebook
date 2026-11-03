@@ -209,6 +209,8 @@ export function KgAnalysisView({
   notebookId,
   onClose,
   canAnalyze = false,
+  canDeleteAnySource = true,
+  relinkBusyNotice = "",
   analysisRunning = false,
   analysisBlocked = false,
   dataInvalidating = false,
@@ -231,6 +233,11 @@ export function KgAnalysisView({
    * 按钮都没有(设计 §3.4)。
    */
   canAnalyze?: boolean;
+  /** 能删任何人上传的来源(库主与管理者)。false = 点名编辑者:问题上的「删除来源…」只对准本人
+   *  上传的来源(决策 D14)。缺省 true = 本字段出现之前的行为。 */
+  canDeleteAnySource?: boolean;
+  /** 「补上关联」被占用时服务端点名的说明(D8),画在问题上那颗「补上关联」旁;空串 = 没有。 */
+  relinkBusyNotice?: string;
   analysisRunning?: boolean;
   analysisBlocked?: boolean;
   /**
@@ -533,12 +540,14 @@ export function KgAnalysisView({
 
   const actionState: KgFindingsActionState = {
     canWrite: canAnalyze,
+    canDeleteAnySource,
     deletingSourceIds,
     reparsingSourceIds,
     relinking,
     // 补上关联与重新合并 / 整理 / 删除知识图谱共用一个维护槽(`analysisBlocked` 里含 relinking,
     // 那一档由 `relinking` 自己说「补连中…」)。
     maintenanceBusy: analysisRunning || analysisBlocked,
+    relinkBusyNotice,
     pendingMerges,
   };
 

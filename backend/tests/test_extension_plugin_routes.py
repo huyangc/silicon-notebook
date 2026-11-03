@@ -1208,15 +1208,9 @@ def test_notebook_gate_set_is_derived_from_the_capability_table():
     set than the capability table's own would fail here rather than at some
     future plugin's mount.
 
-    Since the target-end write fence (docs/incremental-sync-design.md section 5)
-    the set is no longer just three objects: a fenced capability resolves to its
-    own per-capability wrapper (level guard first, then the mirror check), so the
-    expected set is "one object per fenced capability, plus the two bare level
-    guards the unfenced ones still resolve to, plus read". Built here from the
-    same two tables rather than hard-coded, because hard-coding it would mean
-    editing this test on every future capability — but pinned by the three
-    structural assertions below, so a derivation that collapsed to a single
-    shared object, or that quietly dropped the level guards, still fails.
+    Every capability has its own stable wrapper, including capabilities with
+    no mirror fence. Mount admission must recognize all these identities and
+    the read guard; bare level guards no longer identify a capability.
     """
 
     from app.api import deps
@@ -1229,15 +1223,8 @@ def test_notebook_gate_set_is_derived_from_the_capability_table():
     } | {deps.require_notebook_read}
     assert gates == expected
 
-    fenced = {c for c, on in deps._CAPABILITY_MIRROR_FENCE.items() if on}
-    unfenced = set(deps._CAPABILITY_LEVELS) - fenced
-    # Unfenced capabilities still resolve to the bare level guards themselves.
-    assert {deps.require_notebook_write, deps.require_notebook_admin} <= gates
-    # Every fenced capability contributes its OWN distinct wrapper — one shared
-    # wrapper would make a per-capability fence unimplementable.
-    assert len(gates) == len(fenced) + len(
-        {deps._CAPABILITY_LEVELS[c] for c in unfenced}
-    ) + 1
+    assert not {deps.require_notebook_write, deps.require_notebook_admin, deps.require_notebook_edit} & gates
+    assert len(gates) == len(deps._CAPABILITY_LEVELS) + 1
     assert deps.require_notebook_read in gates
 
 

@@ -1111,21 +1111,40 @@ def test_group_partition_query_is_bounded_by_my_memberships(repo):
         def fetchall() -> list:
             return []
 
-    capture = _SqlCapture()
-    QueryStore.granted_notebook_rows(capture, "u")
+    # 分享编辑 P1:查询是 `group 分支 UNION ALL 点名(user)分支`。两个 compound 分支
+    # 各自定位(EXPLAIN 的 LEFT / RIGHT 段),列表与点查两种形态都钉。
+    def branches(notebook_id):
+        capture = _SqlCapture()
+        QueryStore.granted_notebook_rows(capture, "u", notebook_id)
+        with repo._connect() as db:
+            plan = [
+                row["detail"]
+                for row in db.execute(
+                    "EXPLAIN QUERY PLAN " + capture.sql, capture.params
+                )
+            ]
+        assert plan[:2] == ["MERGE (UNION ALL)", "LEFT"], plan
+        right = plan.index("RIGHT")
+        searches = lambda part: [step for step in part if step.startswith("SEARCH")]  # noqa: E731
+        assert not any("SCAN" in step for step in plan), plan
+        return searches(plan[2:right]), searches(plan[right + 1:]), plan
 
-    with repo._connect() as db:
-        plan = [
-            row["detail"]
-            for row in db.execute("EXPLAIN QUERY PLAN " + capture.sql, capture.params)
-        ]
-
-    assert plan[0] == "SEARCH gm USING INDEX idx_group_members_user (user_id=?)", plan
+    group, named, plan = branches(None)
+    assert group[0] == "SEARCH gm USING INDEX idx_group_members_user (user_id=?)", plan
     assert any(
         "idx_notebook_grants_principal (principal_type=? AND principal_id=?)" in step
-        for step in plan
+        for step in group
     ), plan
-    assert not any("SCAN" in step for step in plan), plan
+    assert named[0] == (
+        "SEARCH ng USING INDEX idx_notebook_grants_principal "
+        "(principal_type=? AND principal_id=?)"
+    ), plan
+
+    group, named, plan = branches("nb-point")
+    assert group[0] == "SEARCH gm USING INDEX idx_group_members_user (user_id=?)", plan
+    assert named[0].startswith("SEARCH ng USING INDEX") and (
+        "principal_type=? AND principal_id=?" in named[0]
+    ), plan
 
 
 # ------------------------------------------------- 系统管理员运维旁路(裁决 A)
@@ -2027,12 +2046,13 @@ def test_can_manage_content_matches_the_authoritative_predicate(tmp_path, monkey
 
 
 def test_grantable_principal_types_stay_the_two_group_subjects(tmp_path, monkeypatch):
-    """`can_manage_content` 的派生前提:授权边只能经**两个群组主体**发放。
+    """群组授权边端点只收**两个群组主体**(决策 D4:`GRANT_ROLES` 与主体白名单不动)。
 
-    列表投影(`granted_notebook_rows`)只覆盖 `group` / `group_admins`,而后端的管理权
-    谓词是四臂全收。两者今天等价**只因为**这份白名单——`user` / `everyone` 的边根本
-    没有写入口,更不可能带 `role='admin'`。真要给 `user` 主体开写入口,这条守卫会先红,
-    提醒把那份投影一并扩掉(否则新主体的管理边在界面上完全不可见)。
+    分享编辑 P1 之后,`user` 主体的边**有了**自己的写入口(点名共享,只发 `editor`),
+    列表投影也随之加了点名分支(`granted_notebook_rows` 的 UNION ALL,用例见
+    `test_notebook_editor_projection.py`)——所以这条守卫不再是「投影只覆盖群组」的
+    前提,它钉的是另一件事:`/grants` 这个端点本身仍然只发群组边,点名边与 everyone
+    边都发不出来。
     """
     from app.models.groups import GRANTABLE_PRINCIPAL_TYPES
     from app.repositories.group_rows import GROUP_PRINCIPAL_TYPES

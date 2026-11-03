@@ -220,6 +220,8 @@ export function KgGraphView({
   kgGraph: Pick<
     KgWorkspace["graph"],
     | "buildingKg"
+    | "busyNotice"
+    | "busyNoticeAction"
     | "conceptDetail"
     | "conceptDetailGeneration"
     | "conceptMembersExhausted"
@@ -330,6 +332,9 @@ export function KgGraphView({
           {kgGraph.buildingKg ? "整理中…" : "整理知识图谱"}
         </button>
         后会显示在这里。
+        {kgGraph.busyNoticeAction === "build" && (
+          <span className="kg-busy-notice" role="status"> {kgGraph.busyNotice}</span>
+        )}
       </>
     );
   const [mergeFocus, setMergeFocus] = useState<{ id: string; seq: number } | null>(null);
@@ -464,6 +469,14 @@ export function KgGraphView({
                 }}
               >
                 {kgGraph.deleteResult.text}
+              </p>
+            )}
+            {/* 「补上关联 / 重新合并 / 全部重新分析」被占用(D8,服务端 409 点名发起人):原因
+                画在这一组按钮下,自带计时消失(use-kg-graph 的 busyNotice),不走顶部状态条。 */}
+            {(kgGraph.busyNoticeAction === "relink" || kgGraph.busyNoticeAction === "merge"
+              || kgGraph.busyNoticeAction === "rebuild_all") && (
+              <p className="tool-hint kg-busy-notice" role="status" style={{ margin: "0 2px" }}>
+                {kgGraph.busyNotice}
               </p>
             )}
           </div>

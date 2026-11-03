@@ -93,6 +93,7 @@ const HOOK_ROOTS = new Set([
   "reportWorkspace",
   "sourceLibrary",
   "workspaceExtensions",
+  "collabPulse",
 ]);
 
 // 每个 hook 各自的合法命名空间级解构键——键的值本身是一层命名空间状态对象

@@ -471,6 +471,32 @@ def test_admin_grant_role_literal_agrees_across_its_three_spellings():
         )
 
 
+def test_edit_role_literals_agree():
+    """编辑级的 role 集合在三处独立出现(分享编辑 P1):`group_rows.EDIT_GRANT_ROLES`
+    (行整形)、`COLLABORATOR_ROLE`(点名写入口的角色)、两份 `access_sql` 的编辑级
+    主体判定(SQL 文本)。改一处漏一处的表现是「写入口发出了这个 role,谓词认不出」,
+    不报错、只是编辑权静默失效。另钉:编辑级 ⊇ 管理级(管理字面量在集合里),而
+    `editor` 不是群组授权边能发的角色(决策 D4:`GRANT_ROLES` 不动)。"""
+    from app.models.groups import GRANT_ROLES
+    from app.repositories.group_rows import (
+        ADMIN_GRANT_ROLE,
+        COLLABORATOR_ROLE,
+        EDIT_GRANT_ROLES,
+    )
+    from app.repositories.postgres import access_sql as pg
+
+    assert ADMIN_GRANT_ROLE in EDIT_GRANT_ROLES
+    assert COLLABORATOR_ROLE in EDIT_GRANT_ROLES
+    assert COLLABORATOR_ROLE not in GRANT_ROLES
+    literal = "ng.role IN (" + ",".join(f"'{role}'" for role in EDIT_GRANT_ROLES) + ")"
+    for mod in (access_sql, pg):
+        assert literal in mod.NOTEBOOK_EDIT_SQL, mod.__name__
+        assert "everyone" not in mod.edit_access_clause(), mod.__name__
+        # 管理权、写权、读权一个字都没有认 editor(回滚降级的前提)
+        for name in ("NOTEBOOK_ADMIN_SQL", "NOTEBOOK_WRITE_SQL", "NOTEBOOK_READ_SQL"):
+            assert COLLABORATOR_ROLE not in getattr(mod, name), (mod.__name__, name)
+
+
 def test_predicate_follows_membership_changes(world):
     """读权是实时判定而非一次性授予:踢掉成员即刻失读权,写权全程为假。"""
     repo, notebook, member = world["repo"], world["notebook"], world["member"]
@@ -859,6 +885,18 @@ _CALLABLE_PROBES = {
     ),
     "read_access_clause": lambda mod: mod.read_access_clause(),
     "admin_access_clause": lambda mod: mod.admin_access_clause(),
+    # 分享编辑 P1:编辑级授权边、编辑权子句、「删掉某条边之后的读权」子句。
+    "edit_grant_access_expr": lambda mod: mod.edit_grant_access_expr(
+        "outer.notebook_id", "outer.user_id"
+    ),
+    "edit_access_clause": lambda mod: mod.edit_access_clause(),
+    "read_access_except_grant_clause": lambda mod: mod.read_access_except_grant_clause(),
+    "edit_access_params": lambda mod: repr(mod.edit_access_params("U")),
+    "access_level_params": lambda mod: repr(mod.access_level_params("N", "U")),
+    "collab_pulse_wanted_params": lambda mod: repr(mod.collab_pulse_wanted_params("N", "U")),
+    "read_except_grant_params": lambda mod: repr(
+        mod.read_except_grant_params("N", "U", "G")
+    ),
     "read_access_exists_clause": lambda mod: mod.read_access_exists_clause("m"),
     "live_read_access_exists_clause": lambda mod: mod.live_read_access_exists_clause(
         "m"
@@ -995,6 +1033,16 @@ def test_placeholder_styles_are_not_cross_contaminated():
         )
 
 
+def test_collab_pulse_parameter_order_and_count_match_both_sql_templates():
+    from app.repositories.postgres import access_sql as pg
+
+    for module, placeholder in ((access_sql, "?"), (pg, "%s")):
+        parameters = module.collab_pulse_wanted_params("notebook", "user")
+        assert len(parameters) == module.NOTEBOOK_COLLAB_PULSE_WANTED_SQL.count(placeholder)
+        assert parameters[0] == "notebook"
+        assert set(parameters[1:]) == {"user"}
+
+
 # ---------------------------------------------------------------------------
 # 结构性守卫:谓词不许离开唯一定义点
 # ---------------------------------------------------------------------------
@@ -1092,6 +1140,8 @@ def test_two_step_locked_sites_stay_pinned():
     )
     # `{live}` 是 `_lock_memory_aggregate_on(require_live=True)` 追加的存活谓词
     # (K3:Memory 的修订写在非存活库里写前拒绝),站点数不变。
+    # 系统建议写事务的读权复核(`_lock_suggestion_scope_on`)走
+    # `read_authority_lock.lock_live_reader_on`,不是分段式站点。
     assert len(re.findall(
         r"SELECTcreated_byFROMnotebooksWHEREid=%s(?:\{live\})?FORSHARE", pg_store
     )) == 3, (

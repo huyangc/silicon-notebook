@@ -54,6 +54,7 @@ from app.repositories.postgres.memory_sql import (
     memory_derived_relation,
     no_memory_member_cluster,
     own_memory_source,
+    unadopted_suggestion,
 )
 from app.repositories.postgres.id_binding import bind_ids, execute_ids, member_of
 from app.repositories.postgres.mount_sql import (
@@ -832,18 +833,27 @@ class QueryStore:
           (principal_type = ANY(...) AND principal_id = g.id)` 逐个点查,2000 条边
           里只碰 2 条。SQLite 那侧需要提示,是因为它的 planner 在没有 ANALYZE 时按
           固定启发式估价,会误选 `notebook_grants` 当驱动表。
+
+        分享编辑 P1 加了 `UNION ALL` 之后的点名(`user` 主体)分支。排序写在 compound
+        之后、按结果列名,**不带** `COLLATE "C"`(UNION 之后的 ORDER BY 加 COLLATE 是
+        非法 SQL):`nb.id` 在 schema 里本来就是 `COLLATE "C"`(0001),组 id 同样
+        (0027),点名分支的 NULL 组列显式标成 `COLLATE "C"`,两个分支的排序规则一致,
+        由列定义承担。`NULLS FIRST` 显式写出,与 SQLite 的默认对齐。
         """
         # 点查子句在 `db.execute(` 之前算好 —— 与 SQLite 侧同一形态,理由见那一份。
         point_filter = "" if notebook_id is None else "AND ng.notebook_id = %s "
         params = (user_id,) if notebook_id is None else (user_id, notebook_id)
-        return _compat_notebook_rows(db.execute(
-            "SELECT nb.*, u.username AS _owner_username, "
-            "g.id AS _group_id, g.name AS _group_name, g.kind AS _group_kind, "
-            "ng.role AS _grant_role,"
+        pipeline = (
             "COALESCE(ip.indexing_pipeline_id,'') AS _published_pipeline_id,"
             "COALESCE(ip.indexing_pipeline_version,'builtin.chunk.v1') "
             "AS _published_pipeline_version "
-            "FROM group_members gm "
+        )
+        return _compat_notebook_rows(db.execute(
+            "SELECT nb.*, u.username AS _owner_username, "
+            "g.id AS _group_id, g.name AS _group_name, g.kind AS _group_kind, "
+            "ng.role AS _grant_role, ng.principal_type AS _grant_principal_type,"
+            + pipeline
+            + "FROM group_members gm "
             "JOIN notebook_grants ng ON ng.principal_id = gm.group_id "
             "AND ng.principal_type IN ('group', 'group_admins') "
             "JOIN groups g ON g.id = gm.group_id "
@@ -853,8 +863,20 @@ class QueryStore:
             "WHERE gm.user_id = %s " + point_filter
             + "AND (ng.principal_type = 'group' OR gm.role = 'admin') "
             f"AND nb.{access_sql.NOTEBOOK_LIVE_SQL} "
-            'ORDER BY nb.created_at ASC, nb.id COLLATE "C" ASC, g.id COLLATE "C" ASC',
-            params,
+            "UNION ALL "
+            "SELECT nb.*, u.username AS _owner_username, "
+            'CAST(NULL AS text) COLLATE "C" AS _group_id, '
+            "CAST(NULL AS text) AS _group_name, CAST(NULL AS text) AS _group_kind, "
+            "ng.role AS _grant_role, ng.principal_type AS _grant_principal_type,"
+            + pipeline
+            + "FROM notebook_grants ng "
+            "JOIN notebooks nb ON nb.id = ng.notebook_id "
+            "LEFT JOIN users u ON u.id = nb.created_by "
+            "LEFT JOIN unified_kg_state ip ON ip.notebook_id=nb.id "
+            "WHERE ng.principal_type = 'user' AND ng.principal_id = %s " + point_filter
+            + f"AND nb.{access_sql.NOTEBOOK_LIVE_SQL} "
+            "ORDER BY created_at ASC, id ASC, _group_id ASC NULLS FIRST",
+            params + params,
         ).fetchall())
 
     @staticmethod
@@ -866,11 +888,26 @@ class QueryStore:
         Memory is private to ``created_by`` even when the notebook is shared;
         grouping by both privacy key and notebook id makes that scope explicit
         and avoids a per-card query.
+
+        "Your memories" leave out the unadopted system suggestions (design
+        §6.3): the original grouped count (``al``, the pre-suggestion
+        statement verbatim, through ``idx_memory_owner_notebook_status``)
+        LEFT JOIN the grouped unadopted count (``dr``, through the partial
+        ``idx_memory_suggest_unadopted``), subtracted and floored at 0 in the
+        same statement. Never two reads: between them an adoption or a
+        dismissal would make the difference short-lived negative or miss it.
         """
         rows = db.execute(
+            "SELECT al.created_by, al.notebook_id, "
+            "GREATEST(0, al.c - COALESCE(dr.c, 0)) AS c FROM ("
             "SELECT created_by, notebook_id, COUNT(*) AS c FROM memory_items "
-            "WHERE created_by=%s GROUP BY created_by, notebook_id",
-            (user_id,),
+            "WHERE created_by=%s GROUP BY created_by, notebook_id) al "
+            "LEFT JOIN (SELECT us.created_by, us.notebook_id, COUNT(*) AS c "
+            "FROM memory_items us WHERE us.created_by=%s "
+            f"AND {unadopted_suggestion('us')} "
+            "GROUP BY us.created_by, us.notebook_id) dr "
+            "ON dr.created_by=al.created_by AND dr.notebook_id=al.notebook_id",
+            (user_id, user_id),
         ).fetchall()
         return {
             (row["created_by"], row["notebook_id"]): int(row["c"])
@@ -1062,14 +1099,23 @@ class QueryStore:
             # 列表)同一条 live 过滤,避免 deleting 过渡态下这块摘要与下方笔记本明细
             # 表同屏数字不一致;`groups` 没有笔记本维度,不加。
             # memory_count 排除 status='rejected'——被拒绝的候选不代表用户采纳了
-            # Memory 机制。
+            # Memory 机制;系统建议同理(设计 §6.3):再减去未采纳且仍是 candidate 的
+            # 建议(rejected 的本来就不在原计数里)。原计数 `al` 是改前语句原样,
+            # 减项 `dr` 走部分索引(idx_memory_suggest_unadopted,或更小的 idx_memory_suggest_expiry),同一条语句内相减
+            # 并兜底 0(不分两次读)。
             memory_count = {
                 row["k"]: row["c"]
                 for row in db.execute(
+                    "SELECT al.k, GREATEST(0, al.c - COALESCE(dr.c, 0)) AS c FROM ("
                     "SELECT mi.created_by AS k,COUNT(*) AS c FROM memory_items mi "
                     "JOIN notebooks nb ON nb.id=mi.notebook_id "
                     f"WHERE mi.status<>'rejected' AND nb.{access_sql.NOTEBOOK_LIVE_SQL} "
-                    "GROUP BY mi.created_by"
+                    "GROUP BY mi.created_by) al "
+                    "LEFT JOIN (SELECT mi.created_by AS k,COUNT(*) AS c "
+                    "FROM memory_items mi JOIN notebooks nb ON nb.id=mi.notebook_id "
+                    f"WHERE {unadopted_suggestion('mi')} AND mi.status='candidate' "
+                    f"AND nb.{access_sql.NOTEBOOK_LIVE_SQL} "
+                    "GROUP BY mi.created_by) dr ON dr.k=al.k"
                 ).fetchall()
             }
             # knowhow_tables.created_by 早期/异常写入可能留空,同 kg_builds 排除空串。
@@ -2156,18 +2202,27 @@ class QueryStore:
         (``delete_after > $now`` is that index's own key range), so with no
         notebook inside a window the statement reads an empty index (plan
         pinned in ``tests/postgres/test_notebook_delete_grace_plans_pg.py``)."""
-        params: list[Any] = [user_id, user_id, user_id, utc_instant(now)]
+        # Four ``%s`` in the select list (is_owner, the two memory_count
+        # subqueries, transferable_count), then the window instant.
+        params: list[Any] = [user_id] * 4 + [utc_instant(now)]
         where = [
             access_sql.notebook_delete_window_open_sql("nb"),
             access_sql.read_access_clause("nb", "nm"),
         ]
         params.extend(access_sql.read_access_params(user_id))
         if notebook_id is None:
+            # "Holds memory there" = more rows than unadopted system suggestions
+            # (design §6.3): a reader with only drafts has nothing to export or
+            # move, so gets no notice. Two counts bound to this (user, notebook),
+            # in this statement, through idx_memory_owner_notebook_status and the
+            # partial idx_memory_suggest_unadopted.
             where.append(
-                "(nb.created_by = %s OR EXISTS (SELECT 1 FROM memory_items om "
-                "WHERE om.created_by = %s AND om.notebook_id = nb.id))"
+                "(nb.created_by = %s OR (SELECT COUNT(*) FROM memory_items om "
+                "WHERE om.created_by = %s AND om.notebook_id = nb.id) > "
+                "(SELECT COUNT(*) FROM memory_items ou WHERE ou.created_by = %s "
+                f"AND ou.notebook_id = nb.id AND {unadopted_suggestion('ou')}))"
             )
-            params.extend((user_id, user_id))
+            params.extend((user_id, user_id, user_id))
         else:
             where.append("nb.id = %s")
             params.append(notebook_id)
@@ -2176,8 +2231,10 @@ class QueryStore:
                 "SELECT nb.id AS notebook_id, nb.name AS name, "
                 "nb.delete_after AS delete_after, "
                 "(nb.created_by = %s) AS is_owner, "
-                "(SELECT COUNT(*) FROM memory_items m WHERE m.created_by = %s "
-                "AND m.notebook_id = nb.id) AS memory_count, "
+                "GREATEST(0, (SELECT COUNT(*) FROM memory_items m WHERE m.created_by = %s "
+                "AND m.notebook_id = nb.id) - (SELECT COUNT(*) FROM memory_items u "
+                "WHERE u.created_by = %s AND u.notebook_id = nb.id "
+                f"AND {unadopted_suggestion('u')})) AS memory_count, "
                 "(SELECT COUNT(*) FROM memory_items m WHERE m.created_by = %s "
                 "AND m.notebook_id = nb.id AND m.status = 'confirmed' "
                 "AND m.promotion_state <> 'proposed') AS transferable_count "

@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
+
+from app.domain.memory_suggest_contracts import MemoryMode
 
 # Closed value domains for the per-user search/answer style preference
 # document. They LIVE here (the models layer) rather than in
@@ -24,6 +26,9 @@ SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS = 32
 
 
 class UserProfile(BaseModel):
+    # Only the async authentication dependency may certify a freshly read mode.
+    # Never serialized, accepted from a request, or projected to the SDK.
+    _memory_mode_epoch: int | None = PrivateAttr(default=None)
     id: str
     email: str
     display_name: str
@@ -47,6 +52,31 @@ class UiModeUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ui_mode: Literal["auto", "advanced"]
+
+
+class MemoryModeUpdate(BaseModel):
+    """``PATCH /me/memory-mode`` request body (auto user-memory, plan G14).
+
+    ``memory_mode`` is validated as a Literal here only — ``UserProfile.
+    memory_mode`` stays ``str`` and the stores fold unknown stored values to
+    ``manual`` (G27). ``delete_unadopted`` is honoured only when switching to
+    ``manual``: it deletes the user's suggestions still waiting for review
+    (``candidate``), never the dismissed or expired ones.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    memory_mode: MemoryMode
+    delete_unadopted: bool = False
+
+
+class MemoryModeResponse(BaseModel):
+    """``PATCH /me/memory-mode`` 200: the caller's profile with the mode now
+    stored, and how many suggestions still waiting for review this request
+    deleted (0 unless ``delete_unadopted`` was set while turning off)."""
+
+    user: UserProfile
+    deleted_suggestion_count: int = 0
 
 
 #: Wire-level Literal restatements of search_profile.py's closed value

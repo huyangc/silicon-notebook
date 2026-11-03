@@ -40,6 +40,13 @@ def test_the_world_snapshot_matches_the_sqlite_fixture(postgres_repository):
     assert world_snapshot(postgres_repository, notebook_id) == expected
 
 
+def test_live_sources_carry_uploaded_by_me_on_postgres(postgres_repository):
+    """Share-edit P1 (D14), PostgreSQL form of the SQLite case (same checks)."""
+    from tests.kg_findings_world import check_uploaded_by_me
+
+    check_uploaded_by_me(postgres_repository, _built(postgres_repository), postgres=True)
+
+
 def _status(repository, notebook_id, zone="open") -> dict:
     page = repository._runtime.kg_analysis.findings_page(notebook_id, zone=zone)
     return {(r["rule_id"], r["subject"]["key"]): (r["status"], r["handled_reason"])

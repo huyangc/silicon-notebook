@@ -17,10 +17,13 @@
 不到组成员就判假,见 `test_deleting_the_group_cascades_membership_and_revokes_access`),
 但共享管理列表会永远挂着一条指向已不存在的组的边。
 
-⚠ 本模块**不含**任何授权判定谓词:「谁能读这个 notebook」的唯一定义点是
+⚠ 本模块**不定义**任何授权判定谓词:「谁能读这个 notebook」的唯一定义点是
 `access_sql.py`,这里只做 CRUD 与按主体 id 的直查。唯一一处形似判定的是
 `granted_notebook_rows`(在 `query_store.py`,不在这里)——那是**列表投影**而不是
-判定,与 `joined_notebook_rows` 同一类,理由写在它自己的 docstring 里。
+判定,与 `joined_notebook_rows` 同一类,理由写在它自己的 docstring 里。唯一一处
+**引用**读权谓词的是 `_clear_suggest_jobs_without_read_on`:授权边/成员行变更之后、
+同一写事务内,删掉不再能读受影响笔记本的人的自动记忆建议 job 行(计划 G17),
+谓词原样取自 `access_sql.read_access_clause`,不在这里另写。
 
 **双后端同修**:`postgres/group_store.py` 是本文件的镜像,方法名、边界与返回形状
 必须逐条对应。
@@ -28,7 +31,7 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Callable
+from typing import Any, Callable
 
 from app.repositories.group_rows import (
     assert_share_request_decided_at,
@@ -36,6 +39,7 @@ from app.repositories.group_rows import (
     resolve_grant_principal,
 )
 from app.repositories.ports import (
+    CollaboratorTargetInvalid,
     GroupAdminRequiredError,
     GroupAdminShouldShareDirectlyError,
     GroupGrantAlreadyExists,
@@ -45,12 +49,13 @@ from app.repositories.ports import (
     GroupOwnerRequiredError,
     GroupOwnerTransferTargetError,
     LastGroupAdminError,
-    ShareRequestAlreadyPendingError,
+    NotebookIsPublicLibrary,
     NotebookManageRequiredError,
     NotebookNotFoundError,
-    ShareRequestNotPendingError,
-    ShareRequestNotebookNotLiveError,
+    ShareRequestAlreadyPendingError,
     ShareRequesterUnauthorizedError,
+    ShareRequestNotebookNotLiveError,
+    ShareRequestNotPendingError,
 )
 from app.repositories.sqlite.access_sql import (
     ADMIN_GRANT_PROBE_SQL,
@@ -60,7 +65,8 @@ from app.repositories.sqlite.access_sql import (
     read_access_params,
 )
 from app.repositories.sqlite.database import SqliteDatabase
-
+from app.repositories.sqlite.id_binding import bind_ids, drive_by
+from app.repositories.sqlite.memory_suggest_read_period import readers_before_loss_on, record_read_loss_on
 
 # 一条授权边 + 它的群组主体名字(仅群组主体有值)。LEFT JOIN 的 ON 条件里带
 # `principal_type IN (...)` 是**纵深防御**:今天的 id 都带前缀(`user-…` / `grp-…`),
@@ -137,6 +143,75 @@ _MY_PENDING_SHARE_REQUEST_SELECT = (
     "LEFT JOIN groups g ON g.id = sr.group_id "
     "LEFT JOIN users u ON u.id = sr.requested_by "
 )
+
+
+# 点名授权边(user 主体)连被授权人与授予人的名字(分享编辑 P1)。两个 LEFT JOIN:
+# 账号被删时行仍在,名字回落到 id。
+_USER_GRANT_SELECT = (
+    "SELECT ng.id AS id, ng.notebook_id AS notebook_id, ng.principal_id AS user_id, "
+    "ng.role AS role, ng.created_by AS created_by, ng.created_at AS created_at, "
+    "u.username AS username, u.display_name AS display_name, "
+    "gb.username AS granted_by_username "
+    "FROM notebook_grants ng "
+    "LEFT JOIN users u ON u.id=ng.principal_id "
+    "LEFT JOIN users gb ON gb.id=ng.created_by "
+)
+_USER_GRANT_ORDER = "ORDER BY ng.created_at ASC, ng.id ASC"
+
+
+def _user_grant_row(row) -> dict:
+    return {
+        "id": row["id"],
+        "notebook_id": row["notebook_id"],
+        "user_id": row["user_id"],
+        "username": row["username"] or row["user_id"],
+        "display_name": row["display_name"] or "",
+        "role": row["role"],
+        "granted_by": row["created_by"] or "",
+        "granted_by_username": row["granted_by_username"] or (row["created_by"] or ""),
+        "created_at": row["created_at"],
+    }
+
+
+def _clear_suggest_jobs_without_read_on(connection: Any, notebook_ids: Any, *, readers=(), now=None) -> None:
+    """Delete the auto-memory suggestion job rows (``memory_suggest_jobs``) in
+    ``notebook_ids`` whose owner can no longer read that notebook, inside the
+    caller's write transaction and AFTER its grant/membership change, so the
+    ``NOT EXISTS`` judges the read access that change left (plan G17). A job
+    row's lifetime is its sampling window: deleting it on every loss of read
+    access means a re-granted reader starts from a new window and nothing
+    asked before is ever sampled. The read predicate is the shared
+    ``read_access_clause`` with the owner column as its user reference."""
+    ids = sorted({str(notebook_id) for notebook_id in notebook_ids if notebook_id})
+    if not ids:
+        return
+    if readers:
+        record_read_loss_on(connection, readers, now=now)
+    bound = bind_ids(ids)
+    readable = read_access_clause("nb", "nm", user_ref="memory_suggest_jobs.owner_id")
+    # ``drive_by``: the affected notebooks are a handful (one notebook, or the
+    # notebooks one group's grants reach) while the job table holds a row per
+    # (reader, notebook) across the deployment -- one primary-key seek per
+    # notebook id, then the read predicate per row found, never a table scan.
+    connection.execute(
+        "DELETE FROM memory_suggest_jobs WHERE "
+        f"{drive_by('memory_suggest_jobs.notebook_id', bound)} AND NOT EXISTS ("
+        "SELECT 1 FROM notebooks nb WHERE nb.id = memory_suggest_jobs.notebook_id "
+        f"AND {readable})",
+        (bound.param,),
+    )
+
+
+def _group_grant_notebooks_on(connection: Any, group_id: str, principal_types: str) -> list[str]:
+    """The notebooks holding a grant of ``principal_types`` to ``group_id``."""
+    return [
+        str(row["notebook_id"])
+        for row in connection.execute(
+            "SELECT DISTINCT notebook_id FROM notebook_grants "
+            f"WHERE principal_type IN ({principal_types}) AND principal_id=?",
+            (group_id,),
+        ).fetchall()
+    ]
 
 
 class GroupStore:
@@ -412,12 +487,17 @@ class GroupStore:
                     return False
                 if not actor_is_system_admin and row["owner_id"] != actor_id:
                     raise GroupOwnerRequiredError(group_id)
+            affected = _group_grant_notebooks_on(
+                db, group_id, "'group','group_admins'"
+            )
+            readers = readers_before_loss_on(db, affected)
             db.execute(
                 "DELETE FROM notebook_grants "
                 "WHERE principal_type IN ('group','group_admins') AND principal_id=?",
                 (group_id,),
             )
             cursor = db.execute("DELETE FROM groups WHERE id=?", (group_id,))
+            _clear_suggest_jobs_without_read_on(db, affected, readers=readers, now=self.now())
         return cursor.rowcount > 0
 
     # -------------------------------------------------------------- 成员
@@ -498,10 +578,16 @@ class GroupStore:
                     (group_id, user_id, role, self.now(), added_by),
                 )
                 return "added"
+            affected = _group_grant_notebooks_on(db, group_id, "'group_admins'")
+            readers = readers_before_loss_on(db, affected) if current == "admin" and role != "admin" else []
             db.execute(
                 "UPDATE group_members SET role=? WHERE group_id=? AND user_id=?",
                 (role, group_id, user_id),
             )
+            if current == "admin" and role != "admin":
+                _clear_suggest_jobs_without_read_on(
+                    db, affected, readers=readers, now=self.now()
+                )
         return "updated"
 
     def remove_member(self, group_id: str, user_id: str) -> bool:
@@ -518,9 +604,15 @@ class GroupStore:
                 raise GroupOwnerProtectedError(group_id)
             if current == "admin" and self._admin_count_on(db, group_id) <= 1:
                 raise LastGroupAdminError(group_id)
+            affected = _group_grant_notebooks_on(db, group_id, "'group','group_admins'")
+            readers = readers_before_loss_on(db, affected)
             db.execute(
                 "DELETE FROM group_members WHERE group_id=? AND user_id=?",
                 (group_id, user_id),
+            )
+            _clear_suggest_jobs_without_read_on(
+                db,
+                affected, readers=readers, now=self.now(),
             )
         return True
 
@@ -666,11 +758,15 @@ class GroupStore:
 
     # ------------------------------------------------------------ 授权边
     def list_grants(self, notebook_id: str) -> list[dict]:
-        """该库全部授权边(四类主体如实返回,群组主体顺带解析出组名/分类)。"""
+        """该库的群组与 everyone 授权边(群组主体顺带解析出组名/分类)。
+
+        分享编辑 P1 起不含 `principal_type='user'` 的点名授权边:那一半只归库主在
+        「点名共享」里看与管(`list_user_grants`),两者合起来覆盖表内每一行。"""
         with self.database.connect() as db:
             rows = db.execute(
                 _GRANT_SELECT
-                + "WHERE ng.notebook_id=? ORDER BY ng.created_at ASC, ng.id ASC",
+                + "WHERE ng.notebook_id=? AND ng.principal_type <> 'user' "
+                "ORDER BY ng.created_at ASC, ng.id ASC",
                 (notebook_id,),
             ).fetchall()
         return [self._grant_row(row) for row in rows]
@@ -753,12 +849,18 @@ class GroupStore:
 
         两列一起验:撤销端点的权限挂在 notebook 上,只按 grant_id 删等于让「我有一本
         自己的库的管理权」变成「我能删任何库上的授权边」。
+
+        点名授权边(user 主体)不在此列(分享编辑 P1,决策 D2):组管理员删不到它,
+        与 `list_grants` 看不到它同一口径。
         """
         with self.database.write() as db:
+            readers = readers_before_loss_on(db, [notebook_id])
             cursor = db.execute(
-                "DELETE FROM notebook_grants WHERE id=? AND notebook_id=?",
+                "DELETE FROM notebook_grants WHERE id=? AND notebook_id=? "
+                "AND principal_type <> 'user'",
                 (grant_id, notebook_id),
             )
+            _clear_suggest_jobs_without_read_on(db, [notebook_id], readers=readers, now=self.now())
         return cursor.rowcount > 0
 
     def list_group_shared_notebooks(
@@ -787,13 +889,158 @@ class GroupStore:
     def delete_group_grants_for_notebook(self, group_id: str, notebook_id: str) -> int:
         """撤销不对称的组维度入口:删掉这本库上指向本组的**全部**边。"""
         with self.database.write() as db:
+            readers = readers_before_loss_on(db, [notebook_id])
             cursor = db.execute(
                 "DELETE FROM notebook_grants "
                 "WHERE notebook_id=? AND principal_id=? "
                 "AND principal_type IN ('group','group_admins')",
                 (notebook_id, group_id),
             )
+            _clear_suggest_jobs_without_read_on(db, [notebook_id], readers=readers, now=self.now())
         return cursor.rowcount
+
+    # ------------------------------------------------- 点名共享(分享编辑 P1)
+    def list_user_grants(self, notebook_id: str) -> list[dict]:
+        """这本库全部 `principal_type='user'` 的授权边(编辑者与遗留的 viewer/admin
+        点名行),带被授权人的用户名、显示名与授予人;`created_at, id` 序。"""
+        with self.database.connect() as db:
+            rows = db.execute(
+                _USER_GRANT_SELECT + "WHERE ng.notebook_id=? AND ng.principal_type='user' "
+                + _USER_GRANT_ORDER,
+                (notebook_id,),
+            ).fetchall()
+        return [_user_grant_row(row) for row in rows]
+
+    def list_editor_names(self, notebook_id: str) -> list[dict]:
+        """编辑者的用户名与显示名(决策 D17:持有编辑边的人看得到彼此的名字)。"""
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT u.username AS username, u.display_name AS display_name, "
+                "ng.principal_id AS user_id FROM notebook_grants ng "
+                "LEFT JOIN users u ON u.id=ng.principal_id "
+                "WHERE ng.notebook_id=? AND ng.principal_type='user' "
+                "AND ng.role='editor' " + _USER_GRANT_ORDER,
+                (notebook_id,),
+            ).fetchall()
+        return [
+            {
+                "username": row["username"] or row["user_id"],
+                "display_name": row["display_name"] or "",
+            }
+            for row in rows
+        ]
+
+    def user_grant_role(self, notebook_id: str, user_id: str) -> "str | None":
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT role FROM notebook_grants WHERE notebook_id=? "
+                "AND principal_type='user' AND principal_id=?",
+                (notebook_id, user_id),
+            ).fetchone()
+        return None if row is None else str(row["role"])
+
+    def list_user_grants_for_owner(self, owner_id: str) -> list[dict]:
+        """库主名下每本存活笔记本的点名授权边,**一条语句**聚合(「我分享的」投影,
+        不按库逐个查)。`(notebook_id, username, display_name, role)`。"""
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT ng.notebook_id AS notebook_id, u.username AS username, "
+                "u.display_name AS display_name, ng.role AS role, "
+                "ng.principal_id AS user_id FROM notebook_grants ng "
+                "JOIN notebooks nb ON nb.id=ng.notebook_id "
+                "LEFT JOIN users u ON u.id=ng.principal_id "
+                f"WHERE nb.created_by=? AND nb.{NOTEBOOK_LIVE_SQL} "
+                "AND ng.principal_type='user' "
+                "ORDER BY ng.notebook_id, ng.created_at, ng.id",
+                (owner_id,),
+            ).fetchall()
+        return [
+            {
+                "notebook_id": row["notebook_id"],
+                "username": row["username"] or row["user_id"],
+                "display_name": row["display_name"] or "",
+                "role": row["role"],
+            }
+            for row in rows
+        ]
+
+    @staticmethod
+    def _require_owned_live_notebook_on(
+        db: sqlite3.Connection, notebook_id: str, owner_id: str
+    ) -> str:
+        """在当前写事务里复核这本库还在、存活、且归 `owner_id`,返回它的 tier;否则
+        `NotebookNotFoundError`(PD-8)。
+
+        **刻意新建**,不改共用的 `_require_notebook_on`:后者被 `create_grant` 与共享
+        申请两条路径共用,判的只是外键父行的存在性(深拷贝中的库照样放行);点名共享
+        要的是「存活 + 是库主」这一更窄的口径。SQLite 侧写事务串行(BEGIN IMMEDIATE),
+        与 `set_tier` 天然互斥,不需要 PG 那把 `FOR SHARE`。"""
+        row = db.execute(
+            "SELECT tier, created_by FROM notebooks WHERE id=? "
+            f"AND {NOTEBOOK_LIVE_SQL}",
+            (notebook_id,),
+        ).fetchone()
+        if row is None or row["created_by"] != owner_id:
+            raise NotebookNotFoundError(notebook_id)
+        return str(row["tier"] or "")
+
+    def set_user_editor_grant(
+        self, notebook_id: str, *, owner_id: str, target_user_id: str
+    ) -> dict:
+        """把 `target_user_id` 设成编辑者(PD-12),单写事务。语义与 PG 那一份逐条
+        相同(锁序那一半由 SQLite 的进程写锁承担):不在/不存活/不是库主
+        `NotebookNotFoundError`;公共库 `NotebookIsPublicLibrary`;目标无效
+        `CollaboratorTargetInvalid`;`previous_role` 先读出,`ON CONFLICT ... WHERE
+        role <> 'editor'` 的空返回即本来就是编辑者(`changed=False`)。"""
+        grant_id = self.new_id("gnt")
+        now = self.now()
+        with self.database.write() as db:
+            tier = self._require_owned_live_notebook_on(db, notebook_id, owner_id)
+            if tier == "base":
+                raise NotebookIsPublicLibrary(notebook_id)
+            if target_user_id == owner_id or db.execute(
+                "SELECT 1 FROM users WHERE id=? AND status='active'",
+                (target_user_id,),
+            ).fetchone() is None:
+                raise CollaboratorTargetInvalid(target_user_id)
+            previous = db.execute(
+                "SELECT role FROM notebook_grants WHERE notebook_id=? "
+                "AND principal_type='user' AND principal_id=?",
+                (notebook_id, target_user_id),
+            ).fetchone()
+            changed = db.execute(
+                "INSERT INTO notebook_grants "
+                "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+                "VALUES (?,?,'user',?,'editor',?,?) "
+                "ON CONFLICT (notebook_id, principal_type, principal_id) DO UPDATE "
+                "SET role='editor', created_by=excluded.created_by, "
+                "created_at=excluded.created_at "
+                "WHERE notebook_grants.role <> 'editor' RETURNING id",
+                (grant_id, notebook_id, target_user_id, owner_id, now),
+            ).fetchone() is not None
+            row = db.execute(
+                _USER_GRANT_SELECT + "WHERE ng.notebook_id=? "
+                "AND ng.principal_type='user' AND ng.principal_id=?",
+                (notebook_id, target_user_id),
+            ).fetchone()
+        return {
+            "grant": _user_grant_row(row),
+            "previous_role": None if previous is None else str(previous["role"]),
+            "changed": changed,
+        }
+
+    def delete_user_grant(self, notebook_id: str, user_id: str) -> bool:
+        """删掉这个人在这本库上的点名授权边,不论角色。"""
+        with self.database.write() as db:
+            readers = readers_before_loss_on(db, [notebook_id])
+            cursor = db.execute(
+                "DELETE FROM notebook_grants WHERE notebook_id=? "
+                "AND principal_type='user' AND principal_id=?",
+                (notebook_id, user_id),
+            )
+            if cursor.rowcount:
+                _clear_suggest_jobs_without_read_on(db, [notebook_id], readers=readers, now=self.now())
+        return cursor.rowcount > 0
 
     # -------------------------------------------------------- 共享申请(P2-T3)
     def _pending_share_request(

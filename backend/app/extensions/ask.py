@@ -9,11 +9,13 @@ from typing import Callable
 
 from app.domain.extensions import (
     ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
+    ASK_MEMORY_SUGGEST_COMPLETED_ACCESS_CAPABILITY,
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY,
     ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     AgentProfileAskCompletedPort,
     AskCompletedObserverCallContext,
     CompletedAskNotification,
+    MemorySuggestAskCompletedPort,
     RetrievalExperienceAskCompletedPort,
     SearchProfileAskCompletedPort,
 )
@@ -30,6 +32,7 @@ from app.extension_sdk import (
     AskCompletedAvailabilityContext,
     AskCompletedExtensionContext,
 )
+from app.extensions.builtin.ask_completion import ASK_MEMORY_SUGGEST_COMPLETED_CONTRIBUTION_ID
 from app.extensions.registry import (
     ExtensionRegistry,
     ExtensionRegistryError,
@@ -42,6 +45,7 @@ _OBSERVER_ACCESS_CAPABILITIES = frozenset({
     ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY,
     ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
+    ASK_MEMORY_SUGGEST_COMPLETED_ACCESS_CAPABILITY,
 })
 
 
@@ -110,6 +114,13 @@ class AskCompletedObserverHost:
             ))
         self._registry = registry
         self._observers = tuple(observers)
+        self._without_builtin_memory_suggest = tuple(
+            frozen for frozen in self._observers
+            if not (
+                frozen.registered.plugin_id == ASK_MEMORY_SUGGEST_COMPLETED_CONTRIBUTION_ID
+                and frozen.registered.contribution.declaration.id == ASK_MEMORY_SUGGEST_COMPLETED_CONTRIBUTION_ID
+            )
+        )
         self._event_sink = event_sink
         self._clock = clock
 
@@ -119,10 +130,11 @@ class AskCompletedObserverHost:
         *,
         event_sink: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
-        # Empty topology is a strict no-op, matching the historical no-plugin path.
         if not self._observers:
             return
         if type(call_context) is not AskCompletedObserverCallContext:
+            return
+        if type(call_context.skip_builtin_memory_suggest) is not bool:
             return
         notification = call_context.notification
         if not _valid_notification(notification):
@@ -132,7 +144,8 @@ class AskCompletedObserverHost:
         if not _connection_clear(call_context.connection_probe):
             return
         sink = event_sink if event_sink is not None else self._event_sink
-        for frozen in self._observers:
+        observers = self._without_builtin_memory_suggest if call_context.skip_builtin_memory_suggest else self._observers
+        for frozen in observers:
             contribution = frozen.registered.contribution
             contribution_id = contribution.declaration.id
             plugin_id = frozen.registered.plugin_id
@@ -185,9 +198,7 @@ class AskCompletedObserverHost:
             ):
                 break
             notify = _core_notify(port)
-            # Resolving a core port is still a boundary operation: a hostile or
-            # accidentally lazy property must not smuggle a newly-held lease or
-            # consume the remaining point budget before plugin execution.
+            # Port resolution may acquire a lease or exhaust the deadline.
             if not _connection_clear(call_context.connection_probe):
                 _emit(
                     sink,
@@ -281,6 +292,9 @@ def _valid_notification(value: object) -> bool:
         and value.scope in ("notebook", "global")
         and type(value.notebook_ids) is tuple
         and all(type(item) is str and bool(item) for item in value.notebook_ids)
+        and type(value.submitted_via) is str
+        and type(value.had_clarification) is bool
+        and type(value.ask_job_id) is str
     )
 
 
@@ -291,6 +305,7 @@ def _observer_port(
     AgentProfileAskCompletedPort
     | RetrievalExperienceAskCompletedPort
     | SearchProfileAskCompletedPort
+    | MemorySuggestAskCompletedPort
     | None
 ):
     if capability == ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY:
@@ -303,6 +318,13 @@ def _observer_port(
         )
     if capability == ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY:
         return context.search_profile
+    if capability == ASK_MEMORY_SUGGEST_COMPLETED_ACCESS_CAPABILITY:
+        # Notebook Asks only (design §4.1 step 1); the trigger re-checks.
+        return (
+            context.memory_suggest
+            if context.notification.scope == "notebook"
+            else None
+        )
     return None
 
 

@@ -82,7 +82,7 @@ def test_admin_extensions_lists_builtin_topology_for_admin(client):
     # Hard-coded, mirroring test_extension_discovery.py's own golden count:
     # the point of this assertion is to fail loudly if an unset
     # EXTENSIONS_CONFIG stops producing the exact shipped topology.
-    assert len(body["extensions"]) == 10
+    assert len(body["extensions"]) == 11
     assert all(row["trust"] == "builtin" for row in body["extensions"])
     ids = [row["id"] for row in body["extensions"]]
     assert ids == sorted(ids)

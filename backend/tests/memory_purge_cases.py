@@ -706,11 +706,11 @@ def service(world: World) -> Any:
 def self_exit(world: World, user: Any, notebook_id: str, ack: int | None = None) -> int:
     """``DELETE /notebooks/{id}/membership`` below the route; returns what
     this exit deleted (the 200 body's ``deleted_memory_count``)."""
-    return service(world).leave_notebook(notebook_id, user.id, ack)
+    return service(world).leave_notebook(notebook_id, user.id, ack).deleted_memory_count
 
 
 def disclosure(world: World, user: Any, notebook_id: str) -> int:
-    return service(world).exit_disclosure(notebook_id, user.id)
+    return service(world).exit_disclosure(notebook_id, user.id).memory_count
 
 
 def expect_disclosure_required(fn: Callable[[], Any]) -> int:
@@ -962,9 +962,10 @@ def case_revoking_authorisation_keeps_memory(world: World) -> None:
     """Grant withdrawal and unsharing are not exits: nothing is deleted."""
     repo = world.repo
     alice = world.projections["alice"]
-    grant_id = grant_user(world, world.shared, world.alice)
+    grant_user(world, world.shared, world.alice)
     self_exit(world, world.alice, world.shared)  # grant still reads: keeps
-    assert repo._runtime.groups.delete_grant(world.shared, grant_id)
+    # a named (user) grant is withdrawn through the named-share half (share-edit P1)
+    assert repo._runtime.groups.delete_user_grant(world.shared, world.alice.id)
     assert_intact(world, "alice")
     repo._runtime.sharing.unshare_notebook(world.shared)  # drops Bob's membership row
     assert not repo._runtime.sharing.is_member(world.shared, world.bob.id)
@@ -2286,8 +2287,9 @@ def case_unshare_costs_the_same_writes_for_one_or_many_members(
     """Removing every link member clears each table for the whole set at
     once: unsharing a notebook with 300 members opens exactly as many write
     transactions as unsharing one with a single member (the token-and-rows
-    transaction, then job rows, blocks and observations), and every member's
-    job row is gone afterwards."""
+    transaction, then the auto-memory suggestion job rows, the overlay job
+    rows, blocks and observations), and every member's job row is gone
+    afterwards."""
     sharing = world.repo._runtime.sharing
     counts = {}
     for size in (1, 300):
@@ -2305,7 +2307,7 @@ def case_unshare_costs_the_same_writes_for_one_or_many_members(
             "SELECT COUNT(*) AS c FROM agent_profile_jobs WHERE notebook_id=?",
             (notebook_id,),
         ) == 0, members[:3]
-    assert counts[1] == counts[300] == 4, counts
+    assert counts[1] == counts[300] == 5, counts
 
 
 MONKEYPATCH_CASES: dict[str, Callable[..., None]] = {

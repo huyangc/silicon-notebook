@@ -40,6 +40,7 @@ restart — and ``KeyboardInterrupt``/``SystemExit`` inherit ``BaseException``
 and sail straight past ``except Exception``.
 """
 from __future__ import annotations
+from app.services.collab_jobs import pulse_touch_for_job
 
 import logging
 import time
@@ -1230,6 +1231,7 @@ class AgentProfileConsolidationService:
     lives on the neutral repository runtime rather than being built twice per
     backend — same rationale as ``CommandCatalogService`` next to it.
     """
+    _collab_touch = None
 
     def __init__(
         self,
@@ -2674,7 +2676,7 @@ class AgentProfileConsolidationService:
         shared channel. ``(base)``/``(overlay)`` is as much as it says.
         """
         try:
-            return str(
+            outcome = str(
                 self.profiles.settle(
                     notebook_id,
                     owner_id,
@@ -2683,6 +2685,9 @@ class AgentProfileConsolidationService:
                     **kwargs,
                 )
             )
+            if owner_id == BASE_CHAIN_OWNER and outcome == AGENT_PROFILE_SETTLED:
+                pulse_touch_for_job(self._collab_touch, notebook_id, "understanding")
+            return outcome
         except Exception:  # noqa: BLE001
             _log.exception(
                 "failed to settle agent profile %s chain for notebook %s",

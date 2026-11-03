@@ -22,10 +22,12 @@ from app.core.config import get_settings
 from app.core.memory_inputs import normalize_text
 from app.domain.agent_tools import principal_has_capability
 from app.domain.cancellation import CoreCancellation
+from app.domain.collaboration import SOURCE_TERMINAL_PULSE_KINDS
 from app.domain.promotion_source import PROMOTION_SOURCE_TYPE
 from app.models.sources import SourceDetail
 from app.repositories.ports import DocumentCapacityExceeded, UploadedSourceFile
 from app.repositories.source_files import FILESYSTEM_NAME_MAX_BYTES, safe_filename
+from app.services.collab_jobs import pulse_touch_for_mcp
 from app.services.kg import scheduler as kg_scheduler
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.model_work import ModelPriority, model_work_scope
@@ -922,8 +924,10 @@ def register_source_tools(
                 )
                 return _source_result(source)
 
+        result = await _run_with_progress(ctx, run, label="add_source")
+        pulse_touch_for_mcp(repo, notebook_id, "sources", principal)
         return _budget_response(
-            await _run_with_progress(ctx, run, label="add_source"),
+            result,
             field_limits={"title": 300, "parse_status": 40, "status": 40},
         )
 
@@ -986,9 +990,9 @@ def register_source_tools(
                 kg_scheduler.submit_job(repo.process_source, source_id)
                 return {"source_id": source_id, "queued": True}
 
-        return _budget_response(
-            await _run_with_progress(ctx, run, label="reparse_source")
-        )
+        result = await _run_with_progress(ctx, run, label="reparse_source")
+        pulse_touch_for_mcp(repo, notebook_id, "sources", principal)
+        return _budget_response(result)
 
     @server.tool(
         description=(
@@ -1055,6 +1059,6 @@ def register_source_tools(
                 repo.delete_source(source_id)
                 return {"source_id": source_id, "deleted": True}
 
-        return _budget_response(
-            await _run_with_progress(ctx, run, label="delete_source")
-        )
+        result = await _run_with_progress(ctx, run, label="delete_source")
+        pulse_touch_for_mcp(repo, notebook_id, "sources", principal, SOURCE_TERMINAL_PULSE_KINDS)
+        return _budget_response(result)

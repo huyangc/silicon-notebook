@@ -82,9 +82,9 @@ def test_the_open_zone_lists_every_finding_with_live_sources(repo, built):
     by_rule = {r["rule_id"]: r for r in page.rows}
     assert by_rule["F2"]["live_sources"] == [
         {"source_id": "src-dup-a", "exists": True, "title": "Title of src-dup-a",
-         "source_type": "markdown", "processing": False},
+         "source_type": "markdown", "processing": False, "uploaded_by_me": False},
         {"source_id": "src-dup-b", "exists": True, "title": "Title of src-dup-b",
-         "source_type": "markdown", "processing": False},
+         "source_type": "markdown", "processing": False, "uploaded_by_me": False},
     ]
     assert by_rule["F3"]["live_sources"][0]["source_id"] == "src-broken"
     assert [a["kind"] for a in by_rule["F2"]["actions"]] == ["delete_source"]
@@ -94,6 +94,15 @@ def test_the_open_zone_lists_every_finding_with_live_sources(repo, built):
     assert page.built_at["kg_seq"] == by_rule["F1"]["first_seen"]["kg_seq"]
     assert page.units["impact_objects"] == "objects"
     assert set(page.evidence_units) == {"F1", "F2", "F3", "F4", "F5"}
+
+
+def test_live_sources_carry_uploaded_by_me_for_the_viewer(repo, built):
+    """Share-edit P1 (D14): a named editor deletes only their own uploads, so the
+    page says which live sources the requester uploaded (PostgreSQL twin in
+    ``postgres/test_kg_findings_publish_pg.py``)."""
+    from tests.kg_findings_world import check_uploaded_by_me
+
+    check_uploaded_by_me(repo, built, postgres=False)
 
 
 def test_knowhow_named_canonical_never_in_payload(repo, built):
@@ -181,7 +190,8 @@ def test_delete_source_marks_the_finding_handled_not_gone(repo, built):
     assert _status(page)[("F1", "src-off")] == (STATUS_HANDLED, HANDLED_SOURCE_DELETED)
     row = next(r for r in page.rows if r["rule_id"] == "F1")
     assert row["live_sources"] == [{"source_id": "src-off", "exists": False, "title": "",
-                                    "source_type": "", "processing": False}]
+                                    "source_type": "", "processing": False,
+                                    "uploaded_by_me": False}]
     # F2: one copy gone is handled too
     _sql(repo, "DELETE FROM sources WHERE id='src-dup-b'")
     assert _status(_page(repo, built))[("F2", "src-dup-a|src-dup-b")] == (
@@ -459,6 +469,17 @@ def test_the_findings_routes(tmp_path, monkeypatch):
     overview = client.get(f"/api/notebooks/{nb}/kg-analysis", headers=member).json()
     assert overview["findings_summary"]["present"] is True
     assert set(overview["merge_code"]) == {"stored", "current", "matches"}
+    # uploaded_by_me is shaped for the requester (D14): the member's own upload
+    # reads True for the member and False for the owner; no uploader id on the wire
+    member_id = client.get("/api/me", headers=member).json()["id"]
+    _sql(_repository, "UPDATE sources SET uploaded_by=? WHERE id='src-dup-a'", (member_id,))
+    for headers, expected in ((member, True), (owner, False)):
+        served = client.get(f"/api/notebooks/{nb}/kg-analysis/findings?zone=open",
+                            headers=headers)
+        assert member_id not in served.text
+        lives = {source["source_id"]: source["uploaded_by_me"]
+                 for row in served.json()["rows"] for source in row["live_sources"]}
+        assert lives["src-dup-a"] is expected and lives["src-dup-b"] is False
     assert client.get(f"/api/notebooks/{nb}/kg-analysis/findings?limit=201",
                       headers=owner).status_code == 422
     assert client.get(f"/api/notebooks/{nb}/kg-analysis/findings?zone=other",

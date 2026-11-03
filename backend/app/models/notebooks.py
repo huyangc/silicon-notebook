@@ -82,6 +82,10 @@ class MountedBase(NotebookRef):
     前端须置灰并说明,不能假装它还在工作。"""
     active: bool = True
     inactive_reason: str = ""
+    #: 此刻有效、且只靠「借入」那一臂有效(经别人只读共享给库主得来的库):这本笔记本
+    #: 一旦被共享(含添加第一个编辑者),未共享门关上,它对所有人失效。授予编辑者前的
+    #: 警告只列这些(分享编辑 P1,决策 D13)。
+    closes_when_shared: bool = False
 
 
 class MountableNotebook(NotebookRef):
@@ -201,6 +205,9 @@ class NotebookSummary(BaseModel):
     # **列表与详情两条路径都回填**(群组知识共享 P1-T4)。此前只有列表回填,详情恒为
     # 模型默认的 "owner",于是工作区顶栏那整段 reader 分支对着详情响应从来没为真过。
     access: str = "owner"
+    # Computed only by HTTP GET detail; other summary responses preserve null.
+    collab_pulse: Optional[bool] = None
+    pulse_cursor: Optional[str] = None
     # reader 时 = 原 owner 的用户名(前端展示「来自 X」);owner 时空串。
     shared_from: str = ""
     # 这本库是**经哪几个群组**共享给我的(群组知识共享 P1)。非空 ⇒ 它属于列表的
@@ -235,7 +242,21 @@ class NotebookSummary(BaseModel):
     # ⚠ 它是 **UI 信号不是授权判定**:权威永远是后端守卫
     # (`require_notebook_capability` / `notebook_capability_allowed`)。方向上宁可少给
     # ——投影漏判只是少画一个按钮,多判才会让用户点进一个必然 404 的动作。
+    #
+    # 分享编辑 P1 起它答的是**编辑权**(七个内容写能力:owner ∪ 管理边 ∪ 编辑边);
+    # 管理档入口(画像、tier、授权边)看下面的 `can_manage_notebook`。
     can_manage_content: bool = False
+    # 管理权投影(分享编辑 P1):owner 或管理边。点名编辑者为 False——他改内容,不改
+    # 库的身份,也不能把库再分享出去。同一条「UI 信号不是授权判定」口径。
+    can_manage_notebook: bool = False
+    # 调用者在这本库上的**点名授权**角色(`user` 主体的授权边):"editor"、遗留的
+    # "viewer"/"admin",没有点名授权为 ""(群组成员、链接成员、owner 都是 "")。前端据此
+    # 画「可编辑」徽标(只认 "editor")与「退出协作」;非空时本人的退出走
+    # `DELETE /notebooks/{id}/collaborators/{me}`。
+    collaborator_role: str = ""
+    # 持有点名授权的同时是否还有成员行(交叉态,规格 §4.4「两个退出」各管各的)。只在
+    # `collaborator_role` 非空时计算(零额外语句:那条判定本就要查成员行),否则恒 False。
+    collaborator_is_member: bool = False
     # Sanitized per-notebook indexing selection. These fields are read-only;
     # availability is resolved from the startup-frozen host and never exposes
     # loader paths, capability names, reasons, credentials, or exceptions.
@@ -317,6 +338,9 @@ class SharedByMeItem(BaseModel):
     # 「只读共享 ∨ 共享给群组」,与卡片上的「已分享」徽标同一个判据;`share_token`
     # 为空而本字段非 0 的行,就是一条只因群组共享而出现的记录(没有分享链接可发)。
     group_count: int = 0
+    # 这本库的点名协作者(分享编辑 P1):`[{username, display_name, role}]`,库主名下
+    # 全部库**一条语句**聚合(`list_user_grants_for_owner`),不按库逐个查。
+    collaborators: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class NotebookDeleteResponse(BaseModel):

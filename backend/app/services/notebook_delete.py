@@ -1303,12 +1303,16 @@ class NotebookDeleteJobRunner:
 
 
 class _DeleteSweeper:
-    """One daemon thread re-running ``sweep_once`` until stopped. Same shape
+    """One daemon thread running its maintenance tick until stopped. Same shape
     as ``extension_toggles._Refresher`` (that module's own docstring has the
     "wait first" / idempotent-stop rationale this mirrors)."""
 
-    def __init__(self, runner: NotebookDeleteJobRunner, interval_seconds: float) -> None:
+    def __init__(
+        self, runner: NotebookDeleteJobRunner, interval_seconds: float,
+        *, tick: Callable[[], int] | None = None,
+    ) -> None:
         self._runner = runner
+        self._tick = tick
         self._interval_seconds = interval_seconds
         self._stop_requested = threading.Event()
         self._started = False
@@ -1336,7 +1340,10 @@ class _DeleteSweeper:
     def _loop(self) -> None:
         while not self._stop_requested.wait(self._interval_seconds):
             try:
-                self._runner.sweep_once()
+                if self._tick is None:
+                    self._runner.sweep_once()
+                else:
+                    self._tick()
             except Exception:  # noqa: BLE001 — a bad tick must not kill the thread
                 _log.exception("notebook delete sweep tick failed")
 
@@ -1346,16 +1353,19 @@ _active: "_DeleteSweeper | None" = None
 
 
 def start_notebook_delete_sweeper(
-    runner: NotebookDeleteJobRunner, interval_seconds: float
+    runner: NotebookDeleteJobRunner, interval_seconds: float,
+    *, tick: Callable[[], int] | None = None,
 ) -> Callable[[], None]:
     """Start the periodic sweep thread and return its idempotent stop
     callback. A second start replaces the first (same rationale as
     ``extension_toggles.start_extension_admission_refresher``: only reachable
-    via a new repository lifecycle in this process)."""
+    via a new repository lifecycle in this process). ``tick`` lets startup
+    compose other notebook hygiene with deletes without another thread; the
+    default continues to resolve the runner's ``sweep_once`` on every tick."""
     if not interval_seconds > 0:
         raise ValueError(f"sweep interval must be positive, got {interval_seconds!r}")
     global _active
-    sweeper = _DeleteSweeper(runner, float(interval_seconds))
+    sweeper = _DeleteSweeper(runner, float(interval_seconds), tick=tick)
     with _active_lock:
         previous, _active = _active, None
         if previous is not None:

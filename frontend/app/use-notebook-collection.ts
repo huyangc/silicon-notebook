@@ -73,6 +73,9 @@ type EditorView = {
   owner: CollectionOwner;
   target: NotebookSummary;
   canManageContent: boolean;
+  /** 画像字段(改名/描述等,`notebook:manage`)能不能改。编辑者为 false:弹窗照开,画像只读
+   *  展示,保存时不发 PATCH(分享编辑 P1)。打开时冻结,同 canMountBases 的理由。 */
+  canManageNotebook: boolean;
   /** 能不能改本库挂了哪些参考库(notebook:mount)。⚠ 这一位曾叫 `canConfigureNotebook`
    *  ——后端已经把挂载从 notebook:configure 拆成 notebook:mount(级别没变,恒 owner),
    *  因为镜像围栏上两者相反:链接分享放行、挂载要挡。这个弹窗里只有挂载区读它。 */
@@ -346,19 +349,31 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       "",
       row?.can_manage_content ?? false,
       row?.sync_origin ?? "",
+      row?.can_manage_notebook ?? false,
     );
   };
 
-  // `notebook:manage` 这一格(改名 / 描述性画像 / tier / 索引管线)。编辑器的**入口**、
-  // 它的续跑检查点、以及「这个弹窗还该不该在屏上」三处共用这一个谓词——三者判的是同一件
-  // 事,谁单独漂移都会变成「打得开但保存必被拒」或「打不开但旧弹窗还留在屏上」。镜像上
-  // 被围栏挡:名称/画像/tier 都是同步来的,目标端改了留不住。
+  // `notebook:manage` 这一格(改名 / 描述性画像 / tier)。分享编辑 P1 之后它只管画像本身
+  // (行内改名、设置弹窗里画像字段可不可改);弹窗的入口另由下面的 rowCanOpenEditor 判
+  // ——编辑者没有这一格,却要能打开弹窗切索引管线。镜像上被围栏挡:名称/画像/tier 都是
+  // 同步来的,目标端改了留不住。
   //
   // ⚠ 与 `rowCanManageContent`(裸内容管理权)刻意不同:后者是「他对这本库的内容有没有写
   // 权」,不含镜像这条正交的轴。它现在只剩一个消费点——发布给表单的 `canManageContent`
   // 字段(驱动索引管线切换的二次确认文案),那一格问的确实是权限而不是围栏。
   const rowCanRename = (id: string): boolean => {
     return Boolean(currentRow(id)) && rowCapabilities(id).canManageNotebook;
+  };
+
+  // 笔记本设置弹窗的**入口**(分享编辑 P1,规格 §9):对「编辑权或管理权」开放。弹窗里
+  // 两类字段分属两档:画像(改名/描述等,`notebook:manage`)只在管理权下可改,索引管线切换
+  // (`kg:write`)在编辑权下可用——编辑者打得开弹窗、能切管线,画像只读展示。入口、续跑
+  // 检查点与「弹窗还该不该在屏上」三处共用这一个谓词(同 rowCanRename 原先的纪律)。镜像上
+  // 两位都被围栏收起,入口随之关闭。
+  const rowCanOpenEditor = (id: string): boolean => {
+    if (!currentRow(id)) return false;
+    const capabilities = rowCapabilities(id);
+    return capabilities.canManageNotebook || capabilities.canWriteNotebook;
   };
 
   // 参考库挂载(notebook:mount,恒 owner)。镜像上被围栏挡:notebook_bases 属同步层。
@@ -481,7 +496,11 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       .filter((row) => (row.access ?? "owner") !== "reader")
       .map((row) => row.id));
     const editorVisibleIds = new Set(next
-      .filter((row) => (row.access ?? "owner") !== "reader" || row.can_manage_content === true)
+      .filter((row) => (
+        (row.access ?? "owner") !== "reader"
+        || row.can_manage_content === true
+        || row.can_manage_notebook === true
+      ))
       .map((row) => row.id));
     setEditor((current) => {
       if (!current || editorVisibleIds.has(current.target.id)) return current;
@@ -745,6 +764,11 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         is_shared: authoritativeRow.is_shared,
         granted_via: authoritativeRow.granted_via,
         can_manage_content: authoritativeRow.can_manage_content,
+        // 分享编辑 P1:管理档与点名授权同属「刷新后的权限投影」,随同一份行一起带上——只带
+        // can_manage_content 会让改名之后的工作区拿请求那一刻的管理位配刷新后的编辑位。
+        can_manage_notebook: authoritativeRow.can_manage_notebook,
+        collaborator_role: authoritativeRow.collaborator_role,
+        collaborator_is_member: authoritativeRow.collaborator_is_member,
       };
     } catch (error) {
       if (owns(owner) && renamingRef.current.get(key) === token) throw error;
@@ -759,7 +783,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     // 这个弹窗的保存写的是 PATCH /notebooks/{id}(notebook:manage)+ 索引管线 + 挂载,
     // 三样在镜像上都被围栏挡 → 判据是 `canManageNotebook` 而不是裸内容管理权,否则镜像
     // 上还能打开一个保存必 409 的表单。
-    if (!owner || !rowCanRename(notebookId)) return false;
+    if (!owner || !rowCanOpenEditor(notebookId)) return false;
     const operation: EditorOperation = { notebookId };
     editorOperationRef.current = operation;
     editorRevokedOperationRef.current = null;
@@ -774,6 +798,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       // reference library.  The row's *content* is re-read; its authority is not.
       if (!currentRow(notebookId)) return false;
       const canManageContent = rowCanManageContent(notebookId);
+      const canManageNotebook = rowCanRename(notebookId);
       const canMountBases = rowCanMountBases(notebookId);
       const indexingPipelinePromise = fetchNotebookIndexingPipeline(notebookId);
       const [indexingPipeline, mountable, mountEdges] = canMountBases
@@ -790,7 +815,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       if (
         !owns(owner)
         || editorOperationRef.current !== operation
-        || !rowCanRename(notebookId)
+        || !rowCanOpenEditor(notebookId)
       ) return false;
       // Publish the row as it stands *now*, not the snapshot taken before these
       // requests.  A collection refresh can land while this open is in flight —
@@ -803,6 +828,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         owner,
         target: published,
         canManageContent,
+        canManageNotebook,
         canMountBases,
         mountable,
         mountEdges,
@@ -873,7 +899,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     const current = editor;
     if (!owner || !current || !owns(current.owner) || current.busy
       || editorSaveOutstanding(owner.actorId, current.target.id)
-      || !rowCanRename(current.target.id)) return;
+      || !rowCanOpenEditor(current.target.id)) return;
     const operation = editorOperationRef.current;
     // Two notebook ids are in play once a write is outstanding: the steps below
     // key off `current.target.id`, while the sticky-revocation bookkeeping in
@@ -909,13 +935,17 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         ...(name !== current.target.name ? { name } : {}),
         ...(purpose !== (current.target.purpose ?? "") ? { purpose } : {}),
       };
-      await updateNotebook(current.target.id, notebookPatch);
-      committedWrite = true;
-      if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
+      // 编辑者没有 notebook:manage:画像在弹窗里只读,不发 PATCH(发了也是 404)。
+      if (current.canManageNotebook) {
+        await updateNotebook(current.target.id, notebookPatch);
+        committedWrite = true;
+        if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
+      }
       const pipelineResult = await applyIndexingPipelineSelection(
         current,
         normalizeIndexingPipelineId(indexingPipelineId),
       );
+      if (pipelineResult?.changed) committedWrite = true;
       if (!editorOperationMayContinue(owner, operation, current.target.id)) return;
       const bases = current.canMountBases
         ? await setBases(current.target.id, current.mountedIds)
@@ -942,6 +972,9 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
           effectsRef.current.notify(
             refreshed ? message : `${message} 列表暂未刷新，请稍后刷新页面。`,
           );
+        } else if (!current.canManageNotebook) {
+          // 编辑者这次什么都没写(画像只读、管线没换):不说「已更新」。
+          effectsRef.current.notify("索引管线没有变化，没有需要保存的修改。");
         } else {
           effectsRef.current.notify(
             refreshed
@@ -992,7 +1025,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         if (ownsIdentity(owner) && !editorSaveOutstanding(owner.actorId, current.target.id)) {
           setEditor((value) => {
             if (!value || value.target.id !== current.target.id) return value;
-            if (!rowCanRename(value.target.id)) {
+            if (!rowCanOpenEditor(value.target.id)) {
               editorOperationRef.current = null;
               return null;
             }
@@ -1011,7 +1044,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     const current = editor;
     if (!owner || !current || !owns(current.owner) || current.busy
       || editorSaveOutstanding(owner.actorId, current.target.id)
-      || !rowCanRename(current.target.id)) return;
+      || !rowCanOpenEditor(current.target.id)) return;
     const operation = editorOperationRef.current;
     // Same split-identity refusal as saveEditor — see the comment there.
     if (!operation || operation.notebookId !== current.target.id) return;
@@ -1093,7 +1126,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         if (ownsIdentity(owner) && !editorSaveOutstanding(owner.actorId, current.target.id)) {
           setEditor((value) => {
             if (!value || value.target.id !== current.target.id) return value;
-            if (!rowCanRename(value.target.id)) {
+            if (!rowCanOpenEditor(value.target.id)) {
               editorOperationRef.current = null;
               return null;
             }
@@ -1281,7 +1314,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
       ref: menuRef,
     },
     editor: visible && editor && owns(editor.owner)
-      && (editorSaveInFlight || rowCanRename(editor.target.id))
+      && (editorSaveInFlight || rowCanOpenEditor(editor.target.id))
       ? editor
       : null,
     deletion: visible && deletion && owns(deletion.owner)

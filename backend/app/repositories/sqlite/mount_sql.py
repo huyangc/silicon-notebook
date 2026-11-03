@@ -224,6 +224,23 @@ MOUNT_GATE_CLOSED_EXPR = (
 # 消费点不许手拼。
 MOUNT_BASE_NOT_LIVE_EXPR = "(NOT b." + NOTEBOOK_LIVE_SQL + ")"
 
+# 「挂载方一旦被共享,这条边就失效」的判别式(分享编辑 P1,决策 D13):此刻有效,且
+# **只**靠借入那一臂有效。授予第一个编辑者会给挂载方添一条授权边、关上未共享门,
+# 授予前的警告只列这些边。必须按臂判,不能用 `MOUNT_ORIGIN_COLUMN` 的 `shared` 类别
+# 代替:`shared` 也包含经 everyone 边可读的他人库,而 everyone 那一臂不受未共享门约束,
+# 授予后照样有效,列进来就是误报。本库原本已关门(已有成员行或授权边)时,借入边此刻
+# 已无效(MOUNT_VALID_EXPR 为假),本式恒为假——早已失效的边不当作「将失效」重复列出。
+# 与 MOUNT_VALID_EXPR 同源派生(同一个存活项、同一个借入臂、同一个未共享门),
+# 消费点不许手拼。「同 owner」写成 NULL 安全的形态:被挂库 `created_by` 为 NULL 时,
+# 裸等式是 NULL、整式跟着落成 NULL(读成假),而这样一本库只能经借入臂有效——它恰恰
+# 该被列出。只有库主的 `/bases` 投影算这一列(`list_mount_edges` 的
+# `with_closes_when_shared`),检索路径读同一批边时不付这份代价。
+MOUNT_CLOSES_WHEN_SHARED_EXPR = (
+    "(" + MOUNT_VALID_EXPR + " AND NOT (b.tier = 'base'"
+    " OR (b.created_by IS NOT NULL AND b.created_by = a.created_by)"
+    " OR " + everyone_grant_expr("b.id") + "))"
+)
+
 # 追加到 MOUNT_JOIN 之后的有效性过滤。
 MOUNT_VALID = " AND " + MOUNT_VALID_EXPR
 

@@ -60,6 +60,7 @@ const OWNER_HOOKS = [
   "kgWorkspace",
   "askSession",
   "notebookCollection",
+  "collabPulse",
 ];
 
 // 生命周期动词。`sourceLibrary.deleteGeneration` 这类**读**不在其中——它是取数相位
@@ -133,7 +134,7 @@ test("owner 生命周期调用只能出现在 step 列表里，不得直接写�
 });
 
 
-test("step 列表覆盖全部六个 owner，每项至少声明 begin + settle", () => {
+test("step 列表覆盖全部七个 owner，每项至少声明 begin + settle", () => {
   const stepped = new Set(
     calls
       .filter((entry) => entry.scope === STEPS_SCOPE && isLifecycleCall(entry.target))
@@ -146,12 +147,13 @@ test("step 列表覆盖全部六个 owner，每项至少声明 begin + settle", 
     "reportWorkspace",
     "kgWorkspace",
     "askSession",
+    "collabPulse",
   ]) {
     assert.ok(stepped.has(owner), `step 列表漏掉了 owner: ${owner}`);
   }
 
   const declared = declaredSteps();
-  assert.equal(declared.length, 6, `step 数量应为 6，实测 ${declared.length}`);
+  assert.equal(declared.length, 7, `step 数量应为 7，实测 ${declared.length}`);
   const names = declared.map((step) => step.name);
   assert.equal(new Set(names).size, names.length, `step 名称必须唯一：${names.join(", ")}`);
   for (const step of declared) {
@@ -185,6 +187,7 @@ test("step 列表覆盖全部六个 owner，每项至少声明 begin + settle", 
       "report-workspace",
       "kg-workspace",
       "ask-session",
+      "collab-pulse",
     ],
     `step 顺序必须整体钉住：${names.join(", ")}`,
   );

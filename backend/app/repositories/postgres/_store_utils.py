@@ -12,7 +12,7 @@ _NOTEBOOK_JSON_COLUMNS = ("expected_questions", "source_types", "taxonomy")
 _NOTEBOOK_TIMESTAMP_COLUMNS = ("created_at", "updated_at")
 _TIMESTAMP_COLUMNS_BY_TABLE = {
     "chunk_embeddings": ("created_at",),
-    "chunks": ("created_at",),
+    "chunks": ("created_at", "question_indexed_at"),
     "concept_clusters": ("created_at",),
     "element_embeddings": ("created_at",),
     "knowhow_cell_code": ("created_at", "updated_at"),
@@ -31,7 +31,7 @@ _TIMESTAMP_COLUMNS_BY_TABLE = {
     "source_elements": ("created_at",),
     "source_paper_cards": ("created_at", "updated_at"),
     "source_paper_meta": ("created_at", "updated_at"),
-    "sources": ("created_at", "updated_at"),
+    "sources": ("created_at", "updated_at", "chunked_at", "navigation_scanned_at"),
 }
 
 TimestampInput = str | datetime
@@ -104,12 +104,17 @@ def normalized_clock(
 
 
 def normalize_timestamp_row(table: str, row: dict) -> dict:
-    """Normalize every copied timestamptz column before generic PG INSERT."""
+    """Normalize copied timestamps, including SQLite's blank NULL sentinel.
+
+    A required blank timestamp still fails the database's NOT NULL constraint;
+    nullable timestamps round-trip through sqlite_compatible_row without ever
+    sending an invalid empty string to PostgreSQL.
+    """
     result = dict(row)
     for column in _TIMESTAMP_COLUMNS_BY_TABLE.get(table, ()):
-        value = result.get(column)
-        if value not in (None, ""):
-            result[column] = normalize_timestamp(value)
+        if column in result:
+            value = result[column]
+            result[column] = normalize_timestamp(value) if value not in (None, "") else None
     return result
 
 

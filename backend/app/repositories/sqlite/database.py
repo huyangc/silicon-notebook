@@ -11,6 +11,7 @@ from typing import Any, Callable, Iterable, Iterator
 from app.core.config import Settings
 from app.core import diagnostics_runtime as diagnostics
 from app.repositories.scale_build_lock import UNSUPPORTED_SCALE_BUILD_LOCK
+from app.repositories.sqlite_functions import register_sqlite_functions
 from app.repositories.sqlite.write_lock_stats import WriteLockStats
 
 
@@ -449,6 +450,9 @@ class SqliteDatabase:
         conn._diag_mode = mode
         conn._diag_operation = operation
         conn.row_factory = sqlite3.Row
+        # A module-level pure callback owns no repository/connection state.
+        # Register on each connection, including independent write connections.
+        register_sqlite_functions(conn)
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute(f"PRAGMA busy_timeout = {int(self.settings.db_busy_timeout_ms)}")
@@ -504,6 +508,9 @@ class SqliteDatabase:
                 conn.close()
             except sqlite3.Error:
                 pass
+
+    def pool_wait_stats(self) -> dict[str, int]:
+        return {}
 
     def close(self) -> None:
         """Backend-neutral lifecycle close for the current process thread."""

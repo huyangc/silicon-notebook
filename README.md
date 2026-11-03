@@ -147,7 +147,7 @@ Chinese counterparts are linked from the top of each split document.
 - Highest-fidelity scanned-PDF, formula, and image extraction requires MinerU; local parsers provide deterministic fallbacks.
 - Model-backed answers and knowledge extraction require matching workload bindings; offline mode remains useful for ingestion and deterministic workflows.
 - Ask modes are `chunk` (default) and `reasoning`; the retired `graph`, `fast`, and `global` engine ids still resolve as aliases of built-in modes. Generated-question recall is deployment opt-in and defaults to `off`.
-- Memory is creator-private. Sharing supports copy, read-only membership, and groups, but not live collaborative editing.
+- Memory is creator-private. Sharing supports copy, read-only membership, groups and named editors; collaboration hints show presence and refresh changed sections.
 - Web/network source search remains a disabled future affordance.
 
 ## Documentation maintenance

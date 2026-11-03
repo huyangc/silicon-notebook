@@ -644,6 +644,13 @@
 .memory-preview-provenance strong { color: #3f4857; }
 .memory-dialog-actions { justify-content: flex-end; margin-top: 18px; padding: 15px 26px; border-top: 1px solid var(--line); }
 
+.memory-suggestion-reason,
+.memory-suggestion-stats { color: var(--muted); font-size: 13px; }
+.memory-suggestion-reason p,
+.memory-suggestion-result p { margin: 0; }
+.memory-suggestion-result { font-size: 13px; }
+.memory-suggestion-result [role="alert"] { color: var(--danger, #a83232); }
+
 @media (max-width: 820px) {
   .memory-filterbar { grid-template-columns: 1fr 1fr; }
   .memory-search { grid-column: 1 / -1; }

@@ -13,6 +13,7 @@ from typing import Callable, Mapping
 from app.core.extension_admission import disabled_plugin_ids
 from app.extension_sdk import (
     ASK_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
+    ASK_MEMORY_SUGGEST_COMPLETED_ACCESS_CAPABILITY,
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_ACCESS_CAPABILITY,
     ASK_SEARCH_PROFILE_COMPLETED_ACCESS_CAPABILITY,
     REPORT_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY,
@@ -34,6 +35,8 @@ from app.extensions.builtin import (
     AGENT_PROFILE_WORKSPACE_UI_CAPABILITY,
     ASK_AGENT_PROFILE_COMPLETED_BUNDLE,
     ASK_AGENT_PROFILE_COMPLETED_CONTRIBUTION_ID,
+    ASK_MEMORY_SUGGEST_COMPLETED_BUNDLE,
+    ASK_MEMORY_SUGGEST_COMPLETED_CONTRIBUTION_ID,
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_BUNDLE,
     ASK_RETRIEVAL_EXPERIENCE_COMPLETED_CONTRIBUTION_ID,
     ASK_SEARCH_PROFILE_COMPLETED_BUNDLE,
@@ -306,6 +309,11 @@ def default_extension_runtime() -> ExtensionRuntime:
         ASK_AGENT_PROFILE_COMPLETED_BUNDLE,
         ASK_RETRIEVAL_EXPERIENCE_COMPLETED_BUNDLE,
         ASK_SEARCH_PROFILE_COMPLETED_BUNDLE,
+        # Runs last of the built-in Ask observers, so a spent shared deadline
+        # drops it first (design 2026-10-28 §4.1). The run order is the
+        # contribution-id order, which its id is spelled for; listing it last
+        # here keeps this tuple reading in that same order.
+        ASK_MEMORY_SUGGEST_COMPLETED_BUNDLE,
         REPORT_AGENT_PROFILE_COMPLETED_BUNDLE,
         REPORT_MARKDOWN_EXPORTER_BUNDLE,
         PARSER_BUILTIN_BUNDLE,
@@ -332,6 +340,12 @@ def default_extension_runtime() -> ExtensionRuntime:
             ask_completed_access(
                 context,
                 ASK_SEARCH_PROFILE_COMPLETED_CONTRIBUTION_ID,
+            )
+        ),
+        ASK_MEMORY_SUGGEST_COMPLETED_ACCESS_CAPABILITY: lambda context: (
+            ask_completed_access(
+                context,
+                ASK_MEMORY_SUGGEST_COMPLETED_CONTRIBUTION_ID,
             )
         ),
         REPORT_AGENT_PROFILE_COMPLETED_ACCESS_CAPABILITY: (

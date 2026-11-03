@@ -95,7 +95,7 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
     duplicateRequestRef.current.shared += 1;
     duplicateRequestRef.current.own += 1;
   };
-  const knowledgeContextRequestsRef = useRef(new Map<string, object>());
+  const knowledgeContextRequestsRef = useRef(new Map<string, AbortController>());
 
   const [knowledgeKind, setKnowledgeKind] = useState<KnowledgeKind>("concept");
   const knowledgeKindRef = useRef(knowledgeKind);
@@ -117,7 +117,17 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
     Partial<Record<DuplicatePartition, string>>
   >(NO_DUPLICATE_FAILURES);
   const [knowledgeContexts, setKnowledgeContexts] = useState<Record<string, NodeContext>>({});
+  const knowledgeContextsRef = useRef(knowledgeContexts);
   const [knowledgeBusy, setKnowledgeBusy] = useState<string | null>(null);
+
+  const replaceContexts = (next: Record<string, NodeContext>) => {
+    knowledgeContextsRef.current = next;
+    setKnowledgeContexts(next);
+  };
+  const cancelContextReads = () => {
+    for (const controller of knowledgeContextRequestsRef.current.values()) controller.abort();
+    knowledgeContextRequestsRef.current.clear();
+  };
 
   const clearVisibleState = () => {
     setKnowledgeKind("concept");
@@ -130,8 +140,8 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
     setOwnDuplicates(null);
     setOwnMergedAway(null);
     setDuplicateFailures(NO_DUPLICATE_FAILURES);
-    setKnowledgeContexts({});
-    knowledgeContextRequestsRef.current.clear();
+    replaceContexts({});
+    cancelContextReads();
     setKnowledgeBusy(null);
   };
 
@@ -147,6 +157,10 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
     request: KnowledgeRequest,
   ): Promise<KnowledgeItem[] | null> => {
     const requestId = ++knowledgeRequestRef.current;
+    const expanded = new Set([
+      ...Object.keys(knowledgeContextsRef.current), ...knowledgeContextRequestsRef.current.keys(),
+    ]);
+    cancelContextReads();
     const status = request.status === "all" ? "" : request.status;
     try {
       const response = await listKnowledge(
@@ -161,6 +175,18 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
       setKnowledge((current) => ({ ...current, [request.kind]: items }));
       setKnowledgeTotal((current) => ({ ...current, [request.kind]: response.total_count }));
       setKnowledgePage((current) => ({ ...current, [request.kind]: request.page }));
+      // List refreshes (including writes and collaboration) replace their
+      // expanded context snapshot too. Keep current-page expansion identities,
+      // but never display steps/evidence from the preceding row snapshot.
+      for (const id of knowledgeContextRequestsRef.current.keys()) expanded.add(id);
+      cancelContextReads();
+      const opened = items.filter((item) => expanded.has(item.id));
+      replaceContexts(Object.fromEntries(opened.map((item) => [item.id, {
+        id: item.id, object_type: item.object_type ?? request.kind, name: "",
+        section_path: "", occurrences: [], definition: null, steps: null,
+      }])));
+      const contexts = await Promise.all(opened.map((item) => readKnowledgeContextFor(owner, request.kind, item.id)));
+      if (!owns(owner) || requestId !== knowledgeRequestRef.current || contexts.some((loaded) => !loaded)) return null;
       return items;
     } catch (error) {
       if (owns(owner) && requestId === knowledgeRequestRef.current) {
@@ -200,8 +226,8 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
       setOwnDuplicates(null);
       setOwnMergedAway(null);
       setDuplicateFailures(NO_DUPLICATE_FAILURES);
-      setKnowledgeContexts({});
-      knowledgeContextRequestsRef.current.clear();
+      replaceContexts({});
+      cancelContextReads();
       await loadKnowledgeFor(owner, { kind: nextKind, status: "all", page: 0 });
     } else if (knowledgeRef.current[currentKind] == null) {
       // 类型还在时状态筛选不会被复位(复位只发生在上面换类型那一支),所以重拉必须按当前
@@ -220,8 +246,8 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
     setOwnDuplicates(null);
     setOwnMergedAway(null);
     setDuplicateFailures(NO_DUPLICATE_FAILURES);
-    setKnowledgeContexts({});
-    knowledgeContextRequestsRef.current.clear();
+    replaceContexts({});
+    cancelContextReads();
     void loadKnowledgeFor(owner, { kind, status: "all", page: 0 });
   };
 
@@ -253,6 +279,17 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
     });
   };
 
+  const refreshForCollaboration = async (): Promise<boolean> => {
+    const owner = currentOwner();
+    if (!owner || knowledgeBusy) return false;
+    const kind = knowledgeKindRef.current;
+    const [rows, types] = await Promise.all([
+      loadKnowledgeFor(owner, { kind, status: statusFilterRef.current, page: knowledgePage[kind] ?? 0 }),
+      loadTypesFor(owner),
+    ]);
+    return rows !== null && types !== null && owns(owner);
+  };
+
   const invalidateKnowledge = () => {
     knowledgeRequestRef.current += 1;
     typeRequestRef.current += 1;
@@ -268,8 +305,8 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
     setOwnDuplicates(null);
     setOwnMergedAway(null);
     setDuplicateFailures(NO_DUPLICATE_FAILURES);
-    setKnowledgeContexts({});
-    knowledgeContextRequestsRef.current.clear();
+    replaceContexts({});
+    cancelContextReads();
   };
 
   const updateKnowledge = async (id: string, patch: { status?: string; owner?: string }) => {
@@ -483,36 +520,31 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
     }
   };
 
+  const readKnowledgeContextFor = async (owner: KgWorkspaceOwner, kind: KnowledgeKind, itemId: string): Promise<boolean> => {
+    knowledgeContextRequestsRef.current.get(itemId)?.abort();
+    const request = new AbortController();
+    knowledgeContextRequestsRef.current.set(itemId, request);
+    const current = () => owns(owner) && knowledgeKindRef.current === kind
+      && knowledgeContextRequestsRef.current.get(itemId) === request;
+    try {
+      const context = await fetchNodeContext(owner.notebookId, itemId, "", request.signal);
+      if (!current()) return false;
+      replaceContexts({ ...knowledgeContextsRef.current, [itemId]: context });
+      return true;
+    } catch {
+      // A refresh retains its empty expansion placeholder: the collaboration
+      // result stays pending, and its explicit retry must include this item.
+      // A failed first expansion has no cache entry, so its button stays usable.
+      return false;
+    } finally {
+      if (knowledgeContextRequestsRef.current.get(itemId) === request) knowledgeContextRequestsRef.current.delete(itemId);
+    }
+  };
+
   const loadKnowledgeContext = async (itemId: string) => {
     const owner = currentOwner();
-    if (!owner || knowledgeContexts[itemId]) return;
-    const kind = knowledgeKindRef.current;
-    const request = {};
-    knowledgeContextRequestsRef.current.set(itemId, request);
-    try {
-      const context = await fetchNodeContext(owner.notebookId, itemId);
-      if (owns(owner) && knowledgeKindRef.current === kind
-        && knowledgeContextRequestsRef.current.get(itemId) === request) {
-        setKnowledgeContexts((current) => ({ ...current, [itemId]: context }));
-      }
-    } catch {
-      if (owns(owner) && knowledgeKindRef.current === kind
-        && knowledgeContextRequestsRef.current.get(itemId) === request) {
-        const item = knowledgeRef.current[kind]?.find((row) => row.id === itemId);
-        setKnowledgeContexts((current) => ({
-          ...current,
-          [itemId]: {
-            id: itemId,
-            object_type: item?.object_type ?? "",
-            name: "",
-            section_path: "",
-            occurrences: [],
-            definition: null,
-            steps: null,
-          },
-        }));
-      }
-    }
+    if (!owner || knowledgeContextsRef.current[itemId]) return;
+    await readKnowledgeContextFor(owner, knowledgeKindRef.current, itemId);
   };
 
   const visible = Boolean(currentOwner());
@@ -538,6 +570,7 @@ export function useKgKnowledge({ authority, policy, effects }: UseKgKnowledgeOpt
     selectKnowledgeStatus,
     goToKnowledgePage,
     refreshKnowledge,
+    refreshForCollaboration,
     invalidateKnowledge,
     updateKnowledge,
     findDuplicates,

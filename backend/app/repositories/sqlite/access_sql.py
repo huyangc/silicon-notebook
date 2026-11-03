@@ -26,7 +26,8 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
 * **读权(`NOTEBOOK_READ_SQL`)= owner ∪ `notebook_members` 有行 ∪ 有效授权边**。
 
 三者是严格的包含链:`写权 ⊆ 管理权 ⊆ 读权`。owner 三者皆真;管理边持有者可读可管
-不可删库;只读成员与 viewer 边只可读。
+不可删库;只读成员与 viewer 边只可读。分享编辑 P1 在管理权与读权之间插入第四条
+**编辑权**,包含链变为 `写权 ⊆ 管理权 ⊆ 编辑权 ⊆ 读权`(见下文「编辑权」一节)。
 
 ## 有效授权边(P1 群组知识共享)
 
@@ -67,6 +68,9 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
 * `NOTEBOOK_WRITE_SQL` —— `(notebook_id, user_id)`
 * `NOTEBOOK_READ_SQL` —— `(notebook_id, *read_access_params(user_id))`
 * `NOTEBOOK_ADMIN_SQL` —— `(notebook_id, *admin_access_params(user_id))`
+* `NOTEBOOK_EDIT_SQL` —— `(notebook_id, *edit_access_params(user_id))`
+* `NOTEBOOK_ACCESS_LEVEL_SQL` —— `access_level_params(notebook_id, user_id)`
+* `NOTEBOOK_READ_EXCEPT_GRANT_SQL` —— `read_except_grant_params(notebook_id, user_id, grant_id)`
 * `MEMBER_PROBE_SQL` —— `(notebook_id, user_id)`
 * `GRANT_PROBE_SQL` —— `grant_probe_params(notebook_id, user_id)`
 * `read_access_clause()` / `read_access_exists_clause()` —— `read_access_params(user_id)`
@@ -115,9 +119,32 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
 * `*/sharing_store.py` 的 `add_member` / `remove_member` / `kick_all_members` /
   `list_members` —— 成员关系的 CRUD,不是判定。
 
+## 编辑权(分享编辑 P1,决策 D1)
+
+第四条谓词 **编辑权(`NOTEBOOK_EDIT_SQL`)= owner ∨ `role IN ('admin','editor')` 的
+有效授权边**,包含链因此变为 `写权 ⊆ 管理权 ⊆ 编辑权 ⊆ 读权`。主体判定复用受限三臂
+(排除 `everyone`),管理级的 `role='admin'` 是它的子条件,所以「管理权 ⊆ 编辑权」由
+构造保证;管理权、写权、读权三条谓词**一个字都没改**——编辑者边在管理权里为假、
+在读权里为真(回滚到不认识 `editor` 的旧版本时,这条边自动降级为只读,不提权)。
+
+两条派生查询,臂全部来自同一组构造器,不在调用点手拼:
+
+* `NOTEBOOK_ACCESS_LEVEL_SQL`(PD-5):一条语句答出 `(owner_id, level)`,`level` 按
+  owner → admin → edit → read 的先后取第一个成立的档(CASE 的先后就是档位的高低,
+  把 edit 排到 admin 之前会把组管理员说成编辑者);都不成立为 NULL;库不存在或不
+  存活时无行。供「同一请求里既要判档、又要知道调用者是哪一档」的体内判定用,省掉
+  第二条语句。
+* `NOTEBOOK_READ_EXCEPT_GRANT_SQL`(PD-13):读权在「这一条授权边已被删除」那一刻的
+  值——授权边那条臂多一个 `ng.id<>?`,其余逐字同读权。供撤销/退出协作前判断「删掉
+  这条边之后这个人是否仍能读这本库」(还能读就不清理他的个人覆盖层)。user 与 grant
+  两种参数在占位符序列里交错,参数一律用 `read_except_grant_params` 展开,它按记号
+  渲染一次读出真实次序,不手排。
+
 **双后端同修**:`postgres/access_sql.py` 是本文件的镜像(占位符为 `%s`),两份文件
 结构逐条对应,改一侧必须改另一侧。
 """
+
+import re
 
 # 「这行还不算存在」的可见性谓词单点(批 3·W1 T-1,摸底 5)。折的是 40 处读侧站点
 # (`postgres/` 20 + `sqlite/` 20,逐行枚举见守卫测试),供裸列名或带别名前缀
@@ -353,6 +380,47 @@ def admin_grant_access_expr(
     )
 
 
+def _edit_principal_match_expr(
+    grant_alias: str,
+    user_ref: str,
+    group_alias: str,
+    group_admin_alias: str,
+) -> str:
+    """**编辑级**授权边的主体判定 = 受限三臂(不含 everyone)∧ `role IN
+    ('admin','editor')`(分享编辑 P1,决策 D1)。
+
+    与 `_admin_principal_match_expr` 同一个写法:复用受限三臂、只换 role 条件。管理级的
+    `role='admin'` 是这里的子条件,所以「管理权 ⊆ 编辑权」是构造性的;`everyone` 照样
+    排除(everyone 边恒只读,一条停车行也不能把编辑权发给全站)。`'editor'` 只出现在
+    `principal_type='user'` 的边上(决策 D1/D4),谓词这一侧不特判主体——与管理级同构,
+    免得两份主体判定分叉。参数消费与 `_restricted_principal_arms` 完全相同。
+    """
+    return (
+        f"({grant_alias}.role IN ('admin','editor') AND ("
+        + _restricted_principal_arms(
+            grant_alias, user_ref, group_alias, group_admin_alias
+        )
+        + "))"
+    )
+
+
+def edit_grant_access_expr(
+    notebook_ref: str,
+    user_ref: str,
+    grant_alias: str = "ng",
+    group_alias: str = "ngm",
+    group_admin_alias: str = "nga",
+) -> str:
+    """**编辑级**有效授权边的 `EXISTS (...)`。参数消费同 `admin_grant_access_expr`。"""
+    return _grant_exists_expr(
+        notebook_ref,
+        grant_alias,
+        _edit_principal_match_expr(
+            grant_alias, user_ref, group_alias, group_admin_alias
+        ),
+    )
+
+
 def restricted_grant_access_expr(
     notebook_ref: str,
     user_ref: str,
@@ -500,6 +568,82 @@ def admin_access_clause(
     )
 
 
+def edit_access_clause(
+    nb_alias: str = "nb",
+    *,
+    user_ref: str = "?",
+    grant_alias: str = "ng",
+    group_alias: str = "ngm",
+    group_admin_alias: str = "nga",
+) -> str:
+    """编辑权谓词 = owner ∨ 编辑级有效授权边,作用在已 join 进来的 notebooks 行上。
+
+    与 `admin_access_clause` 同形,只把授权边那一支换成编辑级。参数消费
+    `edit_access_params(user_id)`,传列引用则不消费。
+    """
+    return (
+        f"({nb_alias}.created_by={user_ref} OR "
+        + edit_grant_access_expr(
+            f"{nb_alias}.id", user_ref, grant_alias, group_alias, group_admin_alias
+        )
+        + ")"
+    )
+
+
+def read_access_except_grant_clause(
+    nb_alias: str = "nb",
+    member_alias: str = "nm",
+    *,
+    user_ref: str = "?",
+    grant_ref: str = "?",
+    grant_alias: str = "ng",
+    group_alias: str = "ngm",
+    group_admin_alias: str = "nga",
+) -> str:
+    """读权谓词在「`grant_ref` 这一条授权边已被删除」那一刻的值(PD-13)。
+
+    与 `read_access_clause` 逐字相同,只在授权边那条臂里多一个 `ng.id<>grant_ref`:
+    被删的那一行不再算数,其余每条读权来源(owner、成员行、别的授权边)照常成立。
+    等价性由性质测试对照「真删掉那一行之后的读权」逐格钉住。参数次序是交错的,
+    一律用 `read_except_grant_params` 展开。
+    """
+    return (
+        f"({nb_alias}.created_by={user_ref} OR "
+        + member_exists_expr(f"{nb_alias}.id", user_ref, member_alias)
+        + " OR "
+        + _grant_exists_expr(
+            f"{nb_alias}.id",
+            grant_alias,
+            f"{grant_alias}.id<>{grant_ref} AND "
+            + _principal_match_expr(
+                grant_alias, user_ref, group_alias, group_admin_alias
+            ),
+        )
+        + ")"
+    )
+
+
+def _access_level_case(user_ref: str) -> str:
+    """`NOTEBOOK_ACCESS_LEVEL_SQL` 的 CASE:owner → admin → edit → read 依次判。
+
+    每条臂都是唯一定义点的构造器(管理级、编辑级授权边与读权子句),不手抄主体判定;
+    各臂用不重名的别名,免得读者把两条 EXISTS 当成同一个子查询。先后就是档位高低:
+    admin 必须排在 edit 之前(编辑级臂也收 `role='admin'`)。
+    """
+    return (
+        f"CASE WHEN nb.created_by={user_ref} THEN 'owner' WHEN "
+        + admin_grant_access_expr("nb.id", user_ref, "lag", "lagm", "laga")
+        + " THEN 'admin' WHEN "
+        + edit_grant_access_expr("nb.id", user_ref, "leg", "legm", "lega")
+        + " THEN 'edit' WHEN "
+        + read_access_clause(
+            "nb", "lrm", user_ref=user_ref, grant_alias="lrg",
+            group_alias="lrgm", group_admin_alias="lrga",
+        )
+        + " THEN 'read' END"
+    )
+
+
 def read_access_exists_clause(
     row_alias: str = "m",
     nb_alias: str = "access_nb",
@@ -577,6 +721,36 @@ _READ_ACCESS_PARAM_COUNT = read_access_clause().count("?")
 _ADMIN_ACCESS_PARAM_COUNT = admin_access_clause().count("?")
 _GRANT_PROBE_USER_PARAM_COUNT = GRANT_PROBE_SQL.count("?") - 1
 _ADMIN_GRANT_PROBE_USER_PARAM_COUNT = ADMIN_GRANT_PROBE_SQL.count("?") - 1
+_EDIT_ACCESS_PARAM_COUNT = edit_access_clause().count("?")
+_ACCESS_LEVEL_USER_PARAM_COUNT = _access_level_case("?").count("?")
+# 「删掉某条边之后的读权」里 user 与 grant 两种参数交错出现:按记号渲染一次,读出
+# 占位符的真实先后。手排一份元组的话,子句里任何一条臂挪个位置,两个不透明 id 就
+# 静默对调——查询照常执行,只是判错。
+_READ_EXCEPT_GRANT_SLOTS = tuple(
+    re.findall(
+        r"\{user\}|\{grant\}",
+        read_access_except_grant_clause(user_ref="{user}", grant_ref="{grant}"),
+    )
+)
+
+
+def edit_access_params(user_id: str) -> tuple[str, ...]:
+    """`edit_access_clause()` 要消费的位置参数(从占位符数推导)。"""
+    return (user_id,) * _EDIT_ACCESS_PARAM_COUNT
+
+
+def access_level_params(notebook_id: str, user_id: str) -> tuple[str, ...]:
+    """`NOTEBOOK_ACCESS_LEVEL_SQL` 的位置参数:CASE 在前(全是 user),`nb.id` 在后。"""
+    return (user_id,) * _ACCESS_LEVEL_USER_PARAM_COUNT + (notebook_id,)
+
+
+def read_except_grant_params(
+    notebook_id: str, user_id: str, grant_id: str
+) -> tuple[str, ...]:
+    """`NOTEBOOK_READ_EXCEPT_GRANT_SQL` 的位置参数(`nb.id` 在前,其余按记号次序)。"""
+    return (notebook_id,) + tuple(
+        user_id if slot == "{user}" else grant_id for slot in _READ_EXCEPT_GRANT_SLOTS
+    )
 
 
 def admin_access_params(user_id: str) -> tuple[str, ...]:
@@ -655,3 +829,63 @@ NOTEBOOK_READ_SQL = (
     "SELECT 1 FROM notebooks nb WHERE nb.id=? AND " + read_access_clause()
     + f" AND nb.{NOTEBOOK_LIVE_SQL}"
 )
+
+# 编辑权(owner ∪ 编辑级有效授权边)的完整查询:有行即有编辑权。参数
+# `(notebook_id, *edit_access_params(user_id))`。
+NOTEBOOK_EDIT_SQL = (
+    "SELECT 1 FROM notebooks nb WHERE nb.id=? AND " + edit_access_clause()
+    + f" AND nb.{NOTEBOOK_LIVE_SQL}"
+)
+
+# 「删掉 grant 这一条边之后仍有读权」的完整查询(PD-13)。参数
+# `read_except_grant_params(notebook_id, user_id, grant_id)`。
+NOTEBOOK_READ_EXCEPT_GRANT_SQL = (
+    "SELECT 1 FROM notebooks nb WHERE nb.id=? AND "
+    + read_access_except_grant_clause() + f" AND nb.{NOTEBOOK_LIVE_SQL}"
+)
+
+# 访问级别点查(PD-5):一行 `(owner_id, level)`,`level` ∈ owner/admin/edit/read,
+# 无权为 NULL;库不存在或非存活无行。参数 `access_level_params(notebook_id, user_id)`。
+NOTEBOOK_ACCESS_LEVEL_SQL = (
+    "SELECT nb.created_by AS owner_id, " + _access_level_case("?")
+    + f" AS level FROM notebooks nb WHERE nb.id=? AND nb.{NOTEBOOK_LIVE_SQL}"
+)
+# Collaboration owner probes share the exact Boolean query, including ordering
+# and lifecycle predicate. Only its projection differs.
+NOTEBOOK_EDIT_OWNER_SQL = NOTEBOOK_EDIT_SQL.replace("SELECT 1 FROM notebooks nb", "SELECT nb.created_by FROM notebooks nb", 1)
+NOTEBOOK_ADMIN_OWNER_SQL = NOTEBOOK_ADMIN_SQL.replace("SELECT 1 FROM notebooks nb", "SELECT nb.created_by FROM notebooks nb", 1)
+
+
+def _collab_pulse_wanted_sql(user_ref: str) -> str:
+    restricted = _grant_exists_expr(
+        "nb.id", "pulse_g",
+        "(" + _restricted_principal_arms("pulse_g", user_ref, "pulse_gm", "pulse_ga") + ")",
+    )
+    eligible = (
+        edit_access_clause(user_ref=user_ref, grant_alias="pulse_edit_g",
+                           group_alias="pulse_edit_m", group_admin_alias="pulse_edit_a")
+        + " OR " + member_exists_expr("nb.id", user_ref, "pulse_member")
+        + " OR " + restricted
+    )
+    other = (
+        f"nb.created_by<>{user_ref} OR nb.tier='base' OR "
+        f"EXISTS (SELECT 1 FROM notebook_members pulse_other_m WHERE pulse_other_m.notebook_id=nb.id "
+        f"AND pulse_other_m.user_id<>{user_ref}) OR "
+        "EXISTS (SELECT 1 FROM notebook_grants pulse_other_g WHERE pulse_other_g.notebook_id=nb.id AND ("
+        "pulse_other_g.principal_type='everyone' OR "
+        f"(pulse_other_g.principal_type='user' AND pulse_other_g.principal_id<>{user_ref}) OR "
+        "(pulse_other_g.principal_type IN ('group','group_admins') AND "
+        "EXISTS (SELECT 1 FROM group_members pulse_other_gm "
+        "WHERE pulse_other_gm.group_id=pulse_other_g.principal_id "
+        f"AND pulse_other_gm.user_id<>{user_ref} AND "
+        "(pulse_other_g.principal_type='group' OR pulse_other_gm.role='admin')))))"
+    )
+    return f"SELECT 1 FROM notebooks nb WHERE nb.id={{notebook}} AND nb.{NOTEBOOK_LIVE_SQL} AND ({eligible}) AND ({other})"
+
+
+_COLLAB_PULSE_TEMPLATE = _collab_pulse_wanted_sql("{user}")
+NOTEBOOK_COLLAB_PULSE_WANTED_SQL = _COLLAB_PULSE_TEMPLATE.replace("{user}", "?").replace("{notebook}", "?")
+
+
+def collab_pulse_wanted_params(notebook_id: str, user_id: str) -> tuple[str, ...]:
+    return (notebook_id,) + (user_id,) * _COLLAB_PULSE_TEMPLATE.count("{user}")

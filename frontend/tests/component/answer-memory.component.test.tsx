@@ -1,9 +1,11 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { AnswerView } from "../../app/answer-panel";
 import { MemorySaveDialog } from "../../app/memory-panel";
+import { collectSavedAnswerFlags } from "../../app/memory-model";
 import type {
   AskResponse,
   MemoryPreview,
@@ -27,6 +29,58 @@ const answer: AskResponse = {
   citations: [],
   llm_mode: "deterministic",
 };
+
+function renderAnswer(props: Partial<Parameters<typeof AnswerView>[0]> = {}) {
+  const base: Parameters<typeof AnswerView>[0] = { answer, feedbackSent: "", onFeedback: () => undefined, onOpenKnowledgeGraph: () => undefined, onOpenKnowhowRow: () => undefined, notebookId: "nb-1", notebookNames: {}, onBuildScaleIndex: () => undefined, buildingScaleIndex: false, onSaveMemory: vi.fn(), memorySaved: false, ...props };
+  const view = render(<AnswerView {...base} />);
+  return { ...view, base, rerenderAnswer: (next: Partial<Parameters<typeof AnswerView>[0]>) => view.rerender(<AnswerView {...base} {...next} />) };
+}
+
+test("未采纳建议显示有建议且保存仍可点，采纳后显示已保存并禁用", async () => {
+  const signal = new AbortController().signal;
+  const flags = await collectSavedAnswerFlags([["answer-1"]], async () => ({ links: {}, states: { "answer-1": { memory_id: "draft-1", status: "candidate", suggested: true } } }), signal);
+  const onSaveMemory = vi.fn();
+  const view = renderAnswer({ memorySaved: flags?.["answer-1"] === true, memorySuggested: flags?.["answer-1"] === "suggested", onSaveMemory });
+  expect(screen.getByText("有建议")).toBeVisible();
+  await userEvent.setup().click(screen.getByRole("button", { name: "保存到记忆" }));
+  expect(onSaveMemory).toHaveBeenCalledWith("answer-1");
+  view.rerenderAnswer({ memorySaved: true, memorySuggested: false });
+  expect(screen.getByRole("button", { name: "已保存到记忆" })).toBeDisabled();
+  expect(screen.queryByText("有建议")).toBeNull();
+});
+
+test("D19仅suggest用户点有用后显示句中保存动作，并复用原保存入口", async () => {
+  const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
+  const onSaveMemory = vi.fn();
+  function Harness() {
+    const [feedback, setFeedback] = useState("");
+    return <AnswerView answer={answer} feedbackSent={feedback} onFeedback={setFeedback} notebookId="nb-1" notebookNames={{}} buildingScaleIndex={false} onSaveMemory={onSaveMemory} memorySaved={false} memorySuggestionsEnabled />;
+  }
+  render(<Harness />);
+  expect(screen.queryByRole("button", { name: "存为记忆" })).toBeNull();
+  await userEvent.setup().click(screen.getByRole("button", { name: "有用" }));
+  const action = screen.getByRole("button", { name: "存为记忆" });
+  expect(action).toHaveClass("link-button", "inline-action");
+  expect(action.parentElement).toHaveTextContent("要把这条回答存为记忆吗？");
+  await userEvent.setup().click(action);
+  expect(onSaveMemory).toHaveBeenCalledOnce();
+  expect(onSaveMemory).toHaveBeenCalledWith("answer-1");
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+test("manual回答DOM逐字不变，suggest关闭或已保存时不显示D19", () => {
+  const view = renderAnswer({ feedbackSent: "useful" });
+  expect(screen.queryByRole("button", { name: "存为记忆" })).toBeNull();
+  const manual = view.container.innerHTML;
+  view.rerenderAnswer({ feedbackSent: "useful", memorySuggestionsEnabled: false });
+  expect(view.container.innerHTML).toBe(manual);
+  view.rerenderAnswer({ feedbackSent: "useful", memorySuggestionsEnabled: true });
+  expect(screen.getByRole("button", { name: "存为记忆" })).toBeVisible();
+  view.rerenderAnswer({ feedbackSent: "useful", memorySuggestionsEnabled: false });
+  expect(view.container.innerHTML).toBe(manual);
+  view.rerenderAnswer({ feedbackSent: "useful", memorySuggestionsEnabled: true, memorySaved: true });
+  expect(screen.queryByRole("button", { name: "存为记忆" })).toBeNull();
+});
 
 
 test("AnswerView exposes one executable save-to-Memory action", async () => {

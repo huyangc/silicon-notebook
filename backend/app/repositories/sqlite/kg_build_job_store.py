@@ -132,6 +132,19 @@ class KgBuildJobStore:
             ).fetchone()
         return row is not None
 
+    def running_initiator(self, notebook_id: str) -> "tuple[str, str] | None":
+        """``(user_id, name)`` of who started this notebook's running analysis,
+        or None. Mirror of the PostgreSQL twin (its docstring has the why)."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT j.created_by AS user_id, "
+                "COALESCE(NULLIF(TRIM(u.display_name),''), u.username, '') AS name "
+                "FROM kg_build_jobs j LEFT JOIN users u ON u.id = j.created_by "
+                "WHERE j.notebook_id=? AND j.status='running'",
+                (notebook_id,),
+            ).fetchone()
+        return None if row is None else (str(row["user_id"] or ""), str(row["name"] or ""))
+
     def latest(self, notebook_id: str) -> dict | None:
         with self.database.connect() as db:
             return self.latest_on(db, notebook_id)
