@@ -80,6 +80,8 @@ npm run stop
 
 Production uses one backend worker because model scheduling and cancellation state are process-local. Logs are written under `.local/logs/`; verify `/api/ready` after startup. For offline deployment bundles, run `bash scripts/pack.sh` and follow [packaging/DEPLOY.md](./packaging/DEPLOY.md).
 
+To update an offline install, stop and back it up, then run `./upgrade.sh --target /original/install` from the new bundle. Start from the original directory; configuration and data paths are preserved.
+
 ### Verify
 
 For command-line operations, start with `bash scripts/cli.sh --help` (or

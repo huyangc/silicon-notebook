@@ -80,6 +80,8 @@ npm run stop
 
 生产模式使用单个后端 worker，因为模型调度与取消状态位于进程内。日志写入 `.local/logs/`，启动后应检查 `/api/ready`。离线部署可先运行 `bash scripts/pack.sh`，再按 [packaging/DEPLOY.md](./packaging/DEPLOY.md) 操作。
 
+离线包更新可在停服备份后，从新包执行 `./upgrade.sh --target /原安装目录`，保留现有配置与数据路径，再回原目录启动。
+
 ### 验证
 
 命令行操作从 `bash scripts/cli.sh --help`（或 `npm run cli -- --help`）开始。
