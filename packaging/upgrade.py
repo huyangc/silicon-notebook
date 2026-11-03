@@ -64,11 +64,12 @@ def inspect_existing(target: Path) -> dict:
     script = r'''
 import importlib.metadata as metadata, json, os, pathlib, sys
 root = pathlib.Path(sys.argv[1])
-os.environ["SILICON_NOTEBOOK_ENV_FILE"] = str(root / ".env")
 sys.path.insert(0, str(root / "backend"))
 from app.core.config import Settings
 s = Settings()
 paths = [s.storage_dir, s.model_services_config, s.extensions_config]
+paths.append(os.environ.get("SILICON_NOTEBOOK_ENV_FILE", ""))
+paths.append(_upgrade_selected_env_file)
 if s.database_url.startswith("sqlite:///"):
     paths.append(s.sqlite_path)
 for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
@@ -85,10 +86,30 @@ print(json.dumps({"paths": [p for p in paths if p], "packages": packages}))
 
 
 def run_config_python(python: Path, script: str, target: Path, *args: str, env: dict | None = None):
-    # Match start.sh, including bare $NAME expansion; do not reparse exported
-    # values with dotenv and silently change the identity being checked.
-    shell = 'set -euo pipefail; set -a; source "$1/.env"; set +a; exec "$2" -c "$3" "$1" "${@:4}"'
-    return run_command(["bash", "-c", shell, "upgrade-config", str(target), str(python), script, *args],
+    # Match both start.sh's shell expansion and python_env.py's selected-file
+    # precedence/path preparation. Never replace an explicit selection (or its
+    # empty opt-out) with the root .env while inspecting or checking new code.
+    release_root = Path(__file__).resolve().parent
+    helper = release_root / "scripts/python_env.py"
+    if not helper.is_file():
+        helper = release_root.parent / "scripts/python_env.py"  # source checkout
+    bootstrap = r'''
+import os, pathlib, runpy, sys
+helper, script = sys.argv[1:3]
+root = pathlib.Path(sys.argv[3])
+selected = os.environ.get("SILICON_NOTEBOOK_ENV_FILE", "")
+prepared = runpy.run_path(helper)["build_python_environment"](root=root)
+prepared.setdefault("SILICON_NOTEBOOK_ENV_FILE", str(root / ".env"))
+os.environ.clear()
+os.environ.update(prepared)
+sys.path[:0] = [p for p in prepared["PYTHONPATH"].split(os.pathsep) if p]
+sys.argv = ["-c", *sys.argv[3:]]
+exec(compile(script, "<upgrade-config>", "exec"), {
+    "__name__": "__main__", "_upgrade_selected_env_file": selected.strip(),
+})
+'''
+    shell = 'set -euo pipefail; set -a; source "$1/.env"; set +a; exec "$2" -c "$3" "${@:4}"'
+    return run_command(["bash", "-c", shell, "upgrade-config", str(target), str(python), bootstrap, str(helper), script, str(target), *args],
                        cwd=target, env=env, capture=True)
 
 
@@ -236,7 +257,6 @@ def upgrade(source: Path, target: Path, work: Path, extra_wheelhouse: tuple[Path
         check_script = r'''
 import os, pathlib, sys
 target, stage = map(pathlib.Path, sys.argv[1:])
-os.environ["SILICON_NOTEBOOK_ENV_FILE"] = str(target / ".env")
 sys.path.insert(0, str(stage / "backend"))
 from app.core import config
 config._ROOT_DIR = target
