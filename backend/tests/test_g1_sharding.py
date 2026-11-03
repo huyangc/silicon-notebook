@@ -43,17 +43,30 @@ def test_units_match_effective_loadgroup_keys(marks, native, expected):
     assert shard._unit(_item(*marks), native) == expected
 
 
-def test_lpt_accounts_for_the_second_runners_later_work_and_is_order_independent():
+def test_lpt_accounts_for_both_runners_later_work_and_is_order_independent(monkeypatch):
+    monkeypatch.setenv("G1_PRIMARY_POSTGRES_FOLLOWUP", "1")
     units = {("module", name): [name] for name in "abcd"}
     overhead = shard.CONTRACTS_FRONTEND_TEST_SECONDS
     costs = dict(a=overhead * 1.25, b=overhead, c=overhead * 0.75, d=overhead * 0.5)
     expected = shard._owners(units, costs)
     assert expected == {
-        ("module", "a"): 0, ("module", "b"): 1,
-        ("module", "c"): 0, ("module", "d"): 0,
+        ("module", "a"): 1, ("module", "b"): 0,
+        ("module", "c"): 1, ("module", "d"): 0,
     }
     assert shard._owners(dict(reversed(list(units.items()))), costs) == expected
     assert shard._owners(units, costs, extra_seconds=0) != expected
+    # Daily has no PG tail: preserve its original frontend-only allocation.
+    monkeypatch.setenv("G1_PRIMARY_POSTGRES_FOLLOWUP", "0")
+    assert shard._owners(units, costs) == {
+        ("module", "a"): 0, ("module", "b"): 1,
+        ("module", "c"): 0, ("module", "d"): 0,
+    }
+
+
+def test_invalid_followup_mode_fails_closed(monkeypatch):
+    monkeypatch.setenv("G1_PRIMARY_POSTGRES_FOLLOWUP", "yes")
+    with pytest.raises(pytest.UsageError, match="must be 0 or 1"):
+        shard._followup_difference()
 
 
 @pytest.mark.parametrize("units,costs", [({}, {}), ({("module", "a"): ["a"]}, {"a": 1}),

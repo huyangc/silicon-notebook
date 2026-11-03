@@ -297,6 +297,8 @@ def test_verification_lane_markers_partition_every_architecture_contract_test(tm
     actual scheduling-key function separately proves group co-location.
     The same independent proof exercises the PostgreSQL launcher's actual
     full and sharded commands, without starting fixtures or contacting a DB.
+    All six independent pytest sessions share one isolated interpreter's
+    application imports; test modules and parametrization state stay fresh.
     """
     import ast
     import json
@@ -404,16 +406,26 @@ def test_verification_lane_markers_partition_every_architecture_contract_test(tm
         "tests.architecture.lane_partition_plugin",
     ]
 
-    def collect(extra_args: list[str], *, command=None, cwd=ROOT) -> list[dict]:
+    def collect_all() -> list[list[dict]]:
+        from tests.postgres.lane import BACKEND_ROOT, _pytest_command
+
         child_env = {**os.environ, "PYTHONPATH": str(ROOT / "backend")}
-        if command is not None:
-            # These are collect-only commands with -n0, not a live target
-            # launch. Ambient four-worker target maps must not enable PG.
-            for key in (
-                "TEST_POSTGRES_TARGETS_JSON", "TEST_POSTGRES_URL",
-                "TEST_POSTGRES_NON_C_URL", "TEST_POSTGRES_NON_UTF_URL",
-            ):
-                child_env.pop(key, None)
+        # These are collect-only commands with -n0, not live target launches.
+        # Ambient four-worker target maps must not enable PG.
+        for key in (
+            "TEST_POSTGRES_TARGETS_JSON", "TEST_POSTGRES_URL",
+            "TEST_POSTGRES_NON_C_URL", "TEST_POSTGRES_NON_UTF_URL",
+        ):
+            child_env.pop(key, None)
+        jobs = [{"command": args, "cwd": str(ROOT)}]
+        for index in range(2):
+            jobs.append({"command": [
+                *args, "-m", marker_expr(0), "-p", "tests.architecture.g1_sharding",
+                "--g1-shard-index", str(index), "--g1-shard-count", "2",
+            ], "cwd": str(ROOT)})
+        collect_args = ["--collect-only", "-q", "-p", "tests.architecture.lane_partition_plugin"]
+        for shard in (None, (0, 2), (1, 2)):
+            command = _pytest_command(shard=shard)
             # Keep the launcher's actual selection/plugin arguments, but do
             # not let collection overwrite reports from a real PG execution.
             command = [
@@ -423,9 +435,11 @@ def test_verification_lane_markers_partition_every_architecture_contract_test(tm
                 if arg.startswith("--ci-metrics=") else arg
                 for arg in command
             ]
+            jobs.append({"command": [*command, *collect_args], "cwd": str(BACKEND_ROOT)})
         result = subprocess.run(
-            [*(args if command is None else command), *extra_args],
-            cwd=cwd,
+            [sys.executable, "-m", "tests.architecture.lane_partition_plugin"],
+            input=json.dumps(jobs),
+            cwd=ROOT,
             env=child_env,
             capture_output=True,
             text=True,
@@ -442,9 +456,12 @@ def test_verification_lane_markers_partition_every_architecture_contract_test(tm
             + result.stdout
         )
         dump = result.stdout.split(START_SENTINEL, 1)[1].split(END_SENTINEL, 1)[0]
+        # Keep the actual native-id/group census for CI allocation diagnostics.
+        # This is observed test evidence, never a fixture used by the proof.
+        (tmp_path / "lane-partition-collections.json").write_text(dump, encoding="utf-8")
         return json.loads(dump)
 
-    items = collect([])
+    items, g1_first, g1_second, pg_full, pg_first, pg_second = collect_all()
 
     universe = {item["nodeid"] for item in items}
     assert universe, "candidate discovery found files but collected zero tests"
@@ -485,13 +502,7 @@ def test_verification_lane_markers_partition_every_architecture_contract_test(tm
     assert (g1_ids & candidate_ids) | (g2_ids & candidate_ids) == candidate_ids
     assert not (g1_ids & candidate_ids) & (g2_ids & candidate_ids)
 
-    selected = [
-        collect([
-            "-m", marker_expr(0), "-p", "tests.architecture.g1_sharding",
-            "--g1-shard-index", str(index), "--g1-shard-count", "2",
-        ])
-        for index in range(2)
-    ]
+    selected = [g1_first, g1_second]
     def assert_partition(full, parts, lane):
         complete = Counter(item["nodeid"] for item in full)
         assert complete and all(count == 1 for count in complete.values())
@@ -516,17 +527,7 @@ def test_verification_lane_markers_partition_every_architecture_contract_test(tm
 
     assert_partition([item for item in items if item["nodeid"] in g1_ids], selected, "G1")
 
-    from tests.postgres.lane import BACKEND_ROOT, _pytest_command
-
-    collect_args = ["--collect-only", "-q", "-p", "tests.architecture.lane_partition_plugin"]
-    pg_full = collect(collect_args, command=_pytest_command(), cwd=BACKEND_ROOT)
-    pg_parts = [
-        collect(
-            collect_args, command=_pytest_command(shard=(index, 2)), cwd=BACKEND_ROOT,
-        )
-        for index in range(2)
-    ]
-    assert_partition(pg_full, pg_parts, "PostgreSQL")
+    assert_partition(pg_full, [pg_first, pg_second], "PostgreSQL")
 
 
 def test_the_process_scan_finds_every_way_a_g1_test_starts_a_process():

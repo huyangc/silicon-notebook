@@ -9,7 +9,7 @@ from tests.architecture import ci_partition
 
 _TIMINGS = Path(__file__).resolve().parents[1] / "fixtures/pg_module_timings.json"
 # The second PG runner first completes its G1 backend shard on four workers.
-BACKEND_PRIMARY_TEST_SECONDS = 9 * 60 * 4
+BACKEND_PRIMARY_TEST_SECONDS = 6 * 60 * 4
 
 
 def pytest_addoption(parser):

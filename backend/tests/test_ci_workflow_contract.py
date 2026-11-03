@@ -507,6 +507,7 @@ def test_pr_ci_runs_every_g1_lane_in_two_jobs() -> None:
     ]
     assert _named_step(backend, BACKEND_SHARD_STEPS[0])["env"] == {
         "PYTHON_BIN": "python", "BACKEND_PYTEST_WORKERS": "4",
+        "G1_PRIMARY_POSTGRES_FOLLOWUP": "1",
     }
 
     rest = jobs["standard-contracts-frontend"]
@@ -546,7 +547,8 @@ def test_pr_ci_runs_every_g1_lane_in_two_jobs() -> None:
     shard_commands = []
     for index, job in enumerate((backend, rest)):
         shard = _named_step(job, BACKEND_SHARD_STEPS[index])
-        assert shard["env"] == {"PYTHON_BIN": "python", "BACKEND_PYTEST_WORKERS": "4"}
+        assert shard["env"] == {"PYTHON_BIN": "python", "BACKEND_PYTEST_WORKERS": "4",
+                                "G1_PRIMARY_POSTGRES_FOLLOWUP": "1"}
         words = shlex.split(shard["run"])
         assert words[:2] == ["bash", "scripts/check_backend.sh"]
         assert words[2::2] == ["--shard-index", "--shard-count"]
@@ -751,7 +753,8 @@ def test_daily_extended_gate_runs_every_g1_lane_exactly_as_pr_ci_does() -> None:
         [LOCKED_INSTALL, BACKEND_SHARD_COMMANDS[0]]
     )
     assert _named_step(daily["extended-backend"], BACKEND_SHARD_STEPS[0])["env"] == (
-        _named_step(ci["standard-backend"], BACKEND_SHARD_STEPS[0])["env"]
+        {key: value for key, value in _named_step(ci["standard-backend"], BACKEND_SHARD_STEPS[0])["env"].items()
+         if key != "G1_PRIMARY_POSTGRES_FOLLOWUP"}
     )
 
     rest = daily["extended-contracts-frontend"]
@@ -766,7 +769,8 @@ def test_daily_extended_gate_runs_every_g1_lane_exactly_as_pr_ci_does() -> None:
     )["env"]
     assert lanes["if"] == "${{ !cancelled() }}"
     assert _named_step(rest, BACKEND_SHARD_STEPS[1])["env"] == (
-        _named_step(ci["standard-contracts-frontend"], BACKEND_SHARD_STEPS[1])["env"]
+        {key: value for key, value in _named_step(ci["standard-contracts-frontend"], BACKEND_SHARD_STEPS[1])["env"].items()
+         if key != "G1_PRIMARY_POSTGRES_FOLLOWUP"}
     )
     assert _named_step(rest, BACKEND_SHARD_STEPS[1])["if"] == "${{ !cancelled() }}"
     for daily_name, ci_name in (
