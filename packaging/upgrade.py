@@ -108,7 +108,13 @@ exec(compile(script, "<upgrade-config>", "exec"), {
     "__name__": "__main__", "_upgrade_selected_env_file": selected.strip(),
 })
 '''
-    shell = 'set -euo pipefail; set -a; source "$1/.env"; set +a; exec "$2" -c "$3" "${@:4}"'
+    shell = '''set -euo pipefail
+inherited_pythonpath="${PYTHONPATH-}"
+set -a
+source "$1/.env"
+set +a
+export PYTHONPATH="$inherited_pythonpath${PYTHONPATH:+:$PYTHONPATH}"
+exec "$2" -c "$3" "${@:4}"'''
     return run_command(["bash", "-c", shell, "upgrade-config", str(target), str(python), bootstrap, str(helper), script, str(target), *args],
                        cwd=target, env=env, capture=True)
 

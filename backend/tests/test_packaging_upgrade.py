@@ -303,6 +303,20 @@ class Settings:
 
 
 @pytest.mark.process_contract
+def test_config_check_merges_inherited_root_and_selected_pythonpaths(deployment, monkeypatch):
+    _, target, _ = deployment
+    (target / ".env").write_text("PYTHONPATH=config-plugin\nSILICON_NOTEBOOK_ENV_FILE=.local/deployment.env\n")
+    (target / ".local/deployment.env").write_text("PYTHONPATH=selected-plugin\n")
+    monkeypatch.setenv("PYTHONPATH", "inherited-plugin")
+    output = upgrade.run_config_python(Path(sys.executable),
+        "import os; print(os.environ['PYTHONPATH'])", target)
+    assert output.strip().split(os.pathsep) == [
+        str(target / "backend"), str(target / "inherited-plugin"),
+        str(target / "config-plugin"), str(target / "selected-plugin"),
+    ]
+
+
+@pytest.mark.process_contract
 def test_cancellation_reaps_installer_process_group(tmp_path):
     installer = tmp_path / "installer.py"
     installer.write_text("""import subprocess, sys, signal
