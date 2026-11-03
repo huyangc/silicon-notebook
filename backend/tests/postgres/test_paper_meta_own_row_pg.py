@@ -15,6 +15,7 @@ from app.repositories.postgres._store_utils import normalize_timestamp
 from app.repositories.postgres.source_store import PAPER_META_ELIGIBLE_SQL
 from tests import paper_meta_own_row_cases as cases
 from tests.model_testkit import RecordingModelProvider
+from tests.postgres.conftest import vacuum_until_all_visible
 
 pytestmark = [
     pytest.mark.postgres_integration,
@@ -78,7 +79,8 @@ def _seed_volume(repo, world: cases.World) -> None:
     a production-sized raw_json (the LLM payload, about a kilobyte): with
     near-empty rows a sequential scan of the table is as cheap as the index
     and the pin would measure the fixture, not the reader. Then VACUUM ANALYZE
-    so index-only scans are costed on a settled visibility map."""
+    and verify the readers' tables are fully visible before costing their
+    index-only scans: a concurrent maintenance snapshot can outlive one VACUUM."""
     now = normalize_timestamp("2026-07-22T10:00:00+00:00")
     neighbours = [f"nb-pmor-{index:02d}" for index in range(40)]
     with repo._runtime.source_store.database.write() as db:
@@ -113,6 +115,8 @@ def _seed_volume(repo, world: cases.World) -> None:
         connection.execute("SET statement_timeout = 0")
         for table in ("sources", "source_paper_meta", "notebooks"):
             connection.execute(f"VACUUM ANALYZE {table}")
+    for table in ("sources", "source_paper_meta"):
+        vacuum_until_all_visible(repo.postgres_url, table)
 
 
 def _plans(connection, sql: str, params) -> tuple[str, str]:
