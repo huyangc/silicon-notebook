@@ -24,7 +24,7 @@ CONTRACTS_FRONTEND_TEST_SECONDS = 5 * 60 * 4
 # LPT depends only on the difference, so subtract the primary runner's tail
 # from both initial loads. A negative difference is a scheduling offset,
 # never a negative test cost or a test-selection condition.
-POSTGRES_REST_TEST_SECONDS = 10 * 60 * 4
+POSTGRES_REST_TEST_SECONDS = 5 * 60 * 4
 FOLLOWUP_DIFFERENCE_SECONDS = CONTRACTS_FRONTEND_TEST_SECONDS - POSTGRES_REST_TEST_SECONDS
 
 

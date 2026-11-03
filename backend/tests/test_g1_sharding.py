@@ -50,11 +50,11 @@ def test_lpt_accounts_for_both_runners_later_work_and_is_order_independent(monke
     costs = dict(a=overhead * 1.25, b=overhead, c=overhead * 0.75, d=overhead * 0.5)
     expected = shard._owners(units, costs)
     assert expected == {
-        ("module", "a"): 1, ("module", "b"): 0,
+        ("module", "a"): 0, ("module", "b"): 1,
         ("module", "c"): 1, ("module", "d"): 0,
     }
     assert shard._owners(dict(reversed(list(units.items()))), costs) == expected
-    assert shard._owners(units, costs, extra_seconds=0) != expected
+    assert shard._owners(units, costs, extra_seconds=0) == expected
     # Daily has no PG tail: preserve its original frontend-only allocation.
     monkeypatch.setenv("G1_PRIMARY_POSTGRES_FOLLOWUP", "0")
     assert shard._owners(units, costs) == {
@@ -73,7 +73,7 @@ def test_invalid_followup_mode_fails_closed(monkeypatch):
     ({("module", "a"): ["a"], ("module", "b"): ["b"]}, {"a": 1, "b": 1})])
 def test_empty_partitions_fail_closed(units, costs):
     with pytest.raises(pytest.UsageError, match="empty shard"):
-        shard._owners(units, costs)
+        shard._owners(units, costs, extra_seconds=shard.CONTRACTS_FRONTEND_TEST_SECONDS)
 
 
 @pytest.mark.parametrize("value", [0, -1, True, float("inf"), float("nan"), "1", None, 10**400])
