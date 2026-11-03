@@ -705,6 +705,9 @@ are rejected before replacement. Additional packages in the old environment, inc
 plugins, require their exact-version offline wheels and dependencies through repeatable
 `--extra-wheelhouse /local/wheels`; missing or incompatible packages stop the upgrade. New code checks
 the original settings and plugin imports before switching environments.
+Preflight and new-code checks use the launcher's shared environment preparation, preserving
+`SILICON_NOTEBOOK_ENV_FILE` selection (relative to the original install root) and its empty opt-out;
+the selected environment file is also protected from replacement.
 
 ## Configuration
 

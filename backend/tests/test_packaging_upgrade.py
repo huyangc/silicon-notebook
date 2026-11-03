@@ -255,6 +255,54 @@ PYTHONPATH=backend
 
 
 @pytest.mark.process_contract
+@pytest.mark.parametrize("selection", [".local/deployment.env", "frontend/deployment.env", "absolute", "symlink", ""])
+def test_upgrade_preflight_preserves_selected_environment_file(deployment, monkeypatch, selection):
+    source, target, _ = deployment
+    runtime = target / ".venv/bin/python"
+    runtime.unlink()
+    runtime.symlink_to(sys.executable)
+    core = target / "backend/app/core"
+    core.mkdir(parents=True)
+    (core.parent / "__init__.py").touch()
+    (core / "__init__.py").touch()
+    (core / "config.py").write_text('''import os
+class Settings:
+    storage_dir = os.environ["SILICON_NOTEBOOK_STORAGE_DIR"]
+    model_services_config = os.environ["MODEL_SERVICES_CONFIG"]
+    extensions_config = ""
+    database_url = os.environ["DATABASE_URL"]
+    sqlite_path = database_url[len("sqlite:///"):]
+''')
+    symlink_selection = selection == "symlink"
+    if symlink_selection:
+        selection = "frontend/deployment.env"
+    elif selection == "absolute":
+        selection = str(target / ".local/deployment.env")
+    config = (target / selection) if selection else None
+    database = ".local/customer.db" if not selection or selection == "frontend/deployment.env" else "frontend/customer.db"
+    if config:
+        if symlink_selection:
+            (target / ".local/selected-real.env").touch()
+            config.symlink_to("../.local/selected-real.env")
+        config.write_text(f"DATABASE_URL=sqlite:///{database}\nPYTHONPATH=backend\n")
+    (target / ".env").write_text(
+        f"SILICON_NOTEBOOK_ENV_FILE='{selection}'\n"
+        "SILICON_NOTEBOOK_STORAGE_DIR=.local/storage\nMODEL_SERVICES_CONFIG=\n"
+        + ("DATABASE_URL=sqlite:///.local/customer.db\n" if not selection else "")
+    )
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(upgrade, "inspect_existing", REAL_INSPECT)
+    result = upgrade.inspect_existing(target)
+    assert database in result["paths"]
+    if selection:
+        assert str(config.resolve()) in result["paths"]
+        with pytest.raises(upgrade.UpgradeError, match="重叠"):
+            upgrade.validate(source, target)
+    else:
+        assert str(target / ".env") not in result["paths"]
+
+
+@pytest.mark.process_contract
 def test_cancellation_reaps_installer_process_group(tmp_path):
     installer = tmp_path / "installer.py"
     installer.write_text("""import subprocess, sys, signal
