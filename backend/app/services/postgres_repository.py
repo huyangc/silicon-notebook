@@ -136,7 +136,7 @@ class PostgresRepository(RepositoryFacade):
                 ),
                 index_state_signature=(lambda nb: rt.scale_artifacts.state_signature(nb)),
                 index_manifest_identity=(
-                    lambda nb: rt.scale_artifact_store.scale_manifest_identity(nb)
+                    lambda nb: rt.scale_artifact_store.scale_integrity_identity(nb)
                 ),
                 probe_index_integrity=(
                     lambda nb: probe_scale_index_integrity(

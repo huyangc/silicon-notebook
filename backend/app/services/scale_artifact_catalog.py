@@ -155,15 +155,13 @@ class ScaleArtifactCatalog:
 
         为什么是投影 + memo,而不是「轻读 manifest 头部」:JSON 没有部分解析,
         读出 ``version`` 就必然把整份(含 48k 元素、≈2MB 的 ``watermark_sources``)
-        解析一遍。既有的 ``read_manifest_version`` 也不例外——它省的是**返回**
-        整份 dict,不是解析。把 ``watermark_sources`` 拆到 manifest 旁的独立文件
+        解析一遍。只投影返回 version 也省不了解析。把 ``watermark_sources`` 拆到 manifest 旁的独立文件
         才能真正做到轻读,那是工件格式 + 迁移 + 读写两侧的改动,本批不做(登记为
         残余)。所以这里退而求其次:同一份磁盘工件只解析一次,之后按签名命中。
 
         签名与 fail-soft 语义见 ``ScaleArtifactStore.manifest_stat_signature``。
         解析失败(corrupt manifest)刻意**不进** memo:与仓库既有约定一致
-        (``scale_manifest_identity`` 的 docstring:损坏结论不缓存),用户修好
-        工件之后不必等任何东西过期。
+        (H8 同样不缓存损坏结论),用户修好工件之后不必等任何东西过期。
 
         ``signature`` 由调用方给(见 ``_manifest_signature``);缺省值只服务直接
         调用本方法的测试,``load()`` 永远显式传自己那一次 stat 的结果。

@@ -3438,6 +3438,14 @@ published indexing pipeline all have to match the running service:
 PYTHONPATH=backend python scripts/build_scale_index.py inspect --notebook nb-xxx
 ```
 
+Online checkup and visualization status inspect metadata only; they do not load
+graph arrays or ANN handles. For an explicit full main-index load, run
+`bash scripts/cli.sh scale inspect --notebook nb-xxx --deep`. Reserve enough
+additional memory for the graph arrays and the entire main ANN: this operation
+can take tens of seconds on a large library. The receipt adds
+`deep_index_corrupt`; optional chunk/relation ANN binaries are not deep-checked.
+This checks loadability and main ANN entry counts, not a cryptographic checksum.
+
 **`version_matches_database: false` right after rolling out batch-3-W1 PR-2
 (unified_kg_state.kg_reset_epoch):** if a notebook's KG has EVER been cleared
 via `delete_notebook_kg` before this rollout (the full re-extract endpoint,

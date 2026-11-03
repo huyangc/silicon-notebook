@@ -88,7 +88,7 @@ def test_v9_scale_artifact_loads_and_probes(store):
     dst = _copy_fixture(store, "kg_index", "nb-old")
     expected = json.loads((dst / "manifest.json").read_text())
     assert store.read_manifest(dst) == expected
-    assert store.read_manifest_version(dst) == expected["version"]
+    assert store.read_manifest(dst)["version"] == expected["version"]
     idx = store.load_scale("nb-old")
     assert idx is not None
     assert idx.manifest == expected
@@ -124,15 +124,12 @@ def test_v9_viz_artifact_loads(store):
 def test_manifest_probes_fail_soft_and_preserve_raises(store, tmp_path):
     missing = tmp_path / "nowhere"
     assert store.read_manifest(missing) is None
-    assert store.read_manifest_version(missing) is None
     corrupt = tmp_path / "corrupt"
     corrupt.mkdir()
     (corrupt / "manifest.json").write_text("{not json")
-    assert store.read_manifest_version(corrupt) is None   # cheap probe fail-soft
     with pytest.raises(ValueError):
         store.read_manifest(corrupt)                       # full read keeps raising
     (corrupt / "manifest.json").write_text(json.dumps({"n_nodes": 5}))
-    assert store.read_manifest_version(corrupt) is None    # no version field
     assert store.read_manifest(corrupt) == {"n_nodes": 5}
 
 
@@ -155,7 +152,7 @@ def test_save_full_and_load_scale_roundtrip(store):
     idx = store.load_scale("nb-new")
     assert list(idx.node_ids) == ["a", "b"]
     assert idx.manifest["dim"] == 4
-    assert store.read_manifest_version(live) == ["v", 1]
+    assert store.read_manifest(live)["version"] == ["v", 1]
 
 
 def test_save_viz_and_load_viz_roundtrip(store):
@@ -267,7 +264,7 @@ def test_prepare_fold_directory_resets_leftovers(store):
     assert Path(temporary) == Path(str(live) + ".tmp-retry-token")
     assert Path(temporary).is_dir()
     assert not legacy_leftover.exists()   # legacy no-suffix leftover cleared
-    assert store.read_manifest_version(live) == ["v", 1]   # live untouched
+    assert store.read_manifest(live)["version"] == ["v", 1]   # live untouched
 
     # A retry under the SAME token clears its OWN prior residue too.
     (Path(temporary) / "junk.bin").write_text("stale")
@@ -284,7 +281,7 @@ def test_swap_fold_directory_replaces_live_and_cleans_up(store):
     _write_manifest(Path(temporary), {"version": ["v", 2]})
     (Path(temporary) / "ann.bin").write_text("new")
     store.swap_fold_directory("nb2", temporary)
-    assert store.read_manifest_version(live) == ["v", 2]
+    assert store.read_manifest(live)["version"] == ["v", 2]
     assert (live / "ann.bin").read_text() == "new"
     assert not Path(temporary).exists()
     assert not Path(str(live) + ".old").exists()
@@ -297,7 +294,7 @@ def test_unswapped_temporary_never_touches_live(store):
     temporary = store.prepare_fold_directory("nb3")
     _write_manifest(Path(temporary), {"version": ["v", 9]})
     # no swap — a fold failure before the swap leaves the old artifact intact
-    assert store.read_manifest_version(live) == ["v", 1]
+    assert store.read_manifest(live)["version"] == ["v", 1]
     assert (live / "manifest.json").stat().st_mtime_ns == before
 
 
@@ -354,7 +351,7 @@ def test_a_zombie_swap_is_rejected_without_touching_the_new_claimants_tree(
             "nb-zombie", zombie_temp, verify_held=lambda: False
         )
 
-    assert store.read_manifest_version(live) == ["v", 1]   # nothing published
+    assert store.read_manifest(live)["version"] == ["v", 1]   # nothing published
     assert zombie_temp.is_dir()                              # left for inspection
     assert (fresh_temp / "marker.txt").read_text(encoding="utf-8") == "fresh"
 
@@ -568,7 +565,7 @@ def test_save_full_failure_leaves_previous_artifact_byte_identical(
             claim_token="retry-token")
 
     assert _snapshot(live) == before                   # not one byte moved
-    assert store.read_manifest_version(live) == ["v", 1]
+    assert store.read_manifest(live)["version"] == ["v", 1]
     # the abandoned staging directory is inert — loading ignores it entirely
     staged = Path(str(live) + ".tmp-retry-token")
     assert staged.is_dir()
@@ -584,7 +581,7 @@ def test_save_full_failure_leaves_previous_artifact_byte_identical(
         ["a", "b", "c"],
         {"version": ["v", 2], "dim": 4, "n_nodes": 3, "n_ann": 3}),
         claim_token="retry-token")
-    assert store.read_manifest_version(live) == ["v", 2]
+    assert store.read_manifest(live)["version"] == ["v", 2]
     assert list(store.load_scale("nb-atomic").node_ids) == ["a", "b", "c"]
     assert not staged.exists()
 

@@ -43,8 +43,8 @@ def test_scale_index_status_fail_soft_on_corrupt_manifest(repo):
 
 
 def test_scale_index_status_fail_soft_on_non_object_manifest(repo):
-    """**合法但非对象**的 JSON manifest(如 ``[]``)也是结构性损坏(codex 第4轮 P1):read_manifest /
-    read_manifest_version 须返 None(而非把 list 传给下游 ``.get``→AttributeError→/index-status 500、
+    """**合法但非对象**的 JSON manifest(如 ``[]``)也是结构性损坏(codex 第4轮 P1):
+    read_manifest 须返 None,H8 须判损坏(而非把 list 传给下游 ``.get``→AttributeError→/index-status 500、
     H8 身份路径被 checkup 当「探测不确定」漏报、重建 CTA 够不着)。
 
     **变异锚点**:去掉 read_manifest 的 ``isinstance(data, dict)`` 守卫(直接 return data)→ status()
@@ -58,9 +58,9 @@ def test_scale_index_status_fail_soft_on_non_object_manifest(repo):
 
     # store 层:非对象 → None(与「读不出」同款),不抛。
     assert store.read_manifest(scale_dir) is None
-    assert store.read_manifest_version(scale_dir) is None
     # H8 身份路径不抛(存在=True、version=None):否则 checkup 把 AttributeError 当探测不确定→漏报。
-    assert store.scale_manifest_identity(nb.id) == (True, None)
+    assert store.scale_integrity_identity(nb.id)[0] is True
+    assert repo.checkup._h8_index_integrity(nb.id) == 1
 
     # status() fail-soft:stale/corrupt、不 raise、重建 CTA 可达。
     st = repo.scale_index_status(nb.id)

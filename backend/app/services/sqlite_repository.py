@@ -236,9 +236,9 @@ class SQLiteRepository(RepositoryFacade):
                 ),
                 # H7 memo 廉价失效键(签名不变即复用 state,不跑昂贵 status()/_index_delta 全量扫)。
                 index_state_signature=(lambda nb: rt.scale_artifacts.state_signature(nb)),
-                # H8 缓存键=磁盘 manifest 身份(rebuild/fold 换新 version 即失效),非 version_signal。
+                # H8 缓存键包含 manifest/数组/ANN 的 stat 身份,不按数据库版本推断磁盘代次。
                 index_manifest_identity=(
-                    lambda nb: rt.scale_artifact_store.scale_manifest_identity(nb)
+                    lambda nb: rt.scale_artifact_store.scale_integrity_identity(nb)
                 ),
                 probe_index_integrity=(
                     lambda nb: probe_scale_index_integrity(

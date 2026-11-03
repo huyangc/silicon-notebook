@@ -1027,9 +1027,6 @@
   "backend/app/services/retrieval_service.py": {
     "I001": 2
   },
-  "backend/app/services/scale_artifact_runtime.py": {
-    "I001": 1
-  },
   "backend/app/services/scale_build_cli.py": {
     "I001": 1
   },

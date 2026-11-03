@@ -2673,6 +2673,11 @@ Ctrl-C（先跑完回滚再重新抛出——见下文「Ctrl-C」一节）。
 PYTHONPATH=backend python scripts/build_scale_index.py inspect --notebook nb-xxx
 ```
 
+在线体检和可视化状态只检查元数据，不加载图数组或 ANN 句柄。需要显式完整加载主索引时，
+运行 `bash scripts/cli.sh scale inspect --notebook nb-xxx --deep`。应预留足以容纳图数组和
+整份主 ANN 的额外内存；大库上可能耗时数十秒。收据新增 `deep_index_corrupt`；
+可选 chunk/relation ANN 二进制不做深检。它检查能否加载及主 ANN 条目数，不是密码学校验和验证。
+
 **批 3·W1 PR-2（unified_kg_state.kg_reset_epoch）上线后短暂出现
 `version_matches_database: false`**：如果一个笔记本在本次上线**之前**就已经被
 `delete_notebook_kg` 清过图（整库重抽端点 `POST /api/notebooks/{id}/kg/rebuild`
