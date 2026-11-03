@@ -3365,6 +3365,29 @@ and its completion check are described in
 
 ## KG extraction trigger
 
+Built-in source extraction snapshots the notebook's effective active object-type
+definitions once per source, including global inheritance and notebook overrides.
+Type descriptions, declared fields, primary fields and list fields enter both the
+initial window prompt and gleaning. Declared scalar values are strings and list
+values are arrays of strings; unsupported fields remain absent. Disabled and
+unapproved proposed types are neither offered nor admitted. Custom fields survive
+review, canonicalization, graph serialization and persistence; the common `name`
+mirrors the primary field for existing graph and retrieval readers. A declared
+field colliding with the common `name`, `section_path`, `steps` or `validity_scope`
+envelope retains its exact value in internal `_schema_fields`; knowledge field
+projections and semantic/search text include those values, while graph readers
+keep the existing envelope types. Core-type
+edges retain their strict endpoint rules, while registered custom types use the
+existing extension-type rule for known edge ids. An unchanged default registry
+retains the existing four-type prompt and wire shape. Deployment-provided indexing
+pipelines continue to own their extraction prompt and response mapping.
+
+Saving a definition does not launch extraction or rewrite existing object payloads.
+The next source extraction uses the saved definitions; an already-running source
+keeps its snapshot. To apply a change to previously analyzed documents, explicitly
+run **全部重新分析** in the Knowledge Graph's **图谱处理** group (this calls the model
+again), or reanalyze the relevant sources.
+
 - Built-in relations share one directed endpoint contract across extraction and graph consumers. Historical rows that violate a core-type pair remain auditable but cannot affect graph/PPR/canonical/relation retrieval. Administrator-defined object types remain extensible for known edge ids. Optional cross-element completion advances bounded source-generation keyset pages using indexed same-source candidates, is double-verified, rollout-gated, and disabled by default; it never performs document- or book-wide full scans.
 
 - Edge trust & curation: per-edge trust signals (evidence / corroboration / type-validity) plus a curator review queue; reviewer-rejected edges are excluded from graph reasoning

@@ -1,5 +1,6 @@
 """Merge Concept nodes by normalized name/alias across fragments; rewire edges."""
 from __future__ import annotations
+import json
 from typing import List, Tuple
 
 from app.domain.kg_concept_norm import norm_concept_name as _norm
@@ -13,7 +14,7 @@ def canonicalize(nodes: List[Node], edges: List[Edge], doc_id: str) -> Tuple[Lis
     cn = 0
     for n in nodes:
         if n.type == "Concept" and _norm(n.name):
-            key = _norm(n.name)
+            key = (_norm(n.name), json.dumps(n.payload, sort_keys=True, ensure_ascii=False))
             if key in canon:
                 c = canon[key]
                 c.mentions.extend(n.evidence + n.mentions)
@@ -27,7 +28,8 @@ def canonicalize(nodes: List[Node], edges: List[Edge], doc_id: str) -> Tuple[Lis
                 canon[key] = n
                 out.append(n)
         elif n.type == "Procedure" and _norm(n.name):
-            key = (_norm(n.name), " ".join((n.section_path or "").split()))
+            key = (_norm(n.name), " ".join((n.section_path or "").split()),
+                   json.dumps(n.payload, sort_keys=True, ensure_ascii=False))
             if key in proc_canon:
                 c = proc_canon[key]
                 c.steps.extend(n.steps)        # concatenate; ordered + deduped below

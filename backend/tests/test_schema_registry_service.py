@@ -5,6 +5,7 @@ fail-open behavior. Behavior is characterized through the frozen facade
 surface so the extraction is provably behavior-preserving."""
 from __future__ import annotations
 
+import json
 from uuid import uuid4
 
 import pytest
@@ -60,9 +61,13 @@ class _FakeLLM:
         self.configured = configured
         self.boom = boom
         self.calls = 0
+        self.messages = []
+        self.hints = []
 
     def chat_json(self, messages, schema_hint):
         self.calls += 1
+        self.messages.append(messages)
+        self.hints.append(schema_hint)
         if self.boom:
             raise RuntimeError("model down")
         return self.raw
@@ -75,6 +80,140 @@ def test_runtime_owns_schema_registry_service(repo):
     assert service.sources is repo._runtime.source_store
     assert service.notebooks is repo._runtime.notebook_store
     assert service.settings is repo.settings
+
+
+def test_saved_notebook_schema_controls_builtin_extraction_and_persisted_fields(repo):
+    repo.settings.paper_meta_enabled = False
+    repo.settings.kg_refine_enabled = False
+    repo.settings.kg_gleaning_enabled = False
+    repo.settings.kg_relink_enabled = False
+    notebook = repo.create_notebook(NotebookCreate(name="configured extraction"))
+    repo.create_notebook_object_schema(
+        notebook.id,
+        ObjectSchemaCreate(
+            object_type="failure_case", plural="failure_cases",
+            fields=["name", "root_cause", "symptoms"], primary="name",
+            description="Extract failure cases with their root cause and symptoms.",
+            label="故障案例", list_fields=["symptoms"],
+        ),
+        created_by="user-local",
+    )
+    source_id = _insert_element(
+        repo, notebook.id,
+        "Clock failure occurs because of jitter and causes timing errors.",
+    )
+    client = _FakeLLM(json.dumps({
+        "nodes": [{"type": "failure_case", "name": "Clock failure", "ev": 0,
+                   "payload": {"name": "Clock failure", "root_cause": "jitter",
+                               "symptoms": ["timing errors"]}}],
+        "edges": [],
+    }))
+    repo._runtime.source_ingestion.run_extraction(source_id, kg_client=client)
+    result = repo.list_knowledge(notebook.id, "failure_case")
+    assert result.total_count == 1
+    fields = {field.key: field.value for field in result.items[0].fields}
+    assert fields["root_cause"] == "jitter"
+    assert fields["symptoms"] == "timing errors"
+    assert result.items[0].evidence[0].source_id == source_id
+    definitions = json.loads(client.hints[0])["nodes"]
+    definition = next(item for item in definitions if item["type"] == "failure_case")
+    assert definition["payload"] == {"name": "", "root_cause": "", "symptoms": [""]}
+    assert "Extract failure cases with their root cause and symptoms." in client.messages[0][0]["content"]
+
+
+def test_extraction_uses_local_fields_and_restores_global_inheritance(repo):
+    repo.settings.paper_meta_enabled = False
+    repo.settings.kg_refine_enabled = False
+    repo.settings.kg_gleaning_enabled = False
+    repo.settings.kg_relink_enabled = False
+    local = repo.create_notebook(NotebookCreate(name="local schema"))
+    inherited = repo.create_notebook(NotebookCreate(name="global schema"))
+    repo.update_object_schema("concept", ObjectSchemaUpdate(
+        fields=["name", "global_detail"], description="Global description",
+    ))
+    repo.update_notebook_object_schema(local.id, "concept", ObjectSchemaUpdate(
+        fields=["name", "title", "local_detail"], primary="title",
+        description="Local description",
+    ), created_by="user-local")
+    reply = json.dumps({"nodes": [{
+        "type": "Concept", "name": "Ignored envelope name", "ev": 0,
+        "payload": {"name": "Clock", "title": "Clock failure",
+                    "global_detail": "jitter", "local_detail": "timing errors"},
+    }], "edges": []})
+    for notebook, expected, unwanted in (
+        (local, "local_detail", "global_detail"),
+        (inherited, "global_detail", "local_detail"),
+    ):
+        source_id = _insert_element(repo, notebook.id, "Clock failure causes timing errors due to jitter.")
+        client = _FakeLLM(reply)
+        repo._runtime.source_ingestion.run_extraction(source_id, kg_client=client)
+        result = repo.list_knowledge(notebook.id, "concept")
+        assert result.total_count == 1
+        fields = {field.key: field.value for field in result.items[0].fields}
+        assert expected in fields
+        assert unwanted not in fields
+        if notebook.id == local.id:
+            assert result.items[0].headline == "Clock failure"
+            assert fields["name"] == "Clock"
+    repo.delete_notebook_object_schema(local.id, "concept")
+    source_id = _insert_element(repo, local.id, "Clock failure causes jitter.")
+    client = _FakeLLM(reply)
+    repo._runtime.source_ingestion.run_extraction(source_id, kg_client=client)
+    assert '"global_detail"' in client.hints[0]
+    assert '"local_detail"' not in client.hints[0]
+
+
+def test_disabled_and_proposed_types_never_reach_builtin_extraction(repo):
+    repo.settings.paper_meta_enabled = False
+    repo.settings.kg_refine_enabled = False
+    repo.settings.kg_gleaning_enabled = False
+    repo.settings.kg_relink_enabled = False
+    notebook = repo.create_notebook(NotebookCreate(name="active types only"))
+    repo.update_notebook_object_schema(
+        notebook.id, "concept", ObjectSchemaUpdate(status="disabled"), created_by="user-local",
+    )
+    repo.create_notebook_object_schema(
+        notebook.id, ObjectSchemaCreate(object_type="failure_case", fields=["name"]),
+        created_by="user-local",
+    )
+    repo.update_notebook_object_schema(
+        notebook.id, "failure_case", ObjectSchemaUpdate(status="proposed"), created_by="user-local",
+    )
+    source_id = _insert_element(repo, notebook.id, "Clock failure increases jitter.")
+    client = _FakeLLM(json.dumps({"nodes": [
+        {"type": "Concept", "name": "Clock", "ev": 0},
+        {"type": "failure_case", "name": "Clock failure", "ev": 0},
+        {"type": "Claim", "name": "Clock failure increases jitter", "ev": 0},
+    ], "edges": []}))
+    repo._runtime.source_ingestion.run_extraction(source_id, kg_client=client)
+    assert repo.list_knowledge(notebook.id, "concept").total_count == 0
+    assert repo.list_knowledge(notebook.id, "failure_case").total_count == 0
+    assert repo.list_knowledge(notebook.id, "claim").total_count == 1
+    types = {item["type"] for item in json.loads(client.hints[0])["nodes"]}
+    assert "Concept" not in types
+    assert "failure_case" not in types
+
+
+def test_running_source_keeps_schema_snapshot_until_next_extraction(repo):
+    repo.settings.paper_meta_enabled = False
+    repo.settings.kg_refine_enabled = False
+    repo.settings.kg_gleaning_enabled = False
+    repo.settings.kg_relink_enabled = False
+    notebook = repo.create_notebook(NotebookCreate(name="schema snapshot"))
+    source_id = _insert_element(repo, notebook.id, "Clock failure increases jitter.")
+    reply = json.dumps({"nodes": [{"type": "Concept", "name": "Clock", "ev": 0}], "edges": []})
+
+    class _ChangingClient(_FakeLLM):
+        def chat_json(self, messages, schema_hint):
+            repo.update_notebook_object_schema(
+                notebook.id, "concept", ObjectSchemaUpdate(status="disabled"), created_by="user-local",
+            )
+            return super().chat_json(messages, schema_hint)
+
+    repo._runtime.source_ingestion.run_extraction(source_id, kg_client=_ChangingClient(reply))
+    assert repo.list_knowledge(notebook.id, "concept").total_count == 1
+    repo._runtime.source_ingestion.run_extraction(source_id, kg_client=_FakeLLM(reply))
+    assert repo.list_knowledge(notebook.id, "concept").total_count == 0
 
 
 def test_v47_migration_relocates_legacy_notebook_schema(repo):
