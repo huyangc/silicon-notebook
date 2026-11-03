@@ -317,6 +317,44 @@ def test_config_check_merges_inherited_root_and_selected_pythonpaths(deployment,
 
 
 @pytest.mark.process_contract
+@pytest.mark.parametrize("path_source", ["root", "inherited", "selected"])
+def test_plugin_symlink_in_payload_is_rejected_before_replacement(deployment, monkeypatch, tmp_path, path_source):
+    source, target, _ = deployment
+    runtime = target / ".venv/bin/python"
+    runtime.unlink()
+    runtime.symlink_to(sys.executable)
+    core = target / "backend/app/core"
+    core.mkdir(parents=True)
+    (core.parent / "__init__.py").touch()
+    (core / "__init__.py").touch()
+    (core / "config.py").write_text('''import os
+class Settings:
+    storage_dir = os.environ["SILICON_NOTEBOOK_STORAGE_DIR"]
+    model_services_config = ""
+    extensions_config = ""
+    database_url = os.environ["DATABASE_URL"]
+    sqlite_path = database_url[len("sqlite:///"):]
+''')
+    external = tmp_path / "plugin-src"
+    external.mkdir()
+    (target / "frontend/plugin-src").symlink_to(external, target_is_directory=True)
+    env = "DATABASE_URL=sqlite:///.local/customer.db\nSILICON_NOTEBOOK_STORAGE_DIR=.local/storage\n"
+    if path_source == "root":
+        env += "PYTHONPATH=frontend/plugin-src\n"
+    elif path_source == "inherited":
+        monkeypatch.setenv("PYTHONPATH", "frontend/plugin-src")
+    else:
+        env += "SILICON_NOTEBOOK_ENV_FILE=.local/deployment.env\n"
+        (target / ".local/deployment.env").write_text("PYTHONPATH=frontend/plugin-src\n")
+    (target / ".env").write_text(env)
+    monkeypatch.setattr(upgrade, "inspect_existing", REAL_INSPECT)
+    assert str(external) in upgrade.inspect_existing(target)["paths"]
+    with pytest.raises(upgrade.UpgradeError, match="重叠"):
+        upgrade.validate(source, target)
+    assert (target / "frontend/plugin-src").is_symlink()
+
+
+@pytest.mark.process_contract
 def test_cancellation_reaps_installer_process_group(tmp_path):
     installer = tmp_path / "installer.py"
     installer.write_text("""import subprocess, sys, signal

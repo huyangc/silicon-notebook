@@ -72,9 +72,10 @@ paths.append(os.environ.get("SILICON_NOTEBOOK_ENV_FILE", ""))
 paths.append(_upgrade_selected_env_file)
 if s.database_url.startswith("sqlite:///"):
     paths.append(s.sqlite_path)
-for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
-    if entry and pathlib.Path(os.path.abspath(root / entry)) != root / "backend":
-        paths.append(entry)
+for source in (*_upgrade_pythonpath_values, os.environ.get("PYTHONPATH", "")):
+    for entry in source.split(os.pathsep):
+        if entry and pathlib.Path(os.path.abspath(root / entry)) != root / "backend":
+            paths.append(entry)
 packages = [(d.metadata["Name"], d.version) for d in metadata.distributions()]
 print(json.dumps({"paths": [p for p in paths if p], "packages": packages}))
 '''
@@ -98,7 +99,12 @@ import os, pathlib, runpy, sys
 helper, script = sys.argv[1:3]
 root = pathlib.Path(sys.argv[3])
 selected = os.environ.get("SILICON_NOTEBOOK_ENV_FILE", "")
-prepared = runpy.run_path(helper)["build_python_environment"](root=root)
+environment_helper = runpy.run_path(helper)
+# Keep lexical inputs too: the shared launcher normalizes paths for imports,
+# but replacing a symlink's parent can remove an otherwise external plugin.
+file_values = environment_helper["_dotenv_environment"](root, dict(os.environ))
+original_paths = (os.environ.get("PYTHONPATH", ""), file_values.get("PYTHONPATH", ""))
+prepared = environment_helper["build_python_environment"](root=root)
 prepared.setdefault("SILICON_NOTEBOOK_ENV_FILE", str(root / ".env"))
 os.environ.clear()
 os.environ.update(prepared)
@@ -106,6 +112,7 @@ sys.path[:0] = [p for p in prepared["PYTHONPATH"].split(os.pathsep) if p]
 sys.argv = ["-c", *sys.argv[3:]]
 exec(compile(script, "<upgrade-config>", "exec"), {
     "__name__": "__main__", "_upgrade_selected_env_file": selected.strip(),
+    "_upgrade_pythonpath_values": original_paths,
 })
 '''
     shell = '''set -euo pipefail
