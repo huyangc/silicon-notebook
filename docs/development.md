@@ -1027,7 +1027,7 @@ cost and stale or missing timing hints cannot omit a test. The second runner's
 five-minute contracts/frontend estimate is a balancing hint expressed as 1200
 cumulative test seconds, not a timeout or test limit. In PR CI both backend
 steps explicitly set `G1_PRIMARY_POSTGRES_FOLLOWUP=1`: the first runner's later
-PG work is estimated at ten minutes/2400 test seconds. Allocation uses the
+PG work is estimated at five minutes/1200 test seconds. Allocation uses the
 difference between these tails, reserving capacity for PG. Daily and local
 collection default to `0` (no later PG work); other values fail closed.
 The plugin is loaded only
@@ -1039,7 +1039,7 @@ expressions and their complementary coverage proof remain unchanged.
 
 The PG split uses the same allocation algorithm, independently measured module
 costs, and the unchanged `postgres_integration or postgres_lane_contract`
-selection. Its second runner's preceding backend work is a six-minute/1440
+selection. Its second runner's preceding backend work is a ten-minute/2400
 cumulative-test-second hint, not a timeout or test limit. Native identities and
 effective loadgroups remain intact. The always-reachable G1 guard additionally
 collects the PG launcher's actual unsharded and two sharded commands and proves
@@ -1047,7 +1047,7 @@ their exact multiset union, no overlap and group co-location without a database.
 Shard/plugin arguments never enter child environments. New tests receive a
 default cost; stale hints cannot remove them. Each PG part retains four workers
 and its own twelve targets, with distinct server endpoints on distinct runners.
-The module weights were refreshed from both JUnit shards of CI run 41605280525,
+The module weights were refreshed from both JUnit shards of CI run 41618627951,
 including setup/call/teardown; rounded-zero modules receive a 1 ms positive
 scheduling weight. The partition proof keeps all six actual collect-only
 commands and independent pytest configurations in one isolated child process,
