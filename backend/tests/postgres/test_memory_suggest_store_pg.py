@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
+import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
@@ -135,13 +138,13 @@ def test_note_signal_cannot_recreate_a_job_row_across_a_concurrent_delete_user_g
     then the job rows of owners left without read access, one transaction)
     against a completed ask's ``note_signal`` for the grantee.
 
-    1. ``delete_user_grant`` first, uncommitted: ``note_signal`` waits on the grant
-       edge (its read probe is ``FOR SHARE``), sees it gone once the delete
+    1. ``delete_user_grant`` first, uncommitted: ``note_signal`` waits on the
+       notebook root, sees the grant gone once the delete
        commits, and writes nothing -- the row that cleanup already deleted is
        not recreated. Without the locked probe it would read the old edge from
        its snapshot and re-insert the row.
     2. ``note_signal`` first, uncommitted: ``delete_user_grant`` waits on the
-       share-locked edge; once the signal commits, the delete's own cleanup
+       share-locked root; once the signal commits, the delete's own cleanup
        sees the new row and deletes it.
     """
     cases.seed_enabled(env)
@@ -151,66 +154,83 @@ def test_note_signal_cannot_recreate_a_job_row_across_a_concurrent_delete_user_g
 
     # -- order 1: the real ``delete_user_grant`` (grant deleted, job row cleared)
     # is paused before its commit when the signal arrives.
-    written, release = threading.Event(), threading.Event()
-    deleted: list[bool] = []
-    revoke_worker = threading.Thread(target=lambda: deleted.append(
-        _group_store(_PausingDatabase(database, written, release)).delete_user_grant(
-            cases.NB, cases.OTHER)))
-    revoke_worker.start()
-    assert written.wait(timeout=10)
-    counted: list[int] = []
-    signal_worker = threading.Thread(target=lambda: counted.append(env.store.note_signal(
-        cases.NB, cases.OTHER, ask_job_id="", now=cases.at(2))))
-    signal_worker.start()
-    signal_worker.join(timeout=1.0)
-    assert signal_worker.is_alive(), "note_signal must wait for the revocation"
-    release.set()
-    revoke_worker.join(timeout=30)
-    signal_worker.join(timeout=30)
-    assert deleted == [True] and counted == [0]
+    deleted, counted = _run_blocked_pair(
+        database,
+        lambda db: _group_store(db).delete_user_grant(cases.NB, cases.OTHER),
+        lambda db: MemorySuggestStore(db, new_id=_new_id_factory()).note_signal(
+            cases.NB, cases.OTHER, ask_job_id="", now=cases.at(2)),
+    )
+    assert deleted is True and counted == 0
     assert _other_job(env) == []
 
     # -- order 2: the signal holds the edge when the revocation arrives. The
     # real ``note_signal`` runs against a database whose write transaction
     # pauses after the statements and before the commit.
     _grant_other(env)
-    written, release = threading.Event(), threading.Event()
-    paused = MemorySuggestStore(
-        _PausingDatabase(database, written, release), new_id=_new_id_factory()
+    counted, deleted = _run_blocked_pair(
+        database,
+        lambda db: MemorySuggestStore(db, new_id=_new_id_factory()).note_signal(
+            cases.NB, cases.OTHER, ask_job_id="", now=cases.at(3)),
+        lambda db: _group_store(db).delete_user_grant(cases.NB, cases.OTHER),
     )
-    counted = []
-    signal_worker = threading.Thread(target=lambda: counted.append(paused.note_signal(
-        cases.NB, cases.OTHER, ask_job_id="", now=cases.at(3))))
-    signal_worker.start()
-    assert written.wait(timeout=10)
-    deleted = []
-    revoke_worker = threading.Thread(target=lambda: deleted.append(
-        _group_store(database).delete_user_grant(cases.NB, cases.OTHER)))
-    revoke_worker.start()
-    revoke_worker.join(timeout=1.0)
-    assert revoke_worker.is_alive(), "delete_user_grant must wait for the signal's edge lock"
-    release.set()
-    signal_worker.join(timeout=30)
-    revoke_worker.join(timeout=30)
-    assert counted == [1] and deleted == [True]
+    assert counted == 1 and deleted is True
     assert _other_job(env) == []
 
 
-class _PausingDatabase:
-    """``database.write()`` that, once the body ran, waits for ``release``
-    before letting the transaction commit."""
+class _ObservedDatabase:
+    """Expose each worker's actual backend; optionally pause before commit."""
 
-    def __init__(self, inner, written: threading.Event, release: threading.Event):
+    def __init__(self, inner, release=None):
         self._inner = inner
-        self._written = written
         self._release = release
+        self.connected = threading.Event()
+        self.written = threading.Event()
+        self.backend_pid = None
 
     @contextmanager
     def write(self, **kwargs):
         with self._inner.write(**kwargs) as db:
+            self.backend_pid = db.info.backend_pid
+            self.connected.set()
             yield db
-            self._written.set()
-            assert self._release.wait(timeout=30)
+            self.written.set()
+            if self._release is not None:
+                assert self._release.wait(timeout=30)
+
+
+def _run_blocked_pair(database, first, second):
+    """Release as soon as PG proves this exact waiter blocks on this holder.
+
+    A fixed one-second join races the fixture's one-second lock timeout.
+    Observe outside the two-connection pool and surface worker exceptions
+    through futures; always release the paused transaction before joining.
+    """
+    release = threading.Event()
+    holder = _ObservedDatabase(database, release)
+    waiter = _ObservedDatabase(database)
+    with psycopg.connect(database.settings.database_url, autocommit=True) as observer:
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            held = workers.submit(first, holder)
+            try:
+                assert holder.written.wait(timeout=10), "holder never reached its commit"
+                waiting = workers.submit(second, waiter)
+                assert waiter.connected.wait(timeout=10), "waiter never opened its transaction"
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if waiting.done():
+                        waiting.result()
+                        pytest.fail("operation completed without waiting for the holder")
+                    if observer.execute(
+                        "SELECT %s = ANY(pg_blocking_pids(%s))",
+                        (holder.backend_pid, waiter.backend_pid),
+                    ).fetchone()[0]:
+                        break
+                    time.sleep(0.01)
+                else:
+                    pytest.fail("operation never blocked on the holder's transaction")
+            finally:
+                release.set()
+            return held.result(timeout=30), waiting.result(timeout=30)
 
 
 def _group_store(database):
@@ -231,36 +251,26 @@ def test_note_signal_cannot_recreate_a_job_row_across_a_concurrent_switch_off(
     signal waits on the switch row (``FOR SHARE``) and, once the switch-off
     commits, re-reads ``enabled = 0`` and writes nothing. Without the lock it
     would read the old ``enabled = 1`` and re-insert the deleted row."""
-    import psycopg
-
     cases.seed_enabled(env)
     env.store.note_signal(cases.NB, cases.OWNER, ask_job_id="", now=cases.at(1))
     assert env.job() is not None
-    result: list[int] = []
-    started = threading.Event()
 
-    with psycopg.connect(database.settings.database_url) as switch_off:
-        switch_off.execute(
-            "UPDATE memory_suggest_users SET enabled = 0 WHERE owner_id = %s",
-            (cases.OWNER,),
-        )
-        switch_off.execute(
-            "DELETE FROM memory_suggest_jobs WHERE owner_id = %s", (cases.OWNER,)
-        )
+    def switch_off(db):
+        with db.write() as connection:
+            connection.execute(
+                "UPDATE memory_suggest_users SET enabled = 0 WHERE owner_id = %s",
+                (cases.OWNER,),
+            )
+            connection.execute(
+                "DELETE FROM memory_suggest_jobs WHERE owner_id = %s", (cases.OWNER,)
+            )
 
-        def signal() -> None:
-            started.set()
-            result.append(env.store.note_signal(
-                cases.NB, cases.OWNER, ask_job_id="", now=cases.at(2)))
-
-        worker = threading.Thread(target=signal)
-        worker.start()
-        assert started.wait(timeout=10)
-        worker.join(timeout=1.0)
-        assert worker.is_alive(), "note_signal must wait for the switch-off"
-        switch_off.commit()
-    worker.join(timeout=30)
-    assert result == [0]
+    _, result = _run_blocked_pair(
+        database, switch_off,
+        lambda db: MemorySuggestStore(db, new_id=_new_id_factory()).note_signal(
+            cases.NB, cases.OWNER, ask_job_id="", now=cases.at(2)),
+    )
+    assert result == 0
     assert env.job() is None
 
 
