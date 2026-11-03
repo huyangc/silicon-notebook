@@ -1086,6 +1086,9 @@ def test_group_partition_query_is_bounded_by_my_memberships(repo):
     起步、只用得上 `principal_type` 单列——那是把全库群组授权边扫一遍。两者都不报错,
     也都返回同一批行,所以只有钉住计划才拦得住这次退化。
 
+    单库点查也允许先按 notebooks 的唯一主键取一本库,再从本人的成员边探授权;
+    授权探针仍须约束 principal_type + principal_id,不能退化为只按库或主体类型扫描。
+
     ⚠ 曾经靠 `inspect.getsource` + 正则把 `granted_notebook_rows` 的源码字符串字面量
     拼回一条 SQL(批 3·W1 T-1 之前)。谓词单点化(`access_sql.NOTEBOOK_LIVE_SQL`)把
     末尾那个 `AND nb.status != 'copying'` 换成了一次变量拼接——源码里不再是一段连续
@@ -1141,9 +1144,20 @@ def test_group_partition_query_is_bounded_by_my_memberships(repo):
     ), plan
 
     group, named, plan = branches("nb-point")
-    assert group[0] == "SEARCH gm USING INDEX idx_group_members_user (user_id=?)", plan
-    assert named[0].startswith("SEARCH ng USING INDEX") and (
-        "principal_type=? AND principal_id=?" in named[0]
+    membership = "SEARCH gm USING INDEX idx_group_members_user (user_id=?)"
+    notebook = "SEARCH nb USING INDEX sqlite_autoindex_notebooks_1 (id=?)"
+
+    def principal_probe(step):
+        return step.startswith("SEARCH ng USING INDEX ") and step.endswith((
+            "(principal_type=? AND principal_id=?)",
+            "(notebook_id=? AND principal_type=? AND principal_id=?)",
+        ))
+
+    assert group[0] == membership or group[:2] == [notebook, membership], plan
+    grant = next((index for index, step in enumerate(group) if principal_probe(step)), None)
+    assert grant is not None and group.index(membership) < grant, plan
+    assert principal_probe(named[0]) or (
+        named[:1] == [notebook] and len(named) > 1 and principal_probe(named[1])
     ), plan
 
 

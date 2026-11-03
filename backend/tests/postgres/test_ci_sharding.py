@@ -78,7 +78,7 @@ def test_committed_pg_hints_are_positive_numeric_and_only_balance_ownership():
     assert all(key.startswith("tests/postgres/") and key.endswith(".py") for key in costs)
     assert all(type(value) in (int, float) for key, value in data.items() if key != "seconds_per_test")
     assert costs.get("tests/postgres/test_new_unmeasured_module.py", default) == 0.1
-    assert ci_sharding.BACKEND_PRIMARY_TEST_SECONDS == 9 * 60 * 4
+    assert ci_sharding.BACKEND_PRIMARY_TEST_SECONDS == 6 * 60 * 4
 
 
 @pytest.mark.parametrize("index,preflight_status", [(0, 0), (1, 0), (1, 7)])

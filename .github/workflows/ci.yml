@@ -69,6 +69,7 @@ jobs:
         env:
           PYTHON_BIN: python
           BACKEND_PYTEST_WORKERS: "4"
+          G1_PRIMARY_POSTGRES_FOLLOWUP: "1"
         run: bash scripts/check_backend.sh --shard-index 0 --shard-count 2
 
       - name: Upload backend test timings
@@ -162,6 +163,7 @@ jobs:
         env:
           PYTHON_BIN: python
           BACKEND_PYTEST_WORKERS: "4"
+          G1_PRIMARY_POSTGRES_FOLLOWUP: "1"
         run: bash scripts/check_backend.sh --shard-index 1 --shard-count 2
 
       - name: Run standard contracts and frontend lanes

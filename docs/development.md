@@ -1025,7 +1025,12 @@ keeping each ungrouped module and each effective xdist loadgroup together.
 Measured per-module test costs only balance ownership: new modules use a default
 cost and stale or missing timing hints cannot omit a test. The second runner's
 five-minute contracts/frontend estimate is a balancing hint expressed as 1200
-cumulative test seconds, not a timeout or test limit. The plugin is loaded only
+cumulative test seconds, not a timeout or test limit. In PR CI both backend
+steps explicitly set `G1_PRIMARY_POSTGRES_FOLLOWUP=1`: the first runner's later
+PG work is estimated at ten minutes/2400 test seconds. Allocation uses the
+difference between these tails, reserving capacity for PG. Daily and local
+collection default to `0` (no later PG work); other values fail closed.
+The plugin is loaded only
 by the wrapper's explicit paired shard arguments; neither plugin nor shard
 selection is exported to nested pytest processes. The G1 collection guard checks
 the actual full selection against both actual shard collections, with exact
@@ -1034,7 +1039,7 @@ expressions and their complementary coverage proof remain unchanged.
 
 The PG split uses the same allocation algorithm, independently measured module
 costs, and the unchanged `postgres_integration or postgres_lane_contract`
-selection. Its second runner's preceding backend work is a nine-minute/2160
+selection. Its second runner's preceding backend work is a six-minute/1440
 cumulative-test-second hint, not a timeout or test limit. Native identities and
 effective loadgroups remain intact. The always-reachable G1 guard additionally
 collects the PG launcher's actual unsharded and two sharded commands and proves
@@ -1042,6 +1047,12 @@ their exact multiset union, no overlap and group co-location without a database.
 Shard/plugin arguments never enter child environments. New tests receive a
 default cost; stale hints cannot remove them. Each PG part retains four workers
 and its own twelve targets, with distinct server endpoints on distinct runners.
+The module weights were refreshed from both JUnit shards of CI run 41605280525,
+including setup/call/teardown; rounded-zero modules receive a 1 ms positive
+scheduling weight. The partition proof keeps all six actual collect-only
+commands and independent pytest configurations in one isolated child process,
+reusing application imports while unloading collected test modules and their
+matching parent bindings between sessions to avoid cached parameter-ID drift.
 
 `.github/workflows/daily-extended.yml` (`Daily Extended Gate`, one daily cron plus
 manual dispatch) is G2 in three jobs. `level-2-backend-primary` and
