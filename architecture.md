@@ -803,6 +803,7 @@ owner 固定为 token 主人；后续工具仍逐次走原有授权，不向同 
 - 打开 Knowledge Graph overlay 时读取当前图和 `GET /api/notebooks/{id}/unified-kg/status`；只有用户触发刷新时才调用 rebuild。
 - KG 首次构建/整库重建使用显式 build/rebuild 端点；跨文档 merge review 只处理有界候选批次。
 - vector cache 按数据版本失效；大库 scale index 由维护任务构建/刷新，并通过状态与 manifest 观察。即使 `SCALE_INDEX_AUTO_ENABLED` 开启，调度也发生在后台维护路径，而不是把全库 backfill 塞进 Ask。
+- 在线 H8 与可视化状态探针共用 `services/kg/artifact_probe.py` 的有界元数据检查，不调用完整索引 loader、不打开 ANN；后者只读文件头/形状/计数与文件大小，不证明所有载荷内容完好。H8 按 filesystem store 提供的工件 stat 身份缓存，并合并同库在途检查；显式 CLI `inspect --deep` 才执行额外的完整主索引加载。实际独立可视化图读取也由 `ScaleArtifactRuntime` 合并同库在途冷加载；成功、失败和异常结果只在该次在途检查中共享，完成即释放单飞状态。
 - Ask 不同步补齐整库 embedding、不同步重建 unified KG，也不为 citation validation 扫描全部 source element。
 
 大型选源图由 `source_partitioned_ppr.py` 在选定来源的独立 companion 分区上组合，

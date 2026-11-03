@@ -326,16 +326,14 @@ class ScaleArtifactStore:
         ``_scale_index(allow_stale=True)`` —— 每次提问 10–20MB 的 JSON 解析,
         只为读出 ``version`` 与 ``pipeline_identity`` 两个字段。
 
-        JSON 没有「只解析头部字段」这回事(``read_manifest_version`` 省的也只是
-        返回值,不是解析),把 ``watermark_sources`` 拆成 manifest 旁的独立文件
+        JSON 没有「只解析头部字段」这回事,把 ``watermark_sources`` 拆成 manifest 旁的独立文件
         是更大的改动(工件格式 + 迁移 + 读写两侧),本批不做。退而求其次:调用方
         按这个签名 memo 解析结果,同一份磁盘工件只解析一次。
 
         签名 = ``(st_mtime_ns, st_size, st_ino)``。三者都取:
         · 索引发布是 ``.tmp`` 目录 + 原子 rename,换上来的是**另一个 inode**,
           所以 ``st_ino`` 一变就必然重新解析;
-        · ``st_mtime_ns`` 是纳秒精度,不是 ``scale_manifest_identity`` 那种
-          秒级 mtime 会踩的同秒改写坑;
+        · ``st_mtime_ns`` 是纳秒精度,可识别同秒改写;
         · ``st_size`` 再兜一层。
         任何一项变化都强制重新解析,方向保守。
 
@@ -366,23 +364,6 @@ class ScaleArtifactStore:
             return None
         return (info.st_mtime_ns, info.st_size, info.st_ino)
 
-    def read_manifest_version(self, directory):
-        """廉价读 directory/manifest.json 的 version 字段(几 KB,sub-ms)。用于
-        allow_stale 检索路径校验「进程缓存里的 stale 实例是否仍是当前磁盘索引」——
-        磁盘索引只在 rebuild/fold 时换(新 version),与 kg_mutation_seq 无关。
-        文件缺失/损坏/无 version → None(fail-soft,调用方回退到重新 load)。"""
-        mpath = os.path.join(str(directory), "manifest.json")
-        try:
-            with open(mpath) as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
-            return None
-        # 非对象 JSON(如 [])也算无有效 version:isinstance 守卫,否则 [].get 抛
-        # AttributeError→H8 身份路径(scale_manifest_identity)被 checkup 当「探测不确定」
-        # 吞掉→漏报损坏、重建 CTA 够不着(codex 第4轮 P1)。fail-soft:返 None,让 H8
-        # 继续走磁盘探针(load_scale_index 已有 isinstance 守卫、能正确判 [] 为损坏)。
-        return data.get("version") if isinstance(data, dict) else None
-
     def scale_build_id(self, notebook_id: str):
         """The live main index's per-build generation id, or ``None``.
 
@@ -402,20 +383,30 @@ class ScaleArtifactStore:
             return None
         return manifest.get("build_id") if isinstance(manifest, dict) else None
 
-    def scale_manifest_identity(self, notebook_id: str) -> "tuple[bool, object]":
-        """H8 体检缓存键:磁盘 scale 索引的**产物身份** `(manifest 是否存在, manifest.version)`。
+    def scale_integrity_identity(self, notebook_id: str) -> "tuple[bool, object]":
+        """Cheap H8 identity including payload replacement/truncation signals.
 
-        为什么不是 version_signal:磁盘索引只在 rebuild/fold(`.tmp`+swap 原子换目录)时换新
-        `manifest.version`,**与 kg_mutation_seq / version_signal 解耦**(见上 read_manifest_version
-        与本类顶部说明)。version_signal 只由 unified_kg_state 的 seq 组成、rebuild/fold 不 bump 它,
-        用它当 H8 缓存键会:损坏被缓存后、用户点重建(原子换成健康产物、seq 不变)仍报损坏清不掉。
-        改用磁盘 manifest 身份——rebuild/fold 换新 version 即让缓存失效,正是「产物变没变」的真信号。
-
-        `exists=False` → 未建索引(H8 直接判 0、不必 load)。`exists=True, version=None` → manifest 在
-        但损坏/无 version(探针会真 load 判损坏,且损坏结论不进缓存,故 None 键不会粘住)。sub-ms。"""
-        scale_dir = self.scale_dir(notebook_id)
-        manifest_path = os.path.join(str(scale_dir), "manifest.json")
-        return os.path.exists(manifest_path), self.read_manifest_version(scale_dir)
+        Unlike a version-only key this catches same-version imports and changes
+        to payloads while the manifest is untouched. No file contents are read.
+        """
+        directory = self.scale_dir(notebook_id)
+        names = (
+            "manifest.json", "graph.npz", "node_ids.npy", "idf.npy",
+            "chunk_index.npy", "ann_labels.npy", "ann.bin", "viz.npz",
+            "viz_adj.npz", "chunk_ann_labels.npy", "chunk_ann.bin",
+            "relation_ann_labels.npy", "relation_ann.bin",
+            "chunk_ann_source_names.npy", "chunk_ann_source_codes.npy",
+            "chunk_ann_source_counts.npy",
+        )
+        signatures = []
+        for name in names:
+            try:
+                stat = (directory / name).stat()
+            except FileNotFoundError:
+                signatures.append(None)
+            else:
+                signatures.append((stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+        return signatures[0] is not None, tuple(signatures)
 
     # ──────────────────────────────────────────────────────── load/save ──
     def load_scale(self, notebook_id: str):

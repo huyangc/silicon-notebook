@@ -24,20 +24,19 @@ def repo(tmp_path, monkeypatch):
     return r
 
 
-def test_read_manifest_version(repo, tmp_path):
-    out_dir = tmp_path / "idxdir"
-    out_dir.mkdir()
-    # 无 manifest → None
-    assert repo._runtime.scale_artifact_store.read_manifest_version(str(out_dir)) is None
-    # 有 manifest → 返回 version list
-    (out_dir / "manifest.json").write_text(json.dumps({"version": ["a", 3, "t"]}))
-    assert repo._runtime.scale_artifact_store.read_manifest_version(str(out_dir)) == ["a", 3, "t"]
-    # 损坏 JSON → None(不抛)
-    (out_dir / "manifest.json").write_text("{not json")
-    assert repo._runtime.scale_artifact_store.read_manifest_version(str(out_dir)) is None
-    # 无 version 字段 → None
-    (out_dir / "manifest.json").write_text(json.dumps({"n_nodes": 5}))
-    assert repo._runtime.scale_artifact_store.read_manifest_version(str(out_dir)) is None
+def test_integrity_identity_tracks_same_version_replacement(repo):
+    store = repo._runtime.scale_artifact_store
+    directory = store.scale_dir("nb")
+    assert store.scale_integrity_identity("nb")[0] is False
+    directory.mkdir(parents=True)
+    manifest = directory / "manifest.json"
+    manifest.write_text(json.dumps({"version": [1]}))
+    first = store.scale_integrity_identity("nb")
+    replacement = directory / "replacement.json"
+    replacement.write_text(json.dumps({"version": [1]}))
+    os.replace(replacement, manifest)
+    assert store.scale_integrity_identity("nb")[0] is True
+    assert store.scale_integrity_identity("nb") != first
 
 
 def test_load_lock_table_present(repo):
@@ -96,6 +95,23 @@ def test_stale_reload_after_disk_rebuild(repo):
     repo.build_scale_index(nb.id)                  # 重建 → 新 manifest.version,收进 sB
     b = repo._scale_index(nb.id, allow_stale=True)
     assert b is not None and b is not a            # 新磁盘身份 → 新实例
+
+
+def test_online_probe_accepts_fold_retaining_deleted_source_chunk_prefix(repo):
+    from app.services.checkup import probe_scale_index_integrity
+    from app.services.kg.scale_index import load_scale_index
+
+    nb = _indexed_nb_with_delta(repo)
+    repo.delete_source("sA")
+    repo._runtime.scale_artifacts.fold(nb.id)
+    directory = repo._runtime.scale_artifact_store.scale_dir(nb.id)
+    index = load_scale_index(str(directory))
+    assert index is not None
+    # Fold retains the old indexed prefix while the manifest counts live DB
+    # chunks. These quantities intentionally need not be equal.
+    assert index.manifest["n_chunks"] < len(index.chunk_index)
+    assert probe_scale_index_integrity(directory, deep=True) == 0
+    assert probe_scale_index_integrity(directory) == 0
 
 
 def test_no_manifest_returns_none(repo):

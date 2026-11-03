@@ -12,6 +12,7 @@ import secrets
 import threading
 import time
 import weakref
+from concurrent.futures import Future
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator, Optional
 
@@ -27,7 +28,6 @@ from app.repositories.scale_build_lock import (
     ScaleBuildLockLost,
 )
 from app.services.offline_batch import offline_batch_active
-
 
 # Outcome of one admission attempt in ``_admit_scale_op`` — the three cases a
 # caller must be able to tell apart in order to report an HONEST status:
@@ -186,6 +186,11 @@ class ScaleArtifactRuntime:
         self.auto_index_checked = auto_index_checked
         self.viz_building = viz_building
         self.viz_building_lock = viz_building_lock
+        # Standalone graph readers have a different load boundary from the
+        # scale catalog. Keep only in-flight results here, including failures;
+        # completed graphs remain owned by the existing bounded viz LRU.
+        self._viz_load_guard = threading.Lock()
+        self._viz_loads: dict[str, Future] = {}
 
         self.notebooks = notebooks
         self.facts_repo = facts_repo
@@ -410,8 +415,8 @@ class ScaleArtifactRuntime:
         exactly like the companion probe: a stat signature, ``MANIFEST_ABSENT``
         (the root was probed and provably has no live manifest), or ``None``
         (nothing could be concluded — no probe on this adapter, or this one stat
-        failed). Called at most once per ``viz_index()`` read, and reused for
-        both the hit check and the entry that call may write."""
+        failed). The cold-reader single-flight also samples around its load to
+        detect publication while a graph is being materialized."""
         probe = getattr(self.artifacts, "manifest_stat_signature", None)
         if not callable(probe):
             return None
@@ -903,8 +908,82 @@ class ScaleArtifactRuntime:
             # only past this early return, so a scale-embedded serve pays no extra
             # version_signal read (finding 3).
             return scale
-        cur = self.version(notebook_id)
-        cur_cseq = int(self.projections.version_signal(notebook_id)[1])
+        return self._standalone_viz_singleflight(
+            notebook_id, emit_refusal=emit_refusal, on_refresh=on_refresh
+        )
+
+    def _standalone_viz_singleflight(self, notebook_id, *, emit_refusal, on_refresh):
+        """Share one standalone graph load, retaining no completed flight."""
+        while True:
+            with self._viz_load_guard:
+                future = self._viz_loads.get(notebook_id)
+                leader = future is None
+                if leader:
+                    future = Future()
+                    self._viz_loads[notebook_id] = future
+            if leader:
+                refresh_requested = False
+
+                def mark_refresh():
+                    nonlocal refresh_requested
+                    refresh_requested = True
+
+                try:
+                    try:
+                        while True:
+                            before = self._viz_signature(notebook_id)
+                            database_snapshot = self._viz_database_snapshot(notebook_id)
+                            # Recheck the warm slot inside the flight: another
+                            # reader may have completed before our admission.
+                            # No catalog lock is held here.
+                            index = self._standalone_viz_index(
+                                notebook_id, emit_refusal=emit_refusal,
+                                on_refresh=mark_refresh, database_snapshot=database_snapshot,
+                            )
+                            signature = self._viz_signature(notebook_id)
+                            if signature is not None and signature != before:
+                                index = None  # Release this generation before loading another.
+                                continue
+                            break
+                    finally:
+                        with self._viz_load_guard:
+                            if self._viz_loads.get(notebook_id) is future:
+                                self._viz_loads.pop(notebook_id, None)
+                except BaseException as error:
+                    future.set_exception(error)
+                    raise
+                # Publish only after releasing the flight. Woken followers can
+                # invoke caller callbacks which re-enter the graph reader.
+                future.set_result((index, refresh_requested, signature, database_snapshot))
+            index, refresh_requested, signature, database_snapshot = future.result()
+            current = self._viz_signature(notebook_id)
+            if current is not None and current != signature:
+                index = None
+                continue  # A waiting reader must not adopt a superseded result.
+            current_snapshot = self._viz_database_snapshot(notebook_id)
+            if index is not None:
+                if self.projections.predates_memory_isolation(index.manifest, current_snapshot[0]):
+                    return None
+                if (
+                    current_snapshot != database_snapshot
+                    and not self._viz_manifest_fresh(index.manifest, *current_snapshot)
+                    and not refresh_requested
+                ):
+                    # The disk generation is unchanged, so reuse its payload
+                    # while applying the current DB freshness/refresh policy.
+                    # This must not revisit a cold loader, even if the LRU was
+                    # evicted while the caller waited for the shared result.
+                    return self._serve_stale_viz(notebook_id, index, on_refresh)
+            if refresh_requested and on_refresh is not None:
+                on_refresh()  # User callbacks run after the flight is released.
+            return index
+
+    def _viz_database_snapshot(self, notebook_id):
+        return list(self.version(notebook_id)), int(self.projections.version_signal(notebook_id)[1])
+
+    def _standalone_viz_index(self, notebook_id, *, emit_refusal, on_refresh, database_snapshot):
+        """Read/cache one generation; called only by its single-flight leader."""
+        cur, cur_cseq = database_snapshot
         # P2, codex PR#643 R18: the two gates above are DATABASE-derived, so a
         # CROSS-PROCESS writer (the offline CLI's ``import``, another replica)
         # that replaces or RETIRES ``kg_viz`` under the same version and the
@@ -987,6 +1066,12 @@ class ScaleArtifactRuntime:
             ):
                 index = None
         if index is not None:
+            current_signature = self._viz_signature(notebook_id)
+            if current_signature is not None and current_signature != disk_signature:
+                # Do not publish the obsolete graph. The surrounding flight
+                # observes the same identity change and retries after this
+                # local reference is released, without retaining both graphs.
+                return None
             if self._viz_manifest_fresh(index.manifest, cur, cur_cseq):
                 self.viz_cache[notebook_id] = (
                     index, self._recordable_viz_signature(disk_signature)
@@ -999,8 +1084,8 @@ class ScaleArtifactRuntime:
             # the entry is deliberately the SAME shape as the fresh write one
             # branch up — a bare assignment into the same bounded LRU, so a
             # stale artifact competes for the same residency budget as a fresh
-            # one, and two concurrent readers that both loaded simply overwrite
-            # each other with equivalent generations. ``_recordable_viz_``
+            # one. The surrounding flight admits one cold reader per notebook.
+            # ``_recordable_viz_``
             # ``signature`` is what keeps the entry honest: a probe-less
             # adapter or a stat that could not be completed degrades to None,
             # and an entry with no identity has nothing to invalidate it, so it
@@ -1052,30 +1137,37 @@ class ScaleArtifactRuntime:
         )
 
     def viz_probe(self, notebook_id: str) -> dict:
-        """Read persisted state only; this method never schedules a build."""
-        scale = self.load(notebook_id)
-        if scale is not None and getattr(scale, "viz_ids", None) is not None:
-            # Scale-embedded viz: version-fresh by construction (load() gates on
-            # version); cluster_seq is not consulted — see viz_index (finding 2).
-            manifest = scale.manifest
+        """Read manifest/header metadata, never materialize graph or ANN arrays.
+
+        Status polling must not borrow the graph-serving cold-load path: a
+        standalone viz previously reloaded its entire graph on every poll, and
+        merely checking for an embedded viz could cold-load the scale core.
+        Header inspection still notices missing/truncated files and declared
+        shape/count mismatches without retaining another graph in memory.
+        """
+        from app.services.kg.artifact_probe import (
+            inspect_scale_metadata,
+            inspect_viz_metadata,
+        )
+
+        cur = self.version(notebook_id)
+        manifest = inspect_scale_metadata(self.artifacts.scale_dir(notebook_id))
+        if (
+            manifest is not None
+            and manifest.get("has_viz")
+            and manifest.get("version") == cur
+            and not self.projections.predates_memory_isolation(manifest, cur)
+        ):
+            # Embedded viz inherits the scale version; its cluster_seq is not
+            # consulted, exactly as in the graph-serving path.
             return {
                 "viz_indexed": True,
-                "viz_nodes": int(
-                    manifest.get("n_viz_nodes", len(scale.viz_ids))
-                ),
-                # Fallback for a manifest written before n_viz_edges existed:
-                # len() over the compact edge set is the same edge count the old
-                # list-of-triples gave (VizEdgeSet defines __len__).
-                "viz_edges": int(
-                    manifest.get(
-                        "n_viz_edges",
-                        len(scale.viz_edges) if scale.viz_edges is not None else 0,
-                    )
-                ),
+                "viz_nodes": int(manifest.get("n_viz_nodes", 0)),
+                "viz_edges": int(manifest.get("n_viz_edges", 0)),
                 "viz_stale": False,
             }
-        index = self.artifacts.load_viz(notebook_id)
-        if index is None:
+        manifest = inspect_viz_metadata(self.artifacts.viz_dir(notebook_id))
+        if manifest is None:
             return {
                 "viz_indexed": False,
                 "viz_nodes": 0,
@@ -1084,9 +1176,7 @@ class ScaleArtifactRuntime:
             }
         # Standalone viz artifact: the cluster_seq check (and its version_signal
         # read) is paid ONLY here, not on every scale-embedded status poll (finding 3).
-        cur = self.version(notebook_id)
         cur_cseq = int(self.projections.version_signal(notebook_id)[1])
-        manifest = index.manifest
         if self.projections.predates_memory_isolation(manifest, cur):
             # M1: an artifact built before the isolation is neither served nor
             # counted (its node/edge counts include a member's Memory).

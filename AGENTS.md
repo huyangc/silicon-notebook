@@ -33,6 +33,8 @@ details, numeric rails, and incident history in the owning references below.
   work while awaiting the answer.
 - Existing authorization remains valid within its stated scope. Do not request the same
   approval again.
+- After implementation, follow the standing PR-delivery preference in
+  [PR review and merge](docs/development.md#pr-review-and-merge).
 - Use [delegation](docs/development.md#delegation-and-review) for independent work or
   risk-based review; routine work stays with one agent. Define ownership, acceptance
   criteria, and verification responsibility before delegating.

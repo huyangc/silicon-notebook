@@ -33,10 +33,9 @@
   status()→_index_delta 的全量 source-id 扫(codex P2)。签名是 status() stale 判定输入的廉价超集,
   故缓存绝不比 status() 自身更陈旧;不折进裸 kg_mutation_seq(rebuild 不 bump seq 却换 watermark
   →由 mtime 补上;嵌入变更改 version_facts 也不 bump seq——与 status() 自身的 version() memo 同盲区)。
-- H8:需真 load 一次磁盘产物做交叉校验,故按磁盘 **manifest 身份**(exists + manifest.version)缓存
-  「健康」结论——rebuild/fold(`.tmp`+swap 原子)换新 manifest.version 即失效。**不用 version_signal**:
-  它只由 unified_kg_state 的 seq 组成、rebuild/fold 不 bump 它,与磁盘产物解耦(评审 B1:用它当键会
-  漏报「fold 后损坏」、且损坏被缓存后重建清不掉)。损坏结论从不入缓存、每次现探(修好即自愈)。
+- H8:在线只读文件元数据、数组头与主 ANN 固定头,不加载图数组或 ANN。健康结论按
+  manifest 与各工件的 stat 身份缓存;同版本换代、截断也失效。并发同库共用一次探针。
+  损坏结论不缓存,修好即自愈。完整内容级检查仅由显式 CLI inspect --deep 执行。
 - H9(只读,裁决 M1 存量迁移):``unified_kg_state.memory_isolation_version`` 不是 1——0 = 本库的
   共享派生图建于 Memory 隔离之前,正等启动后的隔离重建;2 = 正等启动后的「悬空种子」检查
   (``memory_isolation_rebuild``,查出任一信号即转 0 入重建队列,否则转 1;凡有簇的
@@ -64,6 +63,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -79,13 +79,9 @@ _SAMPLE_CAP = 20
 # H8 version_signal 缓存的有界化:进程内只保留最近访问的 N 个 notebook(LRU)。看板逐个
 # 打开,工作集本就是个位数~几十;上界只为防「几十万 notebook 全被探过一遍」的无界增长。
 _H8_CACHE_MAX = 256
-# H8 健康结论的缓存**有界存活**:manifest 身份不变时也最多缓存这么久,过期即重探一次。
-# 理由(codex):manifest.version 是内容派生的、外部截断/损坏数组或 ann.bin 而不动 manifest
-# 时身份不变——只靠身份键会把「探过之后才损坏」的索引永远当健康。TTL 让健康结论定期复检,
-# 使 post-probe 磁盘损坏最终可见(损坏结论本就不缓存、每次现探)。300s:检索热路径外,足够低频。
+# H8 健康元数据结论最多存活这么久;文件 stat 变化会提前失效。
 _H8_CACHE_TTL = 300.0
-# H7 memo 的有界化(同 H8:LRU、进程内、重启即空)。H7 不需 TTL:签名含 manifest mtime → 任何
-# 产物重写都失效,不像 H8 的 (exists,version) 身份会漏「探后被外部截断」而需 TTL 兜底。
+# H7 memo 的有界化(同 H8:LRU、进程内、重启即空)。H7 不需 TTL:签名覆盖 status() 的输入。
 _H7_CACHE_MAX = 256
 # H4/H5 memo 的有界化(同 H7/H8:LRU、进程内、重启即空)。epoch 表共用同一上限。
 _H45_CACHE_MAX = 256
@@ -119,23 +115,21 @@ class CheckupResult:
     checks: list[CheckupItem]
 
 
-def probe_scale_index_integrity(scale_dir: Any, *, logger: Any = None) -> int:
-    """H8 的磁盘探针:1=损坏(manifest 在、却加载不出来),0=正常或未建索引。**绝不 raise**。
+def probe_scale_index_integrity(scale_dir: Any, *, logger: Any = None, deep: bool = False) -> int:
+    """1=检测到损坏,0=未检测到或未建索引;绝不 raise。
 
-    关键区分(承计划三·H8):`load_scale_index` 对「manifest 缺失(未建)」与「manifest 在但
-    计数/长度校验失配(损坏)」**都返回 None**,故必须先判 manifest 文件是否存在:
-    - manifest.json 不存在 → 未建索引 → 不是 H8(返回 0,连 load 都不调)。
-    - manifest.json 存在但 load_scale_index 返回 None → 损坏 → 命中 H8(返回 1)。
-    - load_scale_index 返回非 None → 正常(返回 0)。
-
-    保守取舍:探针内部任何异常(磁盘 IO / 反序列化)都归结成**不误报损坏**(返回 0)——
-    体检在看板打开的热路径上,响亮地误报「索引损坏、请重建」比漏报一次更打扰用户,且损坏本
-    就会在下次真正 load 时被 `_unusable` 兜住退化成「无索引」走重建。经 `_scale_index_module`
-    属性调用 load_scale_index,让冻结的磁盘缓存测试的 monkeypatch spy 仍能绑上。"""
+    默认在线路径只检查头部/大小/形状/计数,不证明所有内容完好。
+    ``deep=True`` 是显式运维操作,会加载整份图和主 ANN,要求索引规模的额外内存。
+    未能完成探测时维持保守不误报约定。
+    """
     try:
         manifest_path = os.path.join(str(scale_dir), "manifest.json")
         if not os.path.exists(manifest_path):
             return 0
+        if not deep:
+            from app.services.kg.artifact_probe import inspect_scale_metadata
+
+            return int(inspect_scale_metadata(scale_dir) is None)
         index = _scale_index_module.load_scale_index(str(scale_dir))
         if index is None:
             return 1  # manifest 计数/数组长度失配
@@ -151,8 +145,7 @@ def probe_scale_index_integrity(scale_dir: Any, *, logger: Any = None) -> int:
             # 内容级校验(codex 第2轮 P2):ann.bin 存在但被**截断/非法 HNSW** 时,上面的
             # load_scale_index 只看 .npy、ANN 懒加载,照样报健康——检索侧真 open_ann 才炸、退化成
             # 无索引却不提示重建。这里按 manifest 的 dim 真 load 一次主 ANN,截断/损坏会在 load_index
-            # raise。成本由本探针的 300s 健康缓存摊薄(每源每 5min 至多一次);handle 是本地临时对象、
-            # 探完即弃(不 memoize 到 index 上,避免额外常驻内存)。
+            # raise。仅显式 deep 运维检查进入此路径,临时 handle 探完释放。
             dim = int(index.manifest.get("dim", 0) or 0)
             if dim > 0:
                 import hnswlib  # 既有依赖;万一 import 失败落外层 except → 保守判未损坏(不误报)
@@ -237,8 +230,8 @@ class CheckupService:
       (内含 _index_delta 全量 source-id 扫),只在下面的签名变化时才调。
     - ``index_state_signature``:H7 memo 的**廉价**失效键(version_signal + manifest mtime +
       building/queued);签名不变即复用上次的 state 结论、不跑 ``scale_index_state``(codex P2)。
-    - ``index_manifest_identity``:H8 的缓存键 `(exists, manifest.version)`——磁盘产物身份,
-      rebuild/fold 换新 version 即失效(**不是** version_signal:后者与磁盘产物解耦,见 H8 说明)。
+    - ``index_manifest_identity``:H8 的缓存键 `(exists, artifact_stat_identity)`——包含
+      manifest 与数组/ANN 文件的磁盘身份,同版本重发或外部截断也会失效。
     - ``probe_index_integrity``:H8 的磁盘探针(never-raise,见模块级 probe_scale_index_integrity)。
     - ``active_source_ids``:内存活跃租约快照(H2/H3 的 Python 后置减法)。
     - ``now``:时钟 seam;``event_log``:仅用于 fail-soft 探针的 warning。
@@ -290,11 +283,10 @@ class CheckupService:
         self._approved_memory_promotions = approved_memory_promotions
         self._public_library_memory_sources = public_library_memory_sources
         self._orphan_memory_sources = orphan_memory_sources
-        # 进程内 H8 缓存:nb -> (manifest_version, 0)。**只缓存「健康」结论**(见 _h8 说明:
-        # 损坏结论从不进缓存,每次现探,以免修复后仍粘住误报)。键是磁盘 manifest 身份,
-        # rebuild/fold 换新 version 即失效。重启即空。move_to_end + popitem(last=False) LRU 有界化。
+        # H8 只缓存未检测到损坏的元数据结论,以工件 stat 身份失效;进程内有界 LRU。
         self._h8_cache: "OrderedDict[str, tuple[Any, int, float]]" = OrderedDict()
         self._h8_cache_lock = threading.Lock()
+        self._h8_inflight: dict[str, Future] = {}
         # 进程内 H7 memo:nb -> (signature, h7_value)。签名是 status() stale 判定输入的廉价超集,
         # 命中即跳过昂贵的 status()/_index_delta 全量扫(codex P2)。0/1 都缓存(两向翻转都被签名
         # 捕获,无粘滞);异常不缓存。move_to_end + popitem(last=False) LRU 有界化。重启即空。
@@ -579,7 +571,7 @@ class CheckupService:
 
         缓存策略(承评审 B1:version_signal 键不成立——它与磁盘产物解耦,损坏被缓存后重建
         清不掉):
-        - 键 = 磁盘 **manifest 身份** `(exists, manifest.version)`,rebuild/fold 换新 version 即失效。
+        - 键 = manifest 与各工件 stat 身份;同版本换代与外部截断也会失效。
         - **只缓存「健康」(0)结论**;损坏(1)**从不入缓存、每次现探**。理由:full/fold 都是
           `.tmp`+swap 原子换目录,故「健康→损坏」只可能来自外部篡改(越界);而「损坏→健康」是
           用户点重建的正常闭环——若把损坏也缓存,重建后(即便换了新 version)也要等缓存失效才自愈,
@@ -601,14 +593,36 @@ class CheckupService:
             ):
                 self._h8_cache.move_to_end(notebook_id)
                 return cached[1]  # 本代产物、TTL 内已探过健康(缓存只存 0)
-        # 磁盘探针放在锁外(IO 可能慢);probe 契约上 never-raise,仍兜一层。
+            future = self._h8_inflight.get(notebook_id)
+            leader = future is None
+            if leader:
+                future = Future()
+                self._h8_inflight[notebook_id] = future
+        if not leader:
+            # Share even a failed/corrupt generation, without retaining its
+            # verdict after completion. A repaired artifact retries next call.
+            result, probed_identity = future.result()
+            if probed_identity != manifest_version:
+                return self._h8_index_integrity(notebook_id)
+            return result
+        # Only the leader probes; no filesystem I/O under the global lock.
+        cacheable = False
         try:
             result = int(self._probe_index_integrity(notebook_id))
+            # A swap during inspection must not publish a result for the old
+            # generation. The next call inspects the newly published files.
+            cacheable = self._index_manifest_identity(notebook_id) == (exists, manifest_version)
         except Exception:  # noqa: BLE001
             self._warn("H8 磁盘探针异常(保守判未损坏,不写缓存):%s", notebook_id)
-            return 0
+            result = 0
+        except BaseException as error:
+            # An interrupted leader must not leave followers parked forever.
+            with self._h8_cache_lock:
+                self._h8_inflight.pop(notebook_id, None)
+            future.set_exception(error)
+            raise
         with self._h8_cache_lock:
-            if result == 0:
+            if result == 0 and cacheable:
                 self._h8_cache[notebook_id] = (manifest_version, 0, time.monotonic())
                 self._h8_cache.move_to_end(notebook_id)
                 while len(self._h8_cache) > _H8_CACHE_MAX:
@@ -616,6 +630,8 @@ class CheckupService:
             else:
                 # 损坏结论不缓存,反而清掉本 nb 任何旧的健康缓存——下次仍现探,修好即自愈。
                 self._h8_cache.pop(notebook_id, None)
+            self._h8_inflight.pop(notebook_id, None)
+        future.set_result((result, manifest_version))
         return result
 
     # ---------------------------------------------------------------- H11

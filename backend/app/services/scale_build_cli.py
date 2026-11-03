@@ -1511,7 +1511,7 @@ def interrupted_rollback_state(
     )
 
 
-def run_inspect(repository, notebook_id: str, report: Callable[[str], None]) -> dict:
+def run_inspect(repository, notebook_id: str, report: Callable[[str], None], *, deep: bool = False) -> dict:
     """Read-only: what is on disk, what the database thinks, who holds the claim.
 
     ``scale_index_status`` is the same call the service's own status endpoint
@@ -1588,6 +1588,13 @@ def run_inspect(repository, notebook_id: str, report: Callable[[str], None]) -> 
         "runtime_dim": _runtime_dim(repository.settings),
         "runtime_library_versions": _runtime_libraries(),
     }
+    if deep:
+        from app.services.checkup import probe_scale_index_integrity
+
+        report("deep inspection loads the complete main index; reserve index-sized memory")
+        receipt["deep_index_corrupt"] = bool(
+            probe_scale_index_integrity(roots[MAIN_ROOT], deep=True)
+        )
     if leftovers:
         report(
             "leftover staging/rollback directories are present; a `.old` "
@@ -2552,6 +2559,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "inspect", help="read-only report on one notebook's artifacts and claim"
     )
     inspect.add_argument("--notebook", required=True)
+    inspect.add_argument(
+        "--deep", action="store_true",
+        help="fully load and validate the main index (requires index-sized memory)",
+    )
 
     build = subparsers.add_parser("build", help="rebuild or fold the index")
     build.add_argument("--notebook", required=True)
@@ -2605,7 +2616,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         verify_migration_ledger(settings.database_url)
         with open_scale_build_repository(settings) as repository:
             if args.command == "inspect":
-                receipt = run_inspect(repository, args.notebook, report)
+                receipt = run_inspect(repository, args.notebook, report, deep=args.deep)
             elif args.command == "build":
                 receipt = run_build(
                     repository, args.notebook, mode=args.mode, report=report

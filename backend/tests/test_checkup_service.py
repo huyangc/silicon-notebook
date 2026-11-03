@@ -1077,6 +1077,73 @@ def test_h8_healthy_cache_expires_after_ttl(repo, monkeypatch):
 
 
 # --------------------------- module-level disk probe (H8 判据落点) ----------
+@pytest.mark.parametrize("verdict", [0, 1, "error", "abort"])
+def test_h8_concurrent_requests_share_one_probe(repo, monkeypatch, verdict):
+    import threading
+    from concurrent.futures import Future, ThreadPoolExecutor
+
+    import app.services.checkup as checkup_mod
+
+    entered = threading.Event()
+    follower = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    class ProbeAborted(BaseException):
+        pass
+
+    class ObservedFuture(Future):
+        def result(self, *args, **kwargs):
+            follower.set()
+            return super().result(*args, **kwargs)
+
+    def probe(nb):
+        calls.append(nb)
+        entered.set()
+        assert release.wait(5)
+        if verdict == "error":
+            raise OSError("unavailable")
+        if verdict == "abort":
+            raise ProbeAborted()
+        return verdict
+
+    monkeypatch.setattr(checkup_mod, "Future", ObservedFuture)
+    svc = _service(repo, probe_index_integrity=probe)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(svc._h8_index_integrity, "nb-x")
+        try:
+            assert entered.wait(5)
+            second = pool.submit(svc._h8_index_integrity, "nb-x")
+            assert follower.wait(5)
+        finally:
+            release.set()
+        if verdict == "abort":
+            for pending in (first, second):
+                with pytest.raises(ProbeAborted):
+                    pending.result(5)
+        else:
+            expected = 0 if verdict == "error" else verdict
+            assert first.result(5) == second.result(5) == expected
+    assert calls == ["nb-x"]
+    assert svc._h8_inflight == {}
+
+
+def test_h8_does_not_cache_a_generation_replaced_during_probe(repo):
+    identity = ["old"]
+    calls = []
+
+    def probe(nb):
+        calls.append(nb)
+        identity[0] = "new"
+        return 0
+
+    svc = _service(repo, index_manifest_identity=lambda nb: (True, identity[0]), probe_index_integrity=probe)
+    assert svc._h8_index_integrity("nb-x") == 0
+    assert "nb-x" not in svc._h8_cache
+    assert svc._h8_index_integrity("nb-x") == 0
+    assert len(calls) == 2
+
+
 def test_probe_no_manifest_is_not_corrupt(tmp_path):
     # manifest.json 不存在 = 未建索引,不是损坏。
     assert probe_scale_index_integrity(tmp_path) == 0
@@ -1087,7 +1154,7 @@ def test_probe_manifest_present_load_none_is_corrupt(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "app.services.kg.scale_index.load_scale_index", lambda d: None
     )
-    assert probe_scale_index_integrity(tmp_path) == 1
+    assert probe_scale_index_integrity(tmp_path, deep=True) == 1
 
 
 def test_probe_manifest_present_load_ok(tmp_path, monkeypatch):
@@ -1095,7 +1162,7 @@ def test_probe_manifest_present_load_ok(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "app.services.kg.scale_index.load_scale_index", lambda d: object()
     )
-    assert probe_scale_index_integrity(tmp_path) == 0
+    assert probe_scale_index_integrity(tmp_path, deep=True) == 0
 
 
 def test_probe_never_raises(tmp_path, monkeypatch):
@@ -1105,7 +1172,7 @@ def test_probe_never_raises(tmp_path, monkeypatch):
         raise IOError("disk gone")
 
     monkeypatch.setattr("app.services.kg.scale_index.load_scale_index", _boom)
-    assert probe_scale_index_integrity(tmp_path) == 0
+    assert probe_scale_index_integrity(tmp_path, deep=True) == 0
 
 
 def test_probe_flags_missing_ann_binary(tmp_path, monkeypatch):
@@ -1120,9 +1187,9 @@ def test_probe_flags_missing_ann_binary(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "app.services.kg.scale_index.load_scale_index", lambda d: _Idx()
     )
-    assert probe_scale_index_integrity(tmp_path) == 1   # ann.bin 缺 → 损坏
+    assert probe_scale_index_integrity(tmp_path, deep=True) == 1   # ann.bin 缺 → 损坏
     (tmp_path / "ann.bin").write_bytes(b"x")
-    assert probe_scale_index_integrity(tmp_path) == 0   # 补上 → 健康
+    assert probe_scale_index_integrity(tmp_path, deep=True) == 0   # 补上 → 健康
 
 
 # ------------------------------------------------------ sample boundedness
@@ -1162,11 +1229,11 @@ def test_probe_validates_ann_content_not_just_existence(tmp_path, monkeypatch):
     monkeypatch.setattr(scale_index_mod, "load_scale_index", lambda d: stub)
 
     # 健康 ann.bin:内容校验通过 → 0。
-    assert probe_scale_index_integrity(str(scale_dir)) == 0
+    assert probe_scale_index_integrity(str(scale_dir), deep=True) == 0
     # 截断 ann.bin:load_index raise → 1(不再假报健康)。
     with open(ann_path, "r+b") as f:
         f.truncate(8)
-    assert probe_scale_index_integrity(str(scale_dir)) == 1
+    assert probe_scale_index_integrity(str(scale_dir), deep=True) == 1
 
 
 def test_probe_detects_ann_entry_count_below_labels(tmp_path, monkeypatch):
@@ -1193,7 +1260,7 @@ def test_probe_detects_ann_entry_count_below_labels(tmp_path, monkeypatch):
         ann_labels=["a", "b", "c"], ann_path=ann_path, manifest={"dim": dim}
     )
     monkeypatch.setattr(scale_index_mod, "load_scale_index", lambda d: stub)
-    assert probe_scale_index_integrity(str(scale_dir)) == 1
+    assert probe_scale_index_integrity(str(scale_dir), deep=True) == 1
 
 
 # --------------------------------------------- backfill 分页(审计批4)

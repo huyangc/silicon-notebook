@@ -445,10 +445,14 @@ PYTHONPATH=backend python scripts/batch_ingest.py question-index \
 
 ```bash
 PYTHONPATH=backend python scripts/build_scale_index.py inspect --notebook nb-xxxx
+PYTHONPATH=backend python scripts/build_scale_index.py inspect --notebook nb-xxxx --deep
 PYTHONPATH=backend python scripts/build_scale_index.py build   --notebook nb-xxxx [--full|--fold]
 PYTHONPATH=backend python scripts/build_scale_index.py export  --notebook nb-xxxx --to DIR
 PYTHONPATH=backend python scripts/build_scale_index.py import  --notebook nb-xxxx --from DIR
 ```
+
+`inspect --deep` 才完整加载主索引并返回 `deep_index_corrupt`；需要图数组和整份主 ANN 的额外内存。
+在线体检与可视化状态仅检查元数据，不触发这条深检路径。
 
 `--statement-timeout-seconds`（默认 86400）是全局参数，写在子命令**之前**。`import`
 会硬拒 pipeline 身份、embedding 维度和 hnswlib 版本失配（后者可用

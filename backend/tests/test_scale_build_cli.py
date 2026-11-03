@@ -1819,6 +1819,29 @@ def test_run_inspect_reports_an_unknown_claim_on_a_lock_probe_failure(
     assert receipt["build_claim"] == "unknown"
 
 
+@pytest.mark.parametrize("deep", [False, True])
+def test_inspect_deep_load_is_explicit(repository, store, monkeypatch, deep):
+    from types import SimpleNamespace
+
+    import app.services.checkup as checkup_mod
+
+    _seed_live(store, "nb-1")
+    repository._runtime.scale_artifacts = SimpleNamespace(version=lambda nb: ["nb-1", 1])
+    repository.scale_index_status = lambda nb: {"exists": True, "state": "indexed"}
+    calls = []
+
+    def probe(directory, *, deep):
+        calls.append((directory, deep))
+        return 1
+
+    monkeypatch.setattr(checkup_mod, "probe_scale_index_integrity", probe)
+    receipt = cli.run_inspect(repository, "nb-1", report=lambda message: None, deep=deep)
+    assert calls == ([(store.scale_dir("nb-1"), True)] if deep else [])
+    assert receipt.get("deep_index_corrupt") == (True if deep else None)
+    args = cli.build_arg_parser().parse_args(["inspect", "--notebook", "nb-1", *(["--deep"] if deep else [])])
+    assert args.deep is deep
+
+
 def test_a_refused_package_never_reaches_the_disk(repository, store, tmp_path):
     _seed_live(store, "nb-1")
     package = _package(tmp_path, dim=1024)

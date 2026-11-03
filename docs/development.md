@@ -1359,6 +1359,12 @@ A change that users need to know about, or need to act on, adds one `release-not
 These rules apply when the user has authorized PR delivery; local editing alone
 does not authorize remote mutations.
 
+The user's standing preference for this repository authorizes pushing the task branch
+and opening a PR after implementation and required verification are complete, unless
+the current task says otherwise. Do this by default without asking again. Merging
+requires authorization for that delivery and remains subject to the review and CI
+requirements below; this standing preference alone authorizes PR creation.
+
 - A pull request must be reviewed by codex before it is merged, and **every round's
   raw output is posted verbatim to the PR**, including empty-finding and manual
   rounds, with trigger, exact command, remote head SHA, exit code, and output size.
