@@ -66,8 +66,11 @@ validate() {
     fail=1
   fi
   # Known silent-failure signatures: configured model newer than the CLI.
-  if grep -qiE 'requires a newer version|Model metadata .* not found|not supported when using Codex' \
-       "$d/stderr.log" "$d/events.jsonl" 2>/dev/null; then
+  # Only diagnostics are searched (stderr + error/turn.failed events), never
+  # tool output, which may legitimately contain these strings (e.g. this file).
+  if { cat "$d/stderr.log" 2>/dev/null
+       grep -E '"type":"(error|turn\.failed)"' "$d/events.jsonl" 2>/dev/null; } \
+     | grep -qiE 'requires a newer version|Model metadata .* not found|not supported when using Codex'; then
     echo "codex-impl: codex CLI looks older than the configured model; upgrade it (npm i -g @openai/codex@latest or brew upgrade codex) and resume." >&2
     fail=1
   fi
