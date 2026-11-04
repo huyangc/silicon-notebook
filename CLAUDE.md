@@ -36,6 +36,8 @@ canonical documents 为准。共享开发、验证与交付规则以 `docs/devel
 角色列表在会话启动时枚举；新增或改名角色后需重启会话。未知角色会响亮失败，此时使用内置
 角色并显式传模型。角色名精确匹配，不做大小写或分隔符归一。
 
+规格已定死的多文件实现默认经 `/codex-impl` 交给本机 codex，不可用时回退 `impl-task`。
+
 ### 委托与交付入口
 
 委托前读 [Delegation and review](docs/development.md#delegation-and-review)；按完整验收边界
@@ -50,4 +52,4 @@ canonical documents 为准。共享开发、验证与交付规则以 `docs/devel
 - 仓库通用 Agent 规则与路由：`AGENTS.md`
 - 开发、验证、CI 与 PR 政策：`docs/development.md` / `docs/development_zh.md`
 - 产品/API、架构、部署和运维：使用 `AGENTS.md` 的 routing table
-- Claude Code hook 与角色：`.claude/hooks/`、`.claude/agents/`
+- Claude Code hook 与角色：`.claude/hooks/`、`.claude/agents/`、`.claude/skills/`
