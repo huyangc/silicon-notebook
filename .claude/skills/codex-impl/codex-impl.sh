@@ -11,7 +11,8 @@
 #
 # Every run gets a directory under $CODEX_IMPL_HOME (default
 # ~/.claude/codex-impl/) holding: prompt.md, events.jsonl, stderr.log, last.md
-# (codex's final message), session_id, worktree, base_sha, exit_code.
+# (codex's final message), session_id, worktree, base_sha, exit_code (the
+# validated status below) and codex_exit (the raw CLI status).
 #
 # Exit codes: 0 codex finished and left a final report; 1 codex failed
 # (non-zero exit, error event, empty report, or the known "CLI too old"
@@ -42,9 +43,17 @@ codex_overrides() {
 }
 
 check_result() {
-  # $1 run dir, $2 codex exit code
+  # $1 run dir, $2 raw codex exit code. Writes the validated status to
+  # exit_code (what `show` reports) and the raw CLI status to codex_exit.
+  local d="$1" rc="$2" final
+  echo "$rc" > "$d/codex_exit"
+  validate "$d" "$rc"; final=$?
+  echo "$final" > "$d/exit_code"
+  return "$final"
+}
+
+validate() {
   local d="$1" rc="$2" fail=0
-  echo "$rc" > "$d/exit_code"
   local sid
   sid="$(grep -m1 '"type":"thread.started"' "$d/events.jsonl" 2>/dev/null \
         | sed -E 's/.*"thread_id":"([^"]+)".*/\1/')"
@@ -99,8 +108,10 @@ case "$cmd" in
     command -v codex >/dev/null || die "codex not on PATH"
     [ -f "$HEAVY_GATE" ] || echo "codex-impl: warning: heavy-gate not found at $HEAVY_GATE" >&2
 
-    d="$HOME_DIR/$(date '+%Y%m%d-%H%M%S')-$(printf '%s' "$label" | tr -c 'A-Za-z0-9._-' '-')"
-    mkdir -p "$d"
+    mkdir -p "$HOME_DIR" || die "cannot create $HOME_DIR"
+    # mktemp allocates atomically, so concurrent runs never share a directory.
+    d="$(mktemp -d "$HOME_DIR/$(date '+%Y%m%d-%H%M%S')-$(printf '%s' "$label" | tr -c 'A-Za-z0-9._-' '-').XXXXXX")" \
+      || die "cannot allocate a run directory under $HOME_DIR"
     echo "$wt" > "$d/worktree"
     git -C "$wt" rev-parse HEAD > "$d/base_sha"
     git -C "$wt" status --porcelain > "$d/status_before"
@@ -138,7 +149,7 @@ case "$cmd" in
     d="${1:-}"; [ -d "$d" ] || die "usage: show <run-dir>"
     echo "worktree:   $(cat "$d/worktree")"
     echo "session_id: $(cat "$d/session_id" 2>/dev/null || echo '?')"
-    echo "exit_code:  $(cat "$d/exit_code" 2>/dev/null || echo 'running?')"
+    echo "exit_code:  $(cat "$d/exit_code" 2>/dev/null || echo 'running?') (validated; raw codex: $(cat "$d/codex_exit" 2>/dev/null || echo '?'))"
     echo "--- final report (last.md) ---"
     cat "$d/last.md" 2>/dev/null || echo "(none yet)"
     ;;
