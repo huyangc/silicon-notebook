@@ -1,4 +1,9 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(bash *.claude/skills/codex-impl/codex-impl.sh *)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {
