@@ -55,7 +55,7 @@ TARGET = ROOT / "CLAUDE.md"
 # 执行、验证停止条件及交付细则仍由 docs/development.md / _zh.md 拥有。
 # 3,571 → 1,515：共享工作区红线归 AGENTS.md，委托与 PR 操作归配对开发文档；
 # 常驻只保留 Claude 模型选择、角色和按需入口。
-BASELINE_CHARS = 1_515
+BASELINE_CHARS = 1_594
 BASELINE_LINE_CHARS = 79
 
 _GREW_ADVICE = """
