@@ -70,11 +70,17 @@ function rehypeQuotedPassage({ source, quote }: { source: string; quote: string 
 }
 
 /** A frozen public excerpt, never a request into the author's private source. */
-export function PublicEvidence({ evidence, isMemory = false }: { evidence?: PublicEvidenceT; isMemory?: boolean }) {
+export function PublicEvidence({ evidence, isMemory = false, isImageReference = false }: {
+  evidence?: PublicEvidenceT; isMemory?: boolean; isImageReference?: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
-  if (!evidence?.text) return <p className="public-evidence-note">{isMemory ? "此分享未保留个人记忆上下文。" : "原文已不可用"}</p>;
+  if (!evidence?.text) return <p className="public-evidence-note">{isMemory ? "此分享未保留个人记忆上下文。"
+    : isImageReference ? "此分享未保留图片说明。" : "原文已不可用"}</p>;
+  // Old frozen snapshots can predate the image-description kind. Their public
+  // image marker corrects presentation without widening or rewriting evidence.
+  const imageDescription = evidence.kind === "image_description" || (isImageReference && evidence.kind === "original");
   const label = evidence.kind === "memory" ? "作者的个人记忆"
-    : evidence.kind === "knowledge" ? "知识解释" : "原文";
+    : evidence.kind === "knowledge" ? "知识解释" : imageDescription ? "图片说明" : "原文";
   const markdown = normalizeMathMarkdown(evidence.text);
   return <section className="public-evidence">
     <button type="button" className="link-button inline-action" aria-expanded={expanded}

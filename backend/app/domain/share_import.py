@@ -19,11 +19,11 @@ def _reference(value: Any) -> dict[str, Any] | None:
     verification = value.get("verification")
     if isinstance(verification, str) and verification in ("changed", "source_gone", "unverifiable"):
         ref["verification"] = verification
-    for key in ("title_truncated", "file_name_truncated", "snippet_truncated", "is_memory"):
+    for key in ("title_truncated", "file_name_truncated", "snippet_truncated", "is_memory", "is_image_reference"):
         if type(value.get(key)) is bool:
             ref[key] = value[key]
     evidence = value.get("evidence")
-    if not ref.get("verification") and isinstance(evidence, dict) and evidence.get("kind") in ("original", "knowledge", "memory"):
+    if not ref.get("verification") and isinstance(evidence, dict) and evidence.get("kind") in ("original", "knowledge", "memory", "image_description"):
         ref["evidence"] = {key: evidence[key] for key in ("kind", "text", "quote", "location") if isinstance(evidence.get(key), str)}
         ref["evidence"]["truncated"] = evidence.get("truncated") is True
     return ref

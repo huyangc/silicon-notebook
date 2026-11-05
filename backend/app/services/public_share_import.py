@@ -8,9 +8,8 @@ from typing import Callable
 from markdown_it import MarkdownIt
 
 from app.domain.share_import import MANIFEST_VERSION, encode_manifest
-from app.services.citation_markers import MARKER_RE, marker_keys
+from app.services.citation_markers import CITATION_MARKER_RE, marker_keys
 
-_NUMERIC_MARKER = re.compile(r"\[(\d+(?:\s*[,，、]\s*\d+)*)\]")
 _VERIFICATION_LABELS = {"changed": "原文已改动", "source_gone": "资料已删除", "unverifiable": "无法核对"}
 _EVIDENCE_LABELS = {"grounded": "有据", "inferred": "推断", "overview": "概述"}
 
@@ -33,11 +32,7 @@ def _namespace_body(body: str, keys: dict[str, str]) -> str:
             if not cited or any(key not in keys for key in cited):
                 return match[0]
             return "".join(f"[{keys[key]}]" for key in cited)
-        segment = MARKER_RE.sub(convert, segment)
-        def numeric(match: re.Match) -> str:
-            cited = re.split(r"\s*[,，、]\s*", match[1])
-            return "".join(f"[{keys[key]}]" for key in cited) if all(key in keys for key in cited) else match[0]
-        return _NUMERIC_MARKER.sub(numeric, segment)
+        return CITATION_MARKER_RE.sub(convert, segment)
 
     protected.extend((match.start(), match.end()) for match in inline_literal.finditer(body))
     merged = []
@@ -133,7 +128,7 @@ def build_saved_share(
                 sections.append(f"此引用在回答生成时未通过核对：{reason}。以下摘录仅记录回答时的内容。")
             evidence = ref.get("evidence") if not verification else None
             if evidence:
-                label = {"original": "原文及上下文", "knowledge": "知识解释", "memory": "作者的个人记忆"}.get(evidence.get("kind"), "引用内容")
+                label = {"original": "原文及上下文", "knowledge": "知识解释", "memory": "作者的个人记忆", "image_description": "图片说明"}.get(evidence.get("kind"), "引用内容")
                 sections.extend([label + "：", evidence.get("text", "")])
                 if evidence.get("truncated"):
                     sections.append("原文上下文过长，此处仅保存分享页公开的部分。")

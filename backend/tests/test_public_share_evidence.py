@@ -3,10 +3,15 @@ from contextlib import nullcontext
 from copy import deepcopy
 from types import SimpleNamespace
 
+import pytest
+
+from app.domain.share_import import split_manifest
+from app.models.public_evidence import PublicEvidence
 from app.services.public_share_evidence import (
     capture_share_evidence,
     overlay_share_evidence,
 )
+from app.services.public_share_import import build_saved_share
 
 
 class Snapshots:
@@ -93,3 +98,40 @@ def test_unavailable_context_is_frozen_even_if_source_later_recovers():
     repo.evidence_elements = lambda ids: (_ for _ in ()).throw(AssertionError("missing capture is frozen"))
     capture_share_evidence(repo, "missing", _row())
     assert "evidence" not in overlay_share_evidence(repo, "missing", _row(), _public())["turns"][0]["references"][0]
+
+
+@pytest.mark.parametrize("chunk_context", [False, True])
+def test_generated_image_context_is_typed_and_saved_as_description(chunk_context):
+    repo = _repo()
+    row = _row()
+    element_text = "generated image caption" if chunk_context else "generated quotation caption"
+    repo.evidence_elements = lambda ids: {"el": {
+        "source_id": "source", "element_type": "image", "text": element_text,
+    }}
+    if chunk_context:
+        ref = row["turns"][0]["payload"]["anchors"][0]
+        ref.update({"object_type": "chunk", "object_id": "chunk-image"})
+        repo._runtime.chunk_store.rows_by_ids = lambda db, ids: [{
+            "id": "chunk-image", "source_id": "source", "text": "generated image caption quotation context",
+        }]
+    capture_share_evidence(repo, "image", row)
+    public = overlay_share_evidence(repo, "image", row, _public())
+    evidence = public["turns"][0]["references"][0]["evidence"]
+    assert evidence["kind"] == "image_description"
+    assert PublicEvidence(**evidence).kind == "image_description"
+    content = build_saved_share(public, kind="conversations", title="图片引用").decode()
+    manifest, body = split_manifest(content)
+    assert manifest["turns"][0]["references"][0]["evidence"]["kind"] == "image_description"
+    assert "图片说明：" in body
+    assert "原文及上下文：" not in body
+
+
+def test_legacy_image_snapshot_changes_display_label_without_mutating_frozen_text():
+    repo = _repo()
+    original = {"kind": "original", "text": "generated caption", "quote": "caption"}
+    repo._runtime.answer_links.data["legacy-image"] = {"answer-a": {"k1": deepcopy(original)}}
+    public = _public()
+    public["turns"][0]["references"][0]["is_image_reference"] = True
+    rendered = overlay_share_evidence(repo, "legacy-image", _row(), public)
+    assert rendered["turns"][0]["references"][0]["evidence"] == {**original, "kind": "image_description"}
+    assert repo._runtime.answer_links.data["legacy-image"]["answer-a"]["k1"] == original

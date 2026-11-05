@@ -11597,7 +11597,8 @@
               "enum": [
                 "original",
                 "knowledge",
-                "memory"
+                "memory",
+                "image_description"
               ],
               "title": "Kind",
               "type": "string"

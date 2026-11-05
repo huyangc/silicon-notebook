@@ -20,6 +20,13 @@ def _marker_pattern(body: str) -> str:
 MARKER_RE = re.compile(_marker_pattern(_KEY_GROUP))
 LOOSE_MARKER_RE = re.compile(_marker_pattern(r"\s*" + _KEY_GROUP + r"\s*"))
 
+# Public display accepts positional numbers in square/localized brackets too.
+# Numeric parentheses stay ordinary prose, matching frontend citation-markers.ts.
+_DISPLAY_GROUP = r"k?\d+(?:\s*[,，、]\s*k?\d+)*"
+CITATION_MARKER_RE = re.compile(
+    rf"(?:\[{_DISPLAY_GROUP}\]|【{_DISPLAY_GROUP}】|\({_KEY_GROUP}\)|（{_KEY_GROUP}）)"
+)
+
 
 #: An opener of any marker form above followed by a key: ``[k1``, ``【 k1``,
 #: ``(k1``, ``（k1``.
