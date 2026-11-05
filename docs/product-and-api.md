@@ -5578,7 +5578,9 @@ Authenticated readers can save public content to an owned notebook, choosing an 
 The Markdown carries a structured citation manifest preserved through parsing, reparsing and notebook export. Source detail lets readers navigate body citations to the corresponding evidence. A saved source is an independent copy: expiration or revocation of the original link does not erase it. Later answers cite this saved source directly; its bibliography and excerpts remain secondary evidence, not a claim that the underlying documents were imported or reverified.
 
 Original-passage highlighting follows its source position in Markdown, preserving
-formatting, tables and formulas, including excerpts spanning paragraphs. Public reads
+formatting, tables and formulas, including excerpts spanning paragraphs. Citation cards
+reposition when evidence expands or collapses to remain within the viewport; capped
+content scrolls inside the card. Public reads
 fetch evidence only for turns in the current public window, regardless of how much
 history the link previously exposed. Saved reports retain research-question truncation
 and incomplete-bibliography disclosures in both Markdown and the structured manifest,
