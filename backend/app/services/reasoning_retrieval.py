@@ -5319,6 +5319,7 @@ class ReasoningRetriever:
                 return ReflectDecision(
                     next_action=action, withheld=True,
                     reason=as_text(data.get("reason")),
+                    analysis_update=data.get("analysis"),
                     # answer_layout 任何一轮都可以写,被摘掉动作的这一轮也算。
                     answer_layout=(answer_layout_value(data)
                                    if answer_layout else ""))
