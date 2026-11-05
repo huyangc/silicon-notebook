@@ -1,6 +1,7 @@
 """The real Ask stages preserve analysis in every synthesis route."""
 import json
 import re
+from dataclasses import replace
 
 import pytest
 
@@ -186,9 +187,10 @@ def test_partial_dependency_is_disclosed_in_summary_and_answer(repo, monkeypatch
 def test_real_closing_rerank_cannot_erase_analysis_knowledge_dependency(repo, monkeypatch, output):
     notebook = _notebook(repo, kg=("关键工艺限制",))
     closing_calls = []
-    def evict(self, notebook_id, question, collected, used_queries, top_n, outline, detail):
+    original = ReasoningRetriever._closing_rerank
+    def evict(self, notebook_id, question, collected, used_queries, top_n, outline, detail, **kwargs):
         closing_calls.append(tuple(collected))
-        return [], []
+        return original(self, notebook_id, question, collected, used_queries, 0, outline, detail, **kwargs)
     monkeypatch.setattr(ReasoningRetriever, "_closing_rerank", evict)
 
     class RealLoopModel(AnalysisWriter):
@@ -225,6 +227,50 @@ def test_real_closing_rerank_cannot_erase_analysis_knowledge_dependency(repo, mo
     assert writer.payloads[0]["findings"][0]["missing_evidence_keys"] == []
     assert response.anchors
     assert {anchor.object_id for anchor in response.anchors} <= set(closing_calls[0])
+
+
+@pytest.mark.parametrize("quota", [False, True])
+def test_retained_knowledge_uses_closing_relevance_for_grounding(repo, monkeypatch, quota):
+    notebook = _notebook(repo, kg=("关键工艺限制",))
+    original = ReasoningRetriever._closing_rerank
+    def lower_closing_relevance(self, notebook_id, question, collected, used_queries,
+                                top_n, outline, detail, **kwargs):
+        for key, item in tuple(collected.items()):
+            collected[key] = replace(item, relevance=0.95)
+        if quota:
+            monkeypatch.setattr(self, "_quota_rerank", lambda *args: ([], []))
+            used_queries = ["条件", "局限"]
+        else:
+            monkeypatch.setattr(self.retrieval, "retrieve_scored", lambda *args: [
+                replace(item, relevance=0.15) for item in collected.values()])
+        return original(self, notebook_id, question, collected, used_queries,
+                        0, outline, detail, **kwargs)
+    monkeypatch.setattr(ReasoningRetriever, "_closing_rerank", lower_closing_relevance)
+    repo.settings.reasoning_quota_enabled = quota
+
+    class Model(AnalysisWriter):
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "sub_queries" in schema_hint:
+                return json.dumps({"sub_queries": [{"query": "关键工艺限制"}]})
+            if "next_action" in schema_hint:
+                keys = re.findall(r"\(id=([^)]+)\)", messages[-1]["content"])
+                return json.dumps({"next_action": "answer", "sufficient": True,
+                    "analysis": {"findings": [{"id": "limit", "aspect": "工艺限制",
+                        "conclusion": ASSESSMENT, "status": "supported",
+                        "evidence_keys": [keys[0]]}], "unresolved": []}})
+            return super().chat_json(messages, schema_hint, **kwargs)
+
+    writer = Model()
+    response = _ask(repo, notebook, writer, effort="standard")
+    assert response.anchors, "dependency must remain citable after closing eviction"
+    assert response.evidence_level == "inferred"
+    assert not response.grounded
+    evidence = repo.ask(notebook.id, AskRequest(question="关键工艺限制", mode="reasoning"),
+                        submitted_via="mcp", output="evidence")
+    retained = [item for item in evidence.items if item.anchor and item.anchor.object_id
+                in {anchor.object_id for anchor in response.anchors}]
+    assert retained
+    assert all(item.relevance == pytest.approx(0.0 if quota else 0.15) for item in retained)
 
 
 @pytest.mark.parametrize("kind", ["chunk", "element"])

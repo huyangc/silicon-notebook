@@ -5655,7 +5655,7 @@ class ReasoningRetriever:
         return quota_fuse(collected, per_q, top_n)
 
     def _closing_rerank(self, notebook_id, question, collected, used_queries,
-                        top_n, outline, answer_detail):
+                        top_n, outline, answer_detail, *, retained_keys=()):
         """保持既有配额融合、全局重排和大纲绑定证据补集。"""
         if self.settings.reasoning_quota_enabled and len(used_queries) >= 2:
             # 复合问题: 按子查询配额 round-robin, 避免一方通吃。
@@ -5669,6 +5669,7 @@ class ReasoningRetriever:
                 outline, collected, top_hits,
                 relevance_ceiling=min(
                     (hit.relevance for hit in top_hits), default=0.0),
+                retained_keys=retained_keys,
             )
         else:
             # 单查询/开关关: 原全局重排(用原问题统一打分), 行为不变。
@@ -5687,7 +5688,7 @@ class ReasoningRetriever:
             top_hits = top_hits[:top_n]
             # 补集与选集共用**同一个** scored_map:零新查询,而且相关度同口径。
             outline_evidence = outline_truncated_kg_evidence(
-                outline, collected, top_hits, rescored=scored_map)
+                outline, collected, top_hits, rescored=scored_map, retained_keys=retained_keys)
         return top_hits, outline_evidence
 
     @staticmethod
@@ -9666,9 +9667,12 @@ class ReasoningRetriever:
                          "enumerated_items": state.enum_rows_used}
         raise_if_cancelled(self.cancel_event)
         # 收尾重排保持配额分支和单查询全局重排两支，耗时归入合成候选步骤。
-        top_hits, outline_evidence = self._closing_rerank(
+        top_hits, retained_evidence = self._closing_rerank(
             state.notebook_id, state.question, state.collected, state.used_queries,
-            top_n, state.outline, answer_detail)
+            top_n, state.outline, answer_detail,
+            retained_keys=analysis_evidence_keys(state.analysis))
+        outline_keys = {key for section in state.outline for key in section.evidence_keys}
+        outline_evidence = [item for item in retained_evidence if item.object_id in outline_keys]
         if self._unsafe_scope_restricted():
             state.chains = []
         raise_if_cancelled(self.cancel_event)
@@ -9737,7 +9741,7 @@ class ReasoningRetriever:
         )
         return ReasoningResult(
             analysis=state.analysis,
-            analysis_evidence=self._analysis_evidence(state),
+            analysis_evidence=self._analysis_evidence(state, (*top_hits, *retained_evidence)),
             top_hits=top_hits, elements=state.elements, trace=state.trace, chunks=state.chunks,
             chains=state.chains, enumerations=state.enumerations,
             document_reads=list(state.document_reads),
@@ -9759,7 +9763,7 @@ class ReasoningRetriever:
                        for a in state.attempted.values()])
 
     @staticmethod
-    def _analysis_evidence(state: "_ReasoningRunState") -> tuple[AnalysisEvidence, ...]:
+    def _analysis_evidence(state: "_ReasoningRunState", knowledge) -> tuple[AnalysisEvidence, ...]:
         """Retain dependencies before closing rerank can evict their objects.
 
         Only the current run's authorized evidence pools are read. Unknown
@@ -9769,7 +9773,7 @@ class ReasoningRetriever:
         return tuple(
             AnalysisEvidence(kind, key, item)
             for kind, items, attr in (
-                ("knowledge", state.collected.values(), "object_id"),
+                ("knowledge", knowledge, "object_id"),
                 ("chunk", state.chunks, "chunk_id"),
                 ("element", state.elements, "element_id"),
             )
