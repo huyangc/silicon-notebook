@@ -6,7 +6,7 @@ Run state, action dispatch, cancellation, I/O, and budget consumption remain in
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from app.services.citation_markers import LOOSE_MARKER_RE
 from app.services.reports.policy import (
@@ -357,6 +357,7 @@ def outline_truncated_kg_evidence(
     *,
     rescored: Dict[str, "RetrievedKnowledge"] = None,
     relevance_ceiling: float = None,
+    retained_keys: Sequence[str] = (),
 ) -> List["RetrievedKnowledge"]:
     """大纲绑上、但没进最终相关性选集的知识对象。
 
@@ -389,21 +390,22 @@ def outline_truncated_kg_evidence(
     返回按大纲顺序去重的列表,并排除已在 `top_hits` 里的对象 —— 调用方把它当成
     `top_hits` 的补集使用(合并时 `top_hits` 的重排分数优先)。
     """
-    if not sections:
-        return []
+    # Analysis dependencies need the same closing scores even without an
+    # outline. This adds no lookup and leaves the selected set unchanged.
+    keys = [key for section in (sections or ()) for key in section.evidence_keys]
+    keys.extend(retained_keys)
     present = {hit.object_id for hit in top_hits}
     extra: List["RetrievedKnowledge"] = []
-    for section in sections:
-        for key in section.evidence_keys:
-            if key in present or key not in collected:
-                continue
-            present.add(key)
-            hit = collected[key]
-            if rescored is not None:
-                hit = _rescored_keeping_origin(rescored.get(key), hit)
-            elif relevance_ceiling is not None and hit.relevance > relevance_ceiling:
-                hit = replace(hit, relevance=relevance_ceiling)
-            extra.append(hit)
+    for key in keys:
+        if key in present or key not in collected:
+            continue
+        present.add(key)
+        hit = collected[key]
+        if rescored is not None:
+            hit = _rescored_keeping_origin(rescored.get(key), hit)
+        elif relevance_ceiling is not None and hit.relevance > relevance_ceiling:
+            hit = replace(hit, relevance=relevance_ceiling)
+        extra.append(hit)
     return extra
 
 

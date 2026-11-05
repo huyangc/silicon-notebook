@@ -4752,7 +4752,10 @@ treated as refutation, and synthesis may correct an unsupported assessment.
 
 Dependencies retain their retrieval identities through the immutable stage
 handoff. Referenced knowledge objects are retained from the authorized candidate
-pool before closing `top_n` selection. Each synthesis call reuses complete admitted
+pool before closing `top_n` selection, carrying the same closing-rerank relevance
+as selected evidence. Quota runs cap retained dependencies at the lowest selected
+relevance (zero for an empty selection), as for outline dependencies; retention
+cannot restore an earlier high score to elevate grounding. Each synthesis call reuses complete admitted
 evidence or adds its missing retrieved dependencies in a separate partition,
 mapping identities to that prompt's actual `[kN]` handles, including section offsets.
 External dependencies use public, run-stable `xN` identities, bound only to
