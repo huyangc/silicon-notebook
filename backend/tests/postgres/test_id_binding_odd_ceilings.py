@@ -19,6 +19,7 @@ from app.repositories.postgres.knowledge_store import (
     KnowledgeStore as PgKnowledgeStore,
 )
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from app.repositories.sqlite.chunk_store import ChunkStore as SqChunkStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowledge_store import (
@@ -59,7 +60,7 @@ def _seams() -> RepositoryCompatibilitySeams:
 
 @pytest.fixture
 def backends(postgres_database, tmp_path, _sqlite_schema_template):
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.write() as db:
         db.execute(
             "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "

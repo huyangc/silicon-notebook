@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 from app.domain.memory_suggest_contracts import SKIP_NO_READ_ACCESS, SuggestionRevoked
 from app.repositories.postgres.memory_store import MemoryStore
 from app.repositories.postgres.memory_suggest_store import MemorySuggestStore
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from tests import memory_suggest_write_cases as cases
 
 pytestmark = pytest.mark.postgres_integration
@@ -24,7 +25,7 @@ def database(request):
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 88
+    assert PostgresMigrator(database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     return database
 
 

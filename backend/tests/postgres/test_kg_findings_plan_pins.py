@@ -29,6 +29,7 @@ from app.domain.repository import RepositoryCompatibilitySeams
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.governance_store import GovernanceStore
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from app.repositories.postgres.unified_kg_store import UnifiedKgStore
 
 pytestmark = [
@@ -68,7 +69,7 @@ def pin_database(postgres_settings):
         Path(__file__).resolve().parents[3],
     )
     try:
-        assert PostgresMigrator(database).migrate() == 88
+        assert PostgresMigrator(database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
         _seed(database)
         yield database
     finally:

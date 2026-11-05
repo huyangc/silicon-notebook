@@ -37,6 +37,7 @@ from app.repositories.postgres.extension_toggle_store import (
     ExtensionToggleStore,
 )
 from app.repositories.postgres.identity_store import IdentityStore
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
 NOW = "2026-08-29T00:00:00+00:00"
 
@@ -62,7 +63,7 @@ def store(request) -> ExtensionToggleStore:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 88
+    assert PostgresMigrator(database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     identity = IdentityStore(database, request.getfixturevalue("postgres_settings"))
     return ExtensionToggleStore(database, identity.auth)
 

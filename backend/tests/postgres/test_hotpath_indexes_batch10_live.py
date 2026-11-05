@@ -10,6 +10,7 @@ from app.repositories.postgres.hotpath_indexes import (
     install_hotpath_indexes,
 )
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
 pytestmark = [pytest.mark.postgres_integration, pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch10")]
 NAME = "idx_ask_jobs_memory_suggest_sample"
@@ -36,7 +37,7 @@ def test_migration_accepts_online_builder_index_with_the_catalog_shape(postgres_
         ).fetchone()[0]
         assert actual == spec.predicate_shape
     assert _state(postgres_database) == "存在"
-    assert migrator.migrate() == 88
+    assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     assert _state(postgres_database) == "存在"
 
 
@@ -77,7 +78,7 @@ def test_online_builder_preserves_historical_and_recorded_ask_fields(postgres_da
         assert len(collations) == len(expected)
         assert all(row["collation_name"] == "C" and row["is_nullable"] == "NO" for row in collations)
     assert install_hotpath_indexes(postgres_database.settings.database_url, schema=schema) == state
-    assert migrator.migrate() == 88
+    assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.connect() as db:
         assert dict(db.execute("SELECT submitted_via,output,report_id FROM ask_jobs WHERE id='job-old'").fetchone()) == expected
 
@@ -101,7 +102,7 @@ def test_builder_and_migration_reject_a_same_named_wrong_definition(postgres_dat
     assert migrator.migrate(target_version=86) == 86
     with postgres_database.write() as db:
         db.execute(f"DROP INDEX {NAME}")
-    assert migrator.migrate() == 88
+    assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
 
 
 def test_migration_rejects_an_invalid_concurrent_build_residue(postgres_database):

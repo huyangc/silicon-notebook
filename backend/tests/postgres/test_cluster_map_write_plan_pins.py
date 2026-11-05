@@ -35,6 +35,7 @@ from contextlib import contextmanager
 import pytest
 
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
 pytestmark = [
     pytest.mark.postgres_integration,
@@ -287,7 +288,7 @@ def _assert_no_unparameterized_inner_scratch(name, plan: dict) -> None:
 def test_scratch_statements_plan_by_key_in_every_statistics_state(
     postgres_database, statistics,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     _seed(postgres_database, statistics)
     statements = _captured(postgres_database)
     # Statement shape: the page asks for the scratch insertion order itself.

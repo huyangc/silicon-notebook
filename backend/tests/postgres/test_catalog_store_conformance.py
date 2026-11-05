@@ -24,9 +24,9 @@ import pytest
 
 from app.repositories.postgres.catalog_store import CatalogStore as PostgresCatalogStore
 from app.repositories.postgres.knowhow_store import KnowhowStore as PostgresKnowhowStore
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from app.services.command_catalog import STRIP_CHARS
 from app.services.repository_runtime import RepositoryCompatibilitySeams
-
 
 NOW = "2026-07-31T00:00:00+00:00"
 
@@ -97,7 +97,7 @@ def catalog_harness(request) -> CatalogHarness:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 88
+    assert PostgresMigrator(database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     notebook_id, source_id = "nb-catalog", "src-catalog"
     _seed(database, notebook_id=notebook_id, source_id=source_id)
     yield CatalogHarness(

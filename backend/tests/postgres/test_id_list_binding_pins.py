@@ -47,6 +47,7 @@ from app.repositories.postgres.id_binding import (
 )
 from app.repositories.postgres.knowledge_store import KnowledgeStore
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from app.repositories.postgres.search import chunk_candidate_rows_for_terms
 from app.repositories.postgres.unified_kg_store import UnifiedKgStore
 
@@ -83,7 +84,7 @@ def pin_database(postgres_settings):
     })
     database = PostgresDatabase(settings, Path(__file__).resolve().parents[3])
     try:
-        assert PostgresMigrator(database).migrate() == 88
+        assert PostgresMigrator(database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
         _seed(database)
         yield database
     finally:

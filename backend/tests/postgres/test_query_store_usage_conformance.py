@@ -15,7 +15,7 @@ import pytest
 
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.query_store import QueryStore as PostgresQueryStore
-
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
 pytestmark = pytest.mark.postgres_integration
 
@@ -156,7 +156,7 @@ def _insert_global_ask(connection, job_id, conv_id, user_id, created_at, *,
 
 @pytest.fixture
 def store(postgres_database, postgres_settings):
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     return PostgresQueryStore(postgres_database, postgres_settings)
 
 

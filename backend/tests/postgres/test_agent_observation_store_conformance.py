@@ -27,6 +27,7 @@ import pytest
 
 from app.repositories.ports import AGENT_CALL_RING_MAX, AGENT_OBSERVATION_RING_MAX
 from app.repositories.postgres.agent_observation_store import AgentObservationStore
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from app.services.repository_runtime import RepositoryCompatibilitySeams
 from tests.agent_observation_parity_cases import (
     AGENT_OBSERVATION_TIE_BREAK_IDS,
@@ -116,7 +117,7 @@ def agent_observation_harness(request) -> AgentObservationHarness:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 88
+    assert PostgresMigrator(database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     _seed(database, notebook_ids=(NOTEBOOK_ID, OTHER_NOTEBOOK_ID))
     yield AgentObservationHarness(
         database=database,

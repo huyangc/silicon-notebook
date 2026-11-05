@@ -25,7 +25,7 @@ from app.migration.sync.capture import (
     expected_postgres_triggers,
     postgres_function_body,
 )
-
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
 pytestmark = [
     pytest.mark.postgres_integration,
@@ -358,7 +358,7 @@ def test_the_migration_collapses_duplicate_rows_before_taking_the_key(
             "('c-2','nb-1',0,'com-1','b',0.0,1)"
         )
 
-    assert migrator.migrate() == 88
+    assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
 
     with postgres_database.connect() as conn:
         kos = conn.execute(

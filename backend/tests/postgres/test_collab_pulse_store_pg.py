@@ -43,13 +43,13 @@ def test_notebook_activity_migration_fresh_equals_upgraded(postgres_database):
             }
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 88
+    assert migrator.migrate(target_version=88) == 88
     fresh = shape()
     with postgres_database.write() as db:
         db.execute("DROP TABLE notebook_activity")
         db.execute("DELETE FROM silicon_schema_migrations WHERE version=88")
-    assert migrator.migrate() == 88
-    assert migrator.migrate() == 88
+    assert migrator.migrate(target_version=88) == 88
+    assert migrator.migrate(target_version=88) == 88
     assert shape() == fresh
     assert len(fresh["columns"]) == 8
     foreign_keys = [row["definition"] for row in fresh["constraints"] if "FOREIGN KEY" in row["definition"]]
