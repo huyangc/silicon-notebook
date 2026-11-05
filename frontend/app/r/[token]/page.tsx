@@ -33,6 +33,7 @@ import { normalizeInferenceListMarkers } from "../../inference-list-markers";
 import { remarkGfmPlugin } from "../../markdown-gfm";
 import { normalizeMathMarkdown } from "../../math-markdown";
 import { PublicCitationPopover, type PublicCitePopoverState } from "../../public-citation-popover";
+import { PublicShareSave } from "../../public-share-save";
 import { rehypeReportReferencesFold } from "../../rehype-report-references-fold";
 import { usePrintExpandedFolds } from "../../use-print-expanded-folds";
 import {
@@ -145,11 +146,11 @@ export default function PublicReportPage() {
     );
   }
 
-  return <PublicReportView report={state.report} />;
+  return <PublicReportView report={state.report} token={token} />;
 }
 
 /** 一份已取到的报告。拆成独立组件是为了能用 hooks 记住解析结果（见 markdownTree）。 */
-function PublicReportView({ report }: { report: PublicReportT }) {
+function PublicReportView({ report, token }: { report: PublicReportT; token: string }) {
   // 正文标记点开的那条引用：标记旁弹出引用卡，标记本身高亮。换报告（换 token）时
   // 本组件随加载态卸载，选中态自然清零。
   const [citePopover, setCitePopover] = useState<PublicCitePopoverState | null>(null);
@@ -204,6 +205,7 @@ function PublicReportView({ report }: { report: PublicReportT }) {
           )}
           {report.references.length > 0 && <span>{report.references.length} 条引用出处</span>}
         </p>
+        <PublicShareSave kind="reports" token={token} title={report.question || "分享报告"} expectedRevision={report.snapshot_revision} />
       </header>
 
       <article className="report-markdown answer-markdown">

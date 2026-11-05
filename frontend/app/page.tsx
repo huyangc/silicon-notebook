@@ -202,6 +202,8 @@ import { compactSourceTitle, SUPPORTED_SOURCE_EXT_GROUP } from "./source-title.t
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, checkupNotices, checkupHasRepairableIssue, hasRepairAction, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { askQuestionLimitHint, fetchAnswerMemoryLinks } from "./ask-api";
 import { buildPublicReportLink } from "./public-report";
+import { ImportedShareText } from "./imported-share-text";
+import { importedShareReferences } from "./imported-share-references";
 import { cancelScaleIndex, fetchIndexStatus, fetchScaleIndexStatus, rebuildScaleIndex, type IndexStatus } from "../features/kg-maintenance/kg-api";
 import {
   type ModelServiceStatusItem,
@@ -7841,6 +7843,17 @@ function TablePartGroupCard({ elements, highlightedElementId }: {
 }
 
 function ElementBody({ element, notebookId }: { element: SourceElement; notebookId: string }) {
+  const refs = importedShareReferences(element.metadata?.share_references);
+  if (refs.length && element.element_type === "paragraph") {
+    return <ImportedShareText text={element.text} references={refs} />;
+  }
+  return <>
+    <SourceElementBody element={element} notebookId={notebookId} />
+    {refs.length > 0 && <ImportedShareText text={refs.map((ref) => `[${ref.key}]`).join(" ")} references={refs} />}
+  </>;
+}
+
+function SourceElementBody({ element, notebookId }: { element: SourceElement; notebookId: string }) {
   if (element.element_type === "heading") {
     const HeadingTag = `h${elementHeadingLevel(element)}` as "h3" | "h4" | "h5";
     return <HeadingTag className="element-heading">{element.text}</HeadingTag>;

@@ -1625,6 +1625,9 @@ export function ReportsPanel({
                 <Download size={14} /> 下载 .md
               </button>
             )}
+            {!readOnly && active.status === "done" && !shared && (
+              <span className="tool-hint">公开链接包含引用原文及上下文，访问者可以保存副本。</span>
+            )}
             {!readOnly && active.status === "done" && (
               <button
                 ref={shareButtonRef}

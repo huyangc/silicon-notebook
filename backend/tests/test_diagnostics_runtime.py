@@ -274,6 +274,16 @@ def test_module_wrappers_are_noops_without_an_installed_runtime():
             "/api/public/conversations/{id}",
         ),
         (
+            "/api/public/conversations/tok-secret123/save",
+            ("tok-secret123",),
+            "/api/public/conversations/{id}/save",
+        ),
+        (
+            "/api/public/reports/tok-secret123/save",
+            ("tok-secret123",),
+            "/api/public/reports/{id}/save",
+        ),
+        (
             # Anonymous shared-conversation image bytes: token AND alias redacted,
             # shape preserved so a slow read page and a slow asset fetch stay
             # distinguishable in diagnostics.

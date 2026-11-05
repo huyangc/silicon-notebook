@@ -2597,6 +2597,11 @@
         "type": "table"
       },
       {
+        "name": "public_share_evidence",
+        "sql_sha256": "c7a42d6aa15099b29a6e4c74d0b3a30a6419f769e266311b78ca8596ac099491",
+        "type": "table"
+      },
+      {
         "name": "relation_embeddings",
         "sql_sha256": "72562e32b3076a87a61df1b543962f38616c56ea113e2058c7accdfeb3244218",
         "type": "table"
@@ -3437,6 +3442,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 107
+    "user_version": 108
   }
 }

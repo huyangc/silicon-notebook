@@ -1,8 +1,7 @@
 // 会话公开分享的两个请求形状，笔记本内与全局问答共用（只此一份）。
 //
-// 「分享」POST 的请求体：不带确认值时与接入披露之前**逐字节相同**
-// （`{"expected_through_id": ...}`），只有作者确认过一个确数时才多一个
-// `acknowledged_memory_count`——零条个人记忆的会话，网络上看不出任何新增步骤。
+// 网页明确告知原文公开范围后，POST 带 include_original_context 确认重新发布原文。
+// 只有作者确认过记忆条数时才附加 acknowledged_memory_count。
 // 409 `share_disclosure_required` 转成带确数的 `ShareDisclosureRequired`（与报告分享
 // 同一个类型、同一个解析器，见 share-failure.ts），其余失败照常走人话层。
 
@@ -22,8 +21,8 @@ export function conversationShareRequestBody(
 ): string {
   return JSON.stringify(
     acknowledgedMemoryCount === undefined
-      ? { expected_through_id: expectedThroughId }
-      : { expected_through_id: expectedThroughId, acknowledged_memory_count: acknowledgedMemoryCount },
+      ? { expected_through_id: expectedThroughId, include_original_context: true }
+      : { expected_through_id: expectedThroughId, acknowledged_memory_count: acknowledgedMemoryCount, include_original_context: true },
   );
 }
 

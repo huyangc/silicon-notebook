@@ -7,9 +7,10 @@ from typing import Iterator, List, Optional
 
 from psycopg import errors
 
+from app.domain.global_ask_attribution import attribution_sql
+from app.domain.global_ask_retention import live_turn_sql
 from app.domain.retrieval_experience import project_run_step, project_trace_step
 from app.models.ask import (
-    stored_ask_question,
     ActiveAskJob,
     AskRequest,
     AskResponse,
@@ -21,9 +22,9 @@ from app.models.ask import (
     FeedbackResponse,
     StoredAskOutput,
     StoredSubmittedVia,
+    stored_ask_question,
 )
-from app.domain.global_ask_attribution import attribution_sql
-from app.domain.global_ask_retention import live_turn_sql
+from app.repositories.postgres.answer_link_store import put_share_evidence_on
 
 # One shared newest-first step budget over a ``candidates`` CTE carrying a jsonb
 # ``trace`` column (SQLite twin in sqlite/ask_state_store.py): ``budget`` is
@@ -48,35 +49,6 @@ _RUN_BUDGET_POSTGRES = _TRACE_BUDGET_POSTGRES.replace(
     "cited_json, skipped_json, ",
     "SELECT id, mode, created_at, ",
 )
-from app.repositories.ask_sample_merge import (
-    merge_ask_samples as _merge_ask_samples,
-    merge_run_samples as _merge_run_samples,
-)
-from app.repositories.conversation_linked_report import (
-    job_linked_report,
-    receipt_linked_report,
-    receipt_linked_report_fields,
-)
-from app.repositories.ports import (
-    merge_sampled_rows,
-    AskRequestKeyConflict,
-    ConversationBusyError,
-    ConversationHasNoShareableAnswer,
-    ConversationShareWatermarkStale,
-    PreparedAskTurn,
-    project_ask_row,
-    project_report_attempt,
-    project_report_row,
-    project_run_row,
-)
-from app.repositories.postgres._store_utils import (
-    json_value,
-    jsonb,
-    iso_timestamp,
-    normalize_timestamp,
-)
-from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
-from app.repositories.postgres.read_authority_lock import lock_reader_access_on
 from app.core.capability_tokens import (
     NOTEBOOK_CONVERSATION_SHARE_PREFIX,
     new_capability_token,
@@ -85,17 +57,49 @@ from app.core.internal_observability import (
     public_trace_steps,
     sanitize_answer_payload,
 )
-from app.repositories.postgres.database import PostgresDatabase
+
 # Single source of truth for the public page's turn ceiling — see the SQLite
 # adapter's import of the same constant for why the token-resolved query bounds
 # its fetch to ``MAX_TURNS + 1`` (codex #522 R6 P2). Pure leaf module, no cycle.
 from app.domain.conversation_public_view import MAX_TURNS
+
 # Agentic Memory P3 (B-Profile, T7): the ONE place the question text coming
 # back from ``recent_user_ask_languages`` is turned into a closed language
 # bucket, before it leaves this store — see that method's own docstring, and
 # the SQLite adapter's mirror import for the same reason.
 from app.domain.search_profile import classify_ask_language
-
+from app.repositories.ask_sample_merge import (
+    merge_ask_samples as _merge_ask_samples,
+)
+from app.repositories.ask_sample_merge import (
+    merge_run_samples as _merge_run_samples,
+)
+from app.repositories.conversation_linked_report import (
+    job_linked_report,
+    receipt_linked_report,
+    receipt_linked_report_fields,
+)
+from app.repositories.ports import (
+    AskRequestKeyConflict,
+    ConversationBusyError,
+    ConversationHasNoShareableAnswer,
+    ConversationShareWatermarkStale,
+    PreparedAskTurn,
+    merge_sampled_rows,
+    project_ask_row,
+    project_report_attempt,
+    project_report_row,
+    project_run_row,
+)
+from app.repositories.postgres._store_utils import (
+    iso_timestamp,
+    json_value,
+    jsonb,
+    normalize_timestamp,
+)
+from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
+from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.read_authority_lock import lock_reader_access_on
 
 # Canonical oldest -> newest order for one conversation's answers. Mirrors
 # the SQLite adapter's module constant of the same name — see its docstring
@@ -1624,6 +1628,7 @@ class AskStateStore:
         notebook_id: str,
         conversation_id: str,
         expected_through_id: str | None = None,
+        *, share_evidence: dict | None = None,
     ) -> dict:
         """Issue (or reuse) the public token for one conversation and pin its
         read watermark to a specific answer.
@@ -1753,6 +1758,8 @@ class AskStateStore:
                 "RETURNING share_token, shared_through_at, shared_through_id",
                 (candidate, through_at, through_id, conversation_id, notebook_id),
             ).fetchone()
+            if share_evidence is not None:
+                put_share_evidence_on(db, str(issued["share_token"]), share_evidence)
         return {
             "share_token": str(issued["share_token"]),
             "shared_through_at": iso_timestamp(issued["shared_through_at"]),

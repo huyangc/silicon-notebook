@@ -67,6 +67,7 @@ def issue_answer_link(
     job_id: str,
     principal: Any,
     ttl_hours: int | None,
+    share_evidence: dict | None = None,
 ) -> IssuedAnswerLink:
     """The issuing token's link to ``job_id``: its live one if any, else new.
 
@@ -95,6 +96,7 @@ def issue_answer_link(
         agent_token_id=principal.token_id,
         ttl_seconds=hours * 3600,
         sweep_grace_seconds=int(settings.mcp_answer_link_grace_hours) * 3600,
+        share_evidence=share_evidence,
     )
     return IssuedAnswerLink(
         url=f"{base}/c/{issued['token']}",

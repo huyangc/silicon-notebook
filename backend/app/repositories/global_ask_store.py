@@ -1237,7 +1237,7 @@ class GlobalAskStore:
         """
         return " FOR UPDATE" if self.marker == "%s" else ""
 
-    def share_conversation(self, conversation_id, user_id, *, expected_through_id=None):
+    def share_conversation(self, conversation_id, user_id, *, expected_through_id=None, share_evidence=None):
         """Issue (or reuse) this conversation's public token and pin its read
         watermark to one completed job.
 
@@ -1297,6 +1297,22 @@ class GlobalAskStore:
                 "shared_through_id=? WHERE id=? AND user_id=? "
                 "RETURNING share_token, shared_through_at, shared_through_id"
             ), (candidate, through_at, through_id, conversation_id, user_id)).fetchone()
+            if share_evidence is not None:
+                for turn_key, references in share_evidence.items():
+                    claimed = db.execute(self._sql(
+                        "INSERT INTO public_share_evidence (token, turn_key, reference_key, payload) "
+                        "VALUES (?,?,?,?) ON CONFLICT (token, turn_key, reference_key) DO NOTHING "
+                        "RETURNING reference_key"
+                    ), (str(issued["share_token"]), turn_key, "__captured__", "{}")).fetchone()
+                    if claimed is None:
+                        continue
+                    for key, evidence in references.items():
+                        if key == "__captured__":
+                            continue
+                        db.execute(self._sql(
+                            "INSERT INTO public_share_evidence (token, turn_key, reference_key, payload) "
+                            "VALUES (?,?,?,?) ON CONFLICT (token, turn_key, reference_key) DO NOTHING"
+                        ), (str(issued["share_token"]), turn_key, key, json.dumps(evidence, ensure_ascii=False)))
         return self._share_state(issued)
 
     def _refuse_regression(self, db, conversation_id, through_id, current_id, expected):

@@ -104,7 +104,7 @@ export const getReportShareDisclosure = (nb: string, id: string) =>
     options,
   );
 
-// `acknowledgedMemoryCount` 缺省时不带 body:零个 Memory 引用的报告分享,请求与今天逐字节相同。
+// 网页已展示原文范围披露；明确确认新链接包含原文，记忆条数只在确认后附加。
 export const shareReport = async (
   nb: string,
   id: string,
@@ -113,9 +113,8 @@ export const shareReport = async (
   const res = await performApiRequest(`/notebooks/${nb}/reports/${id}/share`, {
     ...options,
     method: "POST",
-    ...(acknowledgedMemoryCount === undefined
-      ? {}
-      : { body: JSON.stringify({ acknowledged_memory_count: acknowledgedMemoryCount }) }),
+    body: JSON.stringify({ include_original_context: true,
+      ...(acknowledgedMemoryCount === undefined ? {} : { acknowledged_memory_count: acknowledgedMemoryCount }) }),
   });
   if (!res.ok) await throwShareFailure(res, options.tag);
   return res.json() as Promise<{ share_token: string }>;

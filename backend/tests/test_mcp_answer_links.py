@@ -62,6 +62,15 @@ def linked(adapter, monkeypatch):  # noqa: F811 - the imported fixture
     )
     monkeypatch.setattr(ask_module, "answer_link_repository", lambda: store)
     monkeypatch.setattr(ask_module, "get_settings", lambda: settings)
+    # Link delivery now prepares frozen public evidence before issuing. The
+    # adapter fake exposes the same already-authorized single-job snapshot
+    # as GlobalAskService.public_answer_job; the real API path is covered by
+    # the shared SQLite/PostgreSQL source-context scenarios.
+    def public_answer_job(job_id, *, owner_id, allowed_notebook_ids):
+        value = service.last_job
+        return {"created_by": owner_id, "turns": [{"job_id": job_id,
+            "payload": value.response.model_dump(mode="json") if value.response else {}}]}
+    monkeypatch.setattr(service, "public_answer_job", public_answer_job, raising=False)
     return handlers, principal, service, store
 
 

@@ -4466,6 +4466,11 @@
               "default": "",
               "title": "Expected Through Id",
               "type": "string"
+            },
+            "include_original_context": {
+              "default": false,
+              "title": "Include Original Context",
+              "type": "boolean"
             }
           },
           "title": "ConversationShareRequest",
@@ -11560,6 +11565,11 @@
               "title": "Shared At",
               "type": "string"
             },
+            "snapshot_revision": {
+              "default": "",
+              "title": "Snapshot Revision",
+              "type": "string"
+            },
             "title": {
               "default": "",
               "title": "Title",
@@ -11579,6 +11589,44 @@
             }
           },
           "title": "PublicConversation",
+          "type": "object"
+        },
+        "PublicEvidence": {
+          "properties": {
+            "kind": {
+              "enum": [
+                "original",
+                "knowledge",
+                "memory"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "location": {
+              "default": "",
+              "title": "Location",
+              "type": "string"
+            },
+            "quote": {
+              "default": "",
+              "title": "Quote",
+              "type": "string"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            },
+            "truncated": {
+              "default": false,
+              "title": "Truncated",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ],
+          "title": "PublicEvidence",
           "type": "object"
         },
         "PublicImage": {
@@ -11608,6 +11656,16 @@
         "PublicReference": {
           "description": "One reference in a shared conversation, as an anonymous reader sees it\n(T3). Same shape as ``PublicReportReference``.\n\nNo ``source_id`` / ``element_id`` / ``object_id`` / ``notebook_id`` /\n``memory_id`` / ``provenance`` / ``knowhow`` / ``images``: a public link must\nnot hand out handles into the authenticated API. Built by\n``services/conversation_public_view.py`` as an allowlist — a Memory citation\nkeeps its title/snippet but loses its ``memory_id``. ``key`` (``\"k1\"`` or a\npositional ``\"1\"``) is preserved so the page can number ``[k]`` markers from\nit rather than from a list position the reference filter may have shifted.\n\n``title_truncated``/``snippet_truncated`` disclose that an over-length title\nor excerpt was clipped to its bounded prefix, so the page can mark it rather\nthan drop the tail silently (codex #522 R3).",
           "properties": {
+            "evidence": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/PublicEvidence"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "file_name": {
               "default": "",
               "title": "File Name",
@@ -11718,6 +11776,11 @@
               "title": "References",
               "type": "array"
             },
+            "snapshot_revision": {
+              "default": "",
+              "title": "Snapshot Revision",
+              "type": "string"
+            },
             "truncated_references": {
               "default": false,
               "title": "Truncated References",
@@ -11735,6 +11798,16 @@
         "PublicReportReference": {
           "description": "One citation as an anonymous reader sees it.\n\nNo `source_id` / `element_id` / `object_id`: a public link must not hand out\nhandles into the authenticated API. See `services/report_public_view.py`.\n\n`title_truncated`/`snippet_truncated`/`file_name_truncated` disclose that an\nover-length value was clipped to its bounded prefix, so the page can mark it\nrather than drop the tail silently (AGENTS.md 用户编辑的数据不得静默截断;\nsame three flags `PublicReference` carries for a shared conversation).",
           "properties": {
+            "evidence": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/PublicEvidence"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "file_name": {
               "default": "",
               "title": "File Name",
@@ -13083,6 +13156,11 @@
                 }
               ],
               "title": "Acknowledged Memory Count"
+            },
+            "include_original_context": {
+              "default": false,
+              "title": "Include Original Context",
+              "type": "boolean"
             }
           },
           "title": "ReportShareRequest",
@@ -13213,6 +13291,66 @@
             }
           },
           "title": "RetrievalScopeReceipt",
+          "type": "object"
+        },
+        "SavePublicShareRequest": {
+          "properties": {
+            "expected_revision": {
+              "minLength": 1,
+              "title": "Expected Revision",
+              "type": "string"
+            },
+            "notebook_id": {
+              "minLength": 1,
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "title": {
+              "default": "",
+              "title": "Title",
+              "type": "string"
+            },
+            "turn_index": {
+              "anyOf": [
+                {
+                  "minimum": 0.0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Turn Index"
+            }
+          },
+          "required": [
+            "notebook_id",
+            "expected_revision"
+          ],
+          "title": "SavePublicShareRequest",
+          "type": "object"
+        },
+        "SavedPublicShare": {
+          "properties": {
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "reused": {
+              "title": "Reused",
+              "type": "boolean"
+            },
+            "source_id": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id",
+            "notebook_id",
+            "reused"
+          ],
+          "title": "SavedPublicShare",
           "type": "object"
         },
         "ScaleIndexStatus": {
@@ -31713,6 +31851,55 @@
           "summary": "Public Conversation Asset Route"
         }
       },
+      "/api/public/conversations/{token}/save": {
+        "post": {
+          "operationId": "save_public_conversation_api_public_conversations__token__save_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "token",
+              "required": true,
+              "schema": {
+                "title": "Token",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavePublicShareRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/SavedPublicShare"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Save Public Conversation"
+        }
+      },
       "/api/public/reports/{token}": {
         "get": {
           "description": "The one report read that needs no session — the token is the whole grant.\n\nDeliberately has NO `Depends(get_current_user)`: this is the anonymous\nsurface. That also means no request user is bound, so nothing here may call\nan owner-scoped repository method — `current_user` falls back to the seeded\nadmin when the ContextVar is unset, which would silently run as an\nadministrator. `public_report_by_token` takes the token alone for exactly\nthat reason, and the payload is an explicit allowlist rather than the stored\nrow.",
@@ -31751,6 +31938,55 @@
             }
           },
           "summary": "Public Report Route"
+        }
+      },
+      "/api/public/reports/{token}/save": {
+        "post": {
+          "operationId": "save_public_report_api_public_reports__token__save_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "token",
+              "required": true,
+              "schema": {
+                "title": "Token",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavePublicShareRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/SavedPublicShare"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Save Public Report"
         }
       },
       "/api/ready": {

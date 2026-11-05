@@ -9,8 +9,8 @@ from app.api.ask_routes import router as ask_router
 from app.api.catalog_routes import router as catalog_router
 from app.api.collab_routes import router as collab_router
 from app.api.content_overview_routes import router as content_overview_router
-from app.api.group_routes import router as group_router
 from app.api.global_ask_routes import router as global_ask_router
+from app.api.group_routes import router as group_router
 from app.api.kg_routes import router as kg_router
 from app.api.knowhow_routes import router as knowhow_router
 from app.api.knowledge_routes import router as knowledge_router
@@ -19,11 +19,11 @@ from app.api.notebook_collaborator_routes import router as notebook_collaborator
 from app.api.notebook_routes import router as notebook_router
 from app.api.notebook_transfer_routes import download_router as notebook_transfer_download_router
 from app.api.notebook_transfer_routes import router as notebook_transfer_router
+from app.api.public_share_import_routes import router as public_share_import_router
 from app.api.report_routes import router as report_router
 from app.api.source_routes import router as source_router
 from app.api.system_routes import router as system_router
 from app.api.wish_routes import router as wish_router
-
 
 ROOT = Path(__file__).resolve().parents[2]
 DOMAIN_ROUTERS = (
@@ -36,6 +36,7 @@ DOMAIN_ROUTERS = (
     knowledge_router,
     ask_router,
     report_router,
+    public_share_import_router,
     kg_router,
     admin_router,
     catalog_router,
@@ -57,6 +58,7 @@ EXPECTED_COMPOSITION_NAMES = (
     "knowledge_router",
     "ask_router",
     "report_router",
+    "public_share_import_router",
     "kg_router",
     "admin_router",
     # Appended, not slotted next to source_router: this just continues the

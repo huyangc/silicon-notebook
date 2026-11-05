@@ -5,13 +5,12 @@ import threading
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import get_current_user, global_ask_service, user_error
+from app.api.deps import get_current_user, global_ask_service, repository, user_error
 from app.api.task_stream import (
     NDJSON_STREAM_HEADERS,
     deliver_ask_events,
     task_stream_response,
 )
-from app.models.identity import UserProfile
 from app.models.ask import (
     ConversationShareCounts,
     ConversationShareDisclosure,
@@ -19,16 +18,23 @@ from app.models.ask import (
     ConversationShareResponse,
     QueryIntentContract,
 )
+from app.models.global_ask import (
+    GLOBAL_ASK_PAGE_MAX,
+    GLOBAL_ASK_PAGE_SIZE,
+    GlobalAskFeedbackRequest,
+    GlobalAskIntentPreviewRequest,
+    GlobalAskJob,
+    GlobalAskRequest,
+    GlobalConversationDetail,
+    GlobalConversationRename,
+    GlobalConversationSummary,
+)
+from app.models.identity import UserProfile
+from app.models.sources import SourceElement
 from app.repositories.ports import (
     ConversationHasNoShareableAnswer,
     ConversationShareWatermarkStale,
 )
-from app.models.global_ask import (
-    GlobalAskFeedbackRequest, GlobalAskIntentPreviewRequest, GlobalAskRequest, GlobalAskJob,
-    GlobalConversationSummary, GlobalConversationDetail,
-    GlobalConversationRename, GLOBAL_ASK_PAGE_SIZE, GLOBAL_ASK_PAGE_MAX,
-)
-from app.models.sources import SourceElement
 from app.services.cancellation import AskCancelled
 from app.services.global_ask import GlobalAskError
 from app.services.share_disclosure import ShareDisclosureRequired
@@ -318,10 +324,17 @@ def share_global_conversation_route(
     counts otherwise; no token, no watermark move). Without Memory the body and
     the response are what they were before.
     """
+    service = global_ask_service()
+    previous = _share_call(service.conversation_share, conversation_id, user_id=user.id)
+    from app.services.public_share_evidence import prepare_share_evidence
+    repo = repository()
+    token = previous.get("share_token") or ""
+    include = not token or (payload and payload.include_original_context) or repo._runtime.answer_links.share_evidence(token)
     state = _share_call(
         global_ask_service().share_conversation, conversation_id, user_id=user.id,
         expected_through_id=payload.expected_through_id if payload else "",
         acknowledged_memory_count=payload.acknowledged_memory_count if payload else None,
+        evidence_preparer=(lambda row: prepare_share_evidence(repo, row, token=token)) if include else None,
     )
     return ConversationShareResponse(**state)
 

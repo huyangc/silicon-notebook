@@ -383,7 +383,7 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # backfill. See ``_migration_106``.
 # v107 / PostgreSQL 0088 add local collaboration activity hints. Actor ids
 # remain audit-kept without a user FK; notebook deletion cascades.
-SCHEMA_VERSION = 107
+SCHEMA_VERSION = 108
 
 # Frozen copy of ``element_reading_order.INDEX_DIGITS_SQL`` as v105 built it (a
 # migration must not change meaning when the live module changes). The readers
@@ -6527,6 +6527,13 @@ class SqliteMigrator:
                   ON notebook_activity(notebook_id, created_at DESC, id);
                 CREATE INDEX IF NOT EXISTS idx_notebook_activity_created ON notebook_activity(created_at);
             """)
+
+    def _migration_108(self) -> None:
+        # Local capability snapshots, deliberately outside notebook copy/sync.
+        with self._connect() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS public_share_evidence (token TEXT NOT NULL, "
+                       "turn_key TEXT NOT NULL, reference_key TEXT NOT NULL, "
+                       "payload TEXT NOT NULL, PRIMARY KEY (token, turn_key, reference_key))")
 
     def migrate(self) -> list[int]:
         with self._connect() as db:

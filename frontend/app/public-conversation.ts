@@ -26,6 +26,7 @@ export { publicReferenceLocation } from "./public-report.ts";
 
 /** 一条引用出处，匿名读者看到的样子。与 `PublicReference`(后端)逐字段同形。 */
 export type PublicReferenceT = {
+  evidence?: import("./public-report.ts").PublicEvidenceT;
   key: string;
   title: string;
   file_name: string;
@@ -81,6 +82,7 @@ export type PublicTurnT = {
 
 /** 一条公开分享的问答会话。真源：`backend/app/models/ask.py PublicConversation`。 */
 export type PublicConversationT = {
+  snapshot_revision: string;
   title: string;
   created_at: string;
   /** 水位时刻——"内容截至何时"，公开页据此说明其后新增的轮次未包含。 */

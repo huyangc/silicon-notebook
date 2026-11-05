@@ -145,6 +145,9 @@ class Settings(BaseSettings):
     )
     # MCP 回答链接：前端公开访问地址（可含子路径；生产前端是 http://<IP>:3000，故允许 http）。
     public_web_base_url: str = Field("", validation_alias="PUBLIC_WEB_BASE_URL")
+    public_share_evidence_max_chars: int = Field(
+        12000, ge=1200, le=100000, validation_alias="PUBLIC_SHARE_EVIDENCE_MAX_CHARS"
+    )
     mcp_answer_link_ttl_hours: int = Field(
         168, ge=1, le=720, validation_alias="MCP_ANSWER_LINK_TTL_HOURS"
     )

@@ -45,12 +45,12 @@ test("笔记本：不带确认值的 POST，请求体原文与接入披露之前
   expect(calls).toHaveLength(1);
   expect(calls[0].method).toBe("POST");
   expect(path(calls[0])).toBe("/notebooks/nb-1/conversations/conv-1/share");
-  expect(calls[0].body).toBe('{"expected_through_id":"a2"}');
+  expect(calls[0].body).toBe('{"expected_through_id":"a2","include_original_context":true}');
 });
 
 test("笔记本：带确认值时，acknowledged_memory_count 紧随 expected_through_id", async () => {
   await shareConversation("nb-1", "conv-1", "a2", 3);
-  expect(calls[0].body).toBe('{"expected_through_id":"a2","acknowledged_memory_count":3}');
+  expect(calls[0].body).toBe('{"expected_through_id":"a2","acknowledged_memory_count":3,"include_original_context":true}');
 });
 
 test("全局：同样两种请求体，端点是全局那一组", async () => {
@@ -58,8 +58,8 @@ test("全局：同样两种请求体，端点是全局那一组", async () => {
   await api.share("job-2");
   await api.share("job-2", 4);
   expect(calls.map((call) => [call.method, path(call), call.body])).toEqual([
-    ["POST", "/global-ask/conversations/conv-g/share", '{"expected_through_id":"job-2"}'],
-    ["POST", "/global-ask/conversations/conv-g/share", '{"expected_through_id":"job-2","acknowledged_memory_count":4}'],
+    ["POST", "/global-ask/conversations/conv-g/share", '{"expected_through_id":"job-2","include_original_context":true}'],
+    ["POST", "/global-ask/conversations/conv-g/share", '{"expected_through_id":"job-2","acknowledged_memory_count":4,"include_original_context":true}'],
   ]);
 });
 

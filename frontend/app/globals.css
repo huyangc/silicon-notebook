@@ -14314,6 +14314,19 @@ button.tag:hover {
 
 /* 会话公开页：多轮问答竖排。复用 .public-report 的容器/引用出处/正文样式，
    只补每轮的问题条、附图区与轮次分隔。 */
+.public-share-save { margin: 12px 0; }
+.public-share-save > a { margin-left: 12px; }
+.public-share-save-status:empty { display: none; }
+.public-share-save-form { display: grid; gap: 8px; max-width: 38rem; margin-top: 12px; }
+.public-share-save-form label { display: grid; gap: 4px; }
+.public-share-save-form input, .public-share-save-form select { width: 100%; }
+.public-evidence { padding: 12px; border-top: 1px solid var(--border); }
+.public-evidence-note { padding: 0 12px; color: var(--text-muted); font-size: 12px; }
+.public-evidence-context { overflow-x: auto; overflow-wrap: anywhere; }
+.public-evidence-context table { border-collapse: collapse; }
+.public-evidence-context th, .public-evidence-context td { padding: 4px; border: 1px solid var(--border); }
+.public-evidence blockquote { margin: 12px 0; white-space: pre-wrap; }
+
 .public-conversation .public-turn {
   display: grid;
   gap: 14px;

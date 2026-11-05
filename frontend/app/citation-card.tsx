@@ -21,7 +21,7 @@
  * 小窗、全屏三种形态下都落在标记旁边。
  */
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { BookOpen, ExternalLink, Table2 } from "lucide-react";
 import katex from "katex";
 
@@ -493,6 +493,7 @@ export function CitationPopover({
   imageCaptions,
   takeFocus = false,
   dismissSuspended = false,
+  children,
 }: {
   reference: AnswerReference;
   /** 检索结果带图(T1/T2)：透传给 SelectedReferenceDetail 拼装资产 URL,见其
@@ -527,6 +528,7 @@ export function CitationPopover({
   /** Keep the thumbnail trigger mounted while its page-level preview is open,
    * so the modal coordinator can return focus to a live element. */
   dismissSuspended?: boolean;
+  children?: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -618,6 +620,7 @@ export function CitationPopover({
         notes={notes}
         imageCaptions={imageCaptions}
       />
+      {children}
     </div>
   );
 }

@@ -513,6 +513,12 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "test_system_routes.py::test_patch_search_profile_is_409_when_globally_disabled"
         "覆盖（断言 409 + X-User-Message 逐字文案）。"
     ),
+    "app/api/public_share_import_routes.py::_save": (
+        "容量错误复用 source_routes.document_capacity_message 的中文模板；"
+        "build_saved_share 的 ValueError 只由受控中文输入/图片/文件上限文案产生，"
+        "不拼接底层异常原文。test_public_share_import.py 覆盖保存、失效、"
+        "版本变化、图片及大小限制。"
+    ),
 }
 
 

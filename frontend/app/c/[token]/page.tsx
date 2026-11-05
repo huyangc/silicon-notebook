@@ -41,6 +41,7 @@ import { normalizeMathMarkdown } from "../../math-markdown";
 import { ChatTurnNav, chatTurnDomId } from "../../chat-turn-nav";
 import { ImagePreviewModal } from "../../image-preview-modal";
 import { PublicCitationPopover, type PublicCitePopoverState } from "../../public-citation-popover";
+import { PublicShareSave } from "../../public-share-save";
 import { usePrintExpandedFolds } from "../../use-print-expanded-folds";
 import { claimEscapePress } from "../../use-root-modal-coordinator";
 import {
@@ -295,6 +296,7 @@ export default function PublicConversationPage() {
           )}
           {conversation.turns.length > 0 && <span>{conversation.turns.length} 轮问答</span>}
         </p>
+        <PublicShareSave kind="conversations" token={token} title={conversation.title || conversation.turns[0]?.question || "分享问答"} expectedRevision={conversation.snapshot_revision} />
       </header>
 
       {/* 公开页只显示到分享为止最近的那些轮次（被分享的那条一定在页上），更早的轮次排在
@@ -312,6 +314,7 @@ export default function PublicConversationPage() {
           turn={turn}
           index={index}
           token={token}
+          expectedRevision={conversation.snapshot_revision}
           citePopover={citePopover?.turnIndex === index ? citePopover : null}
           onOpenReference={(key, rect) => setCitePopover({ turnIndex: index, key, rect })}
           onClosePopover={() => setCitePopover(null)}
@@ -336,6 +339,7 @@ function PublicTurnView({
   turn,
   index,
   token,
+  expectedRevision,
   citePopover,
   onOpenReference,
   onClosePopover,
@@ -343,6 +347,7 @@ function PublicTurnView({
   turn: PublicTurnT;
   index: number;
   token: string;
+  expectedRevision: string;
   /** 页面那张引用卡恰好属于本轮时才有值。号段是**每轮独立**的，高亮与 DOM id
    *  都按本轮索引隔离，避免跨轮 k1 撞车。 */
   citePopover: PublicCitePopoverState | null;
@@ -475,6 +480,7 @@ function PublicTurnView({
 
   return (
     <section className="public-turn" id={chatTurnDomId(index)}>
+      <PublicShareSave kind="conversations" token={token} title={turn.question || "分享问答"} turnIndex={index} expectedRevision={expectedRevision} />
       <div className="public-turn-question">
         <span className="public-turn-role">提问</span>
         <div className="public-turn-qbody">

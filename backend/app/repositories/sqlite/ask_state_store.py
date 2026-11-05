@@ -45,9 +45,10 @@ from app.core.internal_observability import (
     public_trace_steps,
     sanitize_answer_payload,
 )
+from app.domain.global_ask_attribution import attribution_sql
+from app.domain.global_ask_retention import live_turn_sql
 from app.domain.retrieval_experience import project_run_step, project_trace_step
 from app.models.ask import (
-    stored_ask_question,
     ActiveAskJob,
     AskRequest,
     AskResponse,
@@ -59,9 +60,9 @@ from app.models.ask import (
     FeedbackResponse,
     StoredAskOutput,
     StoredSubmittedVia,
+    stored_ask_question,
 )
-from app.domain.global_ask_attribution import attribution_sql
-from app.domain.global_ask_retention import live_turn_sql
+from app.repositories.sqlite.answer_link_store import put_share_evidence_on
 
 # One shared newest-first step budget over a ``candidates`` CTE that carries a
 # JSON ``trace`` column: ``budget`` is what remains for each row after the newer
@@ -85,8 +86,22 @@ _RUN_BUDGET_SQLITE = _TRACE_BUDGET_SQLITE.replace(
     "cited_json, skipped_json, ",
     "SELECT id, mode, created_at, ",
 )
+# The public projection's turn ceiling is the single source of truth for how many
+# turns one anonymous page renders; the token-resolved query below bounds its
+# fetch to ``MAX_TURNS + 1`` (cap + 1) so a >MAX_TURNS conversation cannot force
+# every anonymous read to load and deserialize the WHOLE conversation's payloads
+# (codex #522 R6 P2). The projection is a pure leaf module (stdlib-only imports),
+# so importing this constant here creates no cycle and keeps the two in lockstep.
+from app.domain.conversation_public_view import MAX_TURNS
+
+# Agentic Memory P3 (B-Profile, T7): the ONE place the question text coming
+# back from ``recent_user_ask_languages`` is turned into a closed language
+# bucket, before it leaves this store — see that method's own docstring.
+from app.domain.search_profile import classify_ask_language
 from app.repositories.ask_sample_merge import (
     merge_ask_samples as _merge_ask_samples,
+)
+from app.repositories.ask_sample_merge import (
     merge_run_samples as _merge_run_samples,
 )
 from app.repositories.conversation_linked_report import (
@@ -112,18 +127,6 @@ from app.repositories.sqlite.access_sql import (
     read_access_params,
 )
 from app.repositories.sqlite.database import SqliteDatabase
-# Agentic Memory P3 (B-Profile, T7): the ONE place the question text coming
-# back from ``recent_user_ask_languages`` is turned into a closed language
-# bucket, before it leaves this store — see that method's own docstring.
-from app.domain.search_profile import classify_ask_language
-# The public projection's turn ceiling is the single source of truth for how many
-# turns one anonymous page renders; the token-resolved query below bounds its
-# fetch to ``MAX_TURNS + 1`` (cap + 1) so a >MAX_TURNS conversation cannot force
-# every anonymous read to load and deserialize the WHOLE conversation's payloads
-# (codex #522 R6 P2). The projection is a pure leaf module (stdlib-only imports),
-# so importing this constant here creates no cycle and keeps the two in lockstep.
-from app.domain.conversation_public_view import MAX_TURNS
-
 
 # Canonical oldest -> newest order for one conversation's answers.
 # `AskStateStore.get_conversation` and the public-share snapshot query
@@ -1765,6 +1768,7 @@ class AskStateStore:
         notebook_id: str,
         conversation_id: str,
         expected_through_id: str | None = None,
+        *, share_evidence: dict | None = None,
     ) -> dict:
         """Issue (or reuse) the public token for one conversation and pin its
         read watermark to a specific answer.
@@ -1885,6 +1889,8 @@ class AskStateStore:
                 "RETURNING share_token, shared_through_at, shared_through_id",
                 (candidate, through_at, through_id, conversation_id, notebook_id),
             ).fetchone()
+            if share_evidence is not None:
+                put_share_evidence_on(db, str(issued["share_token"]), share_evidence)
         return {
             "share_token": str(issued["share_token"]),
             "shared_through_at": str(issued["shared_through_at"] or ""),

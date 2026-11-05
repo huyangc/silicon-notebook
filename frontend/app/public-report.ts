@@ -7,7 +7,17 @@
 import { requestJson } from "./api-client.ts";
 import { httpErrorStatus } from "./errors.ts";
 
+export type PublicEvidenceT = {
+  kind: "original" | "knowledge" | "memory";
+  text: string;
+  quote: string;
+  location: string;
+  truncated: boolean;
+};
+
 export type PublicReportReferenceT = {
+  evidence?: PublicEvidenceT;
+  verification?: import("./citation-verification.ts").CitationVerification;
   key: string;
   title: string;
   file_name: string;
@@ -30,6 +40,7 @@ export type PublicReportReferenceT = {
 };
 
 export type PublicReportT = {
+  snapshot_revision: string;
   question: string;
   /**
    * 研究问题被夹到上限时为真——只可能出现在创建期护栏上线**之前**建的报告上

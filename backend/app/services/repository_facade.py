@@ -2834,13 +2834,14 @@ class RepositoryFacade:
         notebook_id: str,
         conversation_id: str,
         expected_through_id: str | None = None,
+        *, share_evidence: dict | None = None,
     ) -> dict:
         """Issue (or reuse) the public token and pin the read watermark. When
         ``expected_through_id`` is given it pins to exactly that answer (the
         disclosure TOCTOU fix); empty falls back to the current latest. See
         ``AskStateStore.share_conversation``."""
         return self._runtime.ask_state.share_conversation(
-            notebook_id, conversation_id, expected_through_id
+            notebook_id, conversation_id, expected_through_id, share_evidence=share_evidence
         )
 
     def conversation_share_state(
@@ -2940,10 +2941,10 @@ class RepositoryFacade:
         )
 
     def share_report(
-        self, notebook_id: str, report_id: str, *, memory_guard=None
+        self, notebook_id: str, report_id: str, *, memory_guard=None, share_evidence=None
     ) -> str:
         return self._runtime.report_store.share_report(
-            notebook_id, report_id, memory_guard=memory_guard
+            notebook_id, report_id, memory_guard=memory_guard, share_evidence=share_evidence
         )
 
     def unshare_report(self, notebook_id: str, report_id: str) -> None:
