@@ -4718,6 +4718,58 @@ The shared request-local protocol lives at the `.../stream` variants of `POST /n
 
 This request-local protocol deliberately has different disconnect semantics from durable Ask. If its browser goes away, an ASGI frame send fails, or the user closes/stops/replaces the active interaction, the server signals cancellation and observes the worker to completion; provider code must re-raise cancellation instead of converting it into a normal fallback. The browser reader uses a bounded timer fallback so a background tab that suspends `requestAnimationFrame` still drains the terminal frame. If a future action must survive navigation or process restart, it belongs in the durable-job row above rather than in this stream.
 
+### Analysis handoff from reflection to synthesis
+
+Every reasoning Ask can carry a generic analysis snapshot from reflection into
+ordinary synthesis, every section of sectioned synthesis, and its whole-answer
+fallback. It is not specific to multiple-choice questions: findings describe
+aspects of the question, current conclusions and their conditions, a status
+(`supported`, `refuted`, or `uncertain`), and stable evidence identities; unresolved
+questions travel separately. The existing reflect call emits the snapshot, so
+this adds no model call. The last valid snapshot is fed into later reflection
+turns, and the terminal turn's update is accepted before stopping. An omitted
+update retains the last valid snapshot; a valid empty snapshot clears it.
+`reason` remains the trace summary and is not analysis evidence.
+
+The snapshot is bounded at the model-output boundary: at most **12 findings**,
+each with a unique nonempty id of at most **200 characters**, nonempty aspect and
+conclusion strings of at most **800 characters each**, and at most **8 nonempty
+evidence keys of 200 characters each**. At most **12 unresolved questions**, each
+nonempty and at most **800 characters**, are accepted. A malformed or over-limit
+update is rejected as a whole: the last valid snapshot survives, and
+`invalid_analysis_update` is disclosed in the handoff. Findings and qualifiers
+are never silently clipped to fit. These rails describe model-produced output,
+not limits on the user's question.
+
+The host owns the stop reason: `evidence_sufficient`, `retrieval_exhausted`,
+`budget_exhausted`, or `model_failure`. Only the first records a sufficient-evidence
+decision; stopping after failed retrieval, exhausted budgets or model failure does
+not mean the question was resolved. A terminal outline-binding repair accepts
+analysis updates while retaining the reason that already ended retrieval.
+Analysis is a prior assessment to verify
+against the actual evidence, never a new citable source; uncertainty must not be
+treated as refutation, and synthesis may correct an unsupported assessment.
+
+Dependencies retain their retrieval identities through the immutable stage
+handoff. Referenced knowledge objects are retained from the authorized candidate
+pool before closing `top_n` selection. Each synthesis call reuses complete admitted
+evidence or adds its missing retrieved dependencies in a separate partition,
+mapping identities to that prompt's actual `[kN]` handles, including section offsets.
+External dependencies use public, run-stable `xN` identities, bound only to
+external items actually admitted in that prompt; internal plugin keys never
+enter the analysis prompt.
+`REASONING_ANALYSIS_EVIDENCE_CHARS` bounds that additional evidence partition per
+call, including headings and separators: default **12000**, valid range **0..120000**
+characters. It does not enlarge the ordinary evidence partitions or truncate the
+analysis snapshot; zero disables additional evidence admission while preserving
+analysis and missing-evidence disclosure. Original passages that cannot be admitted
+in full are marked missing rather than treated as complete support. Missing
+dependencies remain explicit in the synthesis input, and the answer appends a
+Chinese notice that the affected conclusions need verification. The synthesis
+trace carries `analysis_findings`, `analysis_missing_evidence`, and
+`analysis_stop_reason`. This preserves the assessment/evidence handoff; it is not
+a guarantee of the model's semantic correctness.
+
 ### Reasoning effort and complete collection requests
 
 The grade is picked in the Ask composer through the same graded-effort control as a deep report's research depth — one shared component, so the two never drift apart: a chip carrying the current grade name, opening a slider popover that shows that grade plus one neutral sentence about it. The interface deliberately exposes only the grade name and that sentence; the exact ceilings live in this table (mirrored by `frontend/app/ask-retrieval-effort.ts` and `backend/app/core/ask_retrieval_policy.py`) rather than being printed onto the control. `answer_element_items` and the three `enum_*` columns below are the exceptions to that mirror: they are backend-only fields with no frontend consumer, since they only shape the final synthesis prompt and the [collection-enumeration tools](#collection-enumeration-tools) budget server-side. `read_document`'s element and character sampling pools are the same kind of exception, and are not `AskRetrievalLimits` fields at all: the element pool reuses `document_overview_max_elements` (the same deployment knob the general-purpose document-introduction lane uses), and the character pool is computed on the fly as `limits.chunk_context_chars // 4` — both are read server-side only, so `ask-retrieval-effort.ts` does not need a matching field.
@@ -5974,7 +6026,7 @@ When the in-library fact gate opens through no progress, stale evidence or zero 
 
 **MCP.** `ask`'s `anchors` and `citations` carry the same `url` field the HTTP endpoint does, present only on rows whose `tier` is `external` (`exclude_if` empty, so every existing payload without external evidence serializes byte for byte as before).
 
-**Registration rails (freeze time, loud failures).** An action name must match `^[a-z][a-z0-9_]{2,31}$` and must not collide with any of the 19 core reflect action ids or any of the 17 top-level reflect schema field names (their union, `RESERVED_REFLECT_KEYS`) — otherwise a plugin action would either share a name with a core action or write its arguments into a core schema slot (`browse_sections` and `read_section` are core ids and top-level schema fields since in-document navigation shipped, so an already-deployed plugin whose action carries either name fails startup after the upgrade until it is renamed; the same holds for `find_sources`, `get_paper_cards`, `extract_from_sources` and the top-level `answer_layout` field of the paper tools). A parameter name must not be `name` or `reason`, there may be at most `REFLECT_ACTION_PARAMETERS_MAX` (4) of them, and an `enum` parameter must declare between 2 and `REFLECT_ACTION_ENUM_VALUES_MAX` (8) values — the 2-value floor exists because the schema-hint validator decides "this is an enum" by the presence of a `|` character, so a single-value enum would read as a closed choice to the model while validating as free text underneath. Every plugin-authored string — the action description, each parameter description, the source label — is checked, never silently clamped: over its length limit or carrying a control character (a newline included) fails registration outright (`ExtensionRegistryError`, a startup failure), because the descriptor is deployment configuration reviewed at boot, not user data a runtime clamp is allowed to reshape.
+**Registration rails (freeze time, loud failures).** An action name must match `^[a-z][a-z0-9_]{2,31}$` and must not collide with any of the 19 core reflect action ids or any of the 18 top-level reflect schema field names (their union, `RESERVED_REFLECT_KEYS`) — otherwise a plugin action would either share a name with a core action or write its arguments into a core schema slot (`browse_sections` and `read_section` are core ids and top-level schema fields since in-document navigation shipped, so an already-deployed plugin whose action carries either name fails startup after the upgrade until it is renamed; the same holds for `find_sources`, `get_paper_cards`, `extract_from_sources` and the top-level `answer_layout` field of the paper tools; the analysis handoff also reserves the top-level `analysis` field, so a plugin action with that name must be renamed). A parameter name must not be `name` or `reason`, there may be at most `REFLECT_ACTION_PARAMETERS_MAX` (4) of them, and an `enum` parameter must declare between 2 and `REFLECT_ACTION_ENUM_VALUES_MAX` (8) values — the 2-value floor exists because the schema-hint validator decides "this is an enum" by the presence of a `|` character, so a single-value enum would read as a closed choice to the model while validating as free text underneath. Every plugin-authored string — the action description, each parameter description, the source label — is checked, never silently clamped: over its length limit or carrying a control character (a newline included) fails registration outright (`ExtensionRegistryError`, a startup failure), because the descriptor is deployment configuration reviewed at boot, not user data a runtime clamp is allowed to reshape.
 
 | Bound | Value |
 | --- | ---: |

@@ -93,6 +93,7 @@ GUARDED = (
     "_action_consult_memory", "_action_exact_lookup", "_action_follow_chain",
     "_feed_exact_lookup_skip", "_collect_kg_gap", "_apply_outline_update",
     "_disclose_unresolved_after_loop", "_finish_run",
+    "_analysis_evidence", "_record_stale_stop",
     # in-document navigation: the two actions, the hint block and their helpers
     "_not_a_name_note", "_section_source_rows", "_resolve_section_source",
     "_section_outline_for", "_section_hint_block", "_section_hints_text",

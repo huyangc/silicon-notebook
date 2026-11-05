@@ -1258,19 +1258,12 @@ def test_source_passage_ids_are_shown_only_when_the_outline_is_live(repo):
     assert off == retriever._summarize({}, elements, chunks, ())
 
 
-@pytest.mark.parametrize("effort,ids_expected", [
-    ("thorough", False), ("exhaustive", True),
-])
-def test_run_wires_the_id_display_to_the_gate(repo, effort, ids_expected):
-    """run() 必须把**闸的值**交给 `_summarize`,不是无条件展示 id。
+@pytest.mark.parametrize("effort", ["overview", "standard", "deep", "thorough", "exhaustive"])
+def test_run_exposes_stable_analysis_ids_independently_of_the_outline_gate(repo, effort):
+    """分析交接在所有档位都能引用候选身份，大纲动作仍只在穷尽档开放。
 
-    上一版只测了 `_summarize` 本身(直接调用,两个方向都对),接线处没有任何守卫:
-    把调用点改成 `show_ids=True` 时 225 条用例全绿——一个只在 exhaustive 才该出现
-    的展示,悄悄对每一档都生效了。这里走真实 run:脚本先 search_elements 拿回原文
-    候选,再看下一轮 prompt 的候选区里那些 [element] 行带不带 id。
-
-    chunk 侧同一行代码、同一个开关,由 `_summarize` 的直接用例覆盖(把 chunk 喂进
-    真实 run 要先建分块与 PPR,成本与收益不成比例)。
+    真实 run 先检索原文，再检查后续 reflect 收到的稳定身份与动作空间，避免把
+    原来的「仅大纲需要身份」假设带回普通分析路径。
     """
     notebook = _seed(repo, elements=2)
     llm = _SeqLLM([
@@ -1283,8 +1276,11 @@ def test_run_wires_the_id_display_to_the_gate(repo, effort, ids_expected):
 
     body = llm.reflect_prompts[1].split("Candidates so far:", 1)[-1]
     assert "[element]" in body, "前置条件:这一轮必须真的有原文候选"
-    assert ("(id=el-000)" in body) is ids_expected
-    assert ("(id=el-" in body) is ids_expected
+    assert "(id=el-000)" in body
+    assert "(id=el-" in body
+    schema = json.loads(llm.schema_hints[-1])
+    assert (OUTLINE_ACTION in schema["next_action"].split("|")) is (effort == "exhaustive")
+    assert "analysis" in schema
 
 
 def test_bindings_survive_the_candidate_window(repo):

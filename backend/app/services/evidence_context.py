@@ -1416,7 +1416,11 @@ class EvidenceContextService:
                 prefix = f"{key}: [{hit.object_type}][{tier}] {name}"
                 if remaining_total <= len(prefix):
                     break
-                definition_cap = max(0, min(300, remaining_total - len(prefix)))
+                # Build the normal bounded projection before applying the
+                # remaining partition budget. Its established definition /
+                # procedure preview limits are different from losing part
+                # of that preview to a tight context budget.
+                definition_cap = 300
                 extra = (
                     f" — def: {definition[:definition_cap]}"
                     if definition and definition_cap
@@ -1426,7 +1430,8 @@ class EvidenceContextService:
                     extra += "; steps: " + " -> ".join(
                         step.get("name", "") for step in context["steps"][:8]
                     )
-                line = (prefix + extra)[:remaining_total]
+                projection = prefix + extra
+                line = projection[:remaining_total]
                 lines.append(line)
                 used += separator + len(line)
                 cluster_keys[cluster_id] = key
@@ -1448,6 +1453,8 @@ class EvidenceContextService:
                     # knowhow 格子才有值，其余（非 knowhow KO/合并多行）为 None。
                     "knowhow": _knowhow_ref_from_payload(hit.payload),
                 }
+                if len(projection) > remaining_total:
+                    evidence_by_id[key]["analysis_projection_complete"] = False
 
         priority = {str(object_id) for object_id in (priority_object_ids or ()) if object_id}
         if priority:

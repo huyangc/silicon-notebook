@@ -19,6 +19,10 @@ from typing import List, Optional, Sequence, Tuple
 
 from app.core.query_syntax import quoted_phrases
 from app.domain.reflect_action import ReflectActionSpec
+from app.domain.analysis_handoff import (
+    ANALYSIS_FINDINGS_MAX, ANALYSIS_TEXT_MAX_CHARS, ANALYSIS_KEY_MAX_CHARS,
+    ANALYSIS_EVIDENCE_KEYS_MAX, ANALYSIS_UNRESOLVED_MAX,
+)
 from app.domain.report_followup import REPORT_BLOCK_END, REPORT_EVIDENCE_NOT_LOADED
 # The one literal the four server-side readers of ``source_scoped`` share (see
 # its definition); the reflect prompt is the fourth.
@@ -407,6 +411,7 @@ def answer_prompt(
     peer_notebooks: bool = False,
     report_block: str = "",
     paper_table: bool = False,
+    analysis_block: str = "",
 ) -> str:
     """按节合成的四个形参是 **keyword-only**:三个既有位置参数(question/context/
     history)是所有调用方的形状,把模式开关也做成位置参数,只会让「第四个位置传了
@@ -462,6 +467,7 @@ def answer_prompt(
     )
     report_rule = ATTACHED_REPORT_ANSWER_RULE if report_block else ""
     report_section = f"{report_block}\n\n" if report_block else ""
+    analysis_section = f"{analysis_block}\n\n" if analysis_block else ""
     return (
         "You answer an engineer's question using the notebook knowledge below, "
         "and you may reason beyond it.\n"
@@ -543,7 +549,7 @@ def answer_prompt(
         f"{report_section}"
         f"{section_section}"
         f"{style_section}"
-        f"Question: {question}\n\n"
+        f"{analysis_section}Question: {question}\n\n"
         f"Knowledge items (id: [type][tier] name — context):\n{context_block}\n\n"
         'Return exactly one JSON object with both "answer" (a string) and '
         '"grounded" (a boolean, true or false) at the same root. Do not emit '
@@ -1036,6 +1042,8 @@ def reflect_schema_hint(
         + plugin_projection.schema_branches
         + outline_branch
         + answer_layout_field
+        + '"analysis":{"findings":[{"id":"","aspect":"","conclusion":"",'
+        '"status":"supported|refuted|uncertain","evidence_keys":[""]}],"unresolved":[""]},'
         + '"query":"",'
         + keywords_field +
         '"reason":""}'
@@ -1837,8 +1845,20 @@ def reflect_prompt(
         "question explicitly asks for (each layer / entity / requirement it "
         "names) is covered by the candidates; if an asked-for aspect has no "
         "evidence yet, prefer a retrieval action targeting it. Set "
-        "sufficient=true only when that per-aspect check passes (or further "
-        "retrieval keeps failing). reason: one line.\n"
+        "sufficient=true only when that per-aspect check passes. If retrieval "
+        "keeps failing, choose answer with sufficient=false and retain the gaps. "
+        "reason: one line.\n"
+        "Maintain analysis as a COMPLETE current snapshot, not a log of thoughts: "
+        "findings are concise conclusions about aspects, comparisons, conditions "
+        "or alternatives, each with a stable id, aspect, conclusion, status "
+        "(supported/refuted/uncertain), and evidence_keys copied from candidate ids. "
+        "Preserve qualifiers and counterevidence; missing support means uncertain, "
+        "never refuted. Revise earlier findings when new evidence changes them. "
+        f"Include remaining questions in unresolved. At most {ANALYSIS_FINDINGS_MAX} findings, "
+        f"{ANALYSIS_EVIDENCE_KEYS_MAX} evidence keys per finding, {ANALYSIS_UNRESOLVED_MAX} "
+        f"unresolved questions; text fields at most {ANALYSIS_TEXT_MAX_CHARS} characters "
+        f"and ids/keys at most {ANALYSIS_KEY_MAX_CHARS}. Submit analysis on retrieval turns AND the final "
+        "answer/sufficient turn. It will be handed to the writing model for verification.\n"
         f"{completeness_rule}"
         # Keep every question-independent rule ahead of question-dependent
         # grounding and candidates, in the same user message. This changes

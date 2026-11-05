@@ -24,6 +24,7 @@ ALLOWED_APPLICATION_PREFIXES = (
     "app.application",
     "app.core.ask_retrieval_policy",
     "app.domain.cancellation",
+    "app.domain.analysis_handoff",
     # The typed retrieval terminal state travels ReasoningResult ->
     # ReasoningEvidenceSnapshot -> ResponseDraftInput.  Admitted as one named
     # module rather than the whole ``app.domain`` package, so the next domain

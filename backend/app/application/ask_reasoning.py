@@ -7,11 +7,12 @@ or plugin seat.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol
 
 from app.core.ask_retrieval_policy import AskRetrievalLimits
+from app.domain.analysis_handoff import AnalysisEvidence, AnalysisHandoff
 from app.domain.cancellation import CancelEvent
 from app.models.ask import AskEvidence, AskResponse, QueryIntentContract
 
@@ -226,10 +227,14 @@ class ReasoningEvidenceSnapshot:
     # ``PaperToolsSnapshot`` of the run, ``None`` when no paper tool ran.
     # Defaulted and appended last for the same reason as the fields above.
     paper_tools: PaperToolsSnapshot | None = None
+    analysis: AnalysisHandoff = field(default_factory=AnalysisHandoff)
+    analysis_evidence: tuple[AnalysisEvidence, ...] = ()
 
     @classmethod
     def from_result(cls, result: object) -> "ReasoningEvidenceSnapshot":
         return cls(
+            analysis=getattr(result, "analysis", AnalysisHandoff()),
+            analysis_evidence=tuple(getattr(result, "analysis_evidence", ())),
             top_hits=tuple(getattr(result, "top_hits", ())),
             elements=tuple(getattr(result, "elements", ())),
             trace=tuple(getattr(result, "trace", ())),
@@ -324,6 +329,8 @@ class ResponseDraftInput:
     # and extracted values are citable and may lay the answer out as a table,
     # so they ride this envelope too (``paper_card_answer``).
     paper_tools: PaperToolsSnapshot | None = None
+    analysis: AnalysisHandoff = field(default_factory=AnalysisHandoff)
+    analysis_evidence: tuple[AnalysisEvidence, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

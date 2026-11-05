@@ -243,9 +243,10 @@ def _digest(kg_actions, **extra):
 #: 重算;只为这两把闸改了单库渲染的一个字节,这里就会红。
 #: 2026-10-22 重算:全开的闸里加入文档内导航(``section_nav``,两条动作说明、两个
 #: schema 分支、scope 字段清单里的 ``browse_sections.query``)。
+#: 2026-11-05 重算：通用分析快照进入reflect schema，证据充分与检索耗尽分别表达。
 _SINGLE_LIBRARY_DIGESTS = {
-    True: "17f332ea9f991ffc6c3fea5e34869f82736a1ecbd9983be1984ccaa29c02da4a",
-    False: "f65b72d3dd815cc1c69e0eb4e85f70fd9dd69b06d70bd97b01e56720f869cb35",
+    True: "aa40db8793ca4edf058a76401c4db171039e99b590d8a275d3da242ac42fb78f",
+    False: "03b5ae9f2130655e3dd43020f5e790b4ee5ec46edb1b7183d3e8a475cd3ecc00",
 }
 
 

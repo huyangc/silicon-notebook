@@ -47,11 +47,14 @@ FROZEN_REFLECT_SCHEMA_HINT = (
     '"direction":"out|in|both"},"new_sub_query":{"query":"","types":[],'
     '"prefer":"keyword|semantic|balanced","reason":""},"follow_chain":{"start_object_id":"",'
     '"target_object_id":"","edge_type":null,"direction":"out|in|both"},'
+    '"analysis":{"findings":[{"id":"","aspect":"","conclusion":"",'
+    '"status":"supported|refuted|uncertain","evidence_keys":[""]}],"unresolved":[""]},'
     '"query":"",'
     '"reason":""}'
 )
 # 基线再前进一次(reflect 形状简化):单参数动作共用根级 ``query``,
 # ``prefer`` 写成三值枚举。关闭态的对照物随之换成这一份新形状。
+# 通用分析交接同样属于关闭枚举工具时仍保留的基础能力；分析快照的形状独立冻结。
 
 
 @pytest.fixture
