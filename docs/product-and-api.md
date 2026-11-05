@@ -5571,7 +5571,7 @@ Over-limit reference title/original filename/excerpt sets `title_truncated`/`fil
 
 New notebook conversations, global conversations, MCP answer links and reports can expose the cited original passage and necessary context from their citation cards. Evidence is frozen at publication, so subsequent source edits do not rewrite it. Public reads retain the link's existing live permission, mount, expiration and revocation checks. This grants access only to cited evidence, never the whole source document, source catalog or internal authenticated API handles. Before publication, explain that the link includes original citation context and visitors can save a copy.
 
-Original evidence is stored separately from the citation excerpt. Document originals, knowledge explanations and the author's personal memory have distinct labels; fused definitions and generated descriptions must not be represented as verbatim originals. When the original is unavailable, retain the stored excerpt and disclose the absence without model reconstruction. Each context is bounded by `PUBLIC_SHARE_EVIDENCE_MAX_CHARS` (default 12,000; range 1,200–100,000 characters), clipped around the cited excerpt with explicit disclosure. Existing snippet projection rails remain unchanged. Upgrading never adds original context to legacy links automatically; the author must explicitly republish.
+Original evidence is stored separately from the citation excerpt. Document originals, image descriptions, knowledge explanations and the author's personal memory have distinct labels; fused definitions and generated descriptions must not be represented as verbatim originals. When the original is unavailable, retain the stored excerpt and disclose the absence without model reconstruction. Each context is bounded by `PUBLIC_SHARE_EVIDENCE_MAX_CHARS` (default 12,000; range 1,200–100,000 characters), clipped around the cited excerpt with explicit disclosure. Existing snippet projection rails remain unchanged. Upgrading never adds original context to legacy links automatically; the author must explicitly republish.
 
 Authenticated readers can save public content to an owned notebook, choosing an existing notebook or creating one and confirming a title. The server revalidates the link and generates a Markdown source from its public projection, accepting neither client-supplied body content nor private source handles. Conversations support one turn or all public turns; reports save the whole public body. Body, turn-namespaced citation mapping, public excerpts, original evidence and images travel together. Images become source-local assets rather than expiring share URLs. The saved source's creation time records the save date; identical content saved to the same notebook reuses the existing source.
 
@@ -5583,6 +5583,11 @@ fetch evidence only for turns in the current public window, regardless of how mu
 history the link previously exposed. Saved reports retain research-question truncation
 and incomplete-bibliography disclosures in both Markdown and the structured manifest,
 including after reparsing.
+
+Saving follows the public renderer's citation-marker grammar, including localized
+numeric brackets and groups; numeric parentheses remain ordinary text. Parsed image
+captions and generated descriptions are labeled image descriptions rather than
+verbatim original passages.
 
 Authenticated `POST /public/conversations/{token}/save` and
 `POST /public/reports/{token}/save` accept `{notebook_id, title, expected_revision, turn_index?}`.

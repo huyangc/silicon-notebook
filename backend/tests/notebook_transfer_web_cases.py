@@ -1096,9 +1096,16 @@ def check_a_download_closes_its_file_and_counts_only_when_sent_whole(world: Worl
     import asyncio
 
     async def first_block_only(response) -> bytes:
+        import anyio
+
         body = response.body_iterator
         block = await body.__anext__()
         await body.aclose()
+        # StreamingResponse's sync iterator runs on this loop's AnyIO worker.
+        # Its result can wake us before the worker drops the previous call's
+        # generator argument. Reuse that worker before checking GC/fd cleanup;
+        # gc.collect() alone races those still-live worker locals.
+        await anyio.to_thread.run_sync(lambda: None)
         return block
 
     response = routes.download_notebook_transfer(ticket=token())

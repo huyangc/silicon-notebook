@@ -714,6 +714,31 @@ def public_share_evidence_is_explicit_immutable_and_revocable(env):
     assert env.client.get(f"/api/public/conversations/{legacy}").status_code == 404
 
 
+def image_evidence_is_a_description_on_public_projection(env):
+    headers, owner = _user(env)
+    nb = _notebook(env, headers)
+    suffix = next(_IDS)
+    sid, eid, chunk_id = f"src-image-{suffix}", f"el-image-{suffix}", f"chunk-image-{suffix}"
+    with _write(env) as conn:
+        conn.execute("INSERT INTO sources (id,notebook_id,title,source_type,created_at,updated_at) VALUES (?,?,?,'upload',?,?)",
+                     (sid, nb, "图片资料", "2026-01-01T00:00:00", "2026-01-01T00:00:00"))
+        conn.execute("INSERT INTO source_elements (id,source_id,element_type,location_label,text,created_at) VALUES (?,?,'image','page 2',?,?)",
+                     (eid, sid, "generated image caption", "2026-01-01T00:00:00"))
+        conn.execute("INSERT INTO chunks (id,notebook_id,source_id,text,element_ids,created_at) VALUES (?,?,?,?,?,?)",
+                     (chunk_id, nb, sid, "generated image caption\n\ncontext after the image", json.dumps([eid]), "2026-01-01T00:00:00"))
+    anchor = {"key": "k1", "object_type": "chunk", "object_id": chunk_id, "label": "图片资料",
+              "source_id": sid, "element_id": eid, "snippet": "generated image caption\n\ncontext after the image"}
+    _, cid = _seed_job(env, nb, owner, payload={"answer": "image [k1]", "conclusion": "image", "anchors": [anchor]})
+    response = env.client.post(f"/api/notebooks/{nb}/conversations/{cid}/share", headers=headers)
+    assert response.status_code == 200, response.text
+    token = response.json()["share_token"]
+    public = env.client.get(f"/api/public/conversations/{token}")
+    assert public.status_code == 200, public.text
+    evidence = public.json()["turns"][0]["references"][0]["evidence"]
+    assert evidence["kind"] == "image_description"
+    assert evidence["text"] == anchor["snippet"]
+
+
 def public_evidence_reads_only_selected_turns(env):
     from app.services.public_share_evidence import (
         overlay_report_evidence,
@@ -750,6 +775,7 @@ def public_evidence_reads_only_selected_turns(env):
 
 
 CASES = {
+    "image_evidence_is_a_description_on_public_projection": image_evidence_is_a_description_on_public_projection,
     "public_evidence_reads_only_selected_turns": public_evidence_reads_only_selected_turns,
     "context_publication_failures_leave_no_public_token": context_publication_failures_leave_no_public_token,
     "fresh_public_links_freeze_real_source_elements": fresh_public_links_freeze_real_source_elements,

@@ -94,7 +94,7 @@ export function PublicCitationPopover({
       notes={publicReferenceNotes(reference)}
       takeFocus
     >
-      {!reference.verification && <PublicEvidence evidence={reference.evidence} isMemory={reference.is_memory} />}
+      {!reference.verification && <PublicEvidence evidence={reference.evidence} isMemory={reference.is_memory} isImageReference={reference.is_image_reference} />}
     </CitationPopover>
   );
 }

@@ -8,7 +8,7 @@ import { requestJson } from "./api-client.ts";
 import { httpErrorStatus } from "./errors.ts";
 
 export type PublicEvidenceT = {
-  kind: "original" | "knowledge" | "memory";
+  kind: "original" | "knowledge" | "memory" | "image_description";
   text: string;
   quote: string;
   location: string;
@@ -37,6 +37,7 @@ export type PublicReportReferenceT = {
    * 即「不是」。公开页只认这个布尔，不再从位置标签的字面猜。
    */
   is_memory?: boolean;
+  is_image_reference?: boolean;
 };
 
 export type PublicReportT = {

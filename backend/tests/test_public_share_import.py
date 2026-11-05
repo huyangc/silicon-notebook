@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -53,6 +54,24 @@ def test_grouped_and_numeric_references_preserve_literal_code_and_math():
     assert "`[k1]`" in body and "$x[k1]$" in body and "```txt\n[k1]\n```" in body
     assert "$$\nx[k1]\n$$" in body
     assert "[t1-1]" in body
+
+
+@pytest.mark.parametrize("marker,expected", [
+    ("【1】", "[t1-1]"),
+    ("【1，2】", "[t1-1][t1-2]"),
+    ("[1、2]", "[t1-1][t1-2]"),
+    ("【k1，1】", "[t1-k1][t1-1]"),
+])
+def test_saved_numeric_markers_match_the_public_renderer(marker, expected):
+    turn = _turn(f"结论{marker}。普通数字括号 (1) 与（2）不变。")
+    turn["references"] += [{"key": "1", "title": "数字引用甲"}, {"key": "2", "title": "数字引用乙"}]
+    _manifest, body = split_manifest(build_saved_share({"turns": [turn]}, kind="conversations", title="保存数字引用").decode())
+    assert f"结论{expected}。" in body
+    assert "普通数字括号 (1) 与（2）不变。" in body
+    parsed = parse_markdown_text("saved-numeric", build_saved_share({"turns": [turn]}, kind="conversations", title="保存数字引用").decode())
+    linked = [ref for element in parsed if element.text.startswith("结论")
+              for ref in element.metadata.get("share_references", [])]
+    assert {ref["key"] for ref in linked} == set(re.findall(r"\[(t1-[^]]+)\]", expected))
 
 
 @pytest.mark.parametrize("references", [None, 3, "bad", {}])

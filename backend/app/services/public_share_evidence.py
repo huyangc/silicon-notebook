@@ -92,6 +92,16 @@ def _capture(repo: Any, owner: str, selected: list[tuple[str, dict]]) -> dict:
                     location = str(element.get("location_label") or location)
             if not text and ref.get("definition"):
                 kind, text = "knowledge", str(ref["definition"])
+            # Image element text is a searchable caption/description, which
+            # may be generated. A chunk beginning with that element remains
+            # conservatively labelled as image context, never verbatim text.
+            image_context = bool(element and element.get("source_id") == source_id
+                                 and element.get("element_type") == "image") or any(
+                isinstance(image, dict) and image.get("element_id") == ref.get("element_id")
+                for image in (ref.get("images") or []) if ref.get("element_id")
+            )
+            if kind == "original" and image_context:
+                kind = "image_description"
         if not text:
             continue
         text, truncated = _bounded(text, quote, repo.settings.public_share_evidence_max_chars)
@@ -145,7 +155,13 @@ def overlay_share_evidence(repo: Any, token: str, row: dict, payload: dict) -> d
 def _overlay(payload: dict, evidence: dict) -> None:
     for ref in payload.get("references") or []:
         if ref.get("key") in evidence and evidence[ref["key"]].get("kind") and not ref.get("verification"):
-            ref["evidence"] = evidence[ref["key"]]
+            frozen = evidence[ref["key"]]
+            # Legacy links may have frozen image descriptions before this
+            # distinction existed. Correct only the presentation type using
+            # the already-public image flag; do not rehydrate or rewrite it.
+            ref["evidence"] = {**frozen, "kind": "image_description"} if (
+                ref.get("is_image_reference") and frozen.get("kind") == "original"
+            ) else frozen
 
 
 def overlay_report_evidence(repo: Any, token: str, payload: dict) -> dict:

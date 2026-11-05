@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 
 class PublicEvidence(BaseModel):
-    kind: Literal["original", "knowledge", "memory"]
+    kind: Literal["original", "knowledge", "memory", "image_description"]
     text: str
     quote: str = ""
     location: str = ""

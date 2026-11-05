@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { expect, test } from "vitest";
 import { PublicEvidence } from "../../app/public-evidence";
 import { ImportedShareText } from "../../app/imported-share-text";
+import { PublicCitationPopover } from "../../app/public-citation-popover";
 
 test("原文按需展开，引用段落在上下文中高亮，表格仍可读", async () => {
   const user = userEvent.setup();
@@ -76,4 +77,36 @@ test("保存副本保留核对失败警示，不把它当作可查看的原文",
   expect(screen.getByText("未通过核对：资料已删除")).toBeInTheDocument();
   expect(screen.getByText("当时摘录")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "查看原文" })).toBeNull();
+});
+
+test.each([
+  { kind: "image_description" as const, legacy: false },
+  { kind: "original" as const, legacy: true },
+])("公开图片引用将 $kind 证据标为图片说明", async ({ kind, legacy }) => {
+  const user = userEvent.setup();
+  render(<PublicCitationPopover reference={{
+    key: "k1", title: "引用图片", file_name: "figure.pdf", location: "第 2 页", snippet: "解析器生成的图注",
+    is_image_reference: legacy,
+    evidence: { kind, text: "图中显示功耗趋势。", quote: "功耗趋势", location: "第 2 页", truncated: false },
+  }} displayLabel="[1]" anchorRect={new DOMRect(10, 10, 20, 20)} onClose={() => {}} />);
+  expect(screen.queryByRole("button", { name: "查看原文" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "查看图片说明" }));
+  expect(screen.getByRole("button", { name: "收起图片说明" })).toBeInTheDocument();
+  expect(screen.getByText("功耗趋势")).toBeInTheDocument();
+  expect(screen.queryByRole("img")).toBeNull();
+});
+
+test.each([
+  { kind: "image_description", legacy: false },
+  { kind: "original", legacy: true },
+])("保存的图片引用将 $kind 证据标为图片说明", async ({ kind, legacy }) => {
+  const user = userEvent.setup();
+  render(<ImportedShareText text="图示 [t1-k1]" references={[
+    { key: "t1-k1", title: "引用图片", snippet: "解析器生成的图注", is_image_reference: legacy,
+      evidence: { kind, text: "图中显示功耗趋势。", quote: "功耗趋势", location: "", truncated: false } },
+  ]} />);
+  await user.click(screen.getByRole("button", { name: "查看引用 t1-k1" }));
+  expect(screen.queryByRole("button", { name: "查看原文" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "查看图片说明" }));
+  expect(screen.getByText("功耗趋势")).toBeInTheDocument();
 });
