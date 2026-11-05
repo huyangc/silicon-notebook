@@ -1365,7 +1365,7 @@ def share_conversation_route(
         from app.services.public_share_evidence import prepare_share_evidence
         token = previous.get("share_token") or ""
         evidence = None
-        if not token or (payload and payload.include_original_context) or answer_link_repository().share_evidence(token):
+        if not token or (payload and payload.include_original_context) or answer_link_repository().has_share_evidence(token):
             evidence = prepare_share_evidence(repo, {"created_by": owner, "turns": turns}, token=token)
         state = repo.share_conversation(notebook_id, conversation_id, boundary, share_evidence=evidence)
     return ConversationShareResponse(

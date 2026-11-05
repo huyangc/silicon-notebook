@@ -14323,6 +14323,7 @@ button.tag:hover {
 .public-evidence { padding: 12px; border-top: 1px solid var(--border); }
 .public-evidence-note { padding: 0 12px; color: var(--text-muted); font-size: 12px; }
 .public-evidence-context { overflow-x: auto; overflow-wrap: anywhere; }
+.public-evidence-quoted-block { background-color: Mark; color: MarkText; }
 .public-evidence-context table { border-collapse: collapse; }
 .public-evidence-context th, .public-evidence-context td { padding: 4px; border: 1px solid var(--border); }
 .public-evidence blockquote { margin: 12px 0; white-space: pre-wrap; }

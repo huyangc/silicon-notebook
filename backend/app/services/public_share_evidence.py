@@ -104,9 +104,10 @@ def prepare_share_evidence(repo: Any, row: dict, *, token: str = "") -> dict:
     owner = str(row.get("created_by") or "")
     if not owner:
         return {}
-    existing = _store(repo).share_evidence(token) if token else {}
+    turns = public_window(row.get("turns") or [])
+    existing = _store(repo).share_evidence(token, turn_keys=[_turn_key(turn) for turn in turns]) if token else {}
     payload = {}
-    for turn in public_window(row.get("turns") or []):
+    for turn in turns:
         key = _turn_key(turn)
         if key and key not in existing:
             _, selected, _ = _turn_body_and_references(turn.get("payload"))
@@ -121,7 +122,7 @@ def capture_share_evidence(repo: Any, token: str, row: dict) -> None:
 
 
 def prepare_report_evidence(repo: Any, row: dict, *, token: str = "") -> dict:
-    if token and "report" in _store(repo).share_evidence(token):
+    if token and "report" in _store(repo).share_evidence(token, turn_keys=["report"]):
         return {}
     selected = [(str(ref.get("key") or ""), ref)
                 for ref in (row.get("references") or [])[:MAX_REFERENCES] if isinstance(ref, dict) and ref.get("key")]
@@ -134,8 +135,9 @@ def capture_report_evidence(repo: Any, token: str, row: dict) -> None:
 
 
 def overlay_share_evidence(repo: Any, token: str, row: dict, payload: dict) -> dict:
-    frozen = _store(repo).share_evidence(token)
-    for turn, public in zip(public_window(row.get("turns") or []), payload.get("turns") or []):
+    turns = public_window(row.get("turns") or [])
+    frozen = _store(repo).share_evidence(token, turn_keys=[_turn_key(turn) for turn in turns])
+    for turn, public in zip(turns, payload.get("turns") or []):
         _overlay(public, frozen.get(_turn_key(turn), {}))
     return payload
 
@@ -147,5 +149,5 @@ def _overlay(payload: dict, evidence: dict) -> None:
 
 
 def overlay_report_evidence(repo: Any, token: str, payload: dict) -> dict:
-    _overlay(payload, _store(repo).share_evidence(token).get("report", {}))
+    _overlay(payload, _store(repo).share_evidence(token, turn_keys=["report"]).get("report", {}))
     return payload

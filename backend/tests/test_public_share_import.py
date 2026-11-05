@@ -134,6 +134,21 @@ def test_report_and_single_turn_save_select_only_public_content():
         build_saved_share(payload, kind="conversations", title="错误", turn_index=2)
 
 
+@pytest.mark.parametrize("flag,notice", [
+    ("question_truncated", "研究问题过长，已截断"),
+    ("truncated_references", "引用清单不完整"),
+])
+def test_saved_report_preserves_public_truncation_disclosures(flag, notice):
+    report = {"question": "公开问题前缀", "content_md": "公开正文 [k1]",
+              "references": _turn()["references"], flag: True}
+    content = build_saved_share(report, kind="reports", title="保存报告").decode()
+    manifest, body = split_manifest(content)
+    assert notice in body
+    assert manifest["turns"][0][flag] is True
+    parsed = parse_markdown_text("saved-report", content)
+    assert parsed[0].metadata["share_import"]["turns"][0][flag] is True
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient

@@ -714,7 +714,43 @@ def public_share_evidence_is_explicit_immutable_and_revocable(env):
     assert env.client.get(f"/api/public/conversations/{legacy}").status_code == 404
 
 
+def public_evidence_reads_only_selected_turns(env):
+    from app.services.public_share_evidence import (
+        overlay_report_evidence,
+        overlay_share_evidence,
+        prepare_report_evidence,
+        prepare_share_evidence,
+    )
+
+    headers, owner = _user(env)
+    nb = _notebook(env, headers)
+    _, cid = _seed_job(env, nb, owner)
+    token = env.repo.share_conversation(nb, cid)["share_token"]
+    shown = {"kind": "original", "text": "selected original", "quote": "original"}
+    env.store.put_share_evidence(token, {
+        "shown": {"k1": shown}, "report": {"k1": shown},
+        "older": {"k1": {"text": "outside window"}},
+    })
+    # A projection of the selected turn must not even decode historical rows.
+    with _write(env) as conn:
+        conn.execute("UPDATE public_share_evidence SET payload=? WHERE token=? AND turn_key=? AND reference_key=?",
+                     ("not-json", token, "older", "k1"))
+    assert env.store.share_evidence(token, turn_keys=["shown"]) == {
+        "shown": {"__captured__": {}, "k1": shown},
+    }
+    assert env.store.share_evidence(token, turn_keys=[]) == {}
+    assert env.store.has_share_evidence(token) is True
+    assert env.store.has_share_evidence("unknown") is False
+    row = {"created_by": owner, "turns": [{"answer_id": "shown", "payload": {}}]}
+    public = {"turns": [{"references": [{"key": "k1"}]}]}
+    assert overlay_share_evidence(env.repo, token, row, public)["turns"][0]["references"][0]["evidence"] == shown
+    assert overlay_report_evidence(env.repo, token, {"references": [{"key": "k1"}]})["references"][0]["evidence"] == shown
+    assert prepare_share_evidence(env.repo, row, token=token) == {}
+    assert prepare_report_evidence(env.repo, {"created_by": owner}, token=token) == {}
+
+
 CASES = {
+    "public_evidence_reads_only_selected_turns": public_evidence_reads_only_selected_turns,
     "context_publication_failures_leave_no_public_token": context_publication_failures_leave_no_public_token,
     "fresh_public_links_freeze_real_source_elements": fresh_public_links_freeze_real_source_elements,
     "public_share_evidence_is_explicit_immutable_and_revocable": public_share_evidence_is_explicit_immutable_and_revocable,

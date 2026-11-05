@@ -1,5 +1,5 @@
 """Narrow persistence boundary for anonymous capability snapshots."""
-from typing import Protocol
+from typing import Protocol, Sequence
 
 
 class AnswerLinkStorePort(Protocol):
@@ -11,6 +11,8 @@ class AnswerLinkStorePort(Protocol):
 
     def put_share_evidence(self, token: str, payload: dict) -> None: ...
 
-    def share_evidence(self, token: str) -> dict: ...
+    def share_evidence(self, token: str, *, turn_keys: Sequence[str] | None = None) -> dict: ...
+
+    def has_share_evidence(self, token: str) -> bool: ...
 
     def sweep_answer_links(self, *, grace_seconds: int) -> int: ...

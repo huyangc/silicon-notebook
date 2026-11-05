@@ -56,6 +56,7 @@ def split_manifest(text: str) -> tuple[dict[str, Any] | None, str]:
             return None, text
         normalized["turns"].append({
             **{key: turn[key] for key in ("question", "asked_at", "answered_at") if isinstance(turn.get(key), str)},
+            **{flag: True for flag in ("question_truncated", "truncated_references") if turn.get(flag) is True},
             "references": [clean for item in refs if (clean := _reference(item)) is not None],
         })
     # Imported metadata is a citation record, never proof of authenticity.
