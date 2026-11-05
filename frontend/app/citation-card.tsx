@@ -546,12 +546,25 @@ export function CitationPopover({
   useLayoutEffect(() => {
     const element = ref.current;
     if (!element) return;
-    const rect = element.getBoundingClientRect();
-    setPos(placeCitationPopover(
-      { top: anchorRect.top, bottom: anchorRect.bottom, left: anchorRect.left },
-      { width: rect.width, height: rect.height },
-      { width: window.innerWidth, height: window.innerHeight },
-    ));
+    const measure = () => {
+      const rect = element.getBoundingClientRect();
+      const next = placeCitationPopover(
+        { top: anchorRect.top, bottom: anchorRect.bottom, left: anchorRect.left },
+        { width: rect.width, height: rect.height },
+        { width: window.innerWidth, height: window.innerHeight },
+      );
+      setPos((previous) => previous.top === next.top && previous.left === next.left ? previous : next);
+    };
+    measure();
+    // Expanding evidence and loading images both change card dimensions after
+    // the initial placement. Observe the actual bounded box, not child state.
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(element);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
   }, [anchorRect]);
   useEffect(() => {
     if (dismissSuspended) return;
