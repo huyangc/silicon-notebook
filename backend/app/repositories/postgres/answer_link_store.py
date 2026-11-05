@@ -6,7 +6,7 @@ import json
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from app.core.capability_tokens import ANSWER_LINK_PREFIX, new_capability_token
 from app.repositories.postgres._store_utils import (
@@ -14,6 +14,7 @@ from app.repositories.postgres._store_utils import (
     normalized_clock,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.id_binding import bind_ids, execute_ids, member_of
 
 _SWEEP_INTERVAL_SECONDS = 3600
 
@@ -149,16 +150,31 @@ class AnswerLinkStore:
             )
             put_share_evidence_on(db, token, payload)
 
-    def share_evidence(self, token: str) -> dict:
+    def share_evidence(self, token: str, *, turn_keys: Sequence[str] | None = None) -> dict:
+        """Read only the caller's public window; None is for full inspection."""
+        if turn_keys is not None and not turn_keys:
+            return {}
+        sql = "SELECT turn_key, reference_key, payload FROM public_share_evidence WHERE token=%s"
+        params: list[Any] = [token]
+        if turn_keys is not None:
+            bound = bind_ids(list(dict.fromkeys(turn_keys)))
+            sql += " AND " + member_of("turn_key", bound)
+            params.append(bound.param)
         with self.database.connect() as db:
-            rows = db.execute(
-                "SELECT turn_key, reference_key, payload FROM public_share_evidence WHERE token=%s",
-                (token,),
-            ).fetchall()
+            rows = execute_ids(db, sql, params) if turn_keys is not None else db.execute(sql, params)
+            rows = rows.fetchall()
         out: dict = {}
         for row in rows:
             out.setdefault(row["turn_key"], {})[row["reference_key"]] = json.loads(row["payload"])
         return out
+
+    def has_share_evidence(self, token: str) -> bool:
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT EXISTS(SELECT 1 FROM public_share_evidence WHERE token=%s) AS present",
+                (token,),
+            ).fetchone()
+        return bool(row["present"])
 
     def answer_link(self, token: str) -> dict[str, Any] | None:
         with self.database.connect() as db:

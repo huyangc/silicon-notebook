@@ -6,10 +6,11 @@ import json
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from app.core.capability_tokens import ANSWER_LINK_PREFIX, new_capability_token
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.id_binding import bind_ids, drive_by
 
 _SWEEP_INTERVAL_SECONDS = 3600
 
@@ -150,16 +151,33 @@ class AnswerLinkStore:
             )
             put_share_evidence_on(db, token, payload)
 
-    def share_evidence(self, token: str) -> dict:
+    def share_evidence(self, token: str, *, turn_keys: Sequence[str] | None = None) -> dict:
+        """Read only the caller's public window; None is for full inspection."""
+        if turn_keys is not None and not turn_keys:
+            return {}
+        sql = "SELECT turn_key, reference_key, payload FROM public_share_evidence WHERE token=?"
+        params: list[Any] = [token]
+        if turn_keys is not None:
+            # The list is the exact indexed turn-key set to seek, not a
+            # ceiling applied after reading the token's entire history.
+            bound = bind_ids(list(dict.fromkeys(turn_keys)))
+            sql += " AND " + drive_by("turn_key", bound)
+            params.append(bound.param)
         with self.database.connect() as db:
-            rows = db.execute(
-                "SELECT turn_key, reference_key, payload FROM public_share_evidence WHERE token=?",
-                (token,),
-            ).fetchall()
+            rows = db.execute(sql, params)
+            rows = rows.fetchall()
         out: dict = {}
         for row in rows:
             out.setdefault(row["turn_key"], {})[row["reference_key"]] = json.loads(row["payload"])
         return out
+
+    def has_share_evidence(self, token: str) -> bool:
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT EXISTS(SELECT 1 FROM public_share_evidence WHERE token=?) AS present",
+                (token,),
+            ).fetchone()
+        return bool(row["present"])
 
     def answer_link(self, token: str) -> dict[str, Any] | None:
         with self.database.connect() as db:

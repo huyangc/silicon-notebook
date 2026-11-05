@@ -329,7 +329,7 @@ def share_global_conversation_route(
     from app.services.public_share_evidence import prepare_share_evidence
     repo = repository()
     token = previous.get("share_token") or ""
-    include = not token or (payload and payload.include_original_context) or repo._runtime.answer_links.share_evidence(token)
+    include = not token or (payload and payload.include_original_context) or repo._runtime.answer_links.has_share_evidence(token)
     state = _share_call(
         global_ask_service().share_conversation, conversation_id, user_id=user.id,
         expected_through_id=payload.expected_through_id if payload else "",

@@ -25,6 +25,36 @@ test("知识解释不冒充文档原文，旧分享没有原文时如实说明",
   expect(screen.queryByRole("button", { name: "查看原文" })).toBeNull();
 });
 
+test.each([
+  { name: "粗体", quote: "**证据句。**", expected: "证据句。", selector: "strong" },
+  { name: "跨段", quote: "第一段证据。\n\n第二段证据。", expected: "第一段证据。第二段证据。", selector: "p" },
+  { name: "表格", quote: "| 参数 | 数值 |\n|---|---|\n| 功耗 | 20 |", expected: "参数数值功耗20", selector: "table" },
+  { name: "行内公式", quote: "$E=mc^2$", expected: null, selector: ".katex" },
+  { name: "块级公式", quote: "$$\nE=mc^2\n$$", expected: null, selector: ".katex-display" },
+  { name: "行内代码", quote: "`<img src=x>`", expected: "<img src=x>", selector: "code" },
+  { name: "围栏代码", quote: "```js\nconst answer = 42;\n```", expected: "const answer = 42;\n", selector: "pre code" },
+])("$name 引用在保留原文结构的同时高亮", async ({ quote, expected, selector }) => {
+  const user = userEvent.setup();
+  const { container } = render(<PublicEvidence evidence={{ kind: "original", text: `未引用的前文。\n\n${quote}\n\n未引用的后文。`, quote, location: "", truncated: false }} />);
+  await user.click(screen.getByRole("button", { name: "查看原文" }));
+  const marks = Array.from(container.querySelectorAll('mark, [role="mark"]'));
+  expect(marks.length).toBeGreaterThan(0);
+  expect(container.querySelector(selector)).toBeInTheDocument();
+  if (expected !== null) expect(marks.map((mark) => mark.textContent).join("")).toBe(expected);
+  else expect(marks.some((mark) => mark.querySelector(selector))).toBe(true);
+  expect(marks.some((mark) => mark.textContent?.includes("未引用的"))).toBe(false);
+});
+
+test("高亮不会开放原文内的链接和远程图片", async () => {
+  const user = userEvent.setup();
+  const quote = "[证据](https://example.invalid/private) ![原图](https://example.invalid/image.png)";
+  render(<PublicEvidence evidence={{ kind: "original", text: quote, quote, location: "", truncated: false }} />);
+  await user.click(screen.getByRole("button", { name: "查看原文" }));
+  expect(screen.queryByRole("link")).toBeNull();
+  expect(screen.queryByRole("img")).toBeNull();
+  expect(screen.getByText("证据")).toBeInTheDocument();
+});
+
 test("导入后不同轮次同号引用仍指向各自的证据", async () => {
   const user = userEvent.setup();
   render(<ImportedShareText text="第一轮 [t1-k1]，第二轮 [t2-k1]。" references={[

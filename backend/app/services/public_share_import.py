@@ -66,7 +66,9 @@ def build_saved_share(
         turns = [{"question": payload.get("question", ""),
                   "answer_md": payload.get("content_md", ""),
                   "answered_at": payload.get("updated_at", ""),
-                  "references": payload.get("references", [])}]
+                  "references": payload.get("references", []),
+                  "question_truncated": payload.get("question_truncated") is True,
+                  "truncated_references": payload.get("truncated_references") is True}]
     else:
         turns = payload.get("turns", [])
     indexed = list(enumerate(turns))
@@ -94,6 +96,8 @@ def build_saved_share(
         manifest["turns"].append({"question": turn.get("question", ""),
                                   "asked_at": turn.get("asked_at", ""),
                                   "answered_at": turn.get("answered_at", ""),
+                                  **{flag: True for flag in ("question_truncated", "truncated_references")
+                                     if turn.get(flag) is True},
                                   "references": refs})
         sections.extend([f"## 问题 {index + 1}", turn.get("question", ""),
                          "回答时间：" + (turn.get("answered_at") or "未记录"),
@@ -106,6 +110,8 @@ def build_saved_share(
             sections.append("此轮部分结果卡未包含在分享页中，本副本也未保存这些结果卡。")
         if turn.get("truncated_references"):
             sections.append("分享页的引用清单不完整，本副本仅保存已公开的引用。")
+        if turn.get("question_truncated"):
+            sections.append("研究问题过长，已截断；本副本保留分享页公开的问题。")
         for image in turn.get("images", []):
             if read_image is None:
                 raise ValueError("图片无法保存，请刷新分享页后重试。")

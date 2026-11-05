@@ -4137,6 +4137,11 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 保存的 Markdown 同时携带结构化引用清单，解析、重新解析和笔记本导出保留该关系；来源详情可从正文引用跳到相应证据。它是独立副本：原链接到期或撤销不会删除已保存的内容。以后问答引用该来源时，直接来源仍是这份分享内容，附带的文献及摘录是其转引证据，不代表原始文档已导入或重新核验。
 
+原文高亮按被引内容在 Markdown 中的位置匹配，保留加粗、表格与公式结构；跨段落的
+摘录同样可核对。公开读取仅取当前公开窗口内各轮的证据，不随该链接曾公开的历史总量
+扩大读取范围。保存报告时，研究问题截断及引用清单不完整的提示同时保留在 Markdown
+正文与结构化清单中，重新解析后仍可识别。
+
 保存接口为已认证的 `POST /public/conversations/{token}/save` 与
 `POST /public/reports/{token}/save`，请求体 `{notebook_id, title, expected_revision, turn_index?}`；
 `expected_revision` 必须等于读者加载公开页时取得的 `snapshot_revision`，内容或公开窗口

@@ -13,8 +13,9 @@ class Snapshots:
     def __init__(self):
         self.data = {}
 
-    def share_evidence(self, token):
-        return deepcopy(self.data.get(token, {}))
+    def share_evidence(self, token, *, turn_keys=None):
+        return deepcopy({key: value for key, value in self.data.get(token, {}).items()
+                         if turn_keys is None or key in turn_keys})
 
     def put_share_evidence(self, token, payload):
         for turn, refs in payload.items():
