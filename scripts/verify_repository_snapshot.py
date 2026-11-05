@@ -6357,5 +6357,19 @@ MIGRATION_MANIFEST[(106, 107)] = {
 }
 
 
+PUBLIC_SHARE_EVIDENCE_TABLES = {
+    "public_share_evidence": "CREATE TABLE public_share_evidence (token TEXT NOT NULL, turn_key TEXT NOT NULL, reference_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (token, turn_key, reference_key))",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 108, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **PUBLIC_SHARE_EVIDENCE_TABLES},
+    } for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(107, 108)] = {
+    "tables": PUBLIC_SHARE_EVIDENCE_TABLES, "indexes": {},
+    "columns": {}, "triggers": {}, "views": {},
+}
+
 if __name__ == "__main__":
     raise SystemExit(main())

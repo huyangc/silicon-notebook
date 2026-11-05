@@ -38,8 +38,8 @@ from tests.sqlite_migration_testkit import (
     rollback_v105,
     rollback_v106,
     rollback_v107,
+    rollback_v108,
 )
-
 
 ROOT = Path(__file__).resolve().parents[2]
 VERIFIER_PATH = ROOT / "scripts" / "verify_repository_snapshot.py"
@@ -101,7 +101,7 @@ def test_v92_drop_outside_the_allowlist_still_fails(tmp_path, _upgraded_v9):
     with sqlite3.connect(database) as rollback:
         rollback_v92(rollback)
         rollback.execute("PRAGMA user_version = 91")
-    manifest = module.MIGRATION_MANIFEST[(91, 107)]
+    manifest = module.MIGRATION_MANIFEST[(91, 108)]
     assert manifest["dropped_tables"] == frozenset(
         {"auth_policy", "auth_policy_audit", "external_identities"}
     )
@@ -111,12 +111,12 @@ def test_v92_drop_outside_the_allowlist_still_fails(tmp_path, _upgraded_v9):
     }
     original = dict(manifest)
     try:
-        module.MIGRATION_MANIFEST[(91, 107)] = {
+        module.MIGRATION_MANIFEST[(91, 108)] = {
             **manifest, "dropped_tables": frozenset({"auth_policy"}),
         }
         result = module.verify_snapshot(database, storage)
     finally:
-        module.MIGRATION_MANIFEST[(91, 107)] = original
+        module.MIGRATION_MANIFEST[(91, 108)] = original
     assert not result.ok
     assert "external_identities" in result.changed_tables
 
@@ -441,12 +441,12 @@ def test_deployed_v101_database_verifies_the_seed_space_and_board_partition(
     assert result.source_user_version == 101
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.changed_tables == []
-    manifest = module.MIGRATION_MANIFEST[(101, 107)]
+    manifest = module.MIGRATION_MANIFEST[(101, 108)]
     original = dict(manifest)
     try:
         # A migration that added the column with another default is a
         # discrepancy, not a silent pass.
-        module.MIGRATION_MANIFEST[(101, 107)] = {
+        module.MIGRATION_MANIFEST[(101, 108)] = {
             **manifest,
             "columns": {**manifest["columns"], "unified_kg_state": {
                 "concept_seed_version": ("concept_seed_version", "INTEGER", 1, "1", 0)}},
@@ -458,7 +458,7 @@ def test_deployed_v101_database_verifies_the_seed_space_and_board_partition(
             rollback.execute("PRAGMA user_version = 101")
         assert not module.verify_snapshot(database2, storage2).ok
     finally:
-        module.MIGRATION_MANIFEST[(101, 107)] = original
+        module.MIGRATION_MANIFEST[(101, 108)] = original
 
 
 @pytest.mark.legacy_upgrade_contract
@@ -481,10 +481,10 @@ def test_deployed_v102_database_verifies_the_paper_meta_covering_index(
     assert result.source_user_version == 102
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.changed_tables == []
-    manifest = module.MIGRATION_MANIFEST[(102, 107)]
+    manifest = module.MIGRATION_MANIFEST[(102, 108)]
     original = dict(manifest)
     try:
-        module.MIGRATION_MANIFEST[(102, 107)] = {
+        module.MIGRATION_MANIFEST[(102, 108)] = {
             **manifest,
             "indexes": {**manifest["indexes"], "idx_source_paper_meta_source_nb": (
                 "CREATE INDEX idx_source_paper_meta_source_nb "
@@ -498,7 +498,7 @@ def test_deployed_v102_database_verifies_the_paper_meta_covering_index(
             rollback.execute("PRAGMA user_version = 102")
         assert not module.verify_snapshot(database2, storage2).ok
     finally:
-        module.MIGRATION_MANIFEST[(102, 107)] = original
+        module.MIGRATION_MANIFEST[(102, 108)] = original
 
 
 @pytest.mark.legacy_upgrade_contract
@@ -518,11 +518,11 @@ def test_deployed_v103_database_verifies_the_paper_card_table(tmp_path, _upgrade
     assert result.source_user_version == 103
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.changed_tables == []
-    manifest = module.MIGRATION_MANIFEST[(103, 107)]
+    manifest = module.MIGRATION_MANIFEST[(103, 108)]
     # The chain through v106 also carries _migration_106's three tables.
     assert set(manifest["tables"]) == {"source_paper_cards"} | set(
         module.MEMORY_SUGGEST_TABLES
-    ) | set(module.NOTEBOOK_ACTIVITY_TABLES)
+    ) | set(module.NOTEBOOK_ACTIVITY_TABLES) | set(module.PUBLIC_SHARE_EVIDENCE_TABLES)
     # The chain through v105 also carries _migration_105's reading-order swap,
     # and through v106 _migration_106's two partial memory_items indexes.
     assert set(manifest["indexes"]) == {
@@ -534,7 +534,7 @@ def test_deployed_v103_database_verifies_the_paper_card_table(tmp_path, _upgrade
     try:
         # A migration that created another table text is a discrepancy, not a
         # silent pass.
-        module.MIGRATION_MANIFEST[(103, 107)] = {
+        module.MIGRATION_MANIFEST[(103, 108)] = {
             **manifest,
             "tables": {"source_paper_cards": "CREATE TABLE source_paper_cards (x)"},
         }
@@ -545,7 +545,7 @@ def test_deployed_v103_database_verifies_the_paper_card_table(tmp_path, _upgrade
             rollback.execute("PRAGMA user_version = 103")
         assert not module.verify_snapshot(database2, storage2).ok
     finally:
-        module.MIGRATION_MANIFEST[(103, 107)] = original
+        module.MIGRATION_MANIFEST[(103, 108)] = original
 
 
 @pytest.mark.legacy_upgrade_contract
@@ -569,7 +569,7 @@ def test_deployed_v104_database_verifies_the_element_reading_order_swap(
     assert result.source_user_version == 104
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.changed_tables == []
-    manifest = module.MIGRATION_MANIFEST[(104, 107)]
+    manifest = module.MIGRATION_MANIFEST[(104, 108)]
     assert manifest["dropped_indexes"] == {
         "idx_source_elements_source_created", "idx_source_elements_source_type",
     }
@@ -585,7 +585,7 @@ def test_deployed_v104_database_verifies_the_element_reading_order_swap(
         }},
     ):
         try:
-            module.MIGRATION_MANIFEST[(104, 107)] = broken
+            module.MIGRATION_MANIFEST[(104, 108)] = broken
             again = tmp_path / f"again-{len(broken['dropped_indexes'])}"
             again.mkdir()
             database2, storage2 = _copy_upgraded_fixture(again, _upgraded_v9)
@@ -594,7 +594,7 @@ def test_deployed_v104_database_verifies_the_element_reading_order_swap(
                 rollback.execute("PRAGMA user_version = 104")
             assert not module.verify_snapshot(database2, storage2).ok
         finally:
-            module.MIGRATION_MANIFEST[(104, 107)] = original
+            module.MIGRATION_MANIFEST[(104, 108)] = original
 
 
 @pytest.mark.legacy_upgrade_contract
@@ -619,10 +619,10 @@ def test_deployed_v105_database_verifies_the_memory_suggest_schema(
     assert result.source_user_version == 105
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.changed_tables == []
-    manifest = module.MIGRATION_MANIFEST[(105, 107)]
+    manifest = module.MIGRATION_MANIFEST[(105, 108)]
     assert set(manifest["tables"]) == {
         "memory_suggest_users", "memory_suggest_jobs", "memory_suggest_fingerprints",
-        "memory_suggest_read_fences", "notebook_activity",
+        "memory_suggest_read_fences", "notebook_activity", "public_share_evidence",
     }
     assert set(manifest["indexes"]) == {
         "idx_memory_suggest_unadopted", "idx_memory_suggest_expiry",
@@ -637,7 +637,7 @@ def test_deployed_v105_database_verifies_the_memory_suggest_schema(
     try:
         # The count subtrahend / backlog index without 'rejected' would
         # undercount unadopted suggestions: a discrepancy.
-        module.MIGRATION_MANIFEST[(105, 107)] = {
+        module.MIGRATION_MANIFEST[(105, 108)] = {
             **manifest,
             "indexes": {
                 **manifest["indexes"],
@@ -653,7 +653,7 @@ def test_deployed_v105_database_verifies_the_memory_suggest_schema(
             rollback.execute("PRAGMA user_version = 105")
         assert not module.verify_snapshot(database2, storage2).ok
     finally:
-        module.MIGRATION_MANIFEST[(105, 107)] = original
+        module.MIGRATION_MANIFEST[(105, 108)] = original
 
 
 @pytest.mark.legacy_upgrade_contract
@@ -669,8 +669,8 @@ def test_deployed_previous_database_verifies_notebook_activity(tmp_path, _upgrad
     assert result.source_user_version == 106
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.changed_tables == []
-    manifest = module.MIGRATION_MANIFEST[(106, 107)]
-    assert set(manifest["tables"]) == {"notebook_activity"}
+    manifest = module.MIGRATION_MANIFEST[(106, 108)]
+    assert set(manifest["tables"]) == {"notebook_activity", "public_share_evidence"}
     assert set(manifest["indexes"]) == {"idx_notebook_activity_nb_created", "idx_notebook_activity_created"}
     with sqlite3.connect(database) as untouched:
         assert untouched.execute("PRAGMA user_version").fetchone()[0] == 106
@@ -687,7 +687,7 @@ def test_v97_hop_holds_the_findings_triggers_to_the_generator(tmp_path, _upgrade
     with sqlite3.connect(database) as rollback:
         rollback_v97(rollback)
         rollback.execute("PRAGMA user_version = 96")
-    manifest = module.MIGRATION_MANIFEST[(96, 107)]
+    manifest = module.MIGRATION_MANIFEST[(96, 108)]
     assert set(manifest["triggers"]) == {
         "sync_capture_kg_analysis_findings_insert",
         "sync_capture_kg_analysis_findings_update",
@@ -695,7 +695,7 @@ def test_v97_hop_holds_the_findings_triggers_to_the_generator(tmp_path, _upgrade
     }
     original = dict(manifest)
     try:
-        module.MIGRATION_MANIFEST[(96, 107)] = {
+        module.MIGRATION_MANIFEST[(96, 108)] = {
             **manifest,
             "triggers": {
                 **manifest["triggers"],
@@ -704,7 +704,7 @@ def test_v97_hop_holds_the_findings_triggers_to_the_generator(tmp_path, _upgrade
         }
         result = module.verify_snapshot(database, storage)
     finally:
-        module.MIGRATION_MANIFEST[(96, 107)] = original
+        module.MIGRATION_MANIFEST[(96, 108)] = original
     assert not result.ok
 
 
@@ -1849,6 +1849,27 @@ def _upgraded_v9(tmp_path_factory) -> Path:
         _upgrade_snapshot_fingerprint(fresh)
     )
     return template
+
+
+@pytest.mark.legacy_upgrade_contract
+@pytest.mark.real_sqlite_migration
+def test_deployed_v107_database_verifies_public_evidence(tmp_path, _upgraded_v9):
+    module = _load_verifier()
+    database, storage = _copy_upgraded_fixture(tmp_path, _upgraded_v9)
+    with sqlite3.connect(database) as rollback:
+        rollback_v108(rollback)
+        rollback.execute("PRAGMA user_version=107")
+    result = module.verify_snapshot(database, storage)
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 107
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+    assert set(module.MIGRATION_MANIFEST[(107, 108)]["tables"]) == {"public_share_evidence"}
+    with sqlite3.connect(database) as untouched:
+        assert untouched.execute("PRAGMA user_version").fetchone()[0] == 107
+        assert untouched.execute(
+            "SELECT name FROM sqlite_master WHERE name='public_share_evidence'"
+        ).fetchone() is None
 
 
 def _copy_upgraded_fixture(tmp_path: Path, upgraded_v9: Path) -> tuple[Path, Path]:

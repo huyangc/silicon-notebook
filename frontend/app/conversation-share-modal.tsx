@@ -605,6 +605,7 @@ export function ConversationShareModal({
             <button className="icon-button" onClick={onClose} title="关闭">×</button>
           </div>
           <div className="source-detail-body conversation-share-body">
+            <p className="tool-hint">公开或更新链接时，链接将包含引用原文及上下文，访问者可以保存副本。</p>
             {loading || countsPending || memoryPending ? (
               <p className="tool-hint" style={{ margin: 0 }}>正在加载…</p>
             ) : (<>

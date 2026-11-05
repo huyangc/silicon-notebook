@@ -50,6 +50,9 @@ CANONICAL_ID = "K-quiet zebra/xylophone 协议"
         ("/api/group-invites/inv-secret/join", "/api/group-invites/{token}/join"),
         ("/api/public/reports/rpt-secret", "/api/public/reports/{token}"),
         ("/api/public/conversations/cnv-secret", "/api/public/conversations/{token}"),
+        ("/api/public/conversations/cnv-secret/save", "/api/public/conversations/{token}/save"),
+        ("/api/public/reports/rpt-secret/save", "/api/public/reports/{token}/save"),
+        ("/silicon/api/public/reports/rpt-secret/save", "/silicon/api/public/reports/{token}/save"),
         (
             "/api/public/conversations/cnv-secret/assets/img-1",
             "/api/public/conversations/{token}/assets/{alias}",

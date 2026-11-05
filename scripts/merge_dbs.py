@@ -290,6 +290,7 @@ SKIP_SECONDARY_TABLES = [
     # v94 MCP 限时回答链接:绑定副库自己的 Agent token(agent_access_tokens 只保
     # primary),合进 primary 只会留下指向不存在 token 的死链。只保 primary。
     "answer_links",
+    "public_share_evidence",
     # v106 自动记忆建议: 个人开关与每日额度(memory_suggest_users)、单飞作业行与
     # 游标(memory_suggest_jobs)。开关与 users/user_profiles 同为主库优先, 但它是
     # 「这个部署里谁开了」的运行态, 不与副库求并集; 作业行与 agent_profile_jobs

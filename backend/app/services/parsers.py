@@ -504,8 +504,14 @@ def parse_markdown_text(
     persist 闭包，用于把 data URI 内嵌的图片落盘为资产；省略时 data URI 被剥
     离而不入库（图片不可用，但文本解析不受影响）。
     """
+    from app.domain.share_import import references_for_text, split_manifest
     from app.services.structural_markdown import parse_blocks
 
+    share_manifest, body = split_manifest(text)
+    if share_manifest is not None:
+        # Preserve original source character offsets when hiding the manifest.
+        prefix_size = len(text) - len(body)
+        text = " " * (prefix_size - 1) + "\n" + body
     blocks = parse_blocks(text)
     elements: List[SourceElement] = []
     counters: Dict[str, int] = {}
@@ -526,6 +532,12 @@ def parse_markdown_text(
             "line_start": block.line_start,
             "line_end": block.line_end,
         }
+        if share_manifest is not None:
+            references = references_for_text(share_manifest, block.text)
+            if references:
+                metadata["share_references"] = references
+            if not elements:
+                metadata["share_import"] = share_manifest
         if block.type == "heading":
             metadata["heading_level"] = block.level
             if block.anchor_id:
@@ -559,6 +571,8 @@ def parse_markdown_text(
                 asset_id = _persist_markdown_data_uri(src, persist_image, ordinal)
                 if asset_id:
                     metadata["asset_id"] = asset_id
+                elif share_manifest is not None:
+                    raise ValueError("分享图片保存失败，请重新解析来源或联系管理员。")
             elif isinstance(src, str) and resolve_image is not None:
                 try:
                     asset_id = resolve_image(src, ordinal) or ""

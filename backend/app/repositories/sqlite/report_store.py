@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from typing import Callable, Iterator
 
 from app.core.capability_tokens import new_capability_token
+from app.core.internal_observability import public_report_sections
 from app.domain.report_export import ReportExportSource
 from app.domain.report_failure_note import carries_raw_failure_note
 from app.domain.share_disclosure import (
@@ -26,11 +27,11 @@ from app.domain.share_disclosure import (
     ShareMemoryGuard,
     split_report_memory_use,
 )
-from app.repositories.sqlite.memory_store import MemoryStore
 from app.models.ask import StoredSubmittedVia
 from app.repositories.sqlite.access_sql import NOTEBOOK_READ_SQL, read_access_params
+from app.repositories.sqlite.answer_link_store import put_share_evidence_on
 from app.repositories.sqlite.database import SqliteDatabase
-from app.core.internal_observability import public_report_sections
+from app.repositories.sqlite.memory_store import MemoryStore
 
 
 def _keep_planning_memory(column: str, value: str) -> str:
@@ -446,6 +447,7 @@ class ReportStore:
         report_id: str,
         *,
         memory_guard: ShareMemoryGuard | None = None,
+        share_evidence: dict | None = None,
     ) -> str:
         """Issue (or return) the public token for one report.
 
@@ -469,6 +471,8 @@ class ReportStore:
             if row["share_token"]:
                 # Already public: nothing new is published, so nothing is asked
                 # (the page of a finished report cannot grow).
+                if share_evidence is not None:
+                    put_share_evidence_on(db, str(row["share_token"]), share_evidence)
                 return str(row["share_token"])
             if memory_guard is not None:
                 memory_guard.check(MemoryStore.memory_sources_on(
@@ -485,6 +489,8 @@ class ReportStore:
                 "WHERE id=? AND notebook_id=? RETURNING share_token",
                 (candidate, self.now(), report_id, notebook_id),
             ).fetchone()
+            if issued is not None and share_evidence is not None:
+                put_share_evidence_on(db, str(issued["share_token"]), share_evidence)
         if issued is None:
             raise KeyError(report_id)
         return str(issued["share_token"])

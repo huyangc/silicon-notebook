@@ -1,35 +1,48 @@
 """Global source Ask ownership, authority, and detached execution."""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
-from contextvars import copy_context
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import json
 import logging
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from contextvars import copy_context
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Mapping
 from uuid import uuid4
 
 from app.core.ask_retrieval_policy import DEFAULT_RETRIEVAL_EFFORT
+
 # The same ceiling the anonymous page renders by; the share-time authority
 # sweep below is bounded by it so one click can never deserialize more turns
 # than a public read of the same conversation already does.
 from app.domain.cancellation import (
-    ATTACH_STALL_SECONDS, AskExecutorGone, AskFollowFailed, AskWaitAbandoned,
+    ATTACH_STALL_SECONDS,
+    AskExecutorGone,
+    AskFollowFailed,
+    AskWaitAbandoned,
 )
 from app.domain.conversation_public_view import public_window
 from app.domain.global_ask_attribution import job_attribution
 from app.domain.share_counts import share_counts, share_prefixes
 from app.models.ask import AskRequest, QueryIntentContract, TraceStep
 from app.models.global_ask import (
-    GlobalAskIntentPreviewRequest, GlobalAskJob, GlobalAskRequest,
-    GlobalConversationDetail, GlobalConversationSummary, GlobalNotebookScope, GLOBAL_ASK_PAGE_MAX,
-    GLOBAL_ASK_PAGE_SIZE, GlobalAskSkippedNotebook, global_answer_citations,
-    FLAGGED_CITATION_MESSAGE, global_citation_flagged, global_job_notebook_ids,
+    FLAGGED_CITATION_MESSAGE,
+    GLOBAL_ASK_PAGE_MAX,
+    GLOBAL_ASK_PAGE_SIZE,
+    GlobalAskIntentPreviewRequest,
+    GlobalAskJob,
+    GlobalAskRequest,
+    GlobalAskSkippedNotebook,
+    GlobalConversationDetail,
+    GlobalConversationSummary,
+    GlobalNotebookScope,
+    global_answer_citations,
+    global_citation_flagged,
+    global_job_notebook_ids,
 )
 from app.models.sources import SourceElement
 from app.repositories.global_ask_ports import ReplacedJobUnavailable
@@ -39,14 +52,20 @@ from app.services.ask_modes import UnknownAskMode
 from app.services.cancellation import AskCancelled, raise_if_cancelled
 from app.services.evidence_attestation import evidence_attestation_seat
 from app.services.federated_run import (
-    DetachedAskTurn, FederatedRunPlan, PointerSnapshot,
+    DetachedAskTurn,
+    FederatedRunPlan,
+    PointerSnapshot,
 )
 from app.services.global_ask_feed import JobFeed
 from app.services.global_citation_check import (
-    DIAGNOSTIC_REASONS, GlobalCitationCheck, apply_outcome, check_trace_summary,
+    DIAGNOSTIC_REASONS,
+    GlobalCitationCheck,
+    apply_outcome,
+    check_trace_summary,
 )
 from app.services.global_run import global_ask_run
 from app.services.notebook_catalog import local_universe_non_empty
+
 # 待确认中心「进行中的提问」的推送入口——与笔记本内问答的 worker 同一个叶子模块。
 from app.services.pending_bus import publish_snapshot
 from app.services.retrieval_participants import ParticipantOverride
@@ -55,7 +74,6 @@ from app.services.share_disclosure import (
     require_conversation_acknowledged,
 )
 from app.services.vector_cache import LRUProcessCache
-
 
 _LOG = logging.getLogger("silicon_notebook.global_ask")
 
@@ -558,6 +576,7 @@ def _public_turn_row(job: Any) -> dict[str, Any]:
         answer = payload.get("response")
     return {
         "question": payload.get("question") or "",
+        "job_id": row.get("job_id") or "",
         "payload": answer if isinstance(answer, dict) else {},
     }
 
@@ -2665,7 +2684,7 @@ class GlobalAskService:
         }
 
     def share_conversation(self, conversation_id, *, user_id, expected_through_id="",
-                           acknowledged_memory_count=None):
+                           acknowledged_memory_count=None, evidence_preparer=None):
         """Publish this conversation behind an unguessable link AND advance the
         read watermark -- one call, exactly like the notebook-scoped endpoint.
 
@@ -2687,8 +2706,9 @@ class GlobalAskService:
         # asked to confirm anything about it.
         self._share_authority_sweep(jobs, user_id)
         require_conversation_acknowledged(count, acknowledged_memory_count)
+        evidence = evidence_preparer({"created_by": user_id, "turns": [_public_turn_row(job) for job in jobs]}) if evidence_preparer else None
         return self.store.share_conversation(
-            conversation_id, user_id, expected_through_id=boundary
+            conversation_id, user_id, expected_through_id=boundary, share_evidence=evidence
         )
 
     def conversation_share(self, conversation_id, *, user_id):

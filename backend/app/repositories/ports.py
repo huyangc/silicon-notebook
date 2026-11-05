@@ -5,10 +5,9 @@ protocols intentionally contain no business logic and are structural seams for
 the later store/service extraction.
 """
 from __future__ import annotations
-import json
-import threading
-import queue
 
+import queue
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -20,8 +19,8 @@ from typing import (
     Iterable,
     Iterator,
     List,
-    Mapping,
     Literal,
+    Mapping,
     NamedTuple,
     Optional,
     Protocol,
@@ -30,27 +29,23 @@ from typing import (
     runtime_checkable,
 )
 
+from app.repositories.public_share_ports import AnswerLinkStorePort as AnswerLinkStorePort
+
 if TYPE_CHECKING:
     import numpy as np
 
     from app.domain.share_disclosure import ShareMemoryGuard
 
 from app.core.config import Settings
-from app.repositories.access_level import NotebookAccess
-from app.repositories.auth_ports import AuthStorePort
 from app.domain.ask import AskMode
 from app.domain.cancellation import CancelEvent
 from app.domain.graph import FollowChainResult
 from app.domain.knowledge_contracts import CONCEPT_DETAIL_PAGE_MAX
 from app.domain.notebook_scale import NotebookScaleFacts
 from app.domain.report_followup import CitedReportReference, RestoredReportEvidence
-from app.domain.retrieval_experience import (
-    SITUATION_ASK_MODES,
-    clip_trace_text,
-    closed_value,
-)
-from app.domain.scale import ScaleIndexView
 from app.domain.retrieval import (
+    W_KEYWORD,
+    W_SEMANTIC,
     ChunkRetrievalPlan,
     GapRelationRow,
     KnowledgeContextOutcome,
@@ -59,8 +54,31 @@ from app.domain.retrieval import (
     RetrievedElement,
     RetrievedKnowledge,
     RetrievedRelation,
-    W_KEYWORD,
-    W_SEMANTIC,
+)
+from app.domain.retrieval_experience import (
+    SITUATION_ASK_MODES,
+    clip_trace_text,
+    closed_value,
+)
+from app.domain.scale import ScaleIndexView
+from app.models.admin import ADMIN_QUESTIONS_DEFAULT_LIMIT
+from app.models.ask import (
+    AnswerAnchor,
+    AskEvidence,
+    AskOutput,
+    AskRequest,
+    AskResponse,
+    Citation,
+    ConversationBulkDeleteResult,
+    ConversationDetail,
+    ConversationSummary,
+    FeedbackRequest,
+    FeedbackResponse,
+    NotebookSearchResponse,
+    QueryIntentContract,
+    RuleCard,
+    StoredAskOutput,
+    StoredSubmittedVia,
 )
 from app.models.identity import (
     AgentPrincipal,
@@ -70,8 +88,17 @@ from app.models.identity import (
     AgentTokenSummary,
     UserProfile,
 )
-from app.models.admin import ADMIN_QUESTIONS_DEFAULT_LIMIT
-from app.models.wishes import WISH_PAGE_DEFAULT
+from app.models.knowledge import (
+    DuplicateGroup,
+    KnowledgeGraph,
+    KnowledgeTypeCount,
+    KnowledgeUpdate,
+    MergeRequest,
+    ObjectSchemaCreate,
+    ObjectSchemaModel,
+    ObjectSchemaUpdate,
+    PaginatedKnowledge,
+)
 from app.models.memory import MemoryHit, MemoryRecord, MemoryUpdate, PaginatedMemories
 from app.models.notebooks import (
     NotebookAnalytics,
@@ -89,16 +116,10 @@ from app.models.sources import (
     SourceSummary,
     UploadedSourceSummary,
 )
-from app.models.ask import (
-    AnswerAnchor, AskEvidence, AskOutput, AskRequest, AskResponse, Citation, ConversationDetail,
-    ConversationBulkDeleteResult, ConversationSummary, FeedbackRequest,
-    FeedbackResponse, NotebookSearchResponse, QueryIntentContract, RuleCard,
-    StoredAskOutput, StoredSubmittedVia,
-)
-from app.models.knowledge import (
-    DuplicateGroup, KnowledgeGraph, KnowledgeTypeCount, KnowledgeUpdate, MergeRequest,
-    ObjectSchemaCreate, ObjectSchemaModel, ObjectSchemaUpdate, PaginatedKnowledge,
-)
+from app.models.wishes import WISH_PAGE_DEFAULT
+from app.repositories.access_level import NotebookAccess
+from app.repositories.auth_ports import AuthStorePort
+
 KNOWHOW_COLUMN_KINDS = frozenset({"anchor", "procedure", "entity", "attribute"})
 
 
@@ -591,29 +612,6 @@ class AskIntentHandleStorePort(Protocol):
     ) -> None: ...
 
     def get_intent_handle(self, token: str, *, owner_id: str) -> "dict | None": ...
-
-
-class AnswerLinkStorePort(Protocol):
-    """MCP answer links (v94/0074): expiring anonymous links to one answered
-    ask job, one per (job, issuing Agent token). Expiry is judged at read time;
-    ``issue`` purges stale rows at most once per interval."""
-
-    def issue_answer_link(
-        self,
-        *,
-        job_kind: str,
-        job_id: str,
-        owner_id: str,
-        agent_token_id: str,
-        ttl_seconds: int,
-        sweep_grace_seconds: int,
-    ) -> dict: ...
-
-    def answer_link(self, token: str) -> "dict | None": ...
-
-    # Runs inside issue_answer_link (throttled); callable on its own for tests and operators.
-    # 测试观察点:显式清扫入口,生产在签发时顺带清扫(同一 _sweep)
-    def sweep_answer_links(self, *, grace_seconds: int) -> int: ...
 
 
 class MemorySuggestStorePort(Protocol):
@@ -1285,6 +1283,7 @@ class AskStateRepository(Protocol):
         notebook_id: str,
         conversation_id: str,
         expected_through_id: str | None = None,
+        *, share_evidence: dict | None = None,
     ) -> dict: ...
     def conversation_share_state(self, notebook_id: str, conversation_id: str) -> dict: ...
     def unshare_conversation(self, notebook_id: str, conversation_id: str) -> None: ...
@@ -1343,6 +1342,7 @@ class ReportRepository(Protocol):
     def share_report(
         self, notebook_id: str, report_id: str, *,
         memory_guard: ShareMemoryGuard | None = None,
+        share_evidence: dict | None = None,
     ) -> str: ...
     def unshare_report(self, notebook_id: str, report_id: str) -> None: ...
     def report_share_token(self, notebook_id: str, report_id: str) -> str: ...

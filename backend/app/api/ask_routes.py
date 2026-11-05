@@ -7,20 +7,6 @@ from typing import Any, Iterator, List
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 
-from app.core.config import get_settings
-from app.bootstrap import application_extension_runtime
-from app.domain.ask_engine import AskPluginEngineError
-from app.domain.conversation_public_view import public_window
-
-from app.core.capability_tokens import (
-    is_answer_link_token,
-    is_global_conversation_share_token,
-)
-from app.domain.report_followup import (
-    REASON_REPORT_UNAVAILABLE,
-    LinkedReportNotFound,
-    LinkedReportNotReady,
-)
 from app.api.deps import (
     answer_link_repository,
     ask_component,
@@ -32,14 +18,23 @@ from app.api.deps import (
     require_notebook_read,
     user_error,
 )
-from app.models.notebooks import NotebookSummary
-from app.models.source_scope import (
-    BaseNotebookScope,
-    RetrievalScopeBaseReceipt,
-    RetrievalScopeLocalReceipt,
-    RetrievalScopeReceipt,
-    ResolvedSourceScope,
-    SourceScope,
+from app.api.task_stream import (
+    NDJSON_STREAM_HEADERS,
+    deliver_ask_events,
+    task_stream_response,
+)
+from app.bootstrap import application_extension_runtime
+from app.core.capability_tokens import (
+    is_answer_link_token,
+    is_global_conversation_share_token,
+)
+from app.core.config import get_settings
+from app.domain.ask_engine import AskPluginEngineError
+from app.domain.conversation_public_view import public_window
+from app.domain.report_followup import (
+    REASON_REPORT_UNAVAILABLE,
+    LinkedReportNotFound,
+    LinkedReportNotReady,
 )
 from app.models.ask import (
     AskIntentPreviewRequest,
@@ -61,12 +56,22 @@ from app.models.ask import (
     ReportLinkCheckRequest,
 )
 from app.models.identity import UserProfile
+from app.models.notebooks import NotebookSummary
+from app.models.source_scope import (
+    BaseNotebookScope,
+    ResolvedSourceScope,
+    RetrievalScopeBaseReceipt,
+    RetrievalScopeLocalReceipt,
+    RetrievalScopeReceipt,
+    SourceScope,
+)
 from app.repositories.ports import (
     AskStreamPort,
     ConversationBusyError,
     ConversationHasNoShareableAnswer,
     ConversationShareWatermarkStale,
 )
+from app.services.answer_links import AnswerLinkExpired, resolve_answer_link
 from app.services.ask_followup import (
     FollowupResolution,
     followup_resolution_context,
@@ -78,40 +83,35 @@ from app.services.ask_modes import (
     user_facing_modes,
 )
 from app.services.cancellation import AskCancelled
-from app.services.report_followup import load_linked_report, report_mode_supported
-from app.services.query_intent import (
-    conversation_intent_history,
-    validate_confirmed_intent,
-)
 from app.services.conversation_public_view import (
     memory_lookup_source_ids,
     public_conversation_payload,
     resolve_conversation_asset_alias,
 )
-from app.services.answer_links import AnswerLinkExpired, resolve_answer_link
+from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS, AssetService
+from app.services.notebook_catalog import local_universe_non_empty
 from app.services.public_share_recheck import (
     conversation_library_ids,
     mounts_still_effective,
     notebook_snapshot_still_readable,
 )
+from app.services.query_intent import (
+    conversation_intent_history,
+    validate_confirmed_intent,
+)
+from app.services.report_followup import load_linked_report, report_mode_supported
+from app.services.search_concurrency import run_under_search_gate
 from app.services.share_disclosure import (
     ConversationShareDisclosure as ConversationShareCount,
+)
+from app.services.share_disclosure import (
     ShareDisclosureRequired,
     author_memory_sources,
     conversation_share_disclosure,
     conversation_share_window,
     require_conversation_acknowledged,
 )
-from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS, AssetService
-from app.services.notebook_catalog import local_universe_non_empty
-from app.services.search_concurrency import run_under_search_gate
 from app.services.source_scope import retrieval_scope_receipt_context
-from app.api.task_stream import (
-    NDJSON_STREAM_HEADERS,
-    deliver_ask_events,
-    task_stream_response,
-)
-
 
 # Protocol heartbeat: keep the NDJSON transport active across model calls whose
 # own trace event may take longer than a reverse proxy's idle timeout.
@@ -1256,7 +1256,8 @@ def _memory_store(repo):
 
 
 def _conversation_share_count(
-    repo, notebook_id: str, conversation_id: str, author_id: str, through_id: str
+    repo, notebook_id: str, conversation_id: str, author_id: str, through_id: str,
+    evidence_turns: list | None = None,
 ) -> tuple[str, ConversationShareCount]:
     """``(boundary answer id, the author's Memory count)`` over EXACTLY the
     range a share pinned at ``through_id`` (empty = the newest answer) would
@@ -1284,6 +1285,12 @@ def _conversation_share_count(
         through_id,
         published_through_id=str(state.get("shared_through_id") or ""),
     )
+    if evidence_turns is not None:
+        for turn in detail.turns:
+            evidence_turns.append({"answer_id": turn.answer_id,
+                                   "payload": turn.response.model_dump(mode="json")})
+            if turn.answer_id == boundary:
+                break
     if not mounts_still_effective(
         notebook_id, author_id,
         conversation_library_ids([{"payload": payload} for payload in window]),
@@ -1349,11 +1356,18 @@ def share_conversation_route(
     expected = payload.expected_through_id if payload else ""
     acknowledged = payload.acknowledged_memory_count if payload else None
     with _conversation_share_errors():
+        turns: list = []
         boundary, count = _conversation_share_count(
-            repo, notebook_id, conversation_id, owner, expected
+            repo, notebook_id, conversation_id, owner, expected, turns
         )
         require_conversation_acknowledged(count, acknowledged)
-        state = repo.share_conversation(notebook_id, conversation_id, boundary)
+        previous = repo.conversation_share_state(notebook_id, conversation_id)
+        from app.services.public_share_evidence import prepare_share_evidence
+        token = previous.get("share_token") or ""
+        evidence = None
+        if not token or (payload and payload.include_original_context) or answer_link_repository().share_evidence(token):
+            evidence = prepare_share_evidence(repo, {"created_by": owner, "turns": turns}, token=token)
+        state = repo.share_conversation(notebook_id, conversation_id, boundary, share_evidence=evidence)
     return ConversationShareResponse(
         share_token=state["share_token"],
         shared_through_at=state["shared_through_at"],
@@ -1604,15 +1618,18 @@ def public_conversation_route(token: str, response: Response) -> PublicConversat
     response.headers["Cache-Control"] = "no-store"
     # The raw share token derives each image's opaque alias (T4); the deployment
     # image switch is passed as a bool so the projection stays a pure function.
-    return PublicConversation(
-        **public_conversation_payload(
+    from app.services.public_share_evidence import overlay_share_evidence
+    public = PublicConversation(
+        **overlay_share_evidence(repo, token, row, public_conversation_payload(
             row,
             share_token=token,
             images_enabled=get_settings().mineru_return_images,
             memory_sources=memory_sources,
-        ),
+        )),
         expires_at=expires_at,
     )
+    from app.domain.public_share_revision import public_share_revision
+    return public.model_copy(update={"snapshot_revision": public_share_revision(public.model_dump())})
 
 
 @public_router.get("/public/conversations/{token}/assets/{alias}")

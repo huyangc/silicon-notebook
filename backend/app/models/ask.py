@@ -13,31 +13,23 @@ from pydantic import (
     model_validator,
 )
 
-from app.models.source_scope import (
-    BaseNotebookScope,
-    RetrievalScopeBaseReceipt,
-    RetrievalScopeReceipt,
-    SourceScope,
-)
-
 from app.core.ask_retrieval_policy import (
     AMBIGUITY_QUESTION_MAX_CHARS,
-    RESOLVED_QUESTION_MAX_CHARS,
     AMBIGUITY_ROWS_MAX,
     DEFAULT_RETRIEVAL_EFFORT,
+    RESOLVED_QUESTION_MAX_CHARS,
     ResultScope,
     RetrievalEffort,
 )
 from app.core.internal_observability import public_trace_steps
-
 from app.core.model_safety import (
     safe_model_display_name,
     safe_model_error_code,
     safe_model_error_detail,
-    safe_model_finish_reason,
-    safe_model_metadata_id,
     safe_model_error_stage,
+    safe_model_finish_reason,
     safe_model_label,
+    safe_model_metadata_id,
     safe_model_support_id,
 )
 from app.domain.gap_consult import (
@@ -49,6 +41,13 @@ from app.domain.gap_consult import (
 )
 from app.models.common import Evidence
 from app.models.knowledge import KnowledgeRecord
+from app.models.public_evidence import PublicEvidence
+from app.models.source_scope import (
+    BaseNotebookScope,
+    RetrievalScopeBaseReceipt,
+    RetrievalScopeReceipt,
+    SourceScope,
+)
 
 
 class RuleCard(BaseModel):
@@ -1463,6 +1462,8 @@ class ConversationShareRequest(BaseModel):
     that body must never get a 422.
     """
 
+    include_original_context: bool = False
+
     expected_through_id: str = ""
     acknowledged_memory_count: StrictInt | None = Field(default=None, ge=0)
 
@@ -1566,6 +1567,8 @@ class PublicReference(BaseModel):
     or excerpt was clipped to its bounded prefix, so the page can mark it rather
     than drop the tail silently (codex #522 R3)."""
 
+    evidence: Optional["PublicEvidence"] = Field(default=None, exclude_if=lambda value: value is None)
+
     key: str = ""
     title: str = ""
     file_name: str = ""
@@ -1658,6 +1661,8 @@ class PublicConversation(BaseModel):
 
     ``shared_at`` is the read watermark — "内容截至何时" — so the page can state
     that new turns after it are not included."""
+
+    snapshot_revision: str = ""
 
     title: str = ""
     created_at: str = ""

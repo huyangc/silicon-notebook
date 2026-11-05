@@ -29,7 +29,7 @@ def test_notebook_activity_migration_fresh_equals_upgraded(tmp_path):
             fresh = _shape(db)
             rollback_v107(db)
             db.execute("PRAGMA user_version=106")
-        assert migrator.migrate() == [107]
+        assert migrator.migrate() == [107, 108]
         assert migrator.migrate() == []
         migrator._migration_107()
         with database.connect() as db:

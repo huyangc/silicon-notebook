@@ -3,6 +3,7 @@ from typing import List
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.internal_observability import public_report_sections
+from app.models.public_evidence import PublicEvidence
 from app.models.source_scope import BaseNotebookScope, SourceScope
 
 # The one rail on a research question's length, shared by the create request and
@@ -130,6 +131,8 @@ class PublicReportReference(BaseModel):
     same three flags `PublicReference` carries for a shared conversation).
     """
 
+    evidence: PublicEvidence | None = Field(default=None, exclude_if=lambda value: value is None)
+
     key: str = ""
     title: str = ""
     file_name: str = ""
@@ -152,6 +155,8 @@ class PublicReport(BaseModel):
     (only reachable for a pre-rail row) it is bounded with `question_truncated`
     set rather than clipped silently or returned unbounded.
     """
+
+    snapshot_revision: str = ""
 
     question: str = ""
     # Only ever True for a report created before `REPORT_QUESTION_MAX_CHARS`

@@ -37,6 +37,7 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 # shadow preflight use this reverse-totality list to reject unrelated/live
 # targets and any newly added business table that lacks a reviewed mapping.
 POSTGRES_BUSINESS_TABLES = (
+    "public_share_evidence",
     "notebook_activity",
     "agent_access_tokens",
     "agent_notebook_profile",
@@ -566,6 +567,6 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # indexes deterministic sn_utc_us(created_at) for both owner/status sampling
 # and raw conversation predecessors, preserving the same exact UTC ordering.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=107,
-    postgres_version=88,
+    sqlite_version=108,
+    postgres_version=89,
 )

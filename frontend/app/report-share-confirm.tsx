@@ -98,6 +98,7 @@ export function ReportShareConfirm({
       }}
     >
       <span className="report-share-confirm-text" role="status">{spoken}</span>
+      <p className="tool-hint">链接包含引用原文及上下文，访问者可以保存副本。</p>
       {refusal === null && (
         <button className="report-action" type="button" disabled={busy} onClick={onConfirm}>
           确认公开

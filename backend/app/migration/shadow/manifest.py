@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=107, postgres_version=88, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=108, postgres_version=89, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -942,6 +942,7 @@ _TABLES = (
         "timestamptz",
     ),
     _table("notebook_activity", ("id",), ReplicationKeyKind.DECLARED_PK, 118, "timestamptz"),
+    TableSpec("public_share_evidence", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 119),
 )
 
 MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)

@@ -7,17 +7,20 @@
 // 只做一件事——把白名单投影里的引用整形成站内的 `AnswerReference`。
 //
 // 整形刻意只填投影里**有**的东西：没有 source_id / element_id / notebook_id / url，
-// 所以卡片上「查看原文」「知识图谱」「打开笔记本」「打开链接」一个都出不来（宿主也
-// 不传任何回调）；`notebookId` 传 null，卡片不取任何附图——分享页的附图走正文里的
+// 所以卡片不进入认证来源、知识图谱或作者笔记本；公开原文只读取已冻结的 evidence。
+// `notebookId` 传 null，卡片不取任何附图——分享页的附图走正文里的
 // token 别名图片区，不经这张卡片。
 
 import { CitationPopover } from "./citation-card";
 import type { AnswerReference } from "./answer-formatting";
 import type { CitationVerification } from "./citation-verification";
 import { publicReferenceLocation } from "./public-report";
+import type { PublicEvidenceT } from "./public-report";
+import { PublicEvidence } from "./public-evidence";
 
 /** 两个公开页的引用投影的公共形状（会话那份是报告那份的超集）。 */
 export type PublicPopoverReferenceT = {
+  evidence?: PublicEvidenceT;
   key: string;
   title: string;
   file_name: string;
@@ -90,6 +93,8 @@ export function PublicCitationPopover({
       onClose={onClose}
       notes={publicReferenceNotes(reference)}
       takeFocus
-    />
+    >
+      {!reference.verification && <PublicEvidence evidence={reference.evidence} isMemory={reference.is_memory} />}
+    </CitationPopover>
   );
 }

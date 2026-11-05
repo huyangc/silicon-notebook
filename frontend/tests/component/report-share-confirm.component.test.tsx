@@ -171,7 +171,7 @@ test("0 条:不出确认条,先取披露再发与今天逐字节相同的 POST(�
   const relevant = calls.filter((c) => c.path.includes("/share"));
   expect(relevant).toEqual([
     { method: "GET", path: `${BASE}/${RID}/share/disclosure`, body: null },
-    { method: "POST", path: `${BASE}/${RID}/share`, body: null },
+    { method: "POST", path: `${BASE}/${RID}/share`, body: JSON.stringify({ include_original_context: true }) },
   ]);
 });
 
@@ -243,7 +243,7 @@ test("N>0 确认:POST 带 acknowledged_memory_count,成功后确认条收起、�
   await screen.findByRole("button", { name: "已公开，链接已复制" });
   expect(strip()).toBeNull();
   expect(shareCalls()).toEqual([
-    { method: "POST", path: `${BASE}/${RID}/share`, body: JSON.stringify({ acknowledged_memory_count: 3 }) },
+    { method: "POST", path: `${BASE}/${RID}/share`, body: JSON.stringify({ include_original_context: true, acknowledged_memory_count: 3 }) },
   ]);
   expect(announceShareLink).toHaveBeenCalledWith("tok-1");
 });
@@ -290,8 +290,8 @@ test("409:确认条就地换成服务端确数,再确认发的是新数字", asy
   await user.click(screen.getByRole("button", { name: "确认公开" }));
   await screen.findByRole("button", { name: "已公开，链接已复制" });
   expect(shareCalls().map((c) => c.body)).toEqual([
-    JSON.stringify({ acknowledged_memory_count: 3 }),
-    JSON.stringify({ acknowledged_memory_count: 5 }),
+    JSON.stringify({ include_original_context: true, acknowledged_memory_count: 3 }),
+    JSON.stringify({ include_original_context: true, acknowledged_memory_count: 5 }),
   ]);
   expect(announceShareLink).toHaveBeenCalledWith("tok-2");
 });
@@ -347,7 +347,7 @@ test("取披露失败:POST 不带确认值;0 条的报告照常公开", async ()
 
   await screen.findByRole("button", { name: "已公开，链接已复制" });
   expect(strip()).toBeNull();
-  expect(shareCalls()).toEqual([{ method: "POST", path: `${BASE}/${RID}/share`, body: null }]);
+  expect(shareCalls()).toEqual([{ method: "POST", path: `${BASE}/${RID}/share`, body: JSON.stringify({ include_original_context: true }) }]);
 });
 
 test("取披露失败 + 服务端 409:确认条用确数就地出现,确认后发这个数", async () => {
@@ -367,8 +367,8 @@ test("取披露失败 + 服务端 409:确认条用确数就地出现,确认后�
 
   await screen.findByRole("button", { name: "已公开，链接已复制" });
   expect(shareCalls().map((c) => c.body)).toEqual([
-    null,
-    JSON.stringify({ acknowledged_memory_count: 6 }),
+    JSON.stringify({ include_original_context: true }),
+    JSON.stringify({ include_original_context: true, acknowledged_memory_count: 6 }),
   ]);
 });
 

@@ -201,6 +201,7 @@ function AgentAccessFields({
       <div className="agent-scope-row">
         <label className="agent-access-check"><input type="checkbox" aria-describedby={linkHintId} checked={draft.allow_answer_links} disabled={disabled || !askOn} onChange={(event) => setDraft((current) => ({ ...current, allow_answer_links: event.target.checked }))} />允许签发限时回答链接</label>
         <small id={linkHintId} className="agent-access-hint">
+          链接包含引用原文及上下文，访问者可以保存副本。{" "}
           {!askOn && <strong className="agent-access-warn">需要先勾选问答。{" "}</strong>}
           {draft.allow_answer_links && askOn
             ? "开启后，此 Agent 可以为它的回答生成限时公开链接：任何拿到链接的人无需登录即可查看完整回答，可能包含引用到的个人记忆摘录。链接按部署设置的有效期自动失效（默认 7 天）。"

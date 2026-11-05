@@ -26,11 +26,16 @@ from mcp.server.fastmcp import Context, FastMCP
 from pydantic import BaseModel, Field, ValidationError, WithJsonSchema
 
 from app.api.deps import (
-    answer_link_repository, ask_intent_handle_repository, notebook_access_repository,
+    answer_link_repository,
+    ask_intent_handle_repository,
+    notebook_access_repository,
+    repository,
 )
 from app.core.config import get_settings
 from app.domain.agent_tools import (
-    AgentAccessDenied, capability_tier, scope_missing_message,
+    AgentAccessDenied,
+    capability_tier,
+    scope_missing_message,
 )
 from app.domain.ask_engine import AskPluginEngineError
 from app.domain.cancellation import AskExecutorGone, AskFollowFailed, AskWaitAbandoned
@@ -63,6 +68,7 @@ from app.services.report_followup import load_linked_report
 from app.services.source_scope import memory_access_context
 
 from . import global_ask as _global
+from ._messages import chinese_value_error
 from ._shared import (
     RESULT_LIMIT,
     AgentToolError,
@@ -74,13 +80,11 @@ from ._shared import (
     _run_with_progress,
     _selected_notebook,
 )
-from ._messages import chinese_value_error
 from .answer_link_page import link_page
 from .ask_pages import answer_page, linked_report_view
 from .evidence_page import evidence_page
 from .memory_context import _memory_read_allowed
 from .refs import element_ref, memory_ref
-
 
 logger = logging.getLogger(__name__)
 
@@ -388,11 +392,22 @@ def _deliver(
     _require_answer_links(live, saved_job_id=job_id)
     settings = get_settings()
     try:
+        from app.services.answer_links import _notebook_row, answer_link_job_kind
+        from app.services.public_share_evidence import prepare_share_evidence
+        repo = repository()
+        snapshot = (_notebook_row(repo, live, job_id, live.owner_id)
+                    if answer_link_job_kind(job_id) == "notebook" else
+                    global_ask_service().public_answer_job(job_id, owner_id=live.owner_id,
+                                                         allowed_notebook_ids=set(live.notebook_ids or ())))
+        if snapshot is None:
+            raise AnswerLinkUnavailable()
+        evidence = prepare_share_evidence(repo, snapshot)
         # ``link_ttl_hours`` was validated before any work
         # (``_validate_delivery``): any other error here is not the caller's.
         link = issue_answer_link(
             answer_link_repository(), settings, job_id=job_id,
             principal=live, ttl_hours=link_ttl_hours,
+            share_evidence=evidence,
         )
     except AnswerLinkUnavailable:
         raise AgentToolError("unavailable", _LINK_UNAVAILABLE) from None

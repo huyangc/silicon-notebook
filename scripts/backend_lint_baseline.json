@@ -8,9 +8,6 @@
   "backend/app/api/agent_profile_routes.py": {
     "I001": 1
   },
-  "backend/app/api/ask_routes.py": {
-    "I001": 1
-  },
   "backend/app/api/catalog_routes.py": {
     "I001": 1
   },
@@ -22,9 +19,6 @@
   },
   "backend/app/api/extension_routes.py": {
     "B004": 1,
-    "I001": 1
-  },
-  "backend/app/api/global_ask_routes.py": {
     "I001": 1
   },
   "backend/app/api/group_routes.py": {
@@ -50,9 +44,6 @@
   "backend/app/api/mcp_tools/_shared.py": {
     "I001": 1
   },
-  "backend/app/api/mcp_tools/ask.py": {
-    "I001": 1
-  },
   "backend/app/api/mcp_tools/citations.py": {
     "I001": 1
   },
@@ -69,9 +60,6 @@
     "I001": 1
   },
   "backend/app/api/notebook_routes.py": {
-    "I001": 1
-  },
-  "backend/app/api/report_routes.py": {
     "I001": 1
   },
   "backend/app/api/routes.py": {
@@ -421,9 +409,6 @@
   "backend/app/models/admin.py": {
     "I001": 1
   },
-  "backend/app/models/ask.py": {
-    "I001": 1
-  },
   "backend/app/models/common.py": {
     "F401": 2
   },
@@ -475,10 +460,6 @@
   "backend/app/repositories/pending_action_rows.py": {
     "I001": 1
   },
-  "backend/app/repositories/ports.py": {
-    "F401": 1,
-    "I001": 2
-  },
   "backend/app/repositories/postgres/_store_utils.py": {
     "I001": 1
   },
@@ -487,9 +468,6 @@
   },
   "backend/app/repositories/postgres/agent_profile_store.py": {
     "I001": 1
-  },
-  "backend/app/repositories/postgres/ask_state_store.py": {
-    "I001": 2
   },
   "backend/app/repositories/postgres/bundle.py": {
     "I001": 1
@@ -560,9 +538,6 @@
   "backend/app/repositories/postgres/query_store.py": {
     "I001": 1
   },
-  "backend/app/repositories/postgres/report_store.py": {
-    "I001": 1
-  },
   "backend/app/repositories/postgres/retrieval_indexes.py": {
     "I001": 1
   },
@@ -595,9 +570,6 @@
   },
   "backend/app/repositories/sqlite/anchor_normalization.py": {
     "I001": 1
-  },
-  "backend/app/repositories/sqlite/ask_state_store.py": {
-    "I001": 2
   },
   "backend/app/repositories/sqlite/bundle.py": {
     "I001": 1
@@ -658,9 +630,6 @@
   },
   "backend/app/repositories/sqlite/query_store.py": {
     "F401": 1,
-    "I001": 1
-  },
-  "backend/app/repositories/sqlite/report_store.py": {
     "I001": 1
   },
   "backend/app/repositories/sqlite/sharing_store.py": {
@@ -768,9 +737,6 @@
     "I001": 1
   },
   "backend/app/services/generated_question_contribution.py": {
-    "I001": 1
-  },
-  "backend/app/services/global_ask.py": {
     "I001": 1
   },
   "backend/app/services/global_citation_check.py": {
@@ -1439,9 +1405,6 @@
     "I001": 1
   },
   "backend/tests/speedups/app_routes.py": {
-    "I001": 1
-  },
-  "backend/tests/sqlite_migration_testkit.py": {
     "I001": 1
   },
   "backend/tests/test_access_sql_contract.py": {
@@ -2754,9 +2717,6 @@
   "backend/tests/test_repository_protocol_coverage.py": {
     "I001": 2
   },
-  "backend/tests/test_repository_snapshot_verifier.py": {
-    "I001": 1
-  },
   "backend/tests/test_repository_v9_fixture.py": {
     "I001": 1
   },
@@ -2805,9 +2765,6 @@
   },
   "backend/tests/test_retrieval_service_boundary.py": {
     "F401": 1,
-    "I001": 1
-  },
-  "backend/tests/test_route_domain_boundaries.py": {
     "I001": 1
   },
   "backend/tests/test_runtime_dim_bypasses.py": {

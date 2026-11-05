@@ -597,7 +597,127 @@ def global_link_end_to_end_rechecks_allowlist_and_read(env):
     assert _resolve(env, token) is None
 
 
+def fresh_public_links_freeze_real_source_elements(env):
+    headers, owner = _user(env)
+    nb = _notebook(env, headers)
+    suffix = next(_IDS)
+    sid, eid, rid = f"src-context-{suffix}", f"el-context-{suffix}", f"report-context-{suffix}"
+    with _write(env) as conn:
+        conn.execute("INSERT INTO sources (id,notebook_id,title,source_type,created_at,updated_at) VALUES (?,?,?,'upload',?,?)",
+                     (sid, nb, "文献", "2026-01-01T00:00:00", "2026-01-01T00:00:00"))
+        conn.execute("INSERT INTO source_elements (id,source_id,element_type,location_label,text,created_at) VALUES (?,?,'paragraph','page 2',?,?)",
+                     (eid, sid, "before quoted passage after", "2026-01-01T00:00:00"))
+    anchor = {"key": "k1", "object_id": eid, "object_type": "element", "label": "文献", "source_title": "文献",
+              "source_id": sid, "element_id": eid, "snippet": "quoted passage", "location_label": "page 2"}
+    body = {"answer": "answer [k1]", "conclusion": "answer [k1]", "anchors": [anchor], "citations": []}
+    job_id, cid = _seed_job(env, nb, owner, payload=body)
+    published = env.client.post(f"/api/notebooks/{nb}/conversations/{cid}/share", headers=headers)
+    assert published.status_code == 200, published.text
+    token = published.json()["share_token"]
+    actual = env.client.get(f"/api/public/conversations/{token}").json()["turns"][0]["references"][0]["evidence"]
+    assert actual["text"] == "before quoted passage after"
+    assert actual["quote"] == "quoted passage"
+    chunk_id = f"chunk-context-{suffix}"
+    with _write(env) as conn:
+        conn.execute("INSERT INTO chunks (id,notebook_id,source_id,text,element_ids,created_at) VALUES (?,?,?,?,?,?)",
+                     (chunk_id, nb, sid, "first paragraph\n\nquoted passage in second paragraph", json.dumps([eid]), "2026-01-01T00:00:00"))
+        conn.execute("INSERT INTO chunk_elements (notebook_id,element_id,chunk_id) VALUES (?,?,?)", (nb, eid, chunk_id))
+    chunk_body = {"answer": "chunk [k1]", "conclusion": "chunk", "anchors": [
+        {**anchor, "object_type": "chunk", "object_id": chunk_id, "snippet": "quoted passage in second paragraph"}
+    ]}
+    _, chunk_cid = _seed_job(env, nb, owner, payload=chunk_body)
+    chunk_shared = env.client.post(f"/api/notebooks/{nb}/conversations/{chunk_cid}/share", headers=headers)
+    assert chunk_shared.status_code == 200, chunk_shared.text
+    chunk_page = env.client.get(f"/api/public/conversations/{chunk_shared.json()['share_token']}").json()
+    assert chunk_page["turns"][0]["references"][0]["evidence"]["text"] == "first paragraph\n\nquoted passage in second paragraph"
+    with _write(env) as conn:
+        conn.execute("UPDATE source_elements SET text='changed' WHERE id=?", (eid,))
+    assert env.client.get(f"/api/public/conversations/{token}").json()["turns"][0]["references"][0]["evidence"] == actual
+    # A new report freezes the source at its own publish moment.
+    with _write(env) as conn:
+        conn.execute("UPDATE source_elements SET text='report quoted passage context' WHERE id=?", (eid,))
+        conn.execute("INSERT INTO reports (id,notebook_id,question,status,content_md,references_json,created_by,created_at,updated_at) VALUES (?,?,?,'done',?,?,?,?,?)",
+                     (rid, nb, "research", "report [k1]", json.dumps([anchor]), owner, "2026-01-01T00:00:00", "2026-01-01T00:00:00"))
+    shared_report = env.client.post(f"/api/notebooks/{nb}/reports/{rid}/share", headers=headers)
+    assert shared_report.status_code == 200, shared_report.text
+    report_token = shared_report.json()["share_token"]
+    report = env.client.get(f"/api/public/reports/{report_token}").json()
+    assert report["references"][0]["evidence"]["text"] == "report quoted passage context"
+    from unittest.mock import patch
+
+    from app.api.mcp_tools import ask as ask_module
+    principal = _token(env, owner, [nb])
+    with patch.object(ask_module, "get_settings", return_value=env.repo.settings.model_copy(update={"public_web_base_url": "https://example.test"})):
+        linked = ask_module._deliver(principal, {"job_id": job_id, "conversation_id": cid, "status": "answered", "answer": "answer"}, "link", None)
+    mcp_token = linked["link"]["url"].rsplit("/", 1)[-1]
+    mcp_page = env.client.get(f"/api/public/conversations/{mcp_token}").json()
+    assert mcp_page["turns"][0]["references"][0]["evidence"]["text"] == "report quoted passage context"
+    global_store = env.repo._runtime.global_ask_store
+    global_cid = f"gconv-context-{suffix}"
+    insert_conversation(global_store, global_cid, owner)
+    insert_job(global_store, global_cid, owner, f"gask-context-{suffix}", "2026-01-01T00:00:01", payload={
+        "question": "global question", "response": body, "resolved_notebook_ids": [nb]})
+    global_share = env.client.post(f"/api/global-ask/conversations/{global_cid}/share", headers=headers)
+    assert global_share.status_code == 200, global_share.text
+    global_token = global_share.json()["share_token"]
+    global_page = env.client.get(f"/api/public/conversations/{global_token}").json()
+    assert global_page["turns"][0]["references"][0]["evidence"]["text"] == "report quoted passage context"
+
+
+def context_publication_failures_leave_no_public_token(env):
+    from unittest.mock import patch
+
+    import pytest
+    headers, owner = _user(env)
+    nb = _notebook(env, headers)
+    _, cid = _seed_job(env, nb, owner, payload={"answer": "answer", "conclusion": "answer", "anchors": [], "citations": []})
+    url = f"/api/notebooks/{nb}/conversations/{cid}/share"
+    with patch("app.services.public_share_evidence.prepare_share_evidence", side_effect=RuntimeError("capture failed")):
+        with pytest.raises(RuntimeError, match="capture failed"):
+            env.client.post(url, headers=headers)
+    assert env.repo.conversation_share_state(nb, cid)["share_token"] == ""
+    module = type(env.repo._runtime.ask_state).__module__
+    with patch(f"{module}.put_share_evidence_on", side_effect=RuntimeError("snapshot write failed")):
+        with pytest.raises(RuntimeError, match="snapshot write failed"):
+            env.repo.share_conversation(nb, cid, share_evidence={"turn": {"__captured__": {}}})
+    assert env.repo.conversation_share_state(nb, cid)["share_token"] == ""
+
+
+def public_share_evidence_is_explicit_immutable_and_revocable(env):
+    headers, owner = _user(env)
+    nb = _notebook(env, headers)
+    _, cid = _seed_job(env, nb, owner, payload={"answer": "解释 [k1]", "conclusion": "解释", "anchors": [
+        {"key": "k1", "object_id": "OBJ-1", "label": "概念", "source_title": "概念", "object_type": "concept", "definition": "知识定义"}
+    ]})
+    # A directly minted pre-feature token is a legacy link: opening it and
+    # repeating an old client's share request cannot widen its public scope.
+    legacy = env.repo.share_conversation(nb, cid)["share_token"]
+    url = f"/api/notebooks/{nb}/conversations/{cid}/share"
+    body = env.client.get(f"/api/public/conversations/{legacy}").json()
+    assert "evidence" not in body["turns"][0]["references"][0]
+    assert env.client.post(url, headers=headers).status_code == 200
+    assert not env.store.share_evidence(legacy)
+    assert env.client.post(url, headers=headers, json={"include_original_context": True}).status_code == 200
+    evidence = env.client.get(f"/api/public/conversations/{legacy}").json()["turns"][0]["references"][0]["evidence"]
+    assert evidence["text"] == "知识定义"
+    saved = env.store.share_evidence(legacy)
+    turn_key = next(iter(saved))
+    env.store.put_share_evidence(legacy, {turn_key: {"k1": {"text": "changed"}}})
+    assert env.store.share_evidence(legacy) == saved
+    # Two publishers can prepare before either commits. A later stale
+    # prepared payload must not fill missing references of the winning turn.
+    env.store.put_share_evidence(legacy, {"missing-turn": {"__captured__": {}}})
+    env.store.put_share_evidence(legacy, {"missing-turn": {"k2": {
+        "kind": "original", "text": "later recovered source", "quote": "source"}}})
+    assert env.store.share_evidence(legacy)["missing-turn"] == {"__captured__": {}}
+    assert env.client.delete(url, headers=headers).status_code == 204
+    assert env.client.get(f"/api/public/conversations/{legacy}").status_code == 404
+
+
 CASES = {
+    "context_publication_failures_leave_no_public_token": context_publication_failures_leave_no_public_token,
+    "fresh_public_links_freeze_real_source_elements": fresh_public_links_freeze_real_source_elements,
+    "public_share_evidence_is_explicit_immutable_and_revocable": public_share_evidence_is_explicit_immutable_and_revocable,
     "issue_builds_url_from_public_web_base_url_and_reuses": issue_builds_url_from_public_web_base_url_and_reuses,
     "issue_ttl_is_validated_never_clamped": issue_ttl_is_validated_never_clamped,
     "issue_without_public_web_base_url_is_unavailable": issue_without_public_web_base_url_is_unavailable,

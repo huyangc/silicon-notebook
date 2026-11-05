@@ -742,7 +742,7 @@ test("服务端说 0 条：POST 请求体原文就是 {expected_through_id}，�
 
   fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
   await waitFor(() => expect(shareBodies).toHaveLength(1));
-  expect(shareBodies[0]).toBe('{"expected_through_id":"job-2"}');
+  expect(shareBodies[0]).toBe('{"expected_through_id":"job-2","include_original_context":true}');
 });
 
 test("服务端说 N 条：POST 请求体多一个 acknowledged_memory_count，值就是作者看到的 N", async () => {
@@ -752,7 +752,7 @@ test("服务端说 N 条：POST 请求体多一个 acknowledged_memory_count，�
 
   fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
   await waitFor(() => expect(shareBodies).toHaveLength(1));
-  expect(shareBodies[0]).toBe('{"expected_through_id":"job-2","acknowledged_memory_count":4}');
+  expect(shareBodies[0]).toBe('{"expected_through_id":"job-2","acknowledged_memory_count":4,"include_original_context":true}');
 });
 
 test("披露端点取数失败：兜底文案、POST 不带确认值；真实 409（detail 形态）带回确数，按钮改成「确认公开」", async () => {
@@ -765,14 +765,14 @@ test("披露端点取数失败：兜底文案、POST 不带确认值；真实 40
 
   fireEvent.click(screen.getByRole("button", { name: /分享到这一条/ }));
   await waitFor(() => expect(shareBodies).toHaveLength(1));
-  expect(shareBodies[0]).toBe('{"expected_through_id":"job-2"}');
+  expect(shareBodies[0]).toBe('{"expected_through_id":"job-2","include_original_context":true}');
   expect(await screen.findByText("公开页会包含 3 条你引用到的个人记忆摘录。")).toBeInTheDocument();
   expect(screen.queryByText(/本次未能统计数量/)).toBeNull();
   expect(screen.queryByRole("button", { name: /分享到这一条/ })).toBeNull();
 
   fireEvent.click(screen.getByRole("button", { name: "确认公开" }));
   await waitFor(() => expect(shareBodies).toHaveLength(2));
-  expect(shareBodies[1]).toBe('{"expected_through_id":"job-2","acknowledged_memory_count":3}');
+  expect(shareBodies[1]).toBe('{"expected_through_id":"job-2","acknowledged_memory_count":3,"include_original_context":true}');
   expect(await screen.findByLabelText("分享链接")).toBeInTheDocument();
 });
 

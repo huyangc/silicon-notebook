@@ -1,0 +1,16 @@
+"""Narrow persistence boundary for anonymous capability snapshots."""
+from typing import Protocol
+
+
+class AnswerLinkStorePort(Protocol):
+    def issue_answer_link(self, *, job_kind: str, job_id: str, owner_id: str,
+                          agent_token_id: str, ttl_seconds: int,
+                          sweep_grace_seconds: int, share_evidence: dict | None = None) -> dict: ...
+
+    def answer_link(self, token: str) -> dict | None: ...
+
+    def put_share_evidence(self, token: str, payload: dict) -> None: ...
+
+    def share_evidence(self, token: str) -> dict: ...
+
+    def sweep_answer_links(self, *, grace_seconds: int) -> int: ...

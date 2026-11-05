@@ -355,6 +355,13 @@ expired link is kept: readers see 410 "expired" meanwhile, then the sweep that r
 link becomes 404), and `MCP_ANSWER_PREVIEW_MAX_CHARS` (default 300, range 40-2000; the plain-text preview cap).
 Each token also needs "allow expiring answer links" switched on separately on the Agent access page.
 
+`PUBLIC_SHARE_EVIDENCE_MAX_CHARS` bounds each shared original passage and its context;
+its default and validated range are owned by [the product/API reference](./product-and-api.md#shared-evidence-snapshots-and-saving-to-a-notebook). This advanced setting applies to
+newly published conversation, report and MCP answer-link evidence snapshots. It does
+not widen existing links or alter the model-input truncation setting; clipped contexts
+are disclosed on the citation card. Saved copies use the ordinary source upload and
+document-capacity rails.
+
 The supported production diagnostics target is Ubuntu 24.04 running this normal
 `npm run start` flow with its single Uvicorn worker. If that deployment appears hung,
 leave it running and capture the incident **while the hang is still present**; see

@@ -774,6 +774,19 @@ run 状态仍留在检索编排层。`outline_synthesis.py` 负责把终态结�
 公开行为、精确上限与报告映射见[产品/API：大纲便签与按节合成](./docs/product-and-api_zh.md#大纲便签与按节合成)
 及相邻的深度报告章节。
 
+### 3.3.4 分享证据与导入副本
+
+`services/public_share_evidence.py` 在公开发布边界固定引用原文上下文，公开读取在现有
+链接实时复核通过后叠加白名单证据。文档原文、知识解释、个人记忆按结构化类型区分，
+匿名载荷不增加可寻址来源标识；旧链接不自动扩大公开范围。证据表按链接及稳定轮次／
+引用标识归属，是环境本地的能力数据，不进入笔记本复制、归档或跨环境同步。
+
+`services/public_share_import.py` 从服务端核验后的公开投影生成独立 Markdown 来源，
+正文引用与结构化引用清单按轮次命名，图片固化在来源文件内并由既有解析器落为来源资产。
+原文件携带清单，重新解析和笔记本归档保留引用关系；来源详情消费元素元数据展示证据。
+新提问引用导入来源，不将其中转引的文献提升为已导入的原始文档。导入复用普通摄取、
+内容摘要去重与容量检查，不从匿名上下文借用隐式管理员身份执行写操作。
+
 ### 3.4 Memory 与 Agent MCP
 
 `app.api.mcp_server` 只拥有唯一 FastMCP/SSE transport、Bearer middleware 与 session manager；`app.api.mcp_tool_host` 是唯一 FastMCP tool registration exit。它从 `app.api.mcp_tools` 十一个显式 registrar 捕获精确 25-tool core 目录，`mcp_server.PUBLIC_TOOLS` 就是这份活目录（`CORE_TOOLS` 是同名别名），文档/smoke 守卫全部由它派生，不存在第二份手抄。core handler 的 schema/validation/auth/I/O 顺序不变，统一 live token/档位/allowlist/membership 复核、owner-only 写策略、一次 progress wrapper 与 output budget；异常只映射稳定公开码。注册与 listing 零 repository/model I/O。原先「追加 startup-frozen、显式信任的进程内 `agent.tool_provider` contributor descriptor」那一半零消费者，已整体移除。

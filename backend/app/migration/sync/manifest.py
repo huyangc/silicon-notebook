@@ -704,6 +704,7 @@ _LOCAL: tuple[TableSyncSpec, ...] = (
     # MCP 限时回答链接（SQLite v94 / PostgreSQL 0074）：绑定本环境的 Agent token
     # （agent_access_tokens 本身是 LOCAL），不能跨环境，也不随笔记本同步。
     TableSyncSpec("answer_links", SyncClass.LOCAL, notes="MCP 限时回答链接，绑定本环境 Agent token"),
+    TableSyncSpec("public_share_evidence", SyncClass.LOCAL, notes="公开引用上下文快照，绑定本环境分享口令"),
     TableSyncSpec(
         "source_paper_cards", SyncClass.LOCAL,
         notes="论文卡片缓存（SQLite v104 / PostgreSQL 0085）：各环境按需懒生成，不跨环境",

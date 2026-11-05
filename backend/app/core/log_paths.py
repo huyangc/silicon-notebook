@@ -34,6 +34,11 @@ _CONTENT_SEGMENTS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("/group-invites/", re.compile(r"(/api/group-invites/)[^/?#]+(/join)$"), r"\1{token}\2"),
     ("/public/reports/", re.compile(r"(/api/public/reports/)[^/?#]+$"), r"\1{token}"),
     (
+        "/public/",
+        re.compile(r"(/api/public/(?:reports|conversations)/)[^/?#]+(/save)$"),
+        r"\1{token}\2",
+    ),
+    (
         "/public/conversations/",
         re.compile(r"(/api/public/conversations/)[^/?#]+(/assets/)[^/?#]+$"),
         r"\1{token}\2{alias}",

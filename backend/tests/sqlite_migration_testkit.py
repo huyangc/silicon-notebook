@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sqlite3
 
-
 # SQLite v78's authentication objects that v92 dropped, spelled exactly as
 # sqlite_master stores them (SQLite strips "IF NOT EXISTS").
 V78_AUTH_TABLES = {
@@ -44,8 +43,14 @@ V78_AUTH_TABLES = {
 }
 
 
+def rollback_v108(db: sqlite3.Connection) -> None:
+    """Undo the token-scoped public citation evidence snapshots."""
+    db.execute("DROP TABLE public_share_evidence")
+
+
 def rollback_v107(db: sqlite3.Connection) -> None:
     """Undo local collaboration activity, including both owned indexes."""
+    rollback_v108(db)
     db.execute("DROP TABLE notebook_activity")
 
 

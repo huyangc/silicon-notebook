@@ -6,24 +6,36 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, StrictInt
 
+from app.api.ask_routes import (
+    _report_not_ready_error,
+    _require_non_empty_scope,
+    _scope_is_empty,
+    _validate_base_scope,
+    _validate_source_scope,
+)
 from app.api.deps import (
-    repository,
     report_exporter_host,
+    repository,
     require_notebook_read,
     user_error,
 )
-from app.domain.report_export import ReportExportError, ReportExporterHostPort
+from app.domain.report_export import ReportExporterHostPort, ReportExportError
 from app.models.reports import (
     PublicReport,
     ReportCreate,
-    ReportIntentConfirm,
     ReportDetail,
     ReportExportRequest,
     ReportFollowupScope,
     ReportGenerateRequest,
+    ReportIntentConfirm,
     ReportOutlineUpdate,
     ReportShareResponse,
     ReportSummary,
+)
+from app.models.source_scope import (
+    BaseNotebookScope,
+    ResolvedSourceScope,
+    SourceScope,
 )
 from app.services.public_share_recheck import (
     mounts_still_effective,
@@ -32,9 +44,14 @@ from app.services.public_share_recheck import (
     report_source_ids,
     report_unresolved_object_ids,
 )
+from app.services.report_export import export_completed_reports
 from app.services.report_public_view import (
     public_report_payload,
     report_memory_lookup_source_ids,
+)
+from app.services.reports.intent_confirmation import (
+    ReportIntentConfirmationError,
+    confirmed_understanding,
 )
 from app.services.reports.section_failure import failed_section_errors
 from app.services.share_disclosure import (
@@ -47,24 +64,6 @@ from app.services.share_disclosure import (
     require_publishable,
     share_memory_guard,
 )
-from app.services.report_export import export_completed_reports
-from app.services.reports.intent_confirmation import (
-    ReportIntentConfirmationError,
-    confirmed_understanding,
-)
-from app.models.source_scope import (
-    BaseNotebookScope,
-    ResolvedSourceScope,
-    SourceScope,
-)
-from app.api.ask_routes import (
-    _report_not_ready_error,
-    _require_non_empty_scope,
-    _scope_is_empty,
-    _validate_base_scope,
-    _validate_source_scope,
-)
-
 
 router = APIRouter()
 # 群组共享 P1-T3b:深度报告是 P1 **唯一**放宽写面的地方。整个报告面的授权因此
@@ -763,6 +762,8 @@ class ReportShareRequest(BaseModel):
     confirm sends no body at all, exactly as before M4, and must not get a 422.
     """
 
+    include_original_context: bool = False
+
     acknowledged_memory_count: StrictInt | None = Field(default=None, ge=0)
 
 
@@ -860,9 +861,13 @@ def share_report_route(
             acknowledged=acknowledged,
             already_shared=bool(report.get("shared")),
         )
+        from app.services.public_share_evidence import prepare_report_evidence
+        prior_token = repo.report_share_token(notebook_id, report_id) if report.get("shared") else ""
+        evidence = prepare_report_evidence(repo, report, token=prior_token) if not prior_token or (payload and payload.include_original_context) else None
         token = repo.share_report(
             notebook_id, report_id,
             memory_guard=share_memory_guard(disclosure, acknowledged),
+            share_evidence=evidence,
         )
     except KeyError:
         # Deleted (with its notebook) while the share waited for a cited row.
@@ -983,9 +988,12 @@ def public_report_route(token: str, response: Response) -> PublicReport:
     # Every open is re-authorized above; no browser or proxy may keep a copy
     # that outlives a revocation (as the public conversation routes do).
     response.headers["Cache-Control"] = "no-store"
-    return PublicReport(**public_report_payload(
+    from app.services.public_share_evidence import overlay_report_evidence
+    public = PublicReport(**overlay_report_evidence(repo, token, public_report_payload(
         row, references, memory_sources, failed_errors=failed_errors
-    ))
+    )))
+    from app.domain.public_share_revision import public_share_revision
+    return public.model_copy(update={"snapshot_revision": public_share_revision(public.model_dump())})
 
 
 def _report_mounts_still_effective(repo, row: dict, references: list) -> bool:

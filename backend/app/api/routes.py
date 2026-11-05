@@ -15,6 +15,7 @@ from app.api.memory_routes import memory_router
 from app.api.notebook_collaborator_routes import router as notebook_collaborator_router
 from app.api.notebook_routes import router as notebook_router
 from app.api.notebook_transfer_routes import router as notebook_transfer_router
+from app.api.public_share_import_routes import router as public_share_import_router
 from app.api.report_routes import router as report_router
 from app.api.source_routes import router as source_router
 from app.api.system_routes import router as system_router
@@ -32,6 +33,7 @@ for domain_router in (
     knowledge_router,
     ask_router,
     report_router,
+    public_share_import_router,
     kg_router,
     admin_router,
     # 命令目录(方案 C·C1b)追加在末尾,只是延续「新增域路由器接在末尾」的一贯写法,
