@@ -20,6 +20,7 @@ import pytest
 
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from app.repositories.postgres.unified_kg_store import UnifiedKgStore
 from tests import board_partition_store_cases as cases
 
@@ -161,7 +162,7 @@ def pin_database(request, postgres_settings):
         Path(__file__).resolve().parents[3],
     )
     try:
-        assert PostgresMigrator(database).migrate() == 88
+        assert PostgresMigrator(database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
         _seed(database, *SHAPES[request.param])
         yield database
     finally:

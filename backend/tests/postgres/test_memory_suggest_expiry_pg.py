@@ -9,6 +9,7 @@ from psycopg.types.json import Jsonb
 from app.repositories.postgres.memory_store import MemoryStore
 from app.repositories.postgres.memory_suggest_store import MemorySuggestStore
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from tests import memory_suggest_adoption_cases as adoption
 from tests import memory_suggest_expiry_cases as cases
 from tests import memory_suggest_write_cases as writes
@@ -19,7 +20,7 @@ pytestmark = pytest.mark.postgres_integration
 @pytest.fixture
 def world(postgres_database):
     database = postgres_database
-    assert PostgresMigrator(database).migrate() == 88
+    assert PostgresMigrator(database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     counter = itertools.count(1)
 
     def new_id(prefix):

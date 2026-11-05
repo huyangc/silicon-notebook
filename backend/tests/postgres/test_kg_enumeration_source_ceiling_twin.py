@@ -23,6 +23,7 @@ from app.core.config import Settings
 from app.repositories.postgres import source_ceiling
 from app.repositories.postgres.knowledge_store import KnowledgeStore as PgKnowledgeStore
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from app.repositories.sqlite.knowledge_store import KnowledgeStore as SqliteKnowledgeStore
 from app.services.repository_runtime import RepositoryCompatibilitySeams
 from app.services.sqlite_repository import SQLiteRepository
@@ -69,7 +70,7 @@ def _count(store, connection, supported, excluding):
 def test_postgres_and_sqlite_agree_on_pages_and_counts(
     postgres_database, tmp_path, monkeypatch, backfilled,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.write() as connection:
         fx.seed(lambda sql, params: connection.execute(sql, params), "%s",
                 backfilled=backfilled,
@@ -104,7 +105,7 @@ def test_postgres_and_sqlite_agree_on_pages_and_counts(
 
 
 def test_postgres_no_ceiling_statements_are_byte_identical(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.write() as connection:
         fx.seed(lambda sql, params: connection.execute(sql, params), "%s",
                 backfilled=True,
@@ -153,7 +154,7 @@ def test_postgres_no_ceiling_statements_are_byte_identical(postgres_database):
 
 
 def _seeded_store(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.write() as connection:
         fx.seed(lambda sql, params: connection.execute(sql, params), "%s",
                 backfilled=True,

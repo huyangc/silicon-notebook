@@ -36,6 +36,7 @@ from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.group_store import _clear_suggest_jobs_without_read_on
 from app.repositories.postgres.memory_suggest_store import MemorySuggestStore
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
 pytestmark = [
     pytest.mark.postgres_integration,
@@ -71,7 +72,7 @@ def order_database(postgres_settings):
         Path(__file__).resolve().parents[3],
     )
     try:
-        assert PostgresMigrator(database).migrate() == 88
+        assert PostgresMigrator(database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
         _seed(database)
         yield database
     finally:

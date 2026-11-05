@@ -17,6 +17,7 @@ import psycopg
 import pytest
 
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from tests import promotion_provenance_migration_cases as cases
 
 pytestmark = [
@@ -46,13 +47,13 @@ def test_pg_upgrade_rewrites_foreign_entries_to_the_librarys_own_provenance(
     postgres_database,
 ):
     _seed_at_67(postgres_database)
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     cases.assert_migrated(_snapshot(postgres_database))
 
 
 def test_pg_reexecuting_the_frozen_sql_changes_nothing(postgres_database):
     _seed_at_67(postgres_database)
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     after = _snapshot(postgres_database)
     with postgres_database.write() as db:
         db.execute(MIGRATION.read_text(encoding="utf-8"), prepare=False)

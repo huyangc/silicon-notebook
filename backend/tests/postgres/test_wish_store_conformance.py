@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 import pytest
 
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from app.repositories.postgres.wish_store import WishStore
-
 
 pytestmark = pytest.mark.postgres_integration
 NOW = datetime(2026, 8, 31, 8, 0, tzinfo=timezone.utc)
@@ -24,7 +24,7 @@ def _seed_user(database, user_id: str, role: str) -> None:
 
 @pytest.fixture
 def store(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     counter = iter(("wish-feature", "wish-rejected", "wish-plan", "wish-bug"))
     return WishStore(
         postgres_database,

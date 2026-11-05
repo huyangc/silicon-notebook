@@ -18,6 +18,7 @@ import pytest
 
 from app.repositories.postgres._store_utils import normalize_timestamp
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
 pytestmark = [
     pytest.mark.postgres_integration,
@@ -36,7 +37,7 @@ def _rejected_then_cleared(postgres_database, migrator, *, before: int, index: s
     assert migrator.migrate(target_version=before) == before
     with postgres_database.write() as db:
         db.execute(f"DROP INDEX {index}")
-    assert migrator.migrate() == 88
+    assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
 
 
 @pytest.mark.parametrize(
@@ -122,7 +123,7 @@ def test_0084_accepts_the_index_the_builder_builds(postgres_database):
     with psycopg.connect(postgres_database.settings.database_url, autocommit=True) as conn:
         schema = conn.execute("SELECT current_schema()").fetchone()[0]
         conn.execute(spec.ddl(schema, concurrently=True))
-    assert migrator.migrate() == 88
+    assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.connect() as db:
         definition = db.execute(
             "SELECT pg_get_indexdef(c.oid) AS d FROM pg_class c "
@@ -171,4 +172,4 @@ def test_0051_rejects_a_same_named_wrong_shape_index(postgres_database, index, d
     assert migrator.migrate(target_version=50) == 50
     with postgres_database.write() as db:
         db.execute(f"DROP INDEX {index}")
-    assert migrator.migrate() == 88
+    assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version

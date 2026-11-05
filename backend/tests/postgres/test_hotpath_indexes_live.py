@@ -37,7 +37,7 @@ from app.repositories.postgres.hotpath_indexes import (
     install_hotpath_indexes,
 )
 from app.repositories.postgres.migrator import PostgresMigrator
-
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
 pytestmark = pytest.mark.postgres_integration
 
@@ -80,7 +80,7 @@ def test_install_builds_all_eight_concurrently_and_is_idempotent(postgres_databa
     # is a true no-op ledger entry once the offline CONCURRENTLY builder has
     # already built every index online -- the documented relationship
     # between the two in this module's and the migration's docstrings.
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     after_migration = inspect_hotpath_indexes(database_url, schema=schema)
     assert after_migration == state
 

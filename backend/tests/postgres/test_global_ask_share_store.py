@@ -10,15 +10,15 @@ import pytest
 
 from app.repositories.global_ask_store import GlobalAskStore
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from tests.global_ask_share_cases import CASE_IDS, CASES
-
 
 pytestmark = pytest.mark.postgres_integration
 
 
 @pytest.fixture
 def store(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     return GlobalAskStore(postgres_database, marker="%s")
 
 

@@ -14,11 +14,12 @@ from datetime import datetime, timezone
 
 import pytest
 
+from app.repositories.global_ask_feedback_sql import ADMIN_QUESTION_FEEDBACK_KEYS
 from app.repositories.postgres._store_utils import jsonb
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.query_store import QueryStore as PostgresQueryStore
-
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from tests.activity_parity_cases import (
     ACTIVITY_ROWS,
     BOUND_PARITY_CASES,
@@ -38,8 +39,6 @@ from tests.activity_parity_cases import (
     REPORT_SECTION_FAILURE_SECTIONS,
 )
 from tests.clock_testkit import recent_datetime
-
-from app.repositories.global_ask_feedback_sql import ADMIN_QUESTION_FEEDBACK_KEYS
 
 # No question on these pages received any rating.
 NO_FEEDBACK = dict.fromkeys(ADMIN_QUESTION_FEEDBACK_KEYS, 0)
@@ -177,7 +176,7 @@ def _insert_global_ask(connection, job_id, conv_id, user_id, created_at, *,
 
 @pytest.fixture
 def store(postgres_database, postgres_settings):
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     return PostgresQueryStore(postgres_database, postgres_settings)
 
 
@@ -1412,7 +1411,7 @@ def test_readonly_activity_time_input_matrix(postgres_database, postgres_setting
     invalid-input transaction can leak into the following case. Other activity
     tests still own their independent function-scoped, really migrated schemas.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.write() as connection:
         _seed_parity_rows(connection)
     checks = [

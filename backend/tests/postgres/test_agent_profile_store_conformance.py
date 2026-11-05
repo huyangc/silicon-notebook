@@ -33,7 +33,6 @@ from dataclasses import dataclass
 
 import pytest
 
-from app.repositories.postgres.agent_profile_store import AgentProfileStore
 from app.repositories.ports import (
     AGENT_PROFILE_RESTART_FAILURE_MESSAGE,
     AGENT_PROFILE_SETTLE_GONE,
@@ -42,6 +41,8 @@ from app.repositories.ports import (
     AgentProfileClaimSuperseded,
     AgentProfileRevisionConflict,
 )
+from app.repositories.postgres.agent_profile_store import AgentProfileStore
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from app.services.repository_runtime import RepositoryCompatibilitySeams
 
 NOW = "2026-08-18T00:00:00+00:00"
@@ -104,7 +105,7 @@ def agent_profile_harness(request) -> AgentProfileHarness:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 88
+    assert PostgresMigrator(database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     _seed(database, notebook_id=NOTEBOOK_ID)
     yield AgentProfileHarness(
         database=database,

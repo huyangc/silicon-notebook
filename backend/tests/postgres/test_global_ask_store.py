@@ -5,14 +5,14 @@ import pytest
 from app.models.global_ask import GlobalAskJob, GlobalNotebookScope
 from app.repositories.global_ask_store import GlobalAskStore
 from app.repositories.postgres.migrator import PostgresMigrator
-
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
 pytestmark = pytest.mark.postgres_integration
 
 
 @pytest.fixture
 def store(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     return GlobalAskStore(postgres_database, marker="%s")
 
 
@@ -343,8 +343,8 @@ def test_pg_admin_job_record_returns_record_and_none_for_foreign_or_missing_job(
 
 
 def test_postgres_global_batch_authority_and_source_ceiling(store, monkeypatch):
-    from contextlib import contextmanager
     import hashlib
+    from contextlib import contextmanager
 
     from app.repositories.postgres.sharing_store import SharingStore
     from app.repositories.postgres.source_store import SourceStore
@@ -527,7 +527,7 @@ def _guarded_store(postgres_database):
     from app.repositories.postgres import access_sql
     from app.repositories.postgres.read_authority_lock import lock_reader_access_on
 
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     return GlobalAskStore(
         postgres_database, marker="%s", access_sql=access_sql,
         read_authority_lock=lock_reader_access_on,

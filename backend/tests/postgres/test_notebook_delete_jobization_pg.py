@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import pytest
 
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
+
 
 pytestmark = [
     pytest.mark.postgres_integration,
@@ -81,7 +83,7 @@ def test_migration_0049_applied_and_idempotent(postgres_repository):
 
     migrator = PostgresMigrator(repo._runtime.database)
     final_version = migrator.migrate()
-    assert final_version == 88
+    assert final_version == POSTGRES_SCHEMA_MANIFEST.postgres_version
 
 
 # ---------------------------------------------------------------------------

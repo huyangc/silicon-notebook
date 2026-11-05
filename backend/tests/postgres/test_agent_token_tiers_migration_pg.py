@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from tests import agent_token_tiers_migration_cases as cases
 
 pytestmark = [
@@ -40,13 +41,13 @@ def _snapshot(database) -> dict:
 
 def test_pg_upgrade_rewrites_every_token_to_tiers(postgres_database):
     _seed_at_68(postgres_database)
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     cases.assert_migrated(_snapshot(postgres_database))
 
 
 def test_pg_reexecuting_the_frozen_sql_changes_nothing(postgres_database):
     _seed_at_68(postgres_database)
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     after = _snapshot(postgres_database)
     with postgres_database.write() as db:
         body = MIGRATION.read_text(encoding="utf-8")
@@ -57,7 +58,7 @@ def test_pg_reexecuting_the_frozen_sql_changes_nothing(postgres_database):
 
 
 def test_pg_plaintext_column_is_nullable_c_collated_text(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.connect() as db:
         column = db.execute(
             "SELECT data_type, is_nullable, column_default, collation_name "
@@ -75,7 +76,7 @@ def test_pg_operator_check_counts_the_live_tokens_left_without_a_tier(
     migration's RAISE LOG summary reports) finds exactly the live tokens that
     ended with no tier -- the SQLite twin logs the same number."""
     _seed_at_68(postgres_database)
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.connect() as db:
         count = db.execute(
             "SELECT count(*) AS n FROM agent_access_tokens "

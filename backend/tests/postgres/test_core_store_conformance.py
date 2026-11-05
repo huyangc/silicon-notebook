@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import os
+import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-import os
 from types import SimpleNamespace
-import threading
-import time
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -21,24 +21,27 @@ from app.repositories.ports import (
     SourceElementWrite,
 )
 from app.repositories.postgres.chunk_store import ChunkStore as PostgresChunkStore
+from app.repositories.postgres.group_store import GroupStore as PostgresGroupStore
 from app.repositories.postgres.identity_store import IdentityStore as PostgresIdentityStore
 from app.repositories.postgres.kg_build_job_store import (
     KgBuildAlreadyRunning as PostgresKgBuildAlreadyRunning,
+)
+from app.repositories.postgres.kg_build_job_store import (
     KgBuildJobStore as PostgresKgBuildJobStore,
 )
-from app.repositories.postgres.group_store import GroupStore as PostgresGroupStore
-from app.repositories.postgres.notebook_store import NotebookStore as PostgresNotebookStore
 from app.repositories.postgres.model_status_store import (
     ModelStatusStore as PostgresModelStatusStore,
 )
+from app.repositories.postgres.notebook_store import NotebookStore as PostgresNotebookStore
 from app.repositories.postgres.query_store import QueryStore as PostgresQueryStore
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from app.repositories.postgres.sharing_store import SharingStore as PostgresSharingStore
 from app.repositories.postgres.source_store import SourceStore as PostgresSourceStore
+from app.services import repository_facade
 from app.services.collection_catalog import ENUMERABLE_ELEMENT_KINDS
 from app.services.notebook_catalog import NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService
 from app.services.repository_runtime import RepositoryCompatibilitySeams
-from app.services import repository_facade
 from tests.activity_parity_cases import (
     REPORT_SECTION_FAILURE_EXPECTED,
     REPORT_SECTION_FAILURE_SECTIONS,
@@ -48,7 +51,6 @@ from tests.kg_extracted_parity_cases import (
     kg_case_run_id,
     kg_case_source_id,
 )
-
 
 NOW = "2026-07-22T10:00:00+00:00"
 
@@ -92,7 +94,7 @@ def core_stores(request) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     yield CoreStores(
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
@@ -484,7 +486,9 @@ def test_set_user_search_profile_skips_the_update_when_unchanged(
     from datetime import timezone as _timezone
 
     import app.repositories.postgres.identity_store as pg_identity_store_module
-    from app.domain import search_profile as search_profile_module  # B3: merge_field now lives (and reads datetime) here
+    from app.domain import (
+        search_profile as search_profile_module,  # B3: merge_field now lives (and reads datetime) here
+    )
     from app.services.search_profile import parse_search_profile
 
     store = core_stores.identity
@@ -2401,7 +2405,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -2484,7 +2488,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -2556,7 +2560,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 88
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )

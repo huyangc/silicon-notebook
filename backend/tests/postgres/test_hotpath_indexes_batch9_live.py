@@ -22,6 +22,7 @@ from app.repositories.postgres.hotpath_indexes import (
     inspect_hotpath_indexes,
 )
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
 pytestmark = [
     pytest.mark.postgres_integration,
@@ -56,7 +57,7 @@ def test_0085_accepts_the_indexes_the_builder_builds(postgres_database):
               for row in inspect_hotpath_indexes(url, schema=schema)["indexes"]}
     assert {name: states[name] for name in _NAMES} == dict.fromkeys(_NAMES, "存在")
     assert set(_RETIRED) <= _index_names(postgres_database)
-    assert migrator.migrate() == 88
+    assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     names = _index_names(postgres_database)
     assert set(_NAMES) <= names and not set(_RETIRED) & names
     after = {row["name"]: row["state"]
@@ -73,7 +74,7 @@ def _rejected_then_cleared(postgres_database, migrator, *, index: str, match: st
     assert set(_RETIRED) <= _index_names(postgres_database)
     with postgres_database.write() as db:
         db.execute(f"DROP INDEX {index}")
-    assert migrator.migrate() == 88
+    assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
 
 
 @pytest.mark.parametrize(

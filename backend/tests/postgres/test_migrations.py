@@ -10,6 +10,7 @@ from app.migration.sync.capture import (
     expected_postgres_functions,
     expected_postgres_triggers,
 )
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from tests.postgres.conftest import _safe_ascii_text
 
 pytestmark = pytest.mark.postgres_integration
@@ -420,7 +421,7 @@ def test_packaged_migration_refuses_non_utf_database_before_any_ddl(
 def test_packaged_migrations_apply_in_order(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert len(PostgresMigrator(postgres_database).migrations) == 88
+    assert len(PostgresMigrator(postgres_database).migrations) == POSTGRES_SCHEMA_MANIFEST.postgres_version
     migrator = PostgresMigrator(postgres_database)
     assert migrator.migrate(target_version=2) == 2
     with postgres_database.connect() as conn:
@@ -464,7 +465,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_chunks_text_trgm" not in indexes
     for version in (3, 4, 5, 6, 7, 8, 9, 10, 11):
         assert migrator.migrate(target_version=version) == version
-    assert migrator.migrate() == 88
+    assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.connect() as conn:
         final_indexes = {
             row["indexname"]
@@ -1019,13 +1020,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert floor_xmin["column_default"] is None
     # The migration starts no export, so it leaves no lease behind.
     assert lease_rows == 0
-    assert ledger_versions == [
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-        22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-        41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58,
-        59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78,
-        79, 80, 81, 82, 83, 84, 85, 86, 87, 88,
-    ]
+    assert ledger_versions == list(range(1, POSTGRES_SCHEMA_MANIFEST.postgres_version + 1))
 
 
 def test_auth_simplify_migration_refuses_usernames_differing_only_by_case(
@@ -1048,7 +1043,7 @@ def test_auth_simplify_migration_refuses_usernames_differing_only_by_case(
         migrator.migrate()
     with postgres_database.write() as connection:
         connection.execute("UPDATE users SET username='b12345678' WHERE id='user-b'")
-    assert migrator.migrate() == 88
+    assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.connect() as connection:
         definition = connection.execute(
             "SELECT indexdef FROM pg_indexes WHERE indexname='idx_users_username_lower'"
@@ -1110,8 +1105,8 @@ def test_auth_migrations_preserve_legacy_password_and_session(
         )
 
     # 0072 drops the staged-auth schema; credentials and sessions survive.
-    assert migrator.migrate() == 88
-    assert migrator.migrate() == 88
+    assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
+    assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.connect() as connection:
         users = {
             row["id"]: row for row in connection.execute(
@@ -1222,7 +1217,7 @@ def test_notebook_object_schema_migration_relocates_legacy_rows(postgres_databas
             ),
         )
 
-    assert migrator.migrate() == 88
+    assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.connect() as connection:
         relocated = connection.execute(
             "SELECT notebook_id,object_type,status,created_by "
@@ -1285,7 +1280,7 @@ def test_source_agent_provenance_column_is_nullable_and_unconstrained(
             "AND column_name='agent_profile_id'"
         ).fetchone() is None
 
-    assert migrator.migrate() == 88
+    assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.connect() as connection:
         column = connection.execute(
             "SELECT data_type,is_nullable,column_default,collation_name "
@@ -1360,7 +1355,7 @@ def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_datab
                 ],
             )
 
-    assert migrator.migrate() == 88
+    assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT id,canonical_id FROM concept_clusters "
