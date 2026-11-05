@@ -4,6 +4,7 @@ import re
 
 import pytest
 
+from app.core.ask_retrieval_policy import ask_retrieval_limits
 from app.models.schemas import AskRequest
 from app.services.reasoning_retrieval import ReasoningRetriever
 from tests import test_reasoning_ask as reasoning_cases
@@ -122,3 +123,22 @@ def test_invalid_final_snapshot_is_disclosed_and_preserves_previous(arepo):
         notebook.id, "RTL到GDSII流程", max_steps=2)
     assert result.analysis.findings[0].conclusion == "仍有效的判断"
     assert result.analysis.issues == ("invalid_analysis_update",)
+
+
+@pytest.mark.parametrize("update", [_snapshot("最新修订判断"), {"findings": [], "unresolved": []}])
+def test_unavailable_action_still_hands_off_its_analysis_update_at_budget_end(arepo, update):
+    notebook = _seed(arepo)
+    model = RoundModel([
+        {"next_action": "add_subquery", "new_sub_query": {"query": "工艺适用条件"},
+         "analysis": _snapshot("旧判断")},
+        {"next_action": "update_outline", "analysis": update},
+    ])
+    _bind_reasoning(arepo, model)
+    result = ReasoningRetriever.from_repository(arepo, arepo.settings).run(
+        notebook.id, "RTL到GDSII流程", max_steps=2,
+        limits=ask_retrieval_limits("standard"))
+    assert any(step.detail.get("reason") == "action_not_offered" for step in result.trace)
+    assert [finding.conclusion for finding in result.analysis.findings] == [
+        finding["conclusion"] for finding in update["findings"]]
+    assert result.analysis.unresolved == tuple(update["unresolved"])
+    assert result.analysis.stop_reason == "budget_exhausted"
