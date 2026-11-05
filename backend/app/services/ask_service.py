@@ -3727,8 +3727,10 @@ class AskService:
         refine: bool = True,
         citation_lookups: "CitationLookups | None" = None,
         report: "ReportTurn | None" = None,
+        analysis=None,
+        analysis_evidence=(),
     ) -> "_ReasoningContext":
-        return self._response_drafting._assemble_reasoning_context(notebook_id, question, top_hits, elements, cancel_event=cancel_event, chunks=chunks, chains=chains, memory_hits=memory_hits, kg_context_chars=kg_context_chars, chunk_context_chars=chunk_context_chars, element_items=element_items, structured_block=structured_block, structured_map=structured_map, collection_map_block=collection_map_block, key_offset=key_offset, external_evidence=external_evidence, trailing_chunks=trailing_chunks, refine=refine, citation_lookups=citation_lookups, report=report)
+        return self._response_drafting._assemble_reasoning_context(notebook_id, question, top_hits, elements, cancel_event=cancel_event, chunks=chunks, chains=chains, memory_hits=memory_hits, kg_context_chars=kg_context_chars, chunk_context_chars=chunk_context_chars, element_items=element_items, structured_block=structured_block, structured_map=structured_map, collection_map_block=collection_map_block, key_offset=key_offset, external_evidence=external_evidence, trailing_chunks=trailing_chunks, refine=refine, citation_lookups=citation_lookups, report=report, analysis=analysis, analysis_evidence=analysis_evidence)
 
 
     def _paper_card_evidence(self, stage, *, for_answer: bool = True) -> "PaperCardEvidence | None":
@@ -6163,6 +6165,7 @@ class AskService:
         source-graph activation and fail-soft degradation, plus the
         pre-retrieval facts the drafted answer discloses."""
         from app.application.ask_reasoning import ResponseDraftInput
+        from app.domain.analysis_handoff import AnalysisHandoff
 
         result = run.ready("result")
         return ResponseDraftInput(
@@ -6194,6 +6197,8 @@ class AskService:
             external_evidence=tuple(
                 getattr(result, "external_evidence", ()) or ()),
             spreadsheet_results=tuple(spreadsheet_results),
+            analysis=getattr(result, "analysis", AnalysisHandoff()),
+            analysis_evidence=tuple(getattr(result, "analysis_evidence", ())),
         )
 
 
@@ -6246,6 +6251,7 @@ class AskService:
             StageBoundaryError,
         )
         from app.services.collection_enumeration_answer import collection_map_block
+        from app.services.response_drafting import ANALYSIS_MISSING_NOTICE
 
         if type(stage) is not ResponseDraftInput:
             raise StageBoundaryError("invalid reasoning response draft input")
@@ -6267,8 +6273,9 @@ class AskService:
             "intent": stage.intent_contract,
         }
         report = self._reasoning_report_turn(prepared)
+        top_hits, elements, chunks = self._response_drafting._analysis_pools(stage)
         retrieved = bool(
-            stage.top_hits or stage.elements or stage.chunks or stage.chains
+            top_hits or elements or chunks or stage.chains
             or stage.memory_hits or stage.structured_batch is not None
             or stage.enumerations or map_block or stage.external_evidence
             or paper is not None
@@ -6277,8 +6284,8 @@ class AskService:
         if retrieved or report is not None:
             context = self._assemble_reasoning_context(
                 prepared.notebook_id, prepared.research_question,
-                list(stage.top_hits), list(stage.elements),
-                cancel_event=cancel_event, chunks=list(stage.chunks),
+                top_hits, elements,
+                cancel_event=cancel_event, chunks=chunks,
                 chains=list(stage.chains), memory_hits=list(stage.memory_hits),
                 kg_context_chars=limits.kg_context_chars,
                 chunk_context_chars=limits.chunk_context_chars,
@@ -6288,6 +6295,7 @@ class AskService:
                 external_evidence=stage.external_evidence,
                 refine=False,
                 report=report,
+                analysis=stage.analysis, analysis_evidence=stage.analysis_evidence,
             )
         if context is None or not (retrieved or _report_admitted_any(report)):
             evidence = AskEvidence(
@@ -6300,14 +6308,14 @@ class AskService:
                 len(manifest.candidate_knowledge) + len(manifest.candidate_chunks)
                 + len(manifest.candidate_elements)
                 if manifest is not None else
-                len(stage.top_hits) + len(stage.chunks) + len(stage.elements)
+                len(top_hits) + len(chunks) + len(elements)
             )
             evidence = build_ask_evidence(
                 context.context_block, context.id_map,
                 parse_anchors=self._parse_answer_anchors,
                 mode="reasoning",
                 relevance=_evidence_relevance(context.id_map, (
-                    *stage.top_hits, *stage.chunks, *stage.elements,
+                    *top_hits, *chunks, *elements,
                     *stage.memory_hits)),
                 recalled=recalled,
                 budget_chars=int(context.baseline.get("budget_chars") or 0),
@@ -6315,15 +6323,17 @@ class AskService:
             )
             # The report partition's objects count under their own kinds.
             _recount_selected(evidence, with_report_selected({
-                "chunk": len({item.chunk_id for item in stage.chunks}),
-                "kg": len({hit.object_id for hit in stage.top_hits})
+                "chunk": len({item.chunk_id for item in chunks}),
+                "kg": len({hit.object_id for hit in top_hits})
                 + len(stage.chains),
-                "element": len(stage.elements),
+                "element": len(elements),
                 "external": len(stage.external_evidence),
                 "memory": len(stage.memory_hits),
             }, report))
         if report is not None:
             evidence.linked_report = report.receipt(read=True)
+        if context is not None and context.analysis_missing:
+            evidence.notice = "\n\n".join(filter(None, (evidence.notice, ANALYSIS_MISSING_NOTICE)))
         step = TraceStep(
             step_type="skip",
             summary=f"仅检索：已返回 {len(evidence.items)} 条证据，未生成回答",

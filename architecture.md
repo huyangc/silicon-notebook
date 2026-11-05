@@ -651,6 +651,19 @@ Excel 专业分析插在 reasoning retrieval 结束与 response-draft seam 之�
 
 **关联报告分区**（单库问答带 `report_id` 时；可观察行为与预算见产品/API 文档「就深度报告追问（关联报告）」）。`AskService._engine_scope` 在来源天花板与 retrieval run 安装之后计算一次 `ReportFollowup`（报告行过报告门 → 判词 → 可读时由检索层 `AskCandidatePort.restore_report_references` 按 id 复原被引条目，每条读取再过同一个天花板），装进 `report_followup_context`：chunk 引擎读 `current_report_followup()`，reasoning 经 `PreparedReasoningAsk.report_followup` 显式传递。判词只有一个实现（`services/report_followup.report_link_verdict`），提问执行、`preview_reasoning_intent` 与就地预检 `report_link_check`（经 `_retrieval_ceiling` 非懒安装、不复原）三处共用；扩展引擎只让报告行过报告门（不通过为 `report_unavailable`），通过即定为 `engine_unsupported`，不读引用的归属与内容；全局（无主体）run 不计算报告。复原条目以原生对象类型与原生号段进入一个独立分区（`services/report_evidence.assemble_report_evidence`，渲染器由调用方注入、每类一次调用、按相关度跨类入选，预算 `ask_report_evidence_budget_chars` 与检索预算分开）：chunk 在记忆块之后、reasoning 在总预算截断与证据精炼之后、外部证据之前追加；不并入检索池参与排名（复原条目没有本轮检索分数）。报告块（`render_report_block`，`ask_report_context_max_chars`）经 `answer_prompt(report_block=…)` 与规则 15 进入回答 prompt。读入报告的 reasoning 轮次保持单次合成（`DefaultResponseDraftStage._draft_sectioned_attempt` 的按节合成门要求本轮没有读入报告的 `ReportTurn`），报告可读的 chunk 轮次不走文档概览快路径。回执在 `_save_answer` / `ask_evidence` 收口兜底补写（`_stamp_report_receipt`），同一处剥除 `[evidence not loaded]` 并发内容无关事件。读取失败 fail-soft 为「不读报告」（`read_failed`），`AskCancelled`、`RetrievalControlError` 与布线错误 `ReportRestoreScopeError` 照常上抛。
 
+Ask 的通用分析交接由 `domain.analysis_handoff` 的不可变 `AnalysisHandoff` /
+`AnalysisFinding` / `AnalysisEvidence` 与服务侧 `analysis_handoff` 装配器拥有。
+同一次 reflect 调用可以提交完整分析快照（分项结论、支持/反驳/不确定状态、稳定证据身份、
+未解决问题）；上一份有效快照回喂后续反思，收尾轮的更新在结束检索之前同样采纳。
+`reason` 仍只是 trace 摘要，不充当证据。宿主独立记录证据充分、检索耗尽、预算耗尽或模型失败，
+结束检索不等于问题已经解决。结果经 `ReasoningResult` → `ReasoningEvidenceSnapshot` →
+`ResponseDraftInput` 交给普通合成、每节合成及整体回退；不从持久 trace 重新猜测分析成果，
+也不增加模型调用。依赖材料只从本 run 已授权的候选池保留，关键知识对象在收尾 `top_n`
+之前保留；每次合成把稳定身份映射到自己实际装入的引用键（含节偏移）。原生证据分区未能完整
+提供的依赖，通过独立、有界的补充证据分区补入；预算不足、引用不可用或原文只能装入片段时，
+该依赖保留为缺失，分析摘要完整披露，答案追加中文核实提示。摘要是待核验的阶段成果，不能替代
+来源证据，也不保证模型判断正确。精确协议护栏、补充分区预算与轨迹字段由产品/API 和部署参考拥有。
+
 ### 3.3.1 逐步推理预算与结构化完整枚举
 
 通用问答的明确文档介绍由 `document_overview.py` 识别，`AskService` 在既有相关性检索前

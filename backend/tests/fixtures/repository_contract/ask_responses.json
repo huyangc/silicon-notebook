@@ -381,6 +381,10 @@
           },
           {
             "detail": {
+              "analysis_findings": 0,
+              "analysis_included_evidence": 0,
+              "analysis_missing_evidence": 0,
+              "analysis_stop_reason": "evidence_sufficient",
               "anchor_evidence_ids": [
                 "<chunk-id-1>"
               ],
@@ -562,6 +566,10 @@
           },
           {
             "detail": {
+              "analysis_findings": 0,
+              "analysis_included_evidence": 0,
+              "analysis_missing_evidence": 0,
+              "analysis_stop_reason": "evidence_sufficient",
               "anchor_evidence_ids": [
                 "<chunk-id-1>"
               ],
@@ -750,6 +758,10 @@
           },
           {
             "detail": {
+              "analysis_findings": 0,
+              "analysis_included_evidence": 0,
+              "analysis_missing_evidence": 0,
+              "analysis_stop_reason": "evidence_sufficient",
               "anchor_evidence_ids": [
                 "<chunk-id-1>"
               ],
@@ -966,6 +978,10 @@
           },
           {
             "detail": {
+              "analysis_findings": 0,
+              "analysis_included_evidence": 0,
+              "analysis_missing_evidence": 0,
+              "analysis_stop_reason": "evidence_sufficient",
               "anchor_evidence_ids": [
                 "<chunk-id-1>"
               ],

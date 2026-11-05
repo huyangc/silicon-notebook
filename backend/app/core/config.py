@@ -1090,6 +1090,9 @@ class Settings(BaseSettings):
     proc_min: int = Field(2, validation_alias="PROC_MIN")
     # 推理模式(mode=reasoning)护栏: Reflect 循环总步数 circuit breaker。
     reasoning_max_steps: int = Field(50, validation_alias="REASONING_MAX_STEPS")
+    reasoning_analysis_evidence_chars: int = Field(
+        12000, ge=0, le=120000, validation_alias="REASONING_ANALYSIS_EVIDENCE_CHARS",
+    )
     # 推理模式 Plan 输出子查询数上限。
     reasoning_max_subqueries: int = Field(5, validation_alias="REASONING_MAX_SUBQUERIES")
     # Agent action/cross-library expansion rails.  Defaults preserve the

@@ -14,7 +14,7 @@ import time
 import weakref
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
@@ -43,6 +43,12 @@ from app.core.config import (
 )
 from app.core.llm import budget_kwargs
 from app.core.model_values import as_text, as_text_list
+from app.domain.analysis_handoff import (
+    AnalysisEvidence,
+    AnalysisHandoff,
+    analysis_evidence_keys,
+    parse_analysis_update,
+)
 from app.domain.reflect_action import (
     EXTERNAL_EVIDENCE_MAX_ITEMS_PER_CALL,
     EXTERNAL_EVIDENCE_REFLECT_BLOCK_CHARS,
@@ -703,7 +709,7 @@ def _external_block_text(items: "Sequence[ExternalEvidence]", note: str) -> str:
     for index, item in enumerate(items, start=1):
         line = (
             f"x{index} · [external · {item.source_label}] · {item.title} · "
-            f"{item.excerpt[:_EXTERNAL_EXCERPT_PREVIEW_CHARS]}"
+            f"{item.excerpt[:_EXTERNAL_EXCERPT_PREVIEW_CHARS]} (id=x{index})"
         )
         if used + 1 + len(line) > EXTERNAL_EVIDENCE_REFLECT_BLOCK_CHARS:
             dropped += 1
@@ -3214,6 +3220,7 @@ class ReflectDecision:
     # 如实说明,循环照常进展结算(受 stale 熔断与步数上限约束),而不是像未知动作
     # 那样兜底成 answer 提前收尾。
     withheld: bool = False
+    analysis_update: object = None
 
 
 @dataclass
@@ -3375,6 +3382,8 @@ class ReasoningResult:
     # Internal selected-source regression oracle.  It is never serialized into
     # Ask/report responses; callers may emit only its redacted event payload.
     baseline_manifest: object | None = None
+    analysis: AnalysisHandoff = field(default_factory=AnalysisHandoff)
+    analysis_evidence: tuple[AnalysisEvidence, ...] = ()
 
 
 class _TraceRecorder:
@@ -3507,6 +3516,9 @@ class _ReasoningRunState:
     ever_shown_outline_keys: set
     outline_terminal_repair_used: bool
     outline_cap_repair_used: bool
+
+    # The last valid analysis snapshot, updated before any terminal break.
+    analysis: AnalysisHandoff = field(default_factory=AnalysisHandoff, init=False)
 
     # —— KG 弱支撑边回喂:全部由 reflect 循环写 ——
     kg_gap_seen: set
@@ -5333,6 +5345,7 @@ class ReasoningRetriever:
             d = ReflectDecision(
                 sufficient=sufficient_value is True,
                 next_action=action, reason=as_text(data.get("reason")))
+            d.analysis_update = data.get("analysis")
             exp = data.get("expand")
             if isinstance(exp, dict):
                 d.expand_object_id = as_text(exp.get("object_id"))
@@ -5758,7 +5771,7 @@ class ReasoningRetriever:
         """Project the exact direct-element view available to synthesis."""
         return self._summarize(
             collected, elements, chunks, chains,
-            show_ids=outline_active,
+            show_ids=True,
             shown_binding_keys=shown_binding_keys if outline_active else None,
             element_limit=limits.answer_element_items if limits else None,
             priority_element_ids={
@@ -7376,6 +7389,20 @@ class ReasoningRetriever:
         ``answer_layout``(任何一轮都可写、取最后一次;answer / sufficient 收尾轮不进
         分派,也在这里记)。"""
         raise_if_cancelled(self.cancel_event)
+        state.analysis = parse_analysis_update(decision.analysis_update, state.analysis)
+        if state.outline_terminal_repair_used and state.analysis.stop_reason != "in_progress":
+            # This round may only repair outline bindings: retrieval already
+            # ended for the preceding host-owned reason. Accept its updated
+            # analysis without relabelling that stop as budget exhaustion.
+            pass
+        elif decision.fallback:
+            state.analysis = replace(state.analysis, stop_reason="model_failure")
+        elif decision.sufficient:
+            state.analysis = replace(state.analysis, stop_reason="evidence_sufficient")
+        elif decision.next_action == "answer":
+            state.analysis = replace(state.analysis, stop_reason="retrieval_exhausted")
+        else:
+            state.analysis = replace(state.analysis, stop_reason="in_progress")
         # 上一轮「卡片/抽取被推迟」的标记在这里清零(循环链尾是零松弛的热函数)。
         state.paper_deferred_this_turn = False
         if decision.answer_layout:
@@ -8491,9 +8518,7 @@ class ReasoningRetriever:
             state.section_listing_delivered_this_turn = False
             # 连续 stale_limit 轮无有效进展 → 硬熔断, 强制走到末尾 answer(不再交模型自觉)。
             if state.stale >= self.settings.reasoning_stale_limit:
-                state.record(TraceStep(step_type="skip",
-                                 summary=f"连续 {state.stale} 轮无新进展,熔断收尾(避免空转)",
-                                 detail={"reason": "stale_circuit_breaker", "stale": state.stale}))
+                self._record_stale_stop(state)
                 if (
                     state.outline_overflow
                     and state.steps < state.max_steps
@@ -8507,6 +8532,14 @@ class ReasoningRetriever:
                     continue
                 break
 
+    @staticmethod
+    def _record_stale_stop(state: "_ReasoningRunState") -> None:
+        state.analysis = replace(state.analysis, stop_reason="retrieval_exhausted")
+        state.record(TraceStep(
+            step_type="skip", summary=f"连续 {state.stale} 轮无新进展,熔断收尾(避免空转)",
+            detail={"reason": "stale_circuit_breaker", "stale": state.stale},
+        ))
+
     def _reflect_round_ledger_notes(
         self, state: "_ReasoningRunState", *, first_reflect: bool,
     ) -> str:
@@ -8515,6 +8548,9 @@ class ReasoningRetriever:
         summary = self._reflection_summary(
             state.collected, state.elements, state.chunks, state.chains, state.outline_active,
             state.ever_shown_outline_keys, state.limits, state.outline)
+        if state.analysis.findings or state.analysis.unresolved or state.analysis.issues:
+            summary += "\n\nPrevious analysis snapshot (revise the complete snapshot as needed):\n"
+            summary += json.dumps(asdict(state.analysis), ensure_ascii=False)
         if state.no_progress:
             # 首轮空手与「查了好几轮都没新增」是两件不同的事,提示也必须不同
             # (见 first_round_empty_note):前者要的是换通道,后者才是收尾。
@@ -9616,6 +9652,8 @@ class ReasoningRetriever:
         组装 `ReasoningResult`。`top_n` 是 `run` 收到的原值(None 时在这里自适应解析)。"""
         # 证据预算在此(而非入口)解析:used_queries 到这里才定型(含 add_subquery /
         # expand_community 兄弟),预算随"问题的方面数"走。
+        if state.analysis.stop_reason == "in_progress":
+            state.analysis = replace(state.analysis, stop_reason="budget_exhausted")
         top_n = effective_top_n(
             self.settings, top_n, len(state.used_queries), limits=state.limits
         )
@@ -9697,6 +9735,8 @@ class ReasoningRetriever:
             baseline_step_usage=len(state.trace),
         )
         return ReasoningResult(
+            analysis=state.analysis,
+            analysis_evidence=self._analysis_evidence(state),
             top_hits=top_hits, elements=state.elements, trace=state.trace, chunks=state.chunks,
             chains=state.chains, enumerations=state.enumerations,
             document_reads=list(state.document_reads),
@@ -9716,6 +9756,25 @@ class ReasoningRetriever:
                         **({"failed": True}
                            if a.query in state.failed_search_queries else {})}
                        for a in state.attempted.values()])
+
+    @staticmethod
+    def _analysis_evidence(state: "_ReasoningRunState") -> tuple[AnalysisEvidence, ...]:
+        """Retain dependencies before closing rerank can evict their objects.
+
+        Only the current run's authorized evidence pools are read. Unknown
+        references remain in the analysis and are disclosed by synthesis.
+        """
+        wanted = set(analysis_evidence_keys(state.analysis))
+        return tuple(
+            AnalysisEvidence(kind, key, item)
+            for kind, items, attr in (
+                ("knowledge", state.collected.values(), "object_id"),
+                ("chunk", state.chunks, "chunk_id"),
+                ("element", state.elements, "element_id"),
+            )
+            for item in items
+            if (key := getattr(item, attr)) in wanted
+        )
 
     def run(self, notebook_id, question, history="", on_step=None, top_n=None,
             max_steps=None, intent_queries=None,

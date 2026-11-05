@@ -15,6 +15,7 @@ from typing import Any, Iterable, List, Mapping, Sequence
 from app.core.ask_context import _ASK_MODEL_ERRORS
 from app.core.llm import cap_kwargs
 from app.core.model_values import as_text_list
+from app.domain.analysis_handoff import AnalysisHandoff, render_analysis_handoff
 from app.domain.report_followup import (
     RESTORED_KIND_CHUNK,
     RESTORED_KIND_ELEMENT,
@@ -28,6 +29,7 @@ from app.domain.retrieval import KnowledgeContextOutcome
 from app.domain.retrieval_control import RetrievalControlError
 from app.models.ask import TRACE_ANCHOR_EVIDENCE_IDS_MAX, AnswerAnchor, AskResponse, Citation, TraceStep
 from app.models.knowledge import KnowledgeFieldValue, KnowledgeRecord
+from app.services.analysis_handoff import assemble_analysis_evidence
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.chunk_federation import reasoning_order_for
 from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
@@ -82,6 +84,9 @@ _NO_RETRIEVAL_EVIDENCE_MESSAGE = (
     "但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。"
 )
 
+ANALYSIS_MISSING_NOTICE = "分析所依赖的部分材料未能完整纳入本次回答；相关结论仍需核实。"
+
+
 @dataclass(frozen=True)
 class _ReasoningContext:
     """``AskService._assemble_reasoning_context``'s result: the reasoning
@@ -94,6 +99,8 @@ class _ReasoningContext:
     baseline: dict
     has_external: bool
     admitted_external: set
+    analysis_block: str = ""
+    analysis_missing: tuple[str, ...] = ()
 
 def _merged_section_baseline(rows: Sequence[Mapping[str, Any]]) -> dict:
     """One baseline capture for a sectioned synthesis: the per-section
@@ -274,6 +281,7 @@ def _synthesis_step_detail(
             for key in ("external_included", "external_dropped")
             if key in counts
         },
+        **{key: value for key, value in counts.items() if key.startswith("analysis_")},
         # 按篇原文取样(``read_document``)真正进合成 prompt 的原文元素数。
         # 同样**稀疏**、同样的理由:没有按篇取样的一轮的 detail 与接入这个特性
         # 之前逐键相等。关联报告复原证据分区自己进 prompt 的条目数
@@ -1151,6 +1159,8 @@ class DefaultResponseDraftStage:
         refine: bool = True,
         citation_lookups: "CitationLookups | None" = None,
         report: "ReportTurn | None" = None,
+        analysis: AnalysisHandoff | None = None,
+        analysis_evidence=(),
     ) -> "_ReasoningContext":
         """The reasoning synthesis context, assembled exactly as
         ``_answer_reasoning`` sends it (its parameters, same meaning; see that
@@ -1363,6 +1373,17 @@ class DefaultResponseDraftStage:
             )
         )
         has_external = context_block != pre_external_block
+        analysis_assembly = assemble_analysis_evidence(
+            context_block, id_map, analysis or AnalysisHandoff(), analysis_evidence,
+            budget_chars=self.settings.reasoning_analysis_evidence_chars,
+            key_offset=key_offset,
+            aliases={f"x{index}": item.key for index, item in enumerate(external_evidence, 1)},
+            render=lambda kind, item, **kwargs: self._render_report_kind(
+                "kg" if kind == "knowledge" else kind, [item],
+                notebook_id=notebook_id, lookups=citation_lookups, **kwargs,
+            ),
+        )
+        context_block, id_map = analysis_assembly.context_block, analysis_assembly.id_map
         # Partition the merged *source* map (structured preview + chunks +
         # elements) by numeric key range rather than trusting chunk_id_map /
         # element_id_map's sizes from before the append: _bounded_context_append
@@ -1432,6 +1453,11 @@ class DefaultResponseDraftStage:
             # 关联报告复原证据分区自己进 prompt 的条目数,同样**稀疏**:没挂报告
             # (或本轮不读报告)时不出现。
             **report_counts,
+            **({"analysis_missing_evidence": len(analysis_assembly.missing),
+                "analysis_included_evidence": len(analysis_assembly.bindings),
+                "analysis_findings": len(analysis.findings),
+                "analysis_stop_reason": analysis.stop_reason}
+               if analysis is not None else {}),
         }
         baseline = {
             "context_block": context_block,
@@ -1466,6 +1492,9 @@ class DefaultResponseDraftStage:
             baseline=baseline,
             has_external=has_external,
             admitted_external=set(admitted_external),
+            analysis_block=render_analysis_handoff(analysis, analysis_assembly.bindings)
+                if analysis is not None else "",
+            analysis_missing=analysis_assembly.missing,
         )
 
     def _answer_reasoning(
@@ -1501,6 +1530,8 @@ class DefaultResponseDraftStage:
         citation_lookups: "CitationLookups | None" = None,
         report: "ReportTurn | None" = None,
         paper: "PaperCardEvidence | None" = None,
+        analysis: AnalysisHandoff | None = None,
+        analysis_evidence=(),
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
@@ -1590,6 +1621,7 @@ class DefaultResponseDraftStage:
                 else CitationLookups()
             ),
             report=report,
+            analysis=analysis, analysis_evidence=analysis_evidence,
         )
         context_block, id_map, has_external = (
             context.context_block, context.id_map, context.has_external)
@@ -1609,6 +1641,7 @@ class DefaultResponseDraftStage:
         raw = answer_client.chat_json(
             [{"role": "user", "content": answer_prompt(
                 question, context_block, history,
+                analysis_block=context.analysis_block,
                 sectioned=sectioned,
                 section_title=section_title,
                 section_index=section_index,
@@ -1630,6 +1663,8 @@ class DefaultResponseDraftStage:
         if not isinstance(data, dict):
             raise ValueError("answer did not return a JSON object")
         answer = _answer_text(data)
+        if answer and context.analysis_missing:
+            answer += "\n\n" + ANALYSIS_MISSING_NOTICE
         llm_grounded = data.get("grounded", False) is True
         # 节模式:先按本节号段清洗正文,再解析锚点。
         #
@@ -1669,6 +1704,8 @@ class DefaultResponseDraftStage:
         external_sink: set | None = None,
         citation_lookups: "CitationLookups | None" = None,
         paper: "PaperCardEvidence | None" = None,
+        analysis: AnalysisHandoff | None = None,
+        analysis_evidence=(),
     ):
         """按节合成(设计文档 §3.1):每节一次合成调用,只喂该节绑定的证据。
 
@@ -1770,6 +1807,7 @@ class DefaultResponseDraftStage:
                     citation_lookups=citation_lookups,
                     structured_block=digest, structured_map=digest_map,
                     paper=section_paper,
+                    analysis=analysis, analysis_evidence=analysis_evidence,
                 )
                 return text_, grounded_, anchors_
 
@@ -1794,6 +1832,11 @@ class DefaultResponseDraftStage:
                 )
                 for element in item.elements
             ] + list(item.exact_chunks)
+            section_evidence += [
+                dependency.value if dependency.kind != "element" else SimpleNamespace(
+                    object_id=dependency.key, relevance=dependency.value.score)
+                for dependency in analysis_evidence
+            ]
             # 外部证据走的是**非排序**那道门(`exact_evidence_keys`),库内命中
             # 走 `evidence_pool`——两道门缺一道,一个只引站外材料的节就会被判成
             # 「引了不存在的东西」而 ungrounded,再由下面的节级封顶把整篇答案压到
@@ -1837,8 +1880,13 @@ class DefaultResponseDraftStage:
                         "section_title": item.section.title[:60],
                     },
                 ))
-            for key in merged_counts:
+            for key in ("included_kg", "included_chunks", "included_elements", "included_collections"):
                 merged_counts[key] += int(section_counts.get(key, 0) or 0)
+            if analysis is not None:
+                merged_counts["analysis_missing_evidence"] = max(
+                    merged_counts.get("analysis_missing_evidence", 0),
+                    section_counts.get("analysis_missing_evidence", 0),
+                )
             # 外部计数不参与上面那圈求和(``merged_counts`` 的键里没有它们);
             # 见循环之后的并集口径。
             rendered.append((item, text))
@@ -1852,6 +1900,9 @@ class DefaultResponseDraftStage:
                 merged_anchors.append(anchor)
         if external_sink is not None:
             external_sink.update(admitted_external)
+        if analysis is not None:
+            merged_counts.update(analysis_findings=len(analysis.findings),
+                                 analysis_stop_reason=analysis.stop_reason)
         if external_evidence:  # 稀疏,同单次合成路径
             merged_counts["external_included"] = len(admitted_external)
             merged_counts["external_dropped"] = max(
@@ -2497,6 +2548,20 @@ class DefaultResponseDraftStage:
             baseline_manifest=final_baseline_manifest,
         )
 
+    @staticmethod
+    def _analysis_pools(stage):
+        """Answer and evidence-only output share the same retained dependencies."""
+        top_hits, elements, chunks = list(stage.top_hits), list(stage.elements), list(stage.chunks)
+        for dependency in stage.analysis_evidence:
+            pool, attr = {
+                "knowledge": (top_hits, "object_id"),
+                "element": (elements, "element_id"),
+                "chunk": (chunks, "chunk_id"),
+            }[dependency.kind]
+            if not any(getattr(item, attr) == dependency.key for item in pool):
+                pool.append(dependency.value)
+        return top_hits, elements, chunks
+
     def _begin_reasoning_draft(self, stage, runtime) -> _ReasoningDraftRun:
         """The run state: the draft input rebound to the names the body reads
         (list snapshots of its evidence tuples), the attached report this turn
@@ -2515,10 +2580,8 @@ class DefaultResponseDraftStage:
         structured_batch = stage.structured_batch
         completeness_unavailable = stage.completeness_unavailable
         no_usable_kg = stage.kg_required
-        top_hits = list(stage.top_hits)
-        elements = list(stage.elements)
+        top_hits, elements, chunks = self._analysis_pools(stage)
         trace = list(stage.trace)
-        chunks = list(stage.chunks)
         chains = list(stage.chains)
         enumerations = list(stage.enumerations)
         spreadsheet_results = list(stage.spreadsheet_results)
@@ -2526,6 +2589,11 @@ class DefaultResponseDraftStage:
         reasoning_outline = list(stage.outline)
         reasoning_outline_evidence = list(stage.outline_evidence)
         historical_reasoning_chunks = list(stage.historical_chunks)
+        for dependency in stage.analysis_evidence:
+            if dependency.kind == "chunk" and not any(
+                item.chunk_id == dependency.key for item in historical_reasoning_chunks
+            ):
+                historical_reasoning_chunks.append(dependency.value)
         report = self._reasoning_report_turn(prepared)  # 关联报告:见其 docstring
         on_trace = runtime.trace_sink
         cancel_event = runtime.cancellation
@@ -2721,6 +2789,7 @@ class DefaultResponseDraftStage:
                         external_sink=admitted_external,
                         citation_lookups=run_lookups,
                         paper=run.ready("paper_evidence"),
+                        analysis=stage.analysis, analysis_evidence=stage.analysis_evidence,
                     )
         run.outline_slices, run.outline_skipped = outline_slices, outline_skipped
         run.outline_attempted, run.outline_planned = outline_attempted, outline_planned
@@ -2773,7 +2842,8 @@ class DefaultResponseDraftStage:
                 external_evidence=stage.external_evidence,
                 external_sink=admitted_external,
                 style_block=style_block, citation_lookups=run_lookups, report=report,
-                paper=paper)
+                paper=paper, analysis=stage.analysis,
+                analysis_evidence=stage.analysis_evidence)
             return ans, llm_grounded_, anchors_
 
         # 按节合成失败(某一节两次都吐不出内容)→ 整体回退单次合成,已经产出
@@ -2801,7 +2871,8 @@ class DefaultResponseDraftStage:
                 top_hits or elements or chunks or chains or memory_hits
                 or structured_batch is not None or enumerations
                 or collection_map_prompt_block or stage.external_evidence or report
-                or paper is not None):
+                or paper is not None or stage.analysis.findings or stage.analysis.unresolved
+                or stage.analysis.issues):
             # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
             fallback_err_mark = len(_err_sink)
             answer, llm_grounded, anchors, _ok = self._answer_with_retry(

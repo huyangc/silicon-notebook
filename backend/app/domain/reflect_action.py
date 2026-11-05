@@ -162,6 +162,7 @@ CORE_REFLECT_ACTION_IDS = frozenset({
 # plugin call, and the parser would read it as one.
 REFLECT_SCHEMA_TOP_LEVEL_FIELDS = frozenset({
     "sufficient",
+    "analysis",
     "next_action",
     "reason",
     "expand",

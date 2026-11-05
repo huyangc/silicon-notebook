@@ -12,6 +12,7 @@ import re
 from typing import Any, Callable, Mapping, Sequence
 
 from app.services.context_spans import Span, recorded_spans
+from app.services.analysis_handoff import ANALYSIS_EVIDENCE_KEY_BASE
 
 from app.models.ask import (
     AnswerAnchor,
@@ -83,6 +84,8 @@ def kind_for_key(key: str, id_map: Mapping[str, Mapping[str, Any]]) -> str:
     band = int(match.group(1)) % _SECTION_KEY_STRIDE
     if band >= _PAPER_CARD_BASE:
         return "paper_card"
+    if band >= ANALYSIS_EVIDENCE_KEY_BASE:
+        return "element" if object_type == "element" else "kg"
     if band >= _DOCUMENT_READ_BASE:
         return "document_read"
     if band >= _EXTERNAL_BASE:

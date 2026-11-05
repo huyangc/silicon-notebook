@@ -56,7 +56,8 @@ def test_legacy_preserves_candidate_payload_verbatim_in_the_original_user_role(c
     assert prompt.endswith("Candidates so far:\n" + candidates)
     assert "VERBATIM, quotes included" in prompt
     assert "sufficient=true only when" in prompt
-    assert "or further retrieval keeps failing" in prompt
+    assert "sufficient=true only when that per-aspect check passes." in prompt
+    assert "choose answer with sufficient=false and retain the gaps" in prompt
 
 
 def test_legacy_changing_only_candidate_tail_preserves_the_question_and_fixed_prefix():
