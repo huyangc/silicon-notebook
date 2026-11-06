@@ -219,6 +219,7 @@ function ReportMarkdownLink({ href, children }: { href?: string; children?: Reac
       return (
         <button
           type="button"
+          aria-expanded={state.selectedRefKey === key}
           className={`cite-chip${state.selectedRefKey === key ? " active" : ""}`}
           onClick={(event) => state.onSelectReference(key, event.currentTarget.getBoundingClientRect())}
         >

@@ -5632,6 +5632,8 @@ The public page has one “保存到我的笔记本” action. It opens a dialog
 
 The Markdown carries a structured citation manifest preserved through parsing, reparsing and notebook export. Source detail lets readers navigate body citations to the corresponding evidence. A saved source is an independent copy: expiration or revocation of the original link does not erase it. Later answers cite this saved source directly; its bibliography and excerpts remain secondary evidence, not a claim that the underlying documents were imported or reverified.
 
+Public pages and saved copies reuse the notebook citation card's action styling,
+typography and design tokens. Citation markers expose their expanded state consistently.
 Original-passage highlighting follows its source position in Markdown, preserving
 formatting, tables and formulas, including excerpts spanning paragraphs. Citation cards
 reposition when evidence expands or collapses to remain within the viewport; capped

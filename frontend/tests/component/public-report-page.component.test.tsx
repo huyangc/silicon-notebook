@@ -52,6 +52,7 @@ test("正文 [k] 标记渲染成可点编号，点开在标记旁弹出与站内
   // 编号取自 key 的序号（k7 → [7]），不是清单里的位置序号（那会是 [2]）。
   const chip = await screen.findByRole("button", { name: "[7]" });
   expect(chip).toHaveClass("cite-chip");
+  expect(chip).toHaveAttribute("aria-expanded", "false");
   expect(screen.queryByText("[k7]")).toBeNull();
 
   // 页底不再另列一份引用出处（与正文参考文献重复）：引用只看这张卡。
@@ -59,6 +60,7 @@ test("正文 [k] 标记渲染成可点编号，点开在标记旁弹出与站内
 
   await user.click(chip);
   const card = await screen.findByRole("dialog");
+  expect(chip).toHaveAttribute("aria-expanded", "true");
   expect(card).toHaveClass("cite-popover");
   expect(card.querySelector(".cite-detail-card")).not.toBeNull();
   expect(card).toHaveTextContent("[7]");

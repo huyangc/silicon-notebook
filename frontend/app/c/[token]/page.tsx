@@ -124,6 +124,7 @@ function PublicMarkdownLink({ href, children }: { href?: string; children?: Reac
         <button
           type="button"
           aria-label={markerName}
+          aria-expanded={state.selectedKey === key}
           title={markerName}
           className={`cite-chip${verification ? " cite-chip-unverified" : ""}${state.selectedKey === key ? " active" : ""}`}
           onClick={(event) => state.openReference(key, event.currentTarget.getBoundingClientRect())}

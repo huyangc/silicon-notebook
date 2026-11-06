@@ -1301,6 +1301,8 @@ Cross-cutting frontend interaction guardrails stay small but explicit:
   design: reuse its layout, typography, spacing, colors and components, and design
   loading, empty, error and narrow-screen states as part of the same interface.
   A bare functional form or box is not a finished UI.
+  Elements serving the same function across the system share components or style
+  rules, including their interaction states; page-specific copies must not drift.
 - A control that starts a long-running action becomes disabled immediately and
   shows a busy label or spinner until that action settles; server-side
   single-flight is not a substitute for local double-submit protection. When a
