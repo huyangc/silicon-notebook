@@ -1297,6 +1297,10 @@ ordinary paths stay low-overhead by default.
 
 Cross-cutting frontend interaction guardrails stay small but explicit:
 
+- Every frontend UI change must fit the page's existing visual and interaction
+  design: reuse its layout, typography, spacing, colors and components, and design
+  loading, empty, error and narrow-screen states as part of the same interface.
+  A bare functional form or box is not a finished UI.
 - A control that starts a long-running action becomes disabled immediately and
   shows a busy label or spinner until that action settles; server-side
   single-flight is not a substitute for local double-submit protection. When a

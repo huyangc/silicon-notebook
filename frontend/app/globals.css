@@ -14314,12 +14314,53 @@ button.tag:hover {
 
 /* 会话公开页：多轮问答竖排。复用 .public-report 的容器/引用出处/正文样式，
    只补每轮的问题条、附图区与轮次分隔。 */
-.public-share-save { margin: 12px 0; }
-.public-share-save > a { margin-left: 12px; }
+.public-share-save { margin-top: 20px; }
+.public-share-save-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; }
+.public-share-save-trigger,
+.public-share-save-submit,
+.public-share-saved-link { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+.public-share-save-trigger { font-size: 14px; min-height: 38px; }
+.public-share-save-trigger:hover:not(:disabled) { background: var(--soft); }
+.public-share-save-status { margin: 10px 0 0; color: var(--green); font-size: 13px; }
 .public-share-save-status:empty { display: none; }
-.public-share-save-form { display: grid; gap: 8px; max-width: 38rem; margin-top: 12px; }
-.public-share-save-form label { display: grid; gap: 4px; }
-.public-share-save-form input, .public-share-save-form select { width: 100%; }
+
+.public-share-save-card { max-height: calc(100dvh - 48px); display: flex; flex-direction: column; }
+.public-share-save-card .source-modal-header,
+.public-share-save-card .modal-actions { flex: 0 0 auto; }
+.public-share-save-card .source-modal-header h2 { font-size: 20px; line-height: 1.4; }
+.public-share-save-card .source-modal-header p { font-size: 13px; }
+.public-share-save-card .source-modal-header .icon-button { flex-shrink: 0; }
+.public-share-save-card .modal-actions { border-top: 1px solid var(--line); padding: 16px 24px; }
+.public-share-save-body { min-height: 0; overflow-y: auto; gap: 20px; }
+.public-share-save-preview { display: flex; align-items: flex-start; gap: 12px; padding: 14px; border-radius: 10px; background: var(--soft); }
+.public-share-save-content-icon { display: grid; place-items: center; flex: 0 0 38px; height: 38px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--muted); }
+.public-share-save-preview > div { min-width: 0; }
+.public-share-save-content-type { color: var(--muted); font-size: 12px; }
+.public-share-save-preview p { margin: 5px 0 0; font-size: 14px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
+.public-share-save-field { display: grid; gap: 8px; }
+.public-share-save-field-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.public-share-save-field-heading .inline-action { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+.public-share-save-select { position: relative; display: flex; align-items: center; }
+.public-share-save-select > svg { position: absolute; left: 12px; color: var(--muted); pointer-events: none; }
+.public-share-save-select > svg:last-child { left: auto; right: 12px; }
+.public-share-save-select select { appearance: none; width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 11px 36px; color: var(--ink); background: var(--panel); font: inherit; font-size: 14px; cursor: pointer; text-overflow: ellipsis; }
+.public-share-save-body input:focus-visible,
+.public-share-save-select select:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.public-share-save-body input:disabled,
+.public-share-save-select select:disabled { background: var(--soft); color: var(--muted); cursor: default; }
+.public-share-save-hint { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.public-share-save-loading { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 20px 0; color: var(--muted); font-size: 14px; }
+.public-share-save-error { margin: 0; color: var(--danger); font-size: 13px; line-height: 1.6; }
+.public-share-save-card .modal-actions button { font-size: 14px; }
+
+@media (max-width: 600px) {
+  .public-share-save-modal { padding: 16px; }
+  .public-share-save-card { max-height: calc(100dvh - 32px); }
+  .public-share-save-card .source-modal-header { padding: 18px; gap: 12px; }
+  .public-share-save-card .source-modal-header h2 { font-size: 18px; }
+  .public-share-save-body { padding: 18px; }
+  .public-share-save-card .modal-actions { padding: 14px 18px; }
+}
 .public-evidence { padding: 12px; border-top: 1px solid var(--border); }
 .public-evidence-note { padding: 0 12px; color: var(--text-muted); font-size: 12px; }
 .public-evidence-context { overflow-x: auto; overflow-wrap: anywhere; }

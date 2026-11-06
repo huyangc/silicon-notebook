@@ -124,6 +124,8 @@ carrier they name; neither entry point is a second product or architecture sourc
 
 ### Interactive feedback
 
+- Every frontend UI change follows the overall page design and interaction guardrails
+  in `docs/development.md`; include the interface's loading, empty, error and narrow-screen states.
 - Every control that performs an action must change visibly the moment it is pressed and return
   to its resting state on release. The baseline is one element-level `button:…:active` rule in
   `frontend/app/globals.css`; keep it on the element rather than on individual button classes so

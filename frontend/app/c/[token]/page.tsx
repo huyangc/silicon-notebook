@@ -314,7 +314,6 @@ export default function PublicConversationPage() {
           turn={turn}
           index={index}
           token={token}
-          expectedRevision={conversation.snapshot_revision}
           citePopover={citePopover?.turnIndex === index ? citePopover : null}
           onOpenReference={(key, rect) => setCitePopover({ turnIndex: index, key, rect })}
           onClosePopover={() => setCitePopover(null)}
@@ -339,7 +338,6 @@ function PublicTurnView({
   turn,
   index,
   token,
-  expectedRevision,
   citePopover,
   onOpenReference,
   onClosePopover,
@@ -347,7 +345,6 @@ function PublicTurnView({
   turn: PublicTurnT;
   index: number;
   token: string;
-  expectedRevision: string;
   /** 页面那张引用卡恰好属于本轮时才有值。号段是**每轮独立**的，高亮与 DOM id
    *  都按本轮索引隔离，避免跨轮 k1 撞车。 */
   citePopover: PublicCitePopoverState | null;
@@ -480,7 +477,6 @@ function PublicTurnView({
 
   return (
     <section className="public-turn" id={chatTurnDomId(index)}>
-      <PublicShareSave kind="conversations" token={token} title={turn.question || "分享问答"} turnIndex={index} expectedRevision={expectedRevision} />
       <div className="public-turn-question">
         <span className="public-turn-role">提问</span>
         <div className="public-turn-qbody">

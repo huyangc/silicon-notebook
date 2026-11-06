@@ -23,6 +23,7 @@ export type RootModalSlot =
   | "memory-suggestion-adopt"
   | "catalog-review"
   | "conversation-share"
+  | "public-share-save"
   | "analytics"
   | "kg-schema"
   | "kg-analysis"
@@ -123,6 +124,7 @@ export type ModalPolicy = Readonly<{
 // may sit above it; this preserves the existing analytics -> confirmation and
 // source-detail -> confirmation shapes without introducing one global activeModal.
 export const ROOT_MODAL_POLICIES: Readonly<Record<RootModalSlot, ModalPolicy>> = {
+  "public-share-save": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: true, escape: true },
   "global-ask": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: true },
   "password-change": { ownerKinds: ["actor"], conflictGroup: "primary", layer: 60, backdrop: false, escape: false },
   // 登录后异步弹出的公告，不是用户主动打开的工作流：conflictGroup 为 null，这样它
