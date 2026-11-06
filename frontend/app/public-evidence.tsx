@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState, type ReactNode } from "react";
+import { ChevronDown, ChevronUp, FileText } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -74,6 +75,7 @@ export function PublicEvidence({ evidence, isMemory = false, isImageReference = 
   evidence?: PublicEvidenceT; isMemory?: boolean; isImageReference?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const contextId = useId();
   if (!evidence?.text) return <p className="public-evidence-note">{isMemory ? "此分享未保留个人记忆上下文。"
     : isImageReference ? "此分享未保留图片说明。" : "原文已不可用"}</p>;
   // Old frozen snapshots can predate the image-description kind. Their public
@@ -83,14 +85,16 @@ export function PublicEvidence({ evidence, isMemory = false, isImageReference = 
     : evidence.kind === "knowledge" ? "知识解释" : imageDescription ? "图片说明" : "原文";
   const markdown = normalizeMathMarkdown(evidence.text);
   return <section className="public-evidence">
-    <button type="button" className="link-button inline-action" aria-expanded={expanded}
-      onClick={() => setExpanded((value) => !value)}>{expanded ? `收起${label}` : `查看${label}`}</button>
+    <button type="button" className="cite-detail-action" aria-expanded={expanded} aria-controls={expanded ? contextId : undefined}
+      onClick={() => setExpanded((value) => !value)}>
+      <FileText size={14} aria-hidden="true" />{expanded ? `收起${label}` : `查看${label}`}
+      {expanded ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+    </button>
     {expanded && <>
       {evidence.location && <p className="public-evidence-note">{evidence.location}</p>}
-      <div className="public-evidence-context">
+      <div id={contextId} role="region" aria-label={label} className="public-evidence-context cite-detail-context">
         <ReactMarkdown remarkPlugins={[remarkGfmPlugin, remarkMath]} rehypePlugins={[[rehypeQuotedPassage, { source: markdown, quote: normalizeMathMarkdown(evidence.quote) }], rehypeKatex]}
-          components={{ img: ({ alt }) => <span>{alt || "图片"}</span>,
-            a: ({ children }) => <span>{children}</span> }}>
+          components={EVIDENCE_COMPONENTS}>
           {markdown}
         </ReactMarkdown>
       </div>
@@ -98,3 +102,10 @@ export function PublicEvidence({ evidence, isMemory = false, isImageReference = 
     </>}
   </section>;
 }
+
+const EVIDENCE_COMPONENTS = {
+  img: ({ alt }: { alt?: string }) => <span>{alt || "图片"}</span>,
+  a: ({ children }: { children?: ReactNode }) => <span>{children}</span>,
+  pre: ({ children }: { children?: ReactNode }) => <pre className="answer-code">{children}</pre>,
+  table: ({ children }: { children?: ReactNode }) => <div className="answer-table-wrap"><table className="answer-table">{children}</table></div>,
+} satisfies NonNullable<Parameters<typeof ReactMarkdown>[0]["components"]>;

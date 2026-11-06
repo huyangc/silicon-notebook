@@ -13,7 +13,8 @@ export function ImportedShareText({ text, references }: { text: string; referenc
     <p>{text.split(/(\[t\d+-k?\d+\])/g).map((part, index) => {
       const key = part.slice(1, -1);
       const ref = part.startsWith("[") ? byKey.get(key) : undefined;
-      return ref ? <button key={index} type="button" className="link-button inline-action"
+      const isSelected = selected?.reference.key === key;
+      return ref ? <button key={index} type="button" className={`cite-chip${isSelected ? " active" : ""}`} aria-expanded={isSelected}
         aria-label={`查看引用 ${key}`} onClick={(event) => setSelected({ reference: ref, rect: event.currentTarget.getBoundingClientRect() })}>{part}</button> : part;
     })}</p>
     {selected && <PublicCitationPopover key={selected.reference.key} reference={selected.reference}

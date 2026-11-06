@@ -9,11 +9,19 @@ test("原文按需展开，引用段落在上下文中高亮，表格仍可读",
   const user = userEvent.setup();
   render(<PublicEvidence evidence={{ kind: "original", text: "前文。证据句。后文。\n\n| A | B |\n|---|---|\n| 1 | 2 |", quote: "证据句。", location: "p. 2", truncated: true }} />);
   expect(screen.queryByText("p. 2")).toBeNull();
-  await user.click(screen.getByRole("button", { name: "查看原文" }));
+  const toggle = screen.getByRole("button", { name: "查看原文", expanded: false });
+  expect(toggle).toHaveClass("cite-detail-action");
+  await user.click(toggle);
+  const context = screen.getByRole("region", { name: "原文" });
+  expect(toggle).toHaveAttribute("aria-controls", context.id);
+  expect(toggle).toHaveAttribute("aria-expanded", "true");
   expect(screen.getByText("证据句。").tagName).toBe("MARK");
   expect(screen.getByText("p. 2")).toBeInTheDocument();
-  expect(screen.getByRole("table")).toBeInTheDocument();
+  expect(screen.getByRole("table")).toHaveClass("answer-table");
   expect(screen.getByText("上下文过长，此处仅展示部分内容。")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "收起原文" }));
+  expect(screen.queryByRole("region", { name: "原文" })).toBeNull();
+  expect(screen.getByRole("button", { name: "查看原文", expanded: false })).toHaveFocus();
 });
 
 test("知识解释不冒充文档原文，旧分享没有原文时如实说明", async () => {
@@ -62,7 +70,11 @@ test("导入后不同轮次同号引用仍指向各自的证据", async () => {
     { key: "t1-k1", title: "第一份文献", snippet: "证据甲" },
     { key: "t2-k1", title: "第二份文献", snippet: "证据乙" },
   ]} />);
-  await user.click(screen.getByRole("button", { name: "查看引用 t2-k1" }));
+  const chip = screen.getByRole("button", { name: "查看引用 t2-k1", expanded: false });
+  expect(chip).toHaveClass("cite-chip");
+  await user.click(chip);
+  expect(chip).toHaveAttribute("aria-expanded", "true");
+  expect(chip).toHaveClass("active");
   expect(screen.getByText("证据乙")).toBeInTheDocument();
   expect(screen.queryByText("证据甲")).toBeNull();
 });

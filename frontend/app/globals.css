@@ -8439,9 +8439,11 @@ button.tag:hover {
   border-left: 3px solid #9aa6b7;
   border-radius: 8px;
   background: #fff;
-  color: #263241;
   overflow-wrap: anywhere;
 }
+
+.cite-detail-card,
+.public-evidence { color: #263241; }
 
 .cite-detail-head {
   display: flex;
@@ -8467,8 +8469,11 @@ button.tag:hover {
   font-weight: 700;
 }
 
-.cite-detail-head button {
-  margin-left: auto;
+.cite-detail-head button,
+.cite-detail-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   min-height: 28px;
   border: 1px solid #d8dee8;
   border-radius: 999px;
@@ -8480,9 +8485,18 @@ button.tag:hover {
   cursor: pointer;
 }
 
-.cite-detail-head button:disabled {
+.cite-detail-head button { margin-left: auto; }
+
+.cite-detail-head button:disabled,
+.cite-detail-action:disabled {
   cursor: default;
   opacity: 0.5;
+}
+
+.cite-detail-head button:focus-visible,
+.cite-detail-action:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
 }
 
 /* 引用卡头部的两个链接出口：外部证据（`ask.reflect_action`）的「打开链接」，
@@ -8541,7 +8555,8 @@ button.tag:hover {
   font-weight: 400;
 }
 
-.cite-detail-card h4 {
+.cite-detail-card h4,
+.cite-detail-context :is(h1, h2, h3, h4, h5, h6) {
   margin: 0;
   font-size: 14px;
   line-height: 1.45;
@@ -8569,15 +8584,17 @@ button.tag:hover {
   font-weight: 700;
 }
 
-.cite-detail-card p {
+.cite-detail-card p,
+.cite-detail-context p {
   margin: 0;
   color: #344255;
   font-size: 13px;
   line-height: 1.5;
 }
 
-.cite-detail-card small {
-  color: #6b7686;
+.cite-detail-card small,
+.public-evidence-note {
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -14361,13 +14378,16 @@ button.tag:hover {
   .public-share-save-body { padding: 18px; }
   .public-share-save-card .modal-actions { padding: 14px 18px; }
 }
-.public-evidence { padding: 12px; border-top: 1px solid var(--border); }
-.public-evidence-note { padding: 0 12px; color: var(--text-muted); font-size: 12px; }
-.public-evidence-context { overflow-x: auto; overflow-wrap: anywhere; }
+.public-evidence { display: grid; justify-items: start; gap: 10px; padding: 12px 14px; border-top: 1px solid var(--line); }
+.public-evidence-note { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.cite-popover > .public-evidence-note { padding: 12px 14px; border-top: 1px solid var(--line); }
+.public-evidence .public-evidence-note { color: var(--muted); }
+.public-evidence-context { display: grid; gap: 10px; width: 100%; min-width: 0; overflow-x: auto; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; }
+.public-evidence-context > * { min-width: 0; }
+.public-evidence-context :is(ul, ol) { margin: 0; padding-left: 20px; }
+.public-evidence-context .answer-table { min-width: 0; }
 .public-evidence-quoted-block { background-color: Mark; color: MarkText; }
-.public-evidence-context table { border-collapse: collapse; }
-.public-evidence-context th, .public-evidence-context td { padding: 4px; border: 1px solid var(--border); }
-.public-evidence blockquote { margin: 12px 0; white-space: pre-wrap; }
+.public-evidence-context blockquote { margin: 0; padding-left: 10px; border-left: 3px solid var(--line); }
 
 .public-conversation .public-turn {
   display: grid;

@@ -152,6 +152,7 @@ test("点正文引用在标记旁弹出与站内同一张引用卡，清单默�
 
   const chip = await screen.findByRole("button", { name: "[7]" });
   // 每轮的引用清单折叠在回答下方，不再铺满整屏。
+  expect(chip).toHaveAttribute("aria-expanded", "false");
   const lists = container.querySelectorAll("details.public-references-fold");
   expect(lists).toHaveLength(2);
   lists.forEach((list) => expect(list).not.toHaveAttribute("open"));
@@ -159,6 +160,7 @@ test("点正文引用在标记旁弹出与站内同一张引用卡，清单默�
 
   await user.click(chip);
   const card = await screen.findByRole("dialog");
+  expect(chip).toHaveAttribute("aria-expanded", "true");
   expect(card).toHaveClass("cite-popover");
   expect(card).toHaveTextContent("[7]");
   expect(card).toHaveTextContent("乙文");
@@ -174,6 +176,7 @@ test("点正文引用在标记旁弹出与站内同一张引用卡，清单默�
   fireEvent.keyDown(window, { key: "Escape" });
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   fireEvent.keyUp(window, { key: "Escape" });
+  expect(chip).toHaveAttribute("aria-expanded", "false");
 });
 
 test("整页只有一张引用卡：键盘从一轮的标记换到另一轮的标记，前一张收起", async () => {

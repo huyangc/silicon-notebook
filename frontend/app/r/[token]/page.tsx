@@ -62,6 +62,7 @@ function PublicReportLink({ href, children }: { href?: string; children?: React.
       return (
         <button
           type="button"
+          aria-expanded={state.selectedKey === key}
           className={`cite-chip${state.selectedKey === key ? " active" : ""}`}
           onClick={(event) => state.openReference(key, event.currentTarget.getBoundingClientRect())}
         >
