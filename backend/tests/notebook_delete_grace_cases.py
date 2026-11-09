@@ -184,6 +184,57 @@ def build_world(repo: Any, *, postgres: bool, monkeypatch: Any) -> World:
     )
 
 
+def case_empty_notebook_skips_window_and_atomically_queues_delete(world: World) -> None:
+    stores = world.runtime.notebook_delete_jobs
+    result = stores.request_pending(
+        world.owner_target, world.owner.id, now=T0, delete_empty_immediately=True,
+    )
+    assert "delete_after" not in result
+    job = stores.get(result["job_id"])
+    assert job["notebook_id"] == world.owner_target
+    assert job["status"] == "queued"
+    row = world.sql.rows("SELECT status,delete_after FROM notebooks WHERE id=?", (world.owner_target,))[0]
+    assert row["status"] == "deleting" and row["delete_after"] is None
+
+
+def case_memory_and_sharing_preserve_the_window(world: World) -> None:
+    result = world.runtime.notebook_delete_jobs.request_pending(
+        world.doomed, world.owner.id, now=T0, delete_empty_immediately=True,
+    )
+    assert result["delete_after"] == iso(DEADLINE)
+    assert world.jobs() == []
+
+
+def case_only_a_candidate_memory_keeps_the_window(world: World) -> None:
+    world.runtime.memory_service.create_candidate(
+        world.owner_target, world.owner.id, None, "req-only", "Title", "Body",
+        [], "reason", {}, [],
+    )
+    result = world.runtime.notebook_delete_jobs.request_pending(
+        world.owner_target, world.owner.id, now=T0, delete_empty_immediately=True,
+    )
+    assert result["delete_after"] == iso(DEADLINE)
+
+
+def case_only_a_share_link_keeps_the_window(world: World) -> None:
+    world.sql.write(
+        "UPDATE notebooks SET is_shared=1,share_token='empty-share' WHERE id=?",
+        (world.owner_target,),
+    )
+    result = world.runtime.notebook_delete_jobs.request_pending(
+        world.owner_target, world.owner.id, now=T0, delete_empty_immediately=True,
+    )
+    assert result["delete_after"] == iso(DEADLINE)
+
+
+def case_only_a_member_keeps_the_window(world: World) -> None:
+    world.runtime.sharing.add_member(world.owner_target, world.member.id)
+    result = world.runtime.notebook_delete_jobs.request_pending(
+        world.owner_target, world.owner.id, now=T0, delete_empty_immediately=True,
+    )
+    assert result["delete_after"] == iso(DEADLINE)
+
+
 # ------------------------------------------------------------ T1 (request)
 
 

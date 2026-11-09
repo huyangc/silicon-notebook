@@ -563,6 +563,8 @@ def update_understanding_block(
         )
     except AgentProfileRevisionConflict:
         raise user_error(409, _REVISION_CONFLICT_MESSAGE)
+    except KeyError:
+        raise user_error(404, "笔记本已删除或暂不可用，请刷新后重试。")
     return committed_result(request, notebook_id, "agent_profile:write", _block_out(row))
 
 

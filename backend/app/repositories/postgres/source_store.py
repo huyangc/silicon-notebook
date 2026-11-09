@@ -54,6 +54,7 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
     placeholders,
 )
+from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
 from app.domain.source_find_terms import fold_term, like_pattern
 from app.repositories.find_sources_rows import (
     assemble_scope,
@@ -1950,15 +1951,27 @@ class SourceStore:
         if connection is not None:
             if visible:
                 self._lock_notebook_row_for_capacity(connection, notebook_id)
+                self._require_live_for_new_source_on(connection, notebook_id)
             return connection.execute(statement, values).rowcount > 0
         with self.database.write() as owned:
             if visible:
                 self._lock_notebook_row_for_capacity(owned, notebook_id)
+                self._require_live_for_new_source_on(owned, notebook_id)
             if capacity_limit is not None:
                 current = self._visible_document_count_on(owned, notebook_id)
                 if current >= capacity_limit:
                     raise DocumentCapacityExceeded(current, capacity_limit)
             return owned.execute(statement, values).rowcount > 0
+
+    @staticmethod
+    def _require_live_for_new_source_on(connection, notebook_id: str) -> None:
+        # The row lock was acquired first. Recheck after a queued delete has
+        # committed, rather than trusting the earlier HTTP/service preflight.
+        if connection.execute(
+            f"SELECT 1 FROM notebooks WHERE id=%s AND {NOTEBOOK_LIVE_SQL}",
+            (notebook_id,),
+        ).fetchone() is None:
+            raise KeyError(notebook_id)
 
     def source_id_for_memory(self, memory_id: str) -> str | None:
         if not memory_id:

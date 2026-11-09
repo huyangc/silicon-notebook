@@ -28,7 +28,7 @@ from app.domain.share_disclosure import (
     split_report_memory_use,
 )
 from app.models.ask import StoredSubmittedVia
-from app.repositories.sqlite.access_sql import NOTEBOOK_READ_SQL, read_access_params
+from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL, NOTEBOOK_READ_SQL, read_access_params
 from app.repositories.sqlite.answer_link_store import put_share_evidence_on
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.memory_store import MemoryStore
@@ -90,6 +90,12 @@ class ReportStore:
         report_id = self.new_id("rep")
         now = self.now()
         with self.database.write() as db:
+            self.database.begin_immediate(db)
+            if db.execute(
+                f"SELECT 1 FROM notebooks WHERE id=? AND {NOTEBOOK_LIVE_SQL}",
+                (notebook_id,),
+            ).fetchone() is None:
+                raise KeyError(notebook_id)
             db.execute(
                 "INSERT INTO reports(id, notebook_id, question, depth, created_by, created_at, updated_at, submitted_via)"
                 " VALUES(?,?,?,?,?,?,?,?)",

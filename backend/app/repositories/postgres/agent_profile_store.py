@@ -19,6 +19,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from psycopg import errors
 
 from app.repositories.owner_batches import owner_id_list
+from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.postgres._store_utils import (
     TimestampInput,
     iso_timestamp,
@@ -179,6 +180,13 @@ class AgentProfileStore:
         expected = int(expected_revision)
         token = str(claim_token or "")
         with self.database.write() as connection:
+            # A manual first block must not appear after an empty-delete CAS.
+            # Claimed maintenance can still finish during the recovery window.
+            if origin == "user" and connection.execute(
+                f"SELECT 1 FROM notebooks WHERE id=%s AND {NOTEBOOK_LIVE_SQL} FOR SHARE",
+                (notebook_id,),
+            ).fetchone() is None:
+                raise KeyError(notebook_id)
             if token:
                 claimed = connection.execute(
                     "SELECT 1 FROM agent_profile_jobs "

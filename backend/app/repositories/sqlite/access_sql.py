@@ -95,7 +95,7 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
   `live_read_access_exists_clause`(见该函数 docstring)。
 * `sqlite/memory_store.py`:`_read_access_clause`(经 `live_read_access_exists_clause`
   嵌进 Memory 各处读查询)、
-  `create_candidate_with_initial_revision`(写前判定)、
+  `create_candidate_with_initial_revision`(写前判定，含存活检查以拒绝删除后的迟到写入)、
   `create_answer_with_initial_revision`(答案存 Memory 的范围校验;同名的
   `_answer_save_scope_locked_on` 是不含 SQL 的空接缝,谓词不在那儿)。
 * `sqlite/memory_store.py::group_exit_memory_preview` —— 本人退群预览:`read_access_clause`

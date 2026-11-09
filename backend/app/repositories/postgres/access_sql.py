@@ -39,6 +39,7 @@
   `live_read_access_exists_clause`),是本次收口前的第三份独立复刻。
 * ⚠ **三段式带锁写法,刻意保留**(`postgres/memory_store.py` 的
   `create_candidate_with_initial_revision`、答案存 Memory 的写事务分支、
+  其中候选新建在 owner 探针内额外复核 `NOTEBOOK_LIVE_SQL`，避免删除后迟到写入；
   `_lock_memory_aggregate_on`):它们先 `SELECT created_by FROM notebooks ... FOR SHARE`
   锁住 notebooks 行,再依次 `SELECT 1 FROM notebook_members ... FOR SHARE` 锁成员行、
   `GRANT_PROBE_FOR_SHARE_SQL` 锁授权边行。合并成单条 EXISTS 会丢掉行锁(EXISTS

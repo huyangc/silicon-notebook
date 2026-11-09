@@ -155,10 +155,8 @@ def test_deleting_notebook_is_immediately_invisible_via_the_api(tmp_path, monkey
 
     resp = client.delete(f"/api/notebooks/{nb}", headers=headers)
     assert resp.status_code == 202
-    # The DELETE opens the one-day window (pending_delete); T-1's
-    # NOTEBOOK_LIVE_SQL filter hides it immediately — long before any delete
-    # job exists (§5: "不可用的库经 T-1 统一谓词一律不可见").
-    assert resp.json()["status"] == "pending_delete"
+    # An empty notebook skips the window but is immediately hidden by T-1.
+    assert resp.json() == {"status": "deleting", "delete_after": None}
     assert client.get(f"/api/notebooks/{nb}", headers=headers).status_code == 404
 
     _drain()
@@ -197,6 +195,10 @@ def test_second_sequential_delete_request_gets_409_from_the_owner_scoped_guard(
     nb = client.post("/api/notebooks", json={"name": "D2"}, headers=headers).json()["id"]
 
     rt = deps.repository()._runtime
+    # This case exercises both the recovery window and its later promotion.
+    # A share link keeps even a content-empty notebook in that window.
+    with rt.database.write() as db:
+        db.execute("UPDATE notebooks SET is_shared=1,share_token=? WHERE id=?", ("repeat-delete-share", nb))
     worker_entered = threading.Event()
     release_worker = threading.Event()
     real_run = rt.notebook_delete.run

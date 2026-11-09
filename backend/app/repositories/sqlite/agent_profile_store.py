@@ -16,6 +16,7 @@ import sqlite3
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from app.repositories.owner_batches import owner_id_list
+from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.ports import (
     AGENT_PROFILE_JOB_TERMINAL_STATUSES,
     AGENT_PROFILE_RESTART_FAILURE_MESSAGE,
@@ -177,6 +178,13 @@ class AgentProfileStore:
         token = str(claim_token or "")
         with self.database.write() as db:
             self.database.begin_immediate(db)
+            # A manual first block must not appear after an empty-delete CAS.
+            # Claimed maintenance can still finish during the recovery window.
+            if origin == "user" and db.execute(
+                f"SELECT 1 FROM notebooks WHERE id=? AND {NOTEBOOK_LIVE_SQL}",
+                (notebook_id,),
+            ).fetchone() is None:
+                raise KeyError(notebook_id)
             if token:
                 claimed = db.execute(
                     "SELECT 1 FROM agent_profile_jobs "

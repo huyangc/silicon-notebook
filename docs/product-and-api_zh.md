@@ -2474,8 +2474,20 @@ Markdown 文件（`<笔记本>-记忆-<YYYYMMDD>.md`，每条含标题、类型�
 
 ### 删除整本笔记本：一天窗口
 
+空笔记本例外：当库中没有来源、记忆（含候选）、Knowhow 表、会话、提问作业、报告、
+知识对象／关系／段、附件、自定义内容类型、成员、授权、共享申请、任一方向的挂载、
+全局问答参与记录、Agent 令牌绑定（含默认笔记本）、理解块及其作业、Agent 记录、检索经验、回答或
+图谱整理作业，且未开启分享、没有分享 token 时，主人删除会跳过窗口。
+只有名称、简介等笔记本元数据不需要恢复期；按是否为空判定，不设大小阈值。
+生命周期 CAS、存在性探测与删除作业入队在同一个事务里完成；PostgreSQL 先锁定笔记本行，
+等待已有外键写入结束。返回 **202** `{"status":"deleting","delete_after":null}`：
+立即不可用，不提供撤销或删除通知，直接交给现有后台删除流程清理，无需等待一天。
+清理失败仍由持久化删除作业重试与扫尾。确认弹窗说明两种结果，成功提示区分直接清理与安排删除。
+新建内容与关联在写事务内重验生命周期，避免先前通过请求检查的操作在删除提交后仍被接收。
+有内容或上述关联的笔记本仍遵循下文的一天恢复窗口。
+
 产品裁决 2026-10-21（拍板项 B1–B12 的用户裁决 2026-10-22；规格
-`docs/superpowers/specs/2026-10-22-notebook-delete-grace-window_zh.md`）：删除整本笔记本不再立即删除。主人的
+`docs/superpowers/specs/2026-10-22-notebook-delete-grace-window_zh.md`）：有内容或关联的笔记本不再立即删除。主人的
 `DELETE /api/notebooks/{id}` 把它放进**一天窗口**（`notebooks.status='pending_delete'`，`delete_after = now +
 NOTEBOOK_DELETE_GRACE_SECONDS`）。从这一刻起它**对所有人不可用**（主人也一样）：列表、搜索、问答范围（单库与
 全局）、挂载、分享链接（`/shared`、`/c`、报告分享、全局会话分享都按库不存在回答）、MCP / Agent token 与管理员
@@ -4286,7 +4298,7 @@ MCP 任务**签发限时链接（`answer_links` 表，SQLite v94 / PostgreSQL `0
 
 当前 beta 的关键 API：
 
-- `GET /api/notebooks`、`POST /api/notebooks`、`PATCH /api/notebooks/{id}`、`DELETE /api/notebooks/{id}`、`POST /api/notebooks/{id}/cancel-delete`、`GET /api/me/notebook-deletions` —— 删除端点返回 **202**、body 为 `{"status":"pending_delete","delete_after":"…"}`：它先提交一次单行状态变更，把笔记本放进一天删除窗口（`notebooks.status='pending_delete'`；窗口、主人撤销与告知见[删除整本笔记本：一天窗口](#删除整本笔记本一天窗口)）并立即返回；从这一刻起该笔记本在列表/详情/搜索/挂载等所有读侧视图里立即不可见（`GET /api/notebooks/{id}` 立即 404，对它的读者附说明码），`delete_after` 一过由删除扫尾推进成 `notebooks.status='deleting'`，再由下述后台作业删除。**owner** 重复 `DELETE` 同一本笔记本会拿到 **409**（窗口期内为 `notebook_pending_delete`）（codex #659 R6 P2：删除端点的守卫是 owner 专属判定，刻意不套用其它写端点那条「生命周期存活」过滤，就是为了让重试/重复的删除请求真正走到这个 409，而不是一个会误导人的 404）——**非 owner** 不管重试几次都仍是 404（不向无权限的调用方泄露笔记本是否存在）。真正的数据库与磁盘清理由此后的一个后台作业完成（物化来源文件路径、等待该笔记本上已在跑的知识图谱重建自行停下、再用一个原子的收尾步骤把被删内容归档进用户留存活动历史并删除该行）。浏览器一侧本就把成功的删除当作发后不理处理（客户端先把卡片标记删除、再刷新列表），所以这只对直接调用 API、且曾经把 204 当作「已经彻底删完」信号的调用方是行为变化——可轮询 `GET /api/notebooks/{id}`（404 即确认不可见），或（仅管理员）用 `GET /api/admin/users/{user_id}/activity` 确认留存归档已经落地。归档记录的 `deleted_at` 时间戳是收尾步骤真正执行的那一刻，比删除请求本身晚几秒到几十分钟不等（取决于笔记本规模）。整库 KG **重建**自身的删除相位（与删除笔记本是不同路径）同样先按有界分页排水再做单次原子重置；页/阈值行预算为 `KG_GRAPH_DRAIN_PAGE_ROWS`（默认 2000，允许 50–20000——上限压在 SQLite 默认 SQLITE_MAX_VARIABLE_NUMBER 之下，因为排水页把选中 id 作为 SQL 参数逐个绑定）。
+- `GET /api/notebooks`、`POST /api/notebooks`、`PATCH /api/notebooks/{id}`、`DELETE /api/notebooks/{id}`、`POST /api/notebooks/{id}/cancel-delete`、`GET /api/me/notebook-deletions` —— 空库且无关联时返回 **202** `{"status":"deleting","delete_after":null}`，直接后台清理且不可撤销；其余删除端点返回 **202**、body 为 `{"status":"pending_delete","delete_after":"…"}`：它先提交一次单行状态变更，把笔记本放进一天删除窗口（`notebooks.status='pending_delete'`；窗口、主人撤销与告知见[删除整本笔记本：一天窗口](#删除整本笔记本一天窗口)）并立即返回；从这一刻起该笔记本在列表/详情/搜索/挂载等所有读侧视图里立即不可见（`GET /api/notebooks/{id}` 立即 404，对它的读者附说明码），`delete_after` 一过由删除扫尾推进成 `notebooks.status='deleting'`，再由下述后台作业删除。**owner** 重复 `DELETE` 同一本笔记本会拿到 **409**（窗口期内为 `notebook_pending_delete`）（codex #659 R6 P2：删除端点的守卫是 owner 专属判定，刻意不套用其它写端点那条「生命周期存活」过滤，就是为了让重试/重复的删除请求真正走到这个 409，而不是一个会误导人的 404）——**非 owner** 不管重试几次都仍是 404（不向无权限的调用方泄露笔记本是否存在）。真正的数据库与磁盘清理由此后的一个后台作业完成（物化来源文件路径、等待该笔记本上已在跑的知识图谱重建自行停下、再用一个原子的收尾步骤把被删内容归档进用户留存活动历史并删除该行）。浏览器一侧本就把成功的删除当作发后不理处理（客户端先把卡片标记删除、再刷新列表），所以这只对直接调用 API、且曾经把 204 当作「已经彻底删完」信号的调用方是行为变化——可轮询 `GET /api/notebooks/{id}`（404 即确认不可见），或（仅管理员）用 `GET /api/admin/users/{user_id}/activity` 确认留存归档已经落地。归档记录的 `deleted_at` 时间戳是收尾步骤真正执行的那一刻，比删除请求本身晚几秒到几十分钟不等（取决于笔记本规模）。整库 KG **重建**自身的删除相位（与删除笔记本是不同路径）同样先按有界分页排水再做单次原子重置；页/阈值行预算为 `KG_GRAPH_DRAIN_PAGE_ROWS`（默认 2000，允许 50–20000——上限压在 SQLite 默认 SQLITE_MAX_VARIABLE_NUMBER 之下，因为排水页把选中 id 作为 SQL 参数逐个绑定）。
 - `GET /api/notebooks/{id}/analytics` —— 知识分析看板（有读权即可看）。`feedback_useful` / `feedback_not_useful` 与 `usefulness_rate` 含**归入本库的全局问答评分**：一条全局评分归入它检索到或引用到的每个库各计一次（两者皆空时归入参与库减去被跳过的库，与问答后学习链同一口径 `global_ask_attribution`），`feedback_useful_global` / `feedback_not_useful_global` 是其中全局问答那一份，看板在 👍/👎 后注「（其中全局问答 N 条）」。`low_rated_questions`（「低分提问（知识缺口）」）只列笔记本内提问的原文，全局问答的提问原文不在这里出现，列表末尾注「另有 N 条来自全局问答」。响应只有计数，不含其他参与库的 id 或库名。`answers_total`（看板「提问」）同样含**归入本库的全局问答**：本库的笔记本内回答，加上归入本库、已完成（`done`）且未过留存期的全局问答作业，一个全局作业对它归入的每个库各计一次；`answers_global` 是其中全局问答那一份，看板注「（其中全局问答 N 条）」（为 0 不显示）。全局那一份按 `global_ask_job_notebooks` 走索引计数；升级后尚未回填的作业沿用 payload 判据（同一口径，回填前后数字相同）。
 - `GET /api/notebooks/{id}/analytics/content-overview` —— 面向当前查看者的内容资产：`memory`（`total`、`confirmed`、`candidate`，最多三条最近 `id`/`title`/`status`/`updated_at`）与 `knowhow`（`table_count`、`row_count`、`projection_pending`、`projection_failed`、`stale_code_count`，最多三条最近表摘要）
 - `GET /api/notebooks/{id}/checkup` —— 流水线体检（只读，看板高频入口）：聚合来源与索引的损坏/待办信号——空源、缺检索片段、缺检索向量、待分析来源、检索索引过期/损坏——每项含数量、命中样本与修复动作（只读项的修复动作为 `none`：由系统自行处理，看板只显示提示卡、没有按钮）。`healthy` 为真的条件是所有可修复项（修复动作不是 `none`）的数量都为 0；只读项照常列出数量，但不计入 `healthy`，也不会让铃铛提醒或让修复轮询继续。看板「来源状态」「索引与构建」两块与头像旁铃铛消费它；健康的库保持中性、不打扰。两项「缺检索向量」的数量走进程内事件驱动缓存：应用自己的向量写入（上传解析嵌入、点「补齐向量」、重新解析）完成即失效，下一轮轮询就反映新计数；**跨进程**写入（管理员在服务器上跑离线 CLI 补齐/导入）及个别罕见的后台异常路径看不见这些事件，由背底缓存兜住，**这些场景下计数至多陈旧 300 秒**。

@@ -953,9 +953,12 @@ class SharingStore:
         — the read-choose-write stays inside ONE write transaction exactly as
         the former mixin did."""
         with self.database.write() as db:
+            self.database.begin_immediate(db)
             row = db.execute(
-                "SELECT is_shared, share_token FROM notebooks WHERE id = ?", (notebook_id,)
+                f"SELECT is_shared, share_token FROM notebooks WHERE id = ? AND {NOTEBOOK_LIVE_SQL}", (notebook_id,)
             ).fetchone()
+            if row is None:
+                raise KeyError(notebook_id)
             chosen = (
                 row["share_token"]
                 if row["is_shared"] and row["share_token"]

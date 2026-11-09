@@ -900,9 +900,11 @@ class SharingStore:
     def set_share_token(self, notebook_id: str, token: str) -> str:
         with self.database.write() as connection:
             row = connection.execute(
-                "SELECT is_shared,share_token FROM notebooks WHERE id=%s FOR UPDATE",
+                f"SELECT is_shared,share_token FROM notebooks WHERE id=%s AND {NOTEBOOK_LIVE_SQL} FOR UPDATE",
                 (notebook_id,),
             ).fetchone()
+            if row is None:
+                raise KeyError(notebook_id)
             chosen = row["share_token"] if row["is_shared"] and row["share_token"] else token
             connection.execute(
                 "UPDATE notebooks SET is_shared=1,share_token=%s,updated_at=%s WHERE id=%s",

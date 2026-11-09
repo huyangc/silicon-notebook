@@ -9943,11 +9943,18 @@
           "type": "object"
         },
         "NotebookDeleteResponse": {
-          "description": "202 响应体：这本库已进入一天的删除窗口（``app.domain.notebook_delete_grace``），\n立即对所有人不可用，``delete_after`` 起由删除作业永久删除；在此之前主人可以撤销。\n前端读 ``delete_after``（UTC ISO）展示「何时永久删除」，一切时长以它为准。",
+          "description": "202 响应体：空库直接 ``deleting``、``delete_after=null``；其余库进入一天的删除窗口，\n立即对所有人不可用，``delete_after`` 起由删除作业永久删除；在此之前主人可以撤销。\n前端读 ``delete_after``（UTC ISO）展示「何时永久删除」，一切时长以它为准。",
           "properties": {
             "delete_after": {
-              "title": "Delete After",
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Delete After"
             },
             "status": {
               "default": "pending_delete",
@@ -22387,7 +22394,7 @@
       },
       "/api/notebooks/{notebook_id}": {
         "delete": {
-          "description": "删除整本笔记本:进入一天的删除窗口(`app.domain.notebook_delete_grace`,T1)。\nCAS 提交后立即返回 202 `{\"status\": \"pending_delete\", \"delete_after\"}`——这本\n库此刻起对所有人不可用,`delete_after` 起由删除扫尾推进成 `deleting`,交给\n后台删除作业(六相位,见 `services/notebook_delete.py`)永久删除。在此之前\n主人可以 `POST /notebooks/{id}/cancel-delete` 撤销。\n\n重复 DELETE:窗口里 → 409 `{\"code\": \"notebook_pending_delete\",\n\"delete_after\", \"message\"}`;正在删除/拷贝/导入 → 沿用 409 文案。\n\n守卫用 `require_notebook_delete`（codex #659 R6 P2）而不是\n`require_notebook_capability(\"notebook:delete\")`：后者的\nNOTEBOOK_WRITE_SQL 带生命周期过滤，会把重复/重试的 DELETE 挡成假 404；\n这道守卫仍是 owner-only，只是放行 owner 自己不可用的库，让下面\n这两段 409 真正有机会跑到。",
+          "description": "删除整本笔记本:空库直接进入后台删除，其余进入一天的删除窗口。\n空库返回 202 `{\"status\": \"deleting\", \"delete_after\": null}`，不可撤销。\nCAS 提交后立即返回 202 `{\"status\": \"pending_delete\", \"delete_after\"}`——这本\n库此刻起对所有人不可用,`delete_after` 起由删除扫尾推进成 `deleting`,交给\n后台删除作业(六相位,见 `services/notebook_delete.py`)永久删除。在此之前\n主人可以 `POST /notebooks/{id}/cancel-delete` 撤销。\n\n重复 DELETE:窗口里 → 409 `{\"code\": \"notebook_pending_delete\",\n\"delete_after\", \"message\"}`;正在删除/拷贝/导入 → 沿用 409 文案。\n\n守卫用 `require_notebook_delete`（codex #659 R6 P2）而不是\n`require_notebook_capability(\"notebook:delete\")`：后者的\nNOTEBOOK_WRITE_SQL 带生命周期过滤，会把重复/重试的 DELETE 挡成假 404；\n这道守卫仍是 owner-only，只是放行 owner 自己不可用的库，让下面\n这两段 409 真正有机会跑到。",
           "operationId": "delete_notebook_api_notebooks__notebook_id__delete",
           "parameters": [
             {

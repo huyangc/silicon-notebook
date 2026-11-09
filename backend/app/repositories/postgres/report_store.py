@@ -21,6 +21,7 @@ from app.repositories.postgres._store_utils import (
     jsonb,
     normalize_timestamp,
 )
+from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.postgres.answer_link_store import put_share_evidence_on
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.memory_store import MemoryStore
@@ -87,6 +88,11 @@ class ReportStore:
         report_id = self.new_id("rep")
         now = normalize_timestamp(self.now())
         with self.database.write() as db:
+            if db.execute(
+                f"SELECT 1 FROM notebooks WHERE id=%s AND {NOTEBOOK_LIVE_SQL} FOR KEY SHARE",
+                (notebook_id,),
+            ).fetchone() is None:
+                raise KeyError(notebook_id)
             db.execute(
                 "INSERT INTO reports(id, notebook_id, question, depth, created_by, created_at, updated_at, submitted_via)"
                 " VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",

@@ -344,11 +344,11 @@ class SharedByMeItem(BaseModel):
 
 
 class NotebookDeleteResponse(BaseModel):
-    """202 响应体：这本库已进入一天的删除窗口（``app.domain.notebook_delete_grace``），
+    """202 响应体：空库直接 ``deleting``、``delete_after=null``；其余库进入一天的删除窗口，
     立即对所有人不可用，``delete_after`` 起由删除作业永久删除；在此之前主人可以撤销。
     前端读 ``delete_after``（UTC ISO）展示「何时永久删除」，一切时长以它为准。"""
     status: str = "pending_delete"
-    delete_after: str
+    delete_after: str | None
 
 
 class NotebookDeletionNotice(BaseModel):

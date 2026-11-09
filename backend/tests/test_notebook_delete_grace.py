@@ -248,6 +248,26 @@ def _delete(http):
     return http["client"].delete(f"/api/notebooks/{http['doomed']}", headers=http["owner"])
 
 
+def test_empty_delete_starts_cleanup_without_a_recovery_notice(http, monkeypatch):
+    client = http["client"]
+    runner = http["repo"]._runtime.notebook_delete
+    queued = []
+    monkeypatch.setattr(runner, "_submit", lambda job, notebook: queued.append((job, notebook)))
+    path = f"/api/notebooks/{http['mine']}"
+    assert client.delete(path, headers=http["stranger"]).status_code == 404
+    result = client.delete(path, headers=http["member"])
+    assert result.status_code == 202
+    assert result.json() == {"status": "deleting", "delete_after": None}
+    assert len(queued) == 1
+    assert client.delete(path, headers=http["member"]).status_code == 409
+    assert client.post(f"{path}/cancel-delete", headers=http["member"]).status_code == 409
+    notices = client.get("/api/me/notebook-deletions", headers=http["member"]).json()
+    assert http["mine"] not in {row["notebook_id"] for row in notices["items"]}
+    runner.run(queued[0][0])
+    with http["repo"]._runtime.database.connect() as db:
+        assert db.execute("SELECT id FROM notebooks WHERE id=?", (http["mine"],)).fetchone() is None
+
+
 def test_delete_answers_the_window_and_hides_the_notebook(http):
     client, doomed = http["client"], http["doomed"]
     response = _delete(http)

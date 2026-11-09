@@ -506,7 +506,9 @@ class GroupStore:
             raise GroupNotFoundError(group_id)
 
     @staticmethod
-    def _lock_notebook_on(connection: Any, notebook_id: str) -> None:
+    def _lock_notebook_on(
+        connection: Any, notebook_id: str, *, require_live: bool = False,
+    ) -> None:
         """锁住笔记本行,顺便复核它还在;不在就 `NotebookNotFoundError`(codex #519 R7)。
 
         `_lock_group_on` 的**同类兄弟**,只是换了另一个外键父行:一次插入有几个外键,就有
@@ -558,9 +560,10 @@ class GroupStore:
            退出先锁笔记本，再碰子行。`reject_share_request` / `delete_share_request`
            只锁或改/删子行，之后不再去等 `notebooks`，不构成反向边。
         """
+        live = f" AND {NOTEBOOK_LIVE_SQL}" if require_live else ""
         if (
             connection.execute(
-                "SELECT id FROM notebooks WHERE id=%s FOR KEY SHARE", (notebook_id,)
+                f"SELECT id FROM notebooks WHERE id=%s{live} FOR SHARE", (notebook_id,)
             ).fetchone()
             is None
         ):
@@ -894,7 +897,7 @@ class GroupStore:
                 # 逐字不变(不是组管理员仍先拿它自己的 403)。锁序不受影响:`groups`
                 # 两种写法下都已在手,`groups → notebooks` 与 `create_share_request`
                 # 一致(论证见 `_lock_notebook_on`)。
-                self._lock_notebook_on(connection, notebook_id)
+                self._lock_notebook_on(connection, notebook_id, require_live=True)
                 # **笔记本侧**的那一半同样要在事务内复核(codex #519 R6 P1):
                 # 能力守卫放行之后、本事务开始之前,库主可以撤掉发起人的管理边;
                 # 少了这一次复核,失权者仍能发出一条**新的**授权边(甚至给另一个
@@ -1158,7 +1161,7 @@ class GroupStore:
                 with self.database.write() as connection:
                     # 锁序 group → notebook,不可颠倒(论证见 `_lock_notebook_on`)。
                     self._lock_group_on(connection, group_id, mode="SHARE")
-                    self._lock_notebook_on(connection, notebook_id)
+                    self._lock_notebook_on(connection, notebook_id, require_live=True)
                     self._require_plain_membership_on(
                         connection, group_id, requested_by
                     )

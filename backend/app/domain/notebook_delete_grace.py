@@ -2,7 +2,10 @@
 physical delete (product decision 2026-10-21, rulings B1-B12 of 2026-10-22;
 spec ``docs/superpowers/specs/2026-10-22-notebook-delete-grace-window_zh.md``).
 
-``DELETE /api/notebooks/{id}`` moves the row ``live -> pending_delete`` (T1)
+For notebooks with content or relationships, ``DELETE /api/notebooks/{id}``
+moves the row ``live -> pending_delete`` (T1). Empty, unrelated notebooks
+instead enter ``deleting`` with a queued job in the same transaction, without
+a window or cancellation. The window path
 and stamps ``delete_after = now + NOTEBOOK_DELETE_GRACE_SECONDS``. From that
 moment the notebook is invisible to everyone: ``pending_delete`` is one of the
 values ``access_sql.NOTEBOOK_LIVE_SQL`` lists, so every read, write and share
@@ -33,6 +36,36 @@ from typing import Any
 # (ruling B2): the interface promises "一天", and every client reads the actual
 # deadline from the server's ``delete_after``.
 NOTEBOOK_DELETE_GRACE_SECONDS = 86_400
+
+# Any content or relationship keeps the recovery window, irrespective of size.
+# Existence probes stop at the first match; never count or load private content.
+DELETE_RECOVERY_RELATIONS = (
+    ("sources", "notebook_id"),
+    ("memory_items", "notebook_id"),
+    ("knowhow_tables", "notebook_id"),
+    ("conversations", "notebook_id"),
+    ("ask_jobs", "notebook_id"),
+    ("answers", "notebook_id"),
+    ("reports", "notebook_id"),
+    ("knowledge_objects", "notebook_id"),
+    ("knowledge_relations", "notebook_id"),
+    ("chunks", "notebook_id"),
+    ("notebook_assets", "notebook_id"),
+    ("notebook_object_schemas", "notebook_id"),
+    ("notebook_members", "notebook_id"),
+    ("notebook_grants", "notebook_id"),
+    ("notebook_share_requests", "notebook_id"),
+    ("notebook_bases", "notebook_id"),
+    ("notebook_bases", "base_notebook_id"),
+    ("global_ask_job_notebooks", "notebook_id"),
+    ("agent_token_notebooks", "notebook_id"),
+    ("agent_access_tokens", "default_notebook_id"),
+    ("agent_notebook_profile", "notebook_id"),
+    ("agent_profile_jobs", "notebook_id"),
+    ("agent_observations", "notebook_id"),
+    ("retrieval_experiences", "notebook_id"),
+    ("kg_build_jobs", "notebook_id"),
+)
 
 # Machine-readable codes of the window's HTTP answers (``detail.code``).
 # A repeated DELETE inside the window, and the reader-facing 404 of

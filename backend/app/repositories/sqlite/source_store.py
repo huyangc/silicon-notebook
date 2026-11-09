@@ -56,6 +56,7 @@ from app.repositories.find_sources_rows import (
 from app.repositories.paper_card_rows import paper_card_row
 from app.repositories.sqlite import memory_sql
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.sqlite.id_binding import BoundIds, bind_ids, drive_by, member_of
 from app.repositories.sqlite.memory_sql import (
     memory_source_readable,
@@ -1853,19 +1854,35 @@ class SourceStore:
         )
         if unless_public_library:
             values = (*values, notebook_id)
+        visible = source_type not in {"memory", "knowhow"}
         if connection is not None:
+            if visible:
+                if not connection.in_transaction:
+                    self.database.begin_immediate(connection)
+                self._require_live_for_new_source_on(connection, notebook_id)
             return connection.execute(statement, values).rowcount > 0
         with self.database.write() as db:
+            if visible or capacity_limit is not None:
+                self.database.begin_immediate(db)
+            if visible:
+                self._require_live_for_new_source_on(db, notebook_id)
             if capacity_limit is not None:
                 # BEGIN IMMEDIATE before the COUNT: the RESERVED lock (plus the
                 # process-global write lock) makes count-then-insert one atomic
                 # step, and the fresh write connection reads the latest
                 # committed state — a concurrent creator's row is in the count.
-                self.database.begin_immediate(db)
                 current = self._visible_document_count_on(db, notebook_id)
                 if current >= capacity_limit:
                     raise DocumentCapacityExceeded(current, capacity_limit)
             return db.execute(statement, values).rowcount > 0
+
+    @staticmethod
+    def _require_live_for_new_source_on(db, notebook_id: str) -> None:
+        if db.execute(
+            f"SELECT 1 FROM notebooks WHERE id=? AND {NOTEBOOK_LIVE_SQL}",
+            (notebook_id,),
+        ).fetchone() is None:
+            raise KeyError(notebook_id)
 
     def source_id_by_hash(self, notebook_id: str, digest: str) -> Optional[str]:
         """Existing source in this notebook whose content hash matches

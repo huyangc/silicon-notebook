@@ -39,6 +39,7 @@ from app.repositories.postgres._store_utils import (
     normalized_clock,
 )
 from app.domain.notebook_delete_grace import (
+    DELETE_RECOVERY_RELATIONS,
     delete_after_for,
     instant_text,
     utc_instant,
@@ -196,12 +197,18 @@ class NotebookDeleteJobStore:
         return utc_instant(self.now() if now is None else now)
 
     def request_pending(
-        self, notebook_id: str, requested_by: str, *, now: object = None
+        self, notebook_id: str, requested_by: str, *, now: object = None,
+        delete_empty_immediately: bool = False,
     ) -> dict:
         """T1. See the SQLite twin for the contract."""
         requested_at = self._instant(now)
         delete_after = delete_after_for(requested_at)
         with self.database.write() as connection:
+            # Drain FK writers before the lifecycle CAS and existence probes.
+            # Each subsequent statement sees their committed rows at READ COMMITTED.
+            connection.execute(
+                "SELECT id FROM notebooks WHERE id=%s FOR UPDATE", (notebook_id,)
+            ).fetchone()
             cas = connection.execute(
                 "UPDATE notebooks SET status_before_delete=status,"
                 f"status='{NOTEBOOK_PENDING_DELETE_STATUS}',"
@@ -221,7 +228,31 @@ class NotebookDeleteJobStore:
                         notebook_id, instant_text(existing["delete_after"])
                     )
                 raise NotebookAlreadyDeletingError(notebook_id)
+            if delete_empty_immediately and not self._needs_recovery_on(connection, notebook_id):
+                connection.execute(
+                    "UPDATE notebooks SET status='deleting',delete_after=NULL,"
+                    "updated_at=%s WHERE id=%s",
+                    (self.now(), notebook_id),
+                )
+                job_id = self._insert_job_on(connection, notebook_id, self.now())
+                return {"notebook_id": notebook_id, "job_id": job_id}
         return {"notebook_id": notebook_id, "delete_after": instant_text(delete_after)}
+
+    @staticmethod
+    def _needs_recovery_on(connection, notebook_id: str) -> bool:
+        row = connection.execute(
+            "SELECT is_shared,share_token FROM notebooks WHERE id=%s",
+            (notebook_id,),
+        ).fetchone()
+        if row["is_shared"] or row["share_token"]:
+            return True
+        return any(
+            connection.execute(
+                f"SELECT EXISTS(SELECT 1 FROM {table} WHERE {column}=%s) AS present",
+                (notebook_id,),
+            ).fetchone()["present"]
+            for table, column in DELETE_RECOVERY_RELATIONS
+        )
 
     def cancel_pending(self, notebook_id: str, *, now: object = None) -> str:
         """T2. See the SQLite twin for the contract."""

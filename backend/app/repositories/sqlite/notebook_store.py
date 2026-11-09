@@ -278,6 +278,25 @@ class NotebookStore:
         ]
         now = self.now()
         with self.database.write() as db:
+            self.database.begin_immediate(db)
+            existing = {
+                row["base_notebook_id"] for row in db.execute(
+                    "SELECT base_notebook_id FROM notebook_bases WHERE notebook_id=?",
+                    (notebook_id,),
+                ).fetchall()
+            }
+            # Existing disabled edges may be preserved for automatic recovery.
+            # New edges and the owning notebook must still be live.
+            for target_id in sorted({notebook_id, *wanted}):
+                live = (
+                    f" AND {NOTEBOOK_LIVE_SQL}"
+                    if target_id == notebook_id or target_id not in existing else ""
+                )
+                if db.execute(
+                    f"SELECT 1 FROM notebooks WHERE id=?{live}",
+                    (target_id,),
+                ).fetchone() is None:
+                    raise KeyError(target_id)
             db.execute("DELETE FROM notebook_bases WHERE notebook_id=?", (notebook_id,))
             for base_id in wanted:
                 db.execute(
