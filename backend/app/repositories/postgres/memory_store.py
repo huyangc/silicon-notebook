@@ -786,7 +786,7 @@ class MemoryStore:
             # 定义点的探测常量;读权谓词扩展时这里不会自动跟随,必须像本次这样手改
             # (已登记在 access_sql 的消费者清单)。
             notebook = db.execute(
-                "SELECT created_by FROM notebooks WHERE id=%s FOR SHARE",
+                f"SELECT created_by FROM notebooks WHERE id=%s AND {NOTEBOOK_LIVE_SQL} FOR SHARE",
                 (write.notebook_id,),
             ).fetchone()
             granted = None

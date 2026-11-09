@@ -1210,9 +1210,8 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
     deletingRef.current.add(key);
     setDeletion((value) => value ? { ...value, busy: true } : value);
     try {
-      // 删除进入一天的窗口:这本库此刻起对所有人不可用,列表里马上拿掉;
-      // 通知面板在截止前提供撤销(撤销走 `showCancelledNotebook`)。
-      const { deleteAfter } = await deleteNotebook(current.target.id);
+      // 删除后立即从列表移除；有恢复窗口时通知面板提供撤销。
+      const { deleteAfter, immediate } = await deleteNotebook(current.target.id);
       let tombstones = tombstonesRef.current.get(ownerKey(owner.actorId));
       if (!tombstones) {
         tombstones = new Set<string>();
@@ -1242,7 +1241,7 @@ export function useNotebookCollection({ actorId, effects }: CollectionOptions) {
         ));
         await effectsRef.current.refreshComposite(() => ownsIdentity(owner)).catch(() => undefined);
       }
-      if (owns(owner)) effectsRef.current.notify(deleteScheduledText(current.target.name, deleteAfter));
+      if (owns(owner)) effectsRef.current.notify(deleteScheduledText(current.target.name, deleteAfter, immediate));
     } catch (error) {
       // Reported on the same authority the success branch and the busy recovery
       // use — actor identity, not the dialog operation and not the generation

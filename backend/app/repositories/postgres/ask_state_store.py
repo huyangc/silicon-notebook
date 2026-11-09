@@ -266,6 +266,12 @@ class AskStateStore:
         (identical here: ``INSERT ... SELECT ... WHERE EXISTS`` guarded by
         the same ``NOTEBOOK_LIVE_SQL``, both backends)."""
         now = normalize_timestamp(self.seams.now())
+        # Serialize admission with deletion, including closure-external rows.
+        if db.execute(
+            f"SELECT id FROM notebooks WHERE id=%s AND {NOTEBOOK_LIVE_SQL} FOR SHARE",
+            (notebook_id,),
+        ).fetchone() is None:
+            raise KeyError(notebook_id)
         if conversation_id:
             # 只接续**调用者自己**的对话:共享库里成员传入 owner/他人的 conv-id 不命中,
             # 落到下面新建一条归自己的对话,杜绝跨用户注入回合(read-only 成员经 ask 触达)。

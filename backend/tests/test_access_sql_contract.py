@@ -1143,7 +1143,7 @@ def test_two_step_locked_sites_stay_pinned():
     # 系统建议写事务的读权复核(`_lock_suggestion_scope_on`)走
     # `read_authority_lock.lock_live_reader_on`,不是分段式站点。
     assert len(re.findall(
-        r"SELECTcreated_byFROMnotebooksWHEREid=%s(?:\{live\})?FORSHARE", pg_store
+        r"SELECTcreated_byFROMnotebooksWHEREid=%s(?:\{live\}|AND\{NOTEBOOK_LIVE_SQL\})?FORSHARE", pg_store
     )) == 3, (
         "postgres/memory_store.py 的分段式带锁站点数量变了——"
         "同步更新本 allowlist 与两份 access_sql 的 docstring 清单"

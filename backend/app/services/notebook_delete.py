@@ -420,17 +420,24 @@ class NotebookDeleteJobRunner:
 
     # ------------------------------------------------------------------
     # The one-day deletion window (``app.domain.notebook_delete_grace``).
-    # ``request`` above stays the immediate tombstone (no web route reaches
-    # it); ``DELETE /api/notebooks/{id}`` goes through ``request_pending``.
+    # DELETE uses request_pending, which atomically bypasses the window for
+    # empty, unrelated notebooks and submits the same durable delete job.
     # ------------------------------------------------------------------
 
     def request_pending(self, notebook_id: str, actor: str) -> dict:
-        """T1: open the window. Returns ``{"status": "pending_delete",
+        """T1: directly queue empty notebooks, otherwise open the window.
+        Empty notebooks return ``{"status": "deleting", "delete_after": None}``.
+        Others return ``{"status": "pending_delete",
         "delete_after"}``; raises ``KeyError`` (404),
         ``NotebookPendingDeleteError`` / ``NotebookAlreadyDeletingError``
         (409). The owner's and every Memory holder's bell gains the notice
         after the commit."""
-        window = self.delete_jobs.request_pending(notebook_id, actor)
+        window = self.delete_jobs.request_pending(
+            notebook_id, actor, delete_empty_immediately=True,
+        )
+        if "job_id" in window:
+            self._submit(window["job_id"], notebook_id)
+            return {"status": "deleting", "delete_after": None}
         self._log_window_event("notebook_delete_requested", notebook_id, actor)
         self._notify_async(lambda: self._publish_notice_change(notebook_id))
         return {"status": "pending_delete", "delete_after": window["delete_after"]}

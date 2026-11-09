@@ -30,7 +30,7 @@ export const DELETE_DIALOG_TITLE = "删除笔记本";
 export function deleteConfirmText(name: string): string {
   return `确定删除${named(name)}吗？确认后，这本笔记本立即对所有人不可用：`
     + "你和其他能读它的人都打不开、搜不到，问答、Agent 和分享链接也用不到它。"
-    + "它会再保留一天，之后永久删除其中的一切：来源、深度报告、会话，以及每个人各自保存在这里的记忆。"
+    + "没有内容、记忆或共享等关联的空笔记本会直接永久删除，无法撤销。其他笔记本会再保留一天，之后永久删除其中的一切：来源、深度报告、会话，以及每个人各自保存在这里的记忆。"
     + "这一天里，在这里有记忆的人会收到通知，可以导出自己的记忆，或把它们转移到自己的笔记本；"
     + "你也可以随时撤销删除。撤销后其余一切恢复原样，但已经被转移走的记忆不会回到这本笔记本。";
 }
@@ -41,7 +41,8 @@ export function deleteMountText(count: number): string {
 }
 
 /** 确认成功后的提示；操作入口由短暂提示和通知面板提供。 */
-export function deleteScheduledText(name: string, deleteAfter: string | null): string {
+export function deleteScheduledText(name: string, deleteAfter: string | null, immediate = false): string {
+  if (immediate) return `正在永久删除空笔记本${named(name)}，无需等待一天，无法撤销。`;
   // 回答里没有可读的截止时刻也不编造；通知详情会独立重新拉取。
   const when = deleteAfter ? `${formatDeleteAt(deleteAfter)}起永久删除` : "一天后永久删除";
   return `已安排删除${named(name)}。它现在对所有人都不可用，${when}。`;

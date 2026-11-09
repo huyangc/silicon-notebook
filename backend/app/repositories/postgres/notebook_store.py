@@ -269,6 +269,24 @@ class NotebookStore:
         ]
         now = self.now()
         with self.database.write() as connection:
+            existing = {
+                row["base_notebook_id"] for row in connection.execute(
+                    "SELECT base_notebook_id FROM notebook_bases WHERE notebook_id=%s",
+                    (notebook_id,),
+                ).fetchall()
+            }
+            # Existing disabled edges may be preserved for automatic recovery.
+            # New edges and the owning notebook must still be live.
+            for target_id in sorted({notebook_id, *wanted}):
+                live = (
+                    f" AND {NOTEBOOK_LIVE_SQL}"
+                    if target_id == notebook_id or target_id not in existing else ""
+                )
+                if connection.execute(
+                    f"SELECT 1 FROM notebooks WHERE id=%s{live} FOR KEY SHARE",
+                    (target_id,),
+                ).fetchone() is None:
+                    raise KeyError(target_id)
             connection.execute(
                 "DELETE FROM notebook_bases WHERE notebook_id=%s", (notebook_id,)
             )

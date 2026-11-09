@@ -58,6 +58,8 @@ def test_sqlite_create_grant_and_share_request_unchanged(repo):
     with repo._runtime.database.write() as db:
         GroupStore._require_notebook_on(db, world.notebook)  # existence only
         with pytest.raises(NotebookNotFoundError):
+            GroupStore._require_notebook_on(db, world.notebook, require_live=True)
+        with pytest.raises(NotebookNotFoundError):
             GroupStore._require_notebook_on(db, "nb-missing")
         with pytest.raises(NotebookNotFoundError):
             GroupStore._require_owned_live_notebook_on(

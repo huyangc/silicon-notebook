@@ -1573,7 +1573,8 @@ class NotebookDeleteJobStorePort(Protocol):
     # 删除整本笔记本的一天窗口（``app.domain.notebook_delete_grace``）：T1/T2/T3
     # 三个同事务 CAS，时刻一律显式传入（``None`` = 读一次 store 注入的时钟）。
     def request_pending(
-        self, notebook_id: str, requested_by: str, *, now: object = None
+        self, notebook_id: str, requested_by: str, *, now: object = None,
+        delete_empty_immediately: bool = False,
     ) -> dict: ...
     def cancel_pending(self, notebook_id: str, *, now: object = None) -> str: ...
     def list_due_pending(self, *, now: object = None) -> list[str]: ...

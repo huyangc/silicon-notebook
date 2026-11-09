@@ -218,7 +218,8 @@ def update_notebook(
 def delete_notebook(
     notebook_id: str, user: UserProfile = Depends(get_current_user)
 ) -> NotebookDeleteResponse:
-    """删除整本笔记本:进入一天的删除窗口(`app.domain.notebook_delete_grace`,T1)。
+    """删除整本笔记本:空库直接进入后台删除，其余进入一天的删除窗口。
+    空库返回 202 `{"status": "deleting", "delete_after": null}`，不可撤销。
     CAS 提交后立即返回 202 `{"status": "pending_delete", "delete_after"}`——这本
     库此刻起对所有人不可用,`delete_after` 起由删除扫尾推进成 `deleting`,交给
     后台删除作业(六相位,见 `services/notebook_delete.py`)永久删除。在此之前
@@ -365,7 +366,10 @@ def set_notebook_bases_route(
     wanted = [nb_id for nb_id in dict.fromkeys(payload.base_notebook_ids) if nb_id]
     if any(nb_id not in allowed for nb_id in wanted):
         raise user_error(400, "选择里包含不能作为参考库的知识库")
-    repo.replace_notebook_bases(notebook_id, wanted, user.id)
+    try:
+        repo.replace_notebook_bases(notebook_id, wanted, user.id)
+    except KeyError:
+        raise user_error(404, "笔记本已删除或暂不可用，请刷新后重试。")
     return [
         MountedBase(**edge)
         for edge in repo.list_notebook_bases(notebook_id, viewer_id=user.id)

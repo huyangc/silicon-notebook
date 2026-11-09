@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from typing import Callable
 
 from app.domain.notebook_delete_grace import (
+    DELETE_RECOVERY_RELATIONS,
     delete_after_for,
     instant_text,
     stored_instant_text,
@@ -202,14 +203,18 @@ class NotebookDeleteJobStore:
         return stored_instant_text(self.now() if now is None else now)
 
     def request_pending(
-        self, notebook_id: str, requested_by: str, *, now: object = None
+        self, notebook_id: str, requested_by: str, *, now: object = None,
+        delete_empty_immediately: bool = False,
     ) -> dict:
         """T1: a live notebook enters the deletion window. Records the status
         a cancel restores, who asked and when, and ``delete_after`` = now +
         ``NOTEBOOK_DELETE_GRACE_SECONDS``. ``updated_at`` is left alone: a
         cancel restores the row exactly as it was.
 
-        Returns ``{"notebook_id", "delete_after"}`` (UTC ISO). Raises
+        With ``delete_empty_immediately``, probes content/relationships after
+        the CAS in this transaction; an empty notebook enters ``deleting``
+        and returns ``{"notebook_id", "job_id"}`` for background submission.
+        Otherwise returns ``{"notebook_id", "delete_after"}`` (UTC ISO). Raises
         ``KeyError`` when the row does not exist, ``NotebookPendingDeleteError``
         (carrying the window's ``delete_after``) when it is already inside a
         window, ``NotebookAlreadyDeletingError`` for every other non-live
@@ -236,7 +241,31 @@ class NotebookDeleteJobStore:
                         notebook_id, instant_text(existing["delete_after"])
                     )
                 raise NotebookAlreadyDeletingError(notebook_id)
+            if delete_empty_immediately and not self._needs_recovery_on(db, notebook_id):
+                db.execute(
+                    "UPDATE notebooks SET status='deleting',delete_after=NULL,"
+                    "updated_at=? WHERE id=?",
+                    (self.now(), notebook_id),
+                )
+                job_id = self._insert_job_on(db, notebook_id, self.now())
+                return {"notebook_id": notebook_id, "job_id": job_id}
         return {"notebook_id": notebook_id, "delete_after": instant_text(delete_after)}
+
+    @staticmethod
+    def _needs_recovery_on(db, notebook_id: str) -> bool:
+        row = db.execute(
+            "SELECT is_shared,share_token FROM notebooks WHERE id=?",
+            (notebook_id,),
+        ).fetchone()
+        if row["is_shared"] or row["share_token"]:
+            return True
+        return any(
+            db.execute(
+                f"SELECT EXISTS(SELECT 1 FROM {table} WHERE {column}=?) AS present",
+                (notebook_id,),
+            ).fetchone()["present"]
+            for table, column in DELETE_RECOVERY_RELATIONS
+        )
 
     def cancel_pending(self, notebook_id: str, *, now: object = None) -> str:
         """T2: the owner takes the deletion back before ``delete_after``. The

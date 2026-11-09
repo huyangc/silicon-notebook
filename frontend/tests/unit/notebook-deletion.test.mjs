@@ -94,6 +94,13 @@ test("确认删除返回服务端定下的截止时刻", async () => {
   assert.ok(!/\d{4}年/.test(text), text);
 });
 
+test("空笔记本直接进入永久删除，提示无需等待且不能撤销", async () => {
+  globalThis.fetch = async () => json({ status: "deleting", delete_after: null }, 202);
+  assert.deepEqual(await deleteNotebook("empty"), { deleteAfter: null, immediate: true });
+  assert.match(deleteScheduledText("空库", null, true), /无需等待一天，无法撤销/);
+  assert.match(deleteConfirmText("空库"), /空笔记本会直接永久删除，无法撤销/);
+});
+
 test("撤销的三种结局:成功 / 截止已过 / 已不存在", async () => {
   globalThis.fetch = async () => json({ id: "nb1", name: "x" });
   assert.equal((await cancelNotebookDeletion("nb1")).kind, "cancelled");

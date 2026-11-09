@@ -168,6 +168,8 @@ async def import_knowhow_table(
         )
     except (GridParseError, knowhow_api.KnowhowImportValidationError) as exc:
         raise _knowhow_import_user_error(exc)
+    except KeyError:
+        raise user_error(404, "笔记本已删除或暂不可用，请刷新后重试。")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     knowhow_api.get_scheduler(repo).schedule(table_id)
@@ -369,6 +371,8 @@ def create_knowhow_table(
             created_by_id=principal.identity_id,
             actor_label=principal.audit_label,
         )
+    except KeyError:
+        raise user_error(404, "笔记本已删除或暂不可用，请刷新后重试。")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)

@@ -525,8 +525,11 @@ class GroupStore:
             raise GroupNotFoundError(group_id)
 
     @staticmethod
-    def _require_notebook_on(db: sqlite3.Connection, notebook_id: str) -> None:
+    def _require_notebook_on(
+        db: sqlite3.Connection, notebook_id: str, *, require_live: bool = False,
+    ) -> None:
         """在**当前写事务里**复核这本笔记本还在,不在就 `NotebookNotFoundError`。
+        新建授权/共享申请显式传 require_live=True，拒绝已提交删除的库。
 
         `_require_group_on` 的**同类兄弟**,只是换了另一个外键父行:一次插入有几个外键,
         就有几个父行可能在守卫通过之后被并发删掉,只堵其中一个不算堵住(codex #519 R7)。
@@ -543,8 +546,11 @@ class GroupStore:
         事务内权限复检)。别把两者合并——库已经不存在时,「他还有没有管理权」不是一个
         有意义的问题,而这条要回答的恰恰是那个不成立的前提。
         """
+        if require_live and not db.in_transaction:
+            SqliteDatabase.begin_immediate(db)
+        live = f" AND {NOTEBOOK_LIVE_SQL}" if require_live else ""
         if (
-            db.execute("SELECT 1 FROM notebooks WHERE id=?", (notebook_id,)).fetchone()
+            db.execute(f"SELECT 1 FROM notebooks WHERE id=?{live}", (notebook_id,)).fetchone()
             is None
         ):
             raise NotebookNotFoundError(notebook_id)
@@ -812,7 +818,7 @@ class GroupStore:
                 # 了,「他还有没有管理权」不是一个有意义的问题。这一侧不修 500(见 docstring:
                 # 这边本来就不会 500),修的是**答什么**——不补就会答一句「你已不再拥有这本
                 # 笔记本的管理权」,而真相是库没了。
-                self._require_notebook_on(db, notebook_id)
+                self._require_notebook_on(db, notebook_id, require_live=True)
                 # **笔记本侧**的那一半同样要在事务内复核(codex #519 R6 P1):
                 # 能力守卫放行之后、本事务开始之前,库主可以撤掉发起人的管理边;
                 # 少了这一次复核,失权者仍能发出一条**新的**授权边(甚至给另一个
@@ -1084,7 +1090,7 @@ class GroupStore:
                     # 顺序与 PG 侧保持一致(组 → 笔记本):那边这个顺序承载锁序论证,
                     # 这边没有行锁、顺序无关,但两份实现读起来必须是同一段代码。
                     self._require_group_on(db, group_id)
-                    self._require_notebook_on(db, notebook_id)
+                    self._require_notebook_on(db, notebook_id, require_live=True)
                     self._require_plain_membership_on(db, group_id, requested_by)
                     db.execute(
                         "INSERT INTO notebook_share_requests "

@@ -81,17 +81,18 @@ export const setNotebookIndexingPipeline = (id: string, pipelineId: string | nul
   });
 
 /** 删除整本笔记本(前端唯一的一份 DELETE 客户端):202 `{status: "pending_delete", delete_after}`
- *  ——这本笔记本进入一天的删除窗口,此刻起对所有人不可用,`delete_after`(UTC ISO)起永久删除,
+ *  ——空库直接 deleting，其他库进入一天窗口；此刻起对所有人不可用。
  *  在此之前主人可以撤销。202 本身就是「已安排删除」:回答里读不出 `delete_after` 时返回
  *  `deleteAfter: null`,提示不写时刻,调用方随后重新拉取列表与区块拿到真实时刻——绝不把一次
  *  已经生效的删除报成失败,也不编一个时刻出来。 */
-export async function deleteNotebook(id: string): Promise<{ deleteAfter: string | null }> {
-  const body = await requestJson<{ delete_after?: unknown } | null>(
+export async function deleteNotebook(id: string): Promise<{ deleteAfter: string | null; immediate?: boolean }> {
+  const body = await requestJson<{ status?: unknown; delete_after?: unknown } | null>(
     `/notebooks/${encodeURIComponent(id)}`,
     { ...options, method: "DELETE" },
   );
   const deleteAfter = body?.delete_after;
   return {
+    ...(body?.status === "deleting" ? { immediate: true } : {}),
     deleteAfter: typeof deleteAfter === "string" && Number.isFinite(Date.parse(deleteAfter))
       ? deleteAfter
       : null,

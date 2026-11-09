@@ -16,6 +16,7 @@ from app.repositories.postgres._store_utils import (
     iso_timestamp,
     normalized_clock,
 )
+from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.knowhow_history_store import record_change
 
@@ -208,6 +209,11 @@ class KnowhowStore:
         created_by: str,
         now: str,
     ) -> tuple[str, list[str]]:
+        if db.execute(
+            f"SELECT 1 FROM notebooks WHERE id=%s AND {NOTEBOOK_LIVE_SQL} FOR KEY SHARE",
+            (notebook_id,),
+        ).fetchone() is None:
+            raise KeyError(notebook_id)
         table_id = self.new_id("khtbl")
         db.execute(
             "INSERT INTO knowhow_tables "

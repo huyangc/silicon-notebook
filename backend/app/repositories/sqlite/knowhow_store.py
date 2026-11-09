@@ -13,6 +13,7 @@ from app.repositories.knowhow_guarded_result import (
     guarded_success,
 )
 from app.repositories.ports import CATALOG_MAX_CANDIDATE_PAGE, KNOWHOW_COLUMN_KINDS
+from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.sqlite.anchor_normalization import js_trim, sqlite_js_trim_expression
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.id_binding import bind_ids, drive_by
@@ -168,6 +169,13 @@ class KnowhowStore:
         created_by: str,
         now: str,
     ) -> tuple[str, list[str]]:
+        if not db.in_transaction:
+            self.database.begin_immediate(db)
+        if db.execute(
+            f"SELECT 1 FROM notebooks WHERE id=? AND {NOTEBOOK_LIVE_SQL}",
+            (notebook_id,),
+        ).fetchone() is None:
+            raise KeyError(notebook_id)
         table_id = self.new_id("khtbl")
         db.execute(
             "INSERT INTO knowhow_tables "
