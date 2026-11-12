@@ -1389,6 +1389,24 @@ PAPER_CARD_MAX_WORKERS # 单次请求的卡片生成线程池上限（默认 4�
 PAPER_CARD_RETRY_SECONDS # 同一内容版本出现内容失败（回复不合格、校验后卡片全空、元数据抽取失败）或对该文档确定性的模型失败（上下文超长、服务商拒绝该内容、其他非鉴权 4xx）后的冷却秒数（默认 3600；ge=0），鉴权/配置错误不冷却；连续失败 3 次后固定冷却 24 小时。来源重新解析（元素见证变化）或卡片版本升级后重新计数
 ```
 
+**概念排行配置。** 以下高级部署设置控制 `rank_concepts`；产品数值护栏由[产品/API 契约](./product-and-api_zh.md#概念提及排行rank_concepts)拥有。
+
+| 环境变量 | 默认值 | 校验范围 | 用途 |
+| --- | --- | --- | --- |
+| `REASONING_RANK_CONCEPTS_ENABLED` | `true` | boolean | reflect 动作开关；MCP 遵循 `read` 档 |
+| `KG_RANK_ONLINE_MAX_OBJECTS` | 50000 | 1..10000000 | 未收窄可用概念数的小库路径门槛 |
+| `KG_RANK_QUERY_CANDIDATES` | 100 | 1..1000 | canonical 去重前的主题候选对象数 |
+| `KG_RANK_RECOUNT_MAX_ROWS` | 200000 | 10000..10000000 | 成员行重算预算 |
+| `KG_RANK_RECOUNT_BUDGET_MS` | 1500 | 100..60000 | 重算毫秒预算 |
+| `KG_RANK_FINISH_BUDGET_MS` | 500 | 1..60000 | 取名、引用、F2 的追加收尾毫秒预算 |
+| `KG_RANK_CALL_BUDGET_MS` | 3000 | 100..120000 | 整次调用毫秒预算 |
+| `KG_RANK_CITATION_SCAN` | 50 | 3..1000 | 取名与代表引用的有界成员扫描数 |
+
+`AskRetrievalLimits.rank_calls_per_run` 的各档预算见[产品/API 档位表](./product-and-api_zh.md#论文检索论文卡片与逐篇抽取find_sources--get_paper_cards--extract_from_sources)。
+
+取名、引用及 F2 的收尾截止时间为 `min(call_deadline, max(recount_deadline, now + finish_budget))`，预算换算为秒。它在提前截断后留出收尾时间，不压缩尚未花完的重算预算。重算超时保留已完成批次并披露部分结果，真正的驱动中断也按超时处理。首批超过行数上限仍执行并标 `recount_capped`，后续批次才按行数截断，所以零完成失败只来自时间耗尽。只有驱动错误丢弃连接；发 SQL 前预算到期则回滚后复用健康连接。瞬时失败、零完成及按时间截断的库不写运行内 memo，重试仍重算；多库仅复用成功库，命中 memo 不重读库名。
+
+
 Reflect 只使用 Legacy。已退役的 `REASONING_REFLECT_*` 配置不再选择协议、布局
 或测量模式，应从部署配置中移除。本次清理不需要数据迁移。固定反思指令排在问题
 与候选摘要之前，不新增布局开关。

@@ -144,6 +144,7 @@ _NOT_FOUND_RESOURCE = {
     "read_reference": "引用（来源元素、Memory 或全局问答引用）",
     "list_sources": "来源",
     "find_sources": "笔记本或来源",
+    "rank_concepts": "笔记本",
     "get_paper_cards": "来源",
     "extract_from_sources": "来源",
     "reparse_source": "来源",

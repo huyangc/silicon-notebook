@@ -107,7 +107,13 @@ def create_memory_mcp(
             "claim the list is complete when find_sources' coverage says "
             "otherwise (lexical_complete false, semantic_recall_capped true, "
             "meta_pending counts or skipped libraries), or while matches "
-            "remain on later pages or deferred."
+            "remain on later pages or deferred.\n\n"
+            'To answer "which X is mentioned most / most common": call '
+            "rank_concepts first (put the topic in `query`, or leave it empty "
+            "for the whole notebook), pick the rows that really are X yourself, "
+            "copy the counts, and verify representative mentions with "
+            "read_reference on their refs. Never claim \"most\" when "
+            "coverage.exact is false, and never estimate when status is not ok."
         ),
         stateless_http=False,
         json_response=False,

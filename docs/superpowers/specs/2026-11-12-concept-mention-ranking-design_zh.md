@@ -642,3 +642,35 @@ kg_concept_ranks(
 - 生产的真实分布：头部泛概念的实际规模以生产数据为准，上线前在生产只读副本上用 §9 的同一组查询复测一次。
 
 测量脚本与数据生成 SQL 在本机 `/tmp/rankperf/`，不入库。
+
+## 17. 实现期修正
+
+以下结论覆盖正文中对应的旧约定；本节即为准。
+
+- **D1：空结果表头。** `kg_concept_ranks` 每次发布都写 `rank=0` 表头，空 canonical、代表成员与零计数携带两条世代戳；是否已建排行由表头判定，业务行只读 rank 1–80。
+- **D2：独立模型费用探测。** `GET /notebooks/{id}/unified-kg/rebuild/model-calls` 要求 `kg:write`，返回 `model_calls_possible: true|false|null`，不加入维护状态轮询；未配置两个相关模型绑定或本库维护槽 running 时零 I/O 返回 false，探测异常返回 null，事件只记异常类名。
+- **D3：更新后仍无产出。** 表头缺失且进程内重建状态为 succeeded 才判 `refresh_produced_nothing`；进程重启后恢复 `not_computed`。
+- **D4：失败文案来源。** `ranking_failures` 增加后端整行 `line` 与 `fallback_line`，客户端逐字使用；仅 `not_computed` 的 fallback 非空，内容为更新后仍无产出的失败句。
+- **D5：有界存储端口。** Q 路径增加 `concept_rank_candidate_canonicals` 和 `concept_rank_member_counts`，分别提供候选映射及按簇行数切批，键数受主题候选预算约束。
+- **D6：代表成员失效。** 当前 canonical 无法由代表成员解析时回落到已存 canonical；仍无法取名的行丢弃并计入 `unnamed_dropped`。
+- **D7：重复导入计数。** 披露取 F2 的 `pairs_hit`，不取扣除并入 F1 后的 `total`；F2 未运行时为 0。
+- **D8：多库页号和配额。** N 仅统计本次成功且未跳过的库（含成功空库），每库 `max(1,20//N)`，N≤20 时按成功库顺序分余数、N>20 时每库一行，不拒绝、不轮转；p 页取各库 `[p*配额,(p+1)*配额)`，正常耗尽不重分配额，全部链内联合计至多 40 行并披露未内联行数。
+- **D9：经验词表计数。** 轨迹同时记录 `listed` 与等于本页行数的 `returned_total`，经验投影按后者判有结果或无结果，不写 `result_ids`。
+- **D10：embedding 次数。** 非空主题在 Ask 作用域只调用一次 embedding，多库按同一文本复用；不新增聊天模型步骤。
+- **取名扫描窗口。** 在按成员 id 排序的前 `scan` 个簇成员中，取第一个合格且名字非空者；空名不会被选中，但仍占扫描窗口。
+- **MCP 页号游标。** v2 编码携带整数页号 p 和页大小 l，拒绝 bool、旧 v1 偏移及 reflect 短句柄；l 必须等于本次 limit 且在 1–20，p≥0 且单库 p*limit<80，无下一页为 `""`。
+- **`rank_failed`。** 非取消或检索控制异常的执行失败产出 `unavailable/rank_failed`，后端句子为「没能按提及次数排行：统计时出错。」，出路是重新提问。
+- **失败被成功取代。** 每条参数链只按最后状态生成失败行，同链后来成功不保留旧失败；除 `library_skipped` 外，公共后缀仅在本轮没有任何排行引用时追加，fallback 同规则。
+- **区分空天花板。** 用户取消选择的库静默不参与；读失败或超时而冻结为空的参考库必须披露 `library_skipped`，不能视为用户取消。
+- **`confirm_fast_path` 与漂移。** 漂移只认运行内实际漂移记录，绑定不等于漂移；因其他成员 Memory 而绑定的全选冻结集仍按集内统计，无真实漂移时正常 S 路径可 exact。
+- **收尾预算。** 新增 `KG_RANK_FINISH_BUDGET_MS=500`（1–60000），取名、引用与 F2 的截止时间为 `min(call_deadline,max(recount_deadline,now+finish_budget))`，不压缩尚未花完的重算预算。
+- **探测三态与权限。** 点击更新时才探测一次，false 直接开始，true/null 先确认可能调用模型；403 隐藏当前笔记本出路，其它探测失败按 null 处理，不把失败误作免费。
+- **`concept_ranks_stale`。** 分析总览与重建闸共用世代判据，表头缺失即陈旧；缺失或陈旧均进入 `needs_update`，旧响应缺该字段时沿用原判据。
+- **翻页失败保留成功页。** 卡片累计实际成功交付页面快照，合成逐库保留最近成功页；后续失败既不清掉旧页，也不按恢复库后的新配额重切旧页。
+- **失败库不占配额。** 失败或跳过库配额为零且不占除数，活动库成功、参考库读失败时仍每页 20 行；失败时页号准入保留原参与库数的名义上界，避免把合法页误判为无效游标。
+- **空结果和无引用行。** 仅非 ok 才使用 “Counting did not complete”，成功空结果使用 “No concept in scope matched this request”；有行但无引用仍交付名字与计数，不带 `[kN]`，不报统计失败。
+- **重算超时与重试。** 首批超行数预算仍执行并标截断，后续批次才按行数截断；时间超时保留完成批次，瞬时失败、零完成和时间截断库不写 memo，只有驱动错误丢弃连接，发 SQL 前预算到期回滚后复用健康连接。
+- **重新提问后的焦点。** 笔记本重新提问沿用原问题、模式与档位，提交后把焦点交给新一轮；全局问答仍只回填输入框，由用户提交。
+- **MCP 引用与响应预算。** 顶层 `refs` 是不透明引用字符串列表，行内是去重下标，调用 `read_reference(ref=refs[i])`；引用按每行 3→2→1 降级，展示名超过 200 字时取前 200 字加「…」，按需披露 `truncation`，数字不截断、页面不丢行。
+- **MCP 主题翻页。** 带 query 时每次调用都调一次 embedding，只在最相关的概念候选中统计；编码游标的 d 摘要同时绑定候选 canonical 集合，翻页重取候选后摘要变化即判 stale 并要求从第一页开始。
+- **MCP 失败与授权。** 返回 `ranking_notice` 与 `ranking_failures`，不追加「下面的回答…」后缀；失权沿用统一的 `notebook_unreadable` / `notebook_not_allowed` 映射，不设工具特例。

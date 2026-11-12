@@ -6,6 +6,7 @@ The executor never writes the graph or asks a model to compute a count.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import time
 from collections import Counter
@@ -123,6 +124,7 @@ class LibraryRankCoverage:
 class LibraryRanking:
     coverage: LibraryRankCoverage
     rows: Tuple[ConceptRankRow, ...]
+    query_candidates_digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -178,6 +180,25 @@ def _recount_batches(canonicals, counts):
         yield batch, rows
 
 
+def _query_cursor_scope_digest(digest: str) -> str:
+    """Unpack the scope identity before doing any fresh candidate retrieval."""
+    try:
+        parts = json.loads(digest)
+        if (not isinstance(parts, list) or len(parts) != 2
+                or not all(isinstance(part, str) for part in parts)):
+            raise ValueError("query cursor digest shape")
+        return parts[0]
+    except (ValueError, TypeError) as exc:
+        raise RankCursorError("invalid query ranking cursor digest") from exc
+
+
+def _query_cursor_digest(scope_digest: str, libraries: Sequence[LibraryRanking]) -> str:
+    candidates = [(library.coverage.notebook_id, library.query_candidates_digest)
+                  for library in libraries]
+    summary = hashlib.sha256(json.dumps(candidates, sort_keys=True).encode()).hexdigest()
+    return json.dumps([scope_digest, summary], separators=(",", ":"))
+
+
 class ConceptRankingService:
     def __init__(self, *, database, unified_kg, sources, catalog, enumeration, settings,
                  producible: Callable[[str], bool], refresh_settled: Callable[[str], bool],
@@ -194,7 +215,8 @@ class ConceptRankingService:
 
     def rank(self, active_notebook_id: str, request: ConceptRankRequest, *, retrieval,
              ceiling_binds: bool, cancel_event=None, memo: Optional[dict] = None,
-             participants: Optional[Sequence[str]] = None) -> ConceptRankPage:
+             participants: Optional[Sequence[str]] = None,
+             bind_query_candidates: bool = False) -> ConceptRankPage:
         raise_if_cancelled(cancel_event)
         query = request.query.strip()
         if len(query) > CONCEPT_RANK_QUERY_MAX_CHARS:
@@ -213,6 +235,12 @@ class ConceptRankingService:
             notebook_ids = tuple(nb for nb in notebook_ids if nb == active_notebook_id)
         fingerprint = rank_fingerprint(query, request.scope, notebook_ids)
         cursor = _decode_cursor(request.cursor, fingerprint, request.page_size) if request.cursor else None
+        bind_candidates = bind_query_candidates and bool(query)
+        if bind_candidates:
+            # MCP has no run memo: each page must observe fresh candidate recall.
+            memo = None
+        cursor_scope_digest = (_query_cursor_scope_digest(cursor["d"])
+                               if cursor and bind_candidates else cursor["d"] if cursor else "")
         computation = memo.get(fingerprint) if memo is not None else None
         call_deadline = time.monotonic() + self._settings.kg_rank_call_budget_ms / 1000
         try:
@@ -232,7 +260,7 @@ class ConceptRankingService:
             raise_if_cancelled(cancel_event)
             raise
         raise_if_cancelled(cancel_event)
-        if cursor and (cursor["s"] != [list(seq) for seq in seqs] or cursor["d"] != digest):
+        if cursor and (cursor["s"] != [list(seq) for seq in seqs] or cursor_scope_digest != digest):
             raise RankCursorStaleError("ranking graph or source ceiling changed")
         active_drifted = bool(not subjectless and scope is not None
                               and scope.narrowed is not True
@@ -309,6 +337,14 @@ class ConceptRankingService:
                 fingerprint, query, request.scope, tuple(libraries), seqs, digest)
             if memo is not None and all_cacheable:
                 memo[fingerprint] = computation
+        if bind_candidates and all(
+            library.coverage.status == RANK_STATUS_OK and not library.coverage.skipped
+            and library.query_candidates_digest for library in computation.libraries
+        ):
+            bound_digest = _query_cursor_digest(digest, computation.libraries)
+            if cursor and cursor["d"] != bound_digest:
+                raise RankCursorStaleError("ranking query candidates changed")
+            computation = replace(computation, ceiling_digest=bound_digest)
         page_number = cursor["p"] if cursor else 0
         if not rank_page_valid(computation, page_number, request.page_size):
             raise RankCursorError("invalid ranking cursor page")
@@ -365,9 +401,10 @@ class ConceptRankingService:
     def _rank_contents(self, nb, query, coverage, *, retrieval, count_ceiling,
                        show_ceiling, deadline, call_deadline, cancel_event, tier):
         cacheable = True
+        candidate_digest = ""
         if query:
             coverage = replace(coverage, candidates_lexical_only=coverage.scoped)
-            entries, coverage, cacheable = self._query_rows(
+            entries, coverage, cacheable, candidate_digest = self._query_rows(
                 nb, query, coverage, retrieval, count_ceiling, deadline, cancel_event)
         elif coverage.path == RANK_PATH_SCOPE_FULL:
             with read_budget(deadline, cancel_event), self._database.connect_read() as db:
@@ -405,7 +442,8 @@ class ConceptRankingService:
             (coverage.path == RANK_PATH_SCOPE_FULL and not coverage.recount_capped)
             or (coverage.path == RANK_PATH_PRECOMPUTED and not coverage.stale_counts))
         return LibraryRanking(replace(coverage, unnamed_dropped=dropped,
-                                      duplicate_import_pairs=pairs, exact=exact), rows), cacheable
+                                      duplicate_import_pairs=pairs, exact=exact), rows,
+                              query_candidates_digest=candidate_digest), cacheable
 
     def _query_rows(self, nb, query, coverage, retrieval, ceiling, deadline, cancel_event):
         hits = retrieval.retrieve_scored(nb, query, types=["concept"],
@@ -419,6 +457,9 @@ class ConceptRankingService:
         with read_budget(deadline, cancel_event), self._database.connect_read() as db:
             mapping = self._unified_kg.concept_rank_candidate_canonicals(db, nb, object_ids)
         canonicals = list(dict.fromkeys(mapping[oid] for oid in object_ids if oid in mapping))
+        # Bind the entire mapped candidate set, including candidates outside the
+        # retained top 80, with no dependence on retrieval order or aliases.
+        candidate_digest = hashlib.sha256(json.dumps(sorted(canonicals)).encode()).hexdigest()
         with read_budget(deadline, cancel_event), self._database.connect_read() as db:
             counts = self._unified_kg.concept_rank_member_counts(db, nb, canonicals)
         entries, scanned, completed = [], 0, 0
@@ -446,7 +487,7 @@ class ConceptRankingService:
         if canonicals and not completed:
             coverage = replace(coverage, status=RANK_STATUS_UNAVAILABLE,
                                reason=RANK_REASON_RECOUNT_BUDGET_EXHAUSTED)
-        return top_concept_ranks(entries, CONCEPT_RANK_PRECOMPUTED_ROWS), coverage, cacheable
+        return top_concept_ranks(entries, CONCEPT_RANK_PRECOMPUTED_ROWS), coverage, cacheable, candidate_digest
 
     def _precomputed_rows(self, nb, coverage, deadline, cancel_event):
         with read_budget(deadline, cancel_event), self._database.connect_read() as db:

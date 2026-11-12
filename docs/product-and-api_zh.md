@@ -203,30 +203,7 @@ CJK 字符）；一个标题去掉开头编号（如 `5.7.2.1`、`Figure 1-1.`�
 - 知识图谱视图头部还有一个**图谱分析**按钮（批 1，共 4 批；见 `docs/superpowers/specs/2026-07-25-kg-analysis-view-design.md`），与「图谱 Schema」并列；报告读取仍只要求 notebook 读权限。面板主体是**问题清单**（见 `docs/superpowers/specs/2026-10-19-kg-analysis-findings-design_zh.md`），分四个区：**待处理**按严重度（高／中／低，只用来排序和配色，不出总分）、影响面、主键排序，每条写规则名（疑似内容错配／疑似重复导入／疑似解析残缺／疑似没合并的同名概念／没建立关联的内容）、定位（来源、两个来源、概念组或全库）、判据用到的数字与代表名字、影响的知识对象数和建议动作；**需要开发处理**只列在本库测得到影响、只能靠开发修复的缺陷（目前是只差空格／连字符而没有合并的概念组），只写现象与规模，不放按钮；运行中的代码已修复、这个库已发布的结果还建在修复之前时（`dev_items[].status` 为 `fixed_pending_update`），这一项写「已修复，更新分析后生效」（同样不放按钮，「更新分析」在面板头部）；**诊断数据**是原有的全部统计区块，默认折叠，逐指标的新鲜度标注不变——其中「先看结论」不再有「来源复核入口」卡（由疑似内容错配取代，连同它额外的那次来源画像请求一起删掉），「主题结构信号」改报主体内容（彼此有关联连成的最大那一片）含多少比例的知识对象、内部有几个主题，以及另有多少孤岛、来自几个来源；**已通过**每条规则一行，把「检查过、没发现」（✓，写检查了多少）、「没法检查」（–，写原因，不算通过；没能检查完整、一条都没列出的规则同样记「–」）与「已标为正常」（可撤销）分开写，用户判定过不是同一个的同名概念组也列在这里。头部写报告建于哪一代、与当前是否一致，以及与上一次相比已消失／仍在／新增各几条与已消失的名字（规则版本不同、或有规则没能完整检查时写明本次不比较，并逐条列出仍可比的那几条规则各自的计数）。报告落后于数据时每条问题标「基于变更 #N」；已处置、尚未更新分析的问题标「已处理，更新后核验」并写读侧认出的原因（来源已删除、正在解析或已重新解析、已确认合并、已跑过补上关联），不从列表里消失。可编辑成员在每条问题旁有处置入口，全部走既有入口与后端权限：「打开来源核对」在面板上层打开来源详情（面板不关，关掉来源详情后焦点回到原按钮）；「删除来源…」调起既有删除确认框（文案不变，按钮旁写「不可撤销，先打开来源核对」；疑似重复导入只在建议删除的那份旁出现，保留对象更多的一份）；「重新解析…」先弹确认框，说明会重新调用模型并替换这篇来源现有的知识条目，确认后走体检同款批量重新解析（收录来源不出），并按 id 跟着这篇来源直到这一次跑完（不在来源列表当前页也跟），状态每推进一步就重取问题清单与总览；从确认到跟踪判定这一次跑完，引用这篇来源的每条问题上的「重新解析…」与来源详情里的「重新解析」都置灰并就地写「已提交重新解析，等待完成」（排队期间轮询读到上一次的终态也不放开；跟踪结束——跑完、来源已删、轮询超时、切换笔记本或关闭面板——时放开），不能重复提交；「去待确认合并」关掉面板并在知识图谱视图的「待确认合并」里定位那一组（队列里还没有这一组时写「待确认合并里还没有这一组」）；「补上关联」走既有后台任务，跑完把「新增 N 条关联，还剩 M 个没有关联的知识条目」写在待处理区的区级提示里（那一条此刻要么已移走、要么已没有按钮），已经跑过且之后没有新内容时这条移出待处理、放进诊断数据，不出按钮，写「补上关联已经跑过，剩下 M 个没有可自动补上的关联；集中在某几个来源的，见疑似解析残缺」（不列在已通过、也不计入它的条数）；「标为正常」把一条问题移到已通过。后台任务进行中时对应按钮禁用并就地说明，处置完成后面板重取问题清单。只读成员与镜像库看到同样的问题与证据，但没有任何处置按钮，也没有「标为正常」。「生成分析／更新分析」在面板头部：它复用 `POST /notebooks/{id}/unified-kg/rebuild`、现有确认框、按笔记本单飞后台任务与 `job_id` 配对完成轮询，不重新抽取来源，任务完成后自动刷新报告；报告已与当前图谱一致时置灰并写「已与当前图谱一致，无需更新」，只剩合并代次无法核对时置灰并说明普通更新改变不了它，合并结果建于旧的合并规则时可点并写「合并规则已更新，需要更新一次」（删除知识图谱之后版本记录为空，不算这一档）。升级后还没生成问题清单的库显示灰色「升级后还没生成」，不报红。`GET /notebooks/{id}/kg-analysis` 返回对象构成、**按对象类型分列**的合并收敛率（concept / claim / formula / procedure 分开算——四类混算会把 concept 真实收敛率稀释约 3 倍）、主题板块列表与跨板块边（供俯瞰图使用）。板块列表里每个板块在 `id` 旁另带 `board_key`：`id` 每发布一次划分就重铸，`board_key` 才是板块跨重建的身份——新旧两个板块互为最佳匹配、且共同成员占两者并集至少一半（Jaccard ≥ 1/2）时沿用旧 key，否则新铸。重建以已发布的划分热启动，图本身不动时板块就不动；强制重建也照样热启动（一次性重新划分与 `recluster_kg --cold-partition` 见 `docs/operations_zh.md`）；`GET /notebooks/{id}/kg-analysis/sources` 分页返回逐来源画像，默认按「与主体板块最不连通」在前排序，可切换为「最紧密」在前。与其它所有面向用户的来源计数同口径，来源画像也只覆盖可见的导入来源：隐藏的 `memory` / `knowhow` 投影来源的对象在**预计算**时就被排除，因此这些内部标题不会进报告，也不会把「最不连通」的排行头部占满。孤儿引用（`source_id` 指向已被删除的来源）则刻意**保留**并标记 `source_missing`——那是诊断信号，不是隐藏来源。两个端点只读 `rebuild_communities` 顺带产出的三张预计算产物表（`kg_community_edges`、`kg_source_profiles`、`kg_analysis_artifacts`），在线路径不做全表扫。这三张表与**板块划分本身**在**同一个**写事务里发布，所以报告永远不会把新一代板块与上一代账本拼在一起。每个数字都标注自己建于哪一代、落后当前多少——逐指标标注，不是整页顶一条「可能过期」的横幅。世代有**两条且相互独立**：`kg_mutation_seq`（对象与关系的写入）与 `cluster_mutation_seq`（合并结果）。合并的写路径刻意不动前者，所以从 `concept_clusters` 算出来的四份产物（簇大小直方图、最大簇榜单、跨板块边、来源画像）另带 `built_at_cluster_seq` / `cluster_seq_behind`，一次纯合并写入就会让它们变陈旧；`relation_provenance` 只读关系表、不盖这个戳，也刻意不被合并作废——重算它等于白跑一趟关系全表扫。依赖板块的那两份（跨板块边、来源画像）盖的是**它们描述的板块划分**建在哪一代合并结果上：同一轮重建过划分就是整数，只补账本的那一轮显式记 `null`——那时的划分是库里现成的，而它建在哪一代没有任何地方记。所以 `stale` 是**三值**的：某条线明确落后为 `true`，两条都对齐为 `false`，合并世代无从判断为 `null`；`null` 不等于 `false`，界面单独出一条提示而不是说「与当前一致」。产物账本对**两条**世代线都有独立于社区层的新鲜度闸，已经建过社区的库在下一次普通整理时就能补齐账本，不需要强制重建。主题板块列表本身走**同一套**三值判据，不是另写一份：它的 KG 世代那条线是 `community_seq`，合并世代那条线读的就是上面那个戳——那个戳记的本来就是「板块划分建在哪一代合并结果上」，而依赖板块的两行账本与重铸板块 id 同事务作废，所以「行在」就意味着它描述的正是当前这套划分。于是纯合并写入之后，板块那一格与建在同一套划分上的那两份产物**同时**报「对不上合并进度」，而不是因为 `kg_mutation_seq` 恰好没动就自称「与当前一致」。该动作只刷新派生分析状态。本视图给出带证据的问题与建议，但不自己执行处置：它只把用户带到既有入口——删除或重新解析来源、确认合并、补上关联——各自走既有确认框与后端权限；视图自己唯一的写是「标为正常」（豁免）。
 - **问题清单（后端契约；设计见 `docs/superpowers/specs/2026-10-19-kg-analysis-findings-design_zh.md`）。**建主题板块的同一趟预计算还会按规则算出一份问题清单——每条都附上判据用到的数字与至多 5 个样例名——并在板块**自己的**发布事务里，以第六种账本产物 `findings`（必需产物；依赖合并结果，不依赖板块划分，所以重铸板块不作废它，补账本路径也盖得出整数合并世代）加明细表 `kg_analysis_findings` 一起发布。规则（`rules_version` 1）：**F1 疑似内容错配**——一个来源至少有 10 个 concept canonical，其中不到 5% 也出现在另一个非重复伙伴的来源里（严重度高；建议删除来源；两份重复的错文件合成一行）；**F2 疑似重复导入**——两个来源的 concept canonical Jaccard ≥ 0.45，出现在超过 30 个来源里的概念不计（中；建议删除对象更少的那份，对象数相同时保留先导入的）；**F3 解析残缺**——任一子信号命中：破碎名（一个来源的 concept canonical 名里至少 10% 且至少 5 个含 ≥ 4 个连续单字符 token）、关联过少（每对象关联数低于全库中位数的 0.5 倍，只判对象数 ≥ 20 的来源）、孤立对象过多（占比高于 max(全库中位数 × 3, 10%) 且至少 20 个）（中；建议重新解析；F3 命中的来源不再报 F1）；**F4 疑似没合并的同名概念**——去掉全部分隔符后同名、且有至少两种写法不只差在空格/连字符/下划线的 canonical，已存合并决定驳回或暂缓过的不报（按全部成员在两个合并种子空间的种子匹配——旧规则 v1 与现规则 v2，决定重算保留旧种子的 `~v1:<种子>` 读作它的 v1 种子——含隐藏来源成员；保留旧种子的合并后知识对象本身不进 F4）（低；建议去「待确认合并」）；**F5 没建立关联的内容**——所在 canonical 没有任何非自环关联的可用对象，全库一条（低；建议补上关联）。同名组里只差空格/连字符/下划线的窄的一半（合并种子归一缺陷 S1）只计数，在「需要开发处理」里给至多 3 个例子，不出问题行；`dev_items[]` 每项带 `status`：库已发布的合并仍建在旧种子空间（`unified_kg_state.concept_seed_version` 小于代码的种子空间）时为 `fixed_pending_update`（已修复，更新分析后生效），否则为 `open`。上限一律显式、不静默：每条规则至多 `MAX_PERSISTED_FINDINGS=500` 行（账本逐条规则记 `total` / `persisted` / `truncated`），每个库至多 `KG_FINDINGS_ROWS_MAX=5000` 行明细（写入口超过即硬失败），F2 候选对生成数上限 `KG_FINDINGS_MAX_CANDIDATE_PAIRS`（触顶记为截断）。展示名与样例名只取自可见来源自己的对象，所以取自 knowhow 对象的 canonical 名不会进报告。每次构建从上一份明细继承 `first_seen_*`，并记下对比摘要（已消失 / 仍在 / 新增，附至多 20 个已消失的名字）；规则版本变了、或任一侧截断 / 没能运行某条规则时不比。问题清单的 payload 还带只依赖连通分量的结构数（主连通块的对象占比、孤岛个数及其涉及的来源数）；依赖板块划分的两个数（主连通块内的板块数、恰好等于一整个分量的板块数）放在依赖板块的 `community_edges` payload 里。按别的规则版本建的问题清单判为陈旧（`rules_version` 是它的第三条新鲜度线），所以规则改动后「更新分析」会重算。每一行账本 payload 都带 `ledger_contract` 戳；在场的行全都早于这个戳时，缺 `findings` 判为 `upgrade_pending`（灰色：升级后还没生成）而不是 `unexpected`，下一次普通整理即补上。「补上关联」完成时记一个持久标记 `relink_attempted`（记下完成时的 `kg_mutation_seq`），一条都没补上也记；跑的过程中若有补上关联以外的写入改动了图谱（维护槽不挡普通摄取），标记改记开跑时的世代，让它没读到的内容仍可再补；标记世代等于当前世代时 F5 移出待处理（再跑也补不上）。「标为正常」是用户的决定，重建不清：只有主体已不存在时才在发布时清掉（F1/F3 的来源被删、F2 任一来源被删）；F4/F5 的豁免发布时从不清，规则那一轮 skipped 或被截断时也不清，所以删除知识图谱后还没重抽、来源正在重新解析时，豁免都会保留，重新整理后同样的问题仍是「已标为正常」。豁免只随撤销、删除笔记本消失。总览的 `merge_code` `{stored, current, matches}` 比较上次合并存下的合并代码分量与当前代码；还没合并过（如删除知识图谱之后）时 `matches` 为 `null`，绝不读成「合并规则已更新」。
 
-  **概念排行预计算。**图谱分析构建同时发布至多 80 个概念排行，按可见来源数降序、对象数降序、canonical id
-  的 C 序排列。只统计可用 concept 对象，且 owner 来源必须非空、仍然存在、类型不是
-  `memory` 或 `knowhow`；问题清单原有的孤儿处理不变。排行及代表成员与问题清单在同一
-  发布事务里整替换，不进入分析产物账本。即使结果为空，也写 rank=0 表头记录两条世代序。
-  排行读取（包括名字与引用）使用相同来源边界；名字取按 id 排序的前 `scan` 个成员中
-  首个符合条件且去掉首尾空格后非空的名字。
-
-  用户触发的 `POST /notebooks/{id}/unified-kg/rebuild` 即使其它分析产物已新鲜也会检查该表头。
-  分析总览返回 `concept_ranks_built_at_seq`（`{kg_seq, cluster_seq}` 或 null）与
-  `concept_ranks_stale`，每次请求都读取表头。表头缺失时视为陈旧；否则后端与重建新鲜度闸
-  使用同一个世代判据。
-
-  问答把 `concept_ranking` 结果按笔记本分节显示为「概念排行」卡，列出来源数、提及条数、
-  同名组标签、引用与覆盖说明。卡片原样展示后端交付的行，不重新分页；后续翻页失败仍保留
-  已成功交付的页面。后端提供的 `ranking_notice` 只在正文前显示一次。句尾只提供当前用户
-  可用的动作：高级模式的非 MCP 会话可全选本库来源并重新提问，可写的当前笔记本可更新分析，
-  或重新提问。全局问答的重新提问只回填输入框，不自动提交。分享、复制与导出保留纯文字
-  说明。排行数据缺失或 `concept_ranks_stale: true` 纳入 `needs_update`（「需要更新」）
-  判据；旧响应没有陈旧字段时沿用原判据。排行说明里的更新动作
-  只在点击时探测一次 `GET .../unified-kg/rebuild/model-calls`：`false` 直接开始，`true` 或
-  `null` 均先确认可能调用模型。探测返回 403 时隐藏当前笔记本的出路；其它探测错误按
-  `null` 处理并先确认。状态轮询不做探测。重建成功后只要排行表头存在就提供重新提问，
-  陈旧数据由后端披露；表头缺失则逐字显示后端的 `fallback_line`。失败或轮询超时可重试，
-  不代表没有产出排行。
+  概念排行的预计算、结果与更新行为见[概念提及排行](#概念提及排行rank_concepts)。
 
 - 「分析」菜单本身只包含晋升队列（admin）、发布/撤回公共知识库（admin）与边审查队列。看板、全屏知识图谱是其他顶栏动作；「图谱 Schema」已从顶栏移入知识图谱视图头部，不再是独立顶栏动作。可编辑成员还能在知识图谱视图的「图谱处理」里看到**「删除知识图谱」**：确认后在后台删除从来源分析出的知识图谱，来源及其解析内容保留；运行期间其他图谱处理动作保持不可点，结果显示在按钮旁（契约见知识图谱维护端点下的「删除知识图谱」条目）。管理员维护全局对象类型基线；笔记本 owner 可查看当前生效基线、copy-on-write 改写继承定义、仅在本库停用该类型，或新建本库专属类型；删除覆盖会恢复全局定义。只读成员可查看同一份生效定义但没有写控件。管理员还可切换到全局基线视图，其改动只影响尚未覆盖同名类型的笔记本。面板按三段编排，把「现在有哪些类型」和「改哪一个」分开：顶部一行**作用范围**（当前笔记本／全局基线，仅管理员可切换）决定看到的是哪一份注册表、以及写入落到哪里；左栏是**类型清单**，按待批准的候选／生效中／已停用分三组，每行给出类型标识、显示名、字段数与来源徽章（继承／覆盖／自建／内置），「新增类型」与「从当前笔记本归纳候选类型」收在清单栏底部；候选在批准前不遮蔽同名的继承类型，因此两者在清单里各占一行、可分别选中；右栏是**选中类型的定义**，默认只读，按「编辑」才换成表单，候选类型在这里给出归纳理由与批准／拒绝。编辑草稿按类型分格留存，切到别的类型再切回来不丢输入，清单行上以圆点标记未保存。写动作以回执为准——只有后端写成功且清单已重新拉回，面板才退回只读态或清空新增表单；拿不到回执时保留输入并在按钮紧邻处说明原因。当前不再暴露已退役的内容生成或派生规则动作。现有 notebook 分析视图提供独立的 Memory 和 Knowhow 内容资产卡片：Memory 指标严格限定为当前登录用户和当前 notebook（admin 也不跨用户汇总），Knowhow 指标遵循 notebook 的既有读取权限。卡片只展示计数、健康度/最近活动摘要和跳转入口；浏览与编辑仍复用现有的 Memory、Knowhow 页面和编辑器。
 
@@ -1858,7 +1835,7 @@ Authorization 的 Agent 知道解法；工具清单从部署实例的冻结目�
 *idle* 超时——一次调用在若干秒内既没给出响应、也没发过任何 progress 通知就被中断——别的
 客户端则是每次调用一个固定上限。`reasoning` 档的 `ask` 动辄跑几分钟（理解、规划、联邦
 检索、反思循环、答案合成），部署的插件引擎可能更久，所以没有心跳时客户端会放弃一次服务端仍在正常
-执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 25 个 core 工具的阻塞主体一律
+执行的调用，Agent 看到的是一个传输错误，而答案本来马上就到。因此 26 个 core 工具的阻塞主体一律
 跑在同一道心跳下，**每 5 秒**一拍，内容只有工具名与已耗墙钟秒数——绝不带问题原文、笔记本或
 来源名称，与观测事件同一条口径。不需要它的场合是免费的：客户端没有在请求 `_meta` 里带
 `progressToken` 时该通知是 no-op，而第一拍要等满一个间隔，所以毫秒级返回的工具（绝大多数）
@@ -1917,8 +1894,8 @@ token 的默认笔记本（`list_notebooks` 用 `is_default` 标出）。每个�
 重跑原读取的全部鉴权。报错统一为 `[<code>] <中文说明>`，code 取值 `token_inactive`、`scope_missing`、
 `notebook_not_allowed`、`notebook_unreadable`、`owner_only`、`forbidden`、`not_found`、`invalid_argument`、`busy`、
 `mirrored`、`unavailable`、`internal`。`ValueError` 只有在文本以中文开头（或属于已知校验器形状并被译成中文）
-时才作为 `invalid_argument` 带出原文；其他意外错误一律是 `internal`，文本从不回显。默认 core 的二十五个工具如下；
-`mcp_server.PUBLIC_TOOLS` 就是下面这 25 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
+时才作为 `invalid_argument` 带出原文；其他意外错误一律是 `internal`，文本从不回显。默认 core 的二十六个工具如下；
+`mcp_server.PUBLIC_TOOLS` 就是下面这 26 条本身，不是更大的组合目录——它与 `mcp_server.CORE_TOOLS`
 是同一份清单：
 
 | 分组 | 工具 | Scope |
@@ -1932,6 +1909,7 @@ token 的默认笔记本（`list_notebooks` 用 `is_default` 标出）。每个�
 | 提交 | `propose_memory`、`add_observation` | `contribute` |
 | 来源读取 | `list_sources` | `read` |
 | 论文检索、卡片与逐篇抽取（卡片与抽取会消耗模型配额） | `find_sources`、`get_paper_cards`、`extract_from_sources` | `read` |
+| 按来源篇数给概念排行 | `rank_concepts` | `read` |
 | 来源管理 | `add_source`、`reparse_source` | `manage`（owner-only） |
 | 来源删除 | `delete_source` | `delete`（owner-only，且仅限 Agent 添加的来源） |
 | 构建 | `build` | `manage`（owner-only） |
@@ -1939,7 +1917,7 @@ token 的默认笔记本（`list_notebooks` 用 `is_default` 标出）。每个�
 | Knowhow 代码写入 | `put_knowhow_cell_code` | `contribute` |
 
 实际部署以 server-local frozen catalog 作为 discovery 与 onboarding 的权威清单：它精确等于上表
-25 个工具，由十一个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
+26 个工具，由十一个 core registrar 实时派生，`mcp_server.PUBLIC_TOOLS` 就是这份清单本身而不是第二份
 手抄。每次调用都重新检查 live token/档位/allowlist/成员权，`manage` 与 `delete` 两档都强制经过 owner-only
 notebook 闸（针对已有笔记本的写入）；新建则检查 token 级权限，并把新库归给 token 主人。缺档时工具报错是写明缺哪一档的中文文案（例：「此凭证缺少「读取」权限，请在 Agent 接入页为它勾选后重试」），
 不再只给笔记本 id；token 失效、笔记本不在白名单、主人已无权读该笔记本也各有一句可读文案。结果在构造时就被复制进有界形状——深度不超过 5 层，逐字段/map/list 施加上限——超大容器不会
@@ -3467,7 +3445,7 @@ V2 实验协议与布局已退役。Ask、Deep Report 和 Knowhow 均使用 Lega
 
 ### 集合枚举工具
 
-逐步推理还能通过模型调用的 reflect 动作 `enumerate_elements`（来源元素）与 `enumerate_kg_objects`（知识对象），以及在这两个动作上给出的 `enumerate.collection` 参数值 `"sources"`（改为列出库里的文档），对这几类有界集合做**列举**而非只做排序。模型面的动作空间在这个特性内维持 10 个：第三个集合是一个参数值，不是第三个动作（[下文](#大纲便签与按节合成)的大纲便签之后另外新增了货真价实的第十一个动作 `update_outline`，Agentic Memory P4 的 `consult_memory` 是第十二个，`read_document` 是第十三个，文档内章节导航这一对 `browse_sections` / `read_section`（见[下文](#文档内章节导航browse_sections--read_section)）是第十四、第十五个，与这里无关；计数跟随 `domain/reflect_action.CORE_REFLECT_ACTION_IDS`（16 个 id），不含终态动作 `answer`）。三个集合都由零 LLM 执行器提供：模型只决定是否枚举、枚举多少；覆盖率永远由执行器算出，绝不采信模型自报。这是与上文 Knowhow 物理行执行器**并行的独立机制**——共用同一张按档位缩放的预算表，但不共用同一个意图 scope 门，也不被 `result_scope` 自动触发。
+逐步推理还能通过模型调用的 reflect 动作 `enumerate_elements`（来源元素）与 `enumerate_kg_objects`（知识对象），以及在这两个动作上给出的 `enumerate.collection` 参数值 `"sources"`（改为列出库里的文档），对这几类有界集合做**列举**而非只做排序。第三个集合是参数值，不另增动作。当前 `domain/reflect_action.CORE_REFLECT_ACTION_IDS` 有 20 个核心动作 id（含 `rank_concepts` 与终态 `answer`）。三个集合都由零 LLM 执行器提供：模型只决定是否枚举、枚举多少；覆盖率永远由执行器算出，绝不采信模型自报。这是与上文 Knowhow 物理行执行器**并行的独立机制**——共用同一张按档位缩放的预算表，但不共用同一个意图 scope 门，也不被 `result_scope` 自动触发。
 
 **谁能触发枚举：只有模型。** 触发者就是 reflect 循环里的那两个模型动作，没有第三个。**目录由模型自己选**：`enumerate_elements` 配上参数 `enumerate.collection="sources"` 就是「列这个库有哪几篇文档」，服务端不按问法正则在首轮替它确定性地播一次目录——agentic 模式里目录该不该列是模型的判断，问法分类器（`overview_intent`）只服务 chunk 通用问答那一条通道。模型之后再请求**同一范围**的同一份目录按「本轮已全部列出」跳过（`already_enumerated`），不会把同一份清单列两遍、扣两次预算。**读哪几篇也由模型自己选**：拿到目录之后，用 `read_document` 深入某一篇原文（尤其是目录里没有存摘要的那几行）同样是模型基于目录内容自主决定的一步，服务端不会替它挑、也不自动播种。
 
@@ -3516,7 +3494,7 @@ V2 实验协议与布局已退役。Ask、Deep Report 和 Knowhow 均使用 Lega
 
 **`search_chunks` 的可选关键词参数 `keywords`。** reflect 回复里，`search_elements`、`exact_lookup`、`ppr_retrieve`、`expand_community`、`search_chunks` 这几个单参数动作共用根级的检索串 `query`（各自只读所选动作的那一份；大纲便签的节列表同样直接放在根级 `outline_sections`，未用到的分支与字段写 null）。除检索串 `query` 外，模型可以再给一串空格分隔的关键词，服务端在语义检索之后用它走一次关键词全文检索（与 chunk 通用问答的关键词补召回臂同一条通道、同一个范围：单库问答只查本库，全局问答逐库联邦），命中先收到与本次动作同宽（`CHUNK_MMR_K`）再并入，用来补上语义检索容易漏掉的字面命中——型号、术语、命令名、代码标识符。reflect prompt 列出本 run 的**语料语言**（单库问答取本库，全局问答取参与库的并集；探测不到或探测失败时回退 zh/en，失败不影响这次提问；关键词子闸关着时不探测），要求关键词用这些语言写并带上跨语言对应词、缩写与全称，并且不要加问题没点名的标识符（即便在候选里见过——不同的型号或命令是不同的东西，不是点名那个的另一种写法），也不要加猜测的答案值；问题点名的词仍各带其它语料语言的写法与缩写/全称：关键词臂按整串的覆盖率打分，多出来的词会稀释匹配，真模型抽问里曾因此把金段挤到相关度门槛以下。不填就只按 `query` 检索，轨迹与行为与接入前相同；填了时这一步的轨迹多出 `keywords` 与 `keyword_found`；关键词检索失败时语义那一半照常保留、不上横幅——通道内部的检索失败只记一条 `ask_stage`（`stage="chunk_keyword_union"`，只带异常类名）事件（chunk 通用问答的关键词补召回同样如此），通道调用本身抛出时轨迹再加 `keyword_failed`，严格模式下照抛，取消与检索控制异常（`RetrievalControlError`）照常结束本轮。关键词串（模型写成列表时按空格拼接）解析时截到 300 字符，开头空白不计入。一次带关键词的动作仍只算一次 `REASONING_MAX_CHUNK_SEARCHES`。原文检索开关关闭、或关键词臂本 run 恒空（全局问答且 `GLOBAL_ASK_KEYWORD_ARM_ENABLED=false`）时，schema、prompt 与解析里都没有这个字段——模型看到的参数与实际生效的一致；同一条件下首轮播种的词法臂也不发起（seed 步轨迹不写 `keyword_found`，与没有整题关键词时同形）。
 
-无图时，`expand_graph`、`ppr_retrieve`、`expand_community`、`follow_chain`、`enumerate_kg_objects` 从动作枚举、提示词和白名单一并移除，来源与元素枚举仍可用。轨迹披露「本笔记本尚未整理知识图谱,本轮只用原文检索与集合清单」；`kg_required=True` 保留整理图谱建议，但本身不拒答。全局问答不论有无图谱，都以同样方式移除 `ppr_retrieve`：它在全局问答里的生产者已关闭（只会查命名锚点库），恒返回空；`search_elements` 在全局问答里保留并逐库联邦检索，只在 `GLOBAL_ASK_ELEMENT_ARM_ENABLED=false` 时移除（见全局范围一节）；单库提问两者照旧保留。模型选了本 run 不提供的已知核心动作时（不论是哪把闸摘掉的——无图、全局问答、档位或部署开关），轨迹记一条 skip「跳过模型所选的检索动作(本次检索不提供它)」（`reason="action_not_offered"`，带动作名），反思循环在既有的 stale 熔断与步数上限内继续，不提前收尾；只有核心动作集合之外的名字才走非法动作兜底（`invalid_action:<名>`），严格调用方对任何不在白名单里的动作仍然抛错。
+无图时，`expand_graph`、`ppr_retrieve`、`expand_community`、`follow_chain`、`enumerate_kg_objects`、`rank_concepts` 从动作枚举、提示词和白名单一并移除，来源与元素枚举仍可用。轨迹披露「本笔记本尚未整理知识图谱,本轮只用原文检索与集合清单」；`kg_required=True` 保留整理图谱建议，但本身不拒答。全局问答不论有无图谱，都以同样方式移除 `ppr_retrieve`：它在全局问答里的生产者已关闭（只会查命名锚点库），恒返回空；`search_elements` 在全局问答里保留并逐库联邦检索，只在 `GLOBAL_ASK_ELEMENT_ARM_ENABLED=false` 时移除（见全局范围一节）；单库提问两者照旧保留。模型选了本 run 不提供的已知核心动作时（不论是哪把闸摘掉的——无图、全局问答、档位或部署开关），轨迹记一条 skip「跳过模型所选的检索动作(本次检索不提供它)」（`reason="action_not_offered"`，带动作名），反思循环在既有的 stale 熔断与步数上限内继续，不提前收尾；只有核心动作集合之外的名字才走非法动作兜底（`invalid_action:<名>`），严格调用方对任何不在白名单里的动作仍然抛错。
 
 未收窄来源范围的 run，其内部准入至少需要一条可用通道：`REASONING_ENUM_TOOLS_ENABLED` 开启且参与集来源／元素／对象计数非空，或 `REASONING_CHUNK_SEARCH_ENABLED` 开启且原文参与集有可见来源。原文检索已跨库；仅关闭 `CHUNK_FEDERATION_ENABLED` 才将该准入计数退回 `active_sources`。集合地图未扣除超过 `CHUNK_FEDERATION_MAX_PARTICIPANTS` 的库，因此准入范围可能宽于实际有界生产者集合。两通道关闭、均为空、或集合地图构建失败时确定性早退：「当前笔记本没有可检索的来源；请先添加来源，或挂载/整理一个已建知识图谱的参考库。」
 
@@ -3583,6 +3561,75 @@ V2 实验协议与布局已退役。Ask、Deep Report 和 Knowhow 均使用 Lega
 
 部署插件的 reflect 动作如果叫 `browse_sections` 或 `read_section`，启动即被拒：这两个名字是核心动作 id，属保留名（见 [Reflect 插件动作](#reflect-插件动作askreflect_action) 的注册红线）。
 
+### 概念提及排行（`rank_concepts`）
+
+`rank_concepts` 按提及合并概念的不同 owner 来源篇数排行。模型自己挑出符合问题类别的行，照抄计数并复核代表出处；不得估计计数，`coverage.exact=false` 时不得声称「最多」。排行不调用聊天模型；Ask 运行内带主题词时调一次 embedding，多库共享。MCP 每次调用的 embedding 行为见下文。
+
+**参数与门控。** reflect 参数为 `query`（至多 200 字，空表示全部概念）、`scope`（`all` 或 `current_notebook`）和 `cursor`；全局运行不提供 `scope`。动作要求 catalog/enumeration 已接线、`allow_enumeration`、`allow_rank_concepts`、默认开启的 `REASONING_RANK_CONCEPTS_ENABLED`、本轮范围内有图及档位剩余额度。提示词、schema、白名单、解析和执行共用此闸。无图时动作消失；报告引擎未接枚举服务时不提供；Knowhow 补全显式关闭。每轮至多四条参数链，翻页同样消耗调用预算：
+
+| 档位 | overview | standard | deep | thorough | exhaustive |
+| --- | --- | --- | --- | --- | --- |
+| `rank_calls_per_run` | 1 | 2 | 3 | 3 | 4 |
+
+**路径与口径。** 整库未收窄的可用 concept 数超过 `KG_RANK_ONLINE_MAX_OBJECTS`（默认 50,000）就是大库。大库只勾选部分本库来源时，即使有 `query` 也返回 `unsupported/scoped_large_notebook`，不回退统计；小库支持勾选部分来源。
+
+| 路径 | 选择与计算 | 精确性 |
+| --- | --- | --- |
+| `query`（Q） | 召回至多 `KG_RANK_QUERY_CANDIDATES`（默认 100）个概念对象，映射当前 canonical 去重，再有界分批重算 | 永不 exact：只排主题候选；收窄范围时只用字面候选，披露可能遗漏同义说法 |
+| `scope_full`（S） | query 为空且是小库，在范围内全量聚合合格成员 | 没有漂移、重算截断、丢弃无名行时 exact |
+| `precomputed`（P） | query 为空且是未收窄的大库，读预计算前列 | 计数新鲜、无漂移、未丢弃无名行时 exact；陈旧计数仍可用并披露落后世代 |
+
+`source_count` 统计不同且仍存在的可见 owner 来源，`object_count` 统计这些来源自己的可用 concept 对象，排除 Memory、Knowhow 和孤儿 owner。这刻意不同于按证据支撑判定的枚举：owner 在范围外、支撑在范围内的对象可能出现在枚举中却不计入排行，集合地图的 concept 总数也不必等于排行合计。每库保留至多 80 行，按来源数降序、对象数降序、canonical id 的 C 序排序。同名组可能是同一概念，不得相加；不同库的计数也不跨库相加。名字及至多三条代表引用遵守同一 owner 边界，引用来自不同 owner 来源；在按成员 id 排序的前 `scan` 个簇成员中，取第一个合格且名字非空者；空名不会被选中，但仍占扫描窗口。
+
+**预计算与刷新。** 图谱分析构建在问题清单发布事务中整替换排行及代表成员，独立于分析产物账本；即使结果为空，也写 rank=0 表头保存 KG 与 cluster 两条世代戳。用户触发的 `POST /notebooks/{id}/unified-kg/rebuild` 即使其他分析产物新鲜，也会检查该表头。分析总览每次请求读取表头，返回 `concept_ranks_built_at_seq`（`{kg_seq, cluster_seq}` 或 null）和 `concept_ranks_stale`；表头缺失即陈旧，否则与重建新鲜度闸共用世代判据。排行缺失或陈旧进入 `needs_update`（「需要更新」），旧响应没有陈旧字段时沿用原判据。
+
+**覆盖标记。** 每库各有一份覆盖，不判跨库整体 `exact`。
+
+| 字段 | 含义 |
+| --- | --- |
+| `notebook_id`、`notebook_name` | 库身份与显示名称 |
+| `status`、`reason`、`path` | `ok` / `unsupported` / `unavailable`、失败原因、上述 Q/S/P 路径 |
+| `scoped`、`scope_sources` | 本库来源是否收窄、范围内可见 owner 来源数 |
+| `drifted` | 本轮记录的真实来源漂移，不能仅由天花板绑定推断 |
+| `candidates_lexical_only` | 主题候选仅按字面匹配 |
+| `stale_counts`、`seq_behind` | 存储计数陈旧、尚未计入的图谱变更次数 |
+| `recount_capped`、`recount_skipped` | 重算达到行数或时间预算、未重算的候选概念数 |
+| `unnamed_dropped` | 因未得到合格名字而丢弃的行数 |
+| `duplicate_import_pairs` | F2 的 `pairs_hit`，规则未运行时为 0；重复导入可能抬高来源数 |
+| `exact` | 满足上述 S/P 路径精确性条件 |
+| `skipped` | 空、`read_failed` 或 `timeout`；跳过库的 `status=unavailable` |
+| `next_cursor` | 下一页游标，无下一页为空字符串 |
+
+因其他成员 Memory 而绑定的全选冻结集仍在集内计数，没有真实漂移时 S 路径仍可 exact；`confirm_fast_path` 不能把绑定本身当作漂移。用户取消勾选导致的空天花板静默不参与，读失败或超时后冻结为空的参考库必须披露 `library_skipped`。
+
+**分页与证据。** N 只计本次 `status=ok` 且未 skipped 的库，成功空库也计入；失败或跳过库配额为 0，不占除数。成功库每库配额 `max(1,20//N)`；N≤20 时余数按成功库顺序分配，N>20 时每库一行（配额总和 `max(20,N)`，不拒绝、不轮转）。页号 p 取各库至多 80 行中的 `[p*配额,(p+1)*配额)`；正常耗尽不重分配额，任一库下一页仍有实际行才可翻页。因此活动库成功、参考库读取失败时每页仍有 20 行配额。有失败库时按原参与库数保留名义页号准入上界，让原本合法的游标返回本次失败而非误报无效。
+
+reflect 短游标如 `c2:p1` 仅当前运行有效。卡片按实际成功交付的页面快照逐库累计、去重，合成逐库保留最近成功页；后续翻页失败不清空旧页，也不按恢复库后的新配额重切旧页。全部链合计内联至多 40 行，按库截断、保留块头并披露「另有 N 行未内联」。枚举与排行通过同一分配器共用 5000 证据号段（枚举先取、排行后取，最高 `k5140`）。没有可用引用的行仍内联名字与计数、占行额度，但没有 `[kN]`，不算统计失败；MCP 同样保留这种行。
+
+**失败与披露。** 问答的 `concept_ranking` 结果卡按笔记本分节，显示「概念 / 来源数 / 提及条数」、同名组、引用和覆盖说明，并保留上文约定的成功页面；非 ok 节只显示失败原因，不重复放出路。非 ok 结果不含行。后端唯一拥有 `ranking_notice` 以及 `ranking_failures` 每项的 `reason`、`notebook_ids`、`line`、`fallback_line`；客户端逐字使用后端句子。仅 `not_computed` 的 fallback 非空，内容是 `refresh_produced_nothing` 的句子。原因按下表顺序各出现一次，出路只给当前用户做得到的动作：
+
+| 原因 | 后端句子 | 可用出路 |
+| --- | --- | --- |
+| `scoped_large_notebook` | 没能按提及次数排行：本笔记本内容较多，只勾选部分来源时不支持这类统计。 | 全选本库来源并重新提问：仅当前笔记本仍处于自选模式且未全选的非 MCP 会话；只恢复本库来源，参考库勾选不变 |
+| `not_computed` | 没能按提及次数排行：本笔记本还没有排行数据。 | 更新分析：仅可编辑、非镜像、单库运行的当前笔记本；点击时才探测一次 `GET .../unified-kg/rebuild/model-calls`，false 直接开始，true/null 先确认可能调用模型；403 隐藏出路，其他探测失败按 null 处理，状态轮询不探测 |
+| `analysis_unavailable` | 没能按提及次数排行：本笔记本暂时不支持这类统计。 | 无，更新分析也产不出 |
+| `refresh_produced_nothing` | 没能按提及次数排行：这次更新没有产出排行数据。 | 无，进程内重建已成功但仍无表头 |
+| `recount_budget_exhausted` | 没能按提及次数排行：统计超时。 | 重新提问 |
+| `rank_failed` | 没能按提及次数排行：统计时出错。 | 重新提问 |
+| `library_skipped` | 有 {K} 个笔记本读取失败，没有计入排行。 | 重新提问 |
+
+出路是失败句末尾的可点击文字，仅在表中条件满足时提供；分享、复制、导出和 MCP 保留纯文字说明。全局问答的重新提问仅回填输入框，不自动提交。重建成功后只要排行表头存在就提供重新提问，陈旧数据仍由后端披露；表头缺失则逐字显示 `fallback_line`。重建失败或轮询超时可重试，不表示没有产出排行。`ranking_notice` 在正文前只显示一次。
+
+每条参数链只按最后状态生成失败行，同链后来成功会取代先前失败。除 `library_skipped` 外，仅本轮答案没有引用任何链的排行行时追加「下面的回答只基于检索到的部分内容，不是统计结果。」，`fallback_line` 同样遵守此规则。只有 `status!=ok` 才使用合成指示 “Counting did not complete”；成功空结果使用 “No concept in scope matched this request”，正常翻页耗尽不宣称整库没有匹配概念。
+
+答案引用任一排行行时，不论 `result_scope` 都追加确定性的计数口径披露：exact 时写「按提及它的来源篇数统计，范围：<N> 篇来源。」；非 exact 时逐项列出覆盖缺口并说明结果可能不全，每个被引用库各一句。顺序为失败句、排行披露、Knowhow 覆盖、模型正文、通用完整性提示。只有披露确实渲染、被引用排行全部 exact、且每条链当前均无失败时，才压掉通用未验证完整性提示，`aggregate` 同样适用。排行失败不强制追加通用提示；没有排行引用或失败时沿用原有完整性行为。
+
+**MCP。** `rank_concepts(notebook_id="", query="", cursor="", limit=20)` 需要 `read`，每次重读凭证和笔记本权限，只统计单库未收窄范围，不带运行 memo；Memory 与 Knowhow owner 始终不计入。`limit` 为 1–20，query 至多 200 字，非法参数在授权和调用台账写入前拒绝。带 query 时每次 MCP 调用（含翻页）都调一次 embedding，只在与主题最相关的概念候选中统计。返回 `notebook_id`、`query`、`path`、`rows`、`refs`、`coverage`、`next_cursor`、`ranking_notice`、`ranking_failures`，以及按需的 `truncation`。每行包含全局序号 `rank = page_number * limit + i + 1`、`name`、`source_count`、`object_count`、`same_name_group` 和去重后的整数 `refs` 下标；顶层 `refs` 是不透明引用字符串列表，用 `read_reference(ref=refs[i])` 复核。非 ok 保留覆盖信息并返回 `rows=[]`，失败文案仍由后端唯一拥有；本工具没有后续回答，因此不追加「下面的回答只基于检索到的部分内容，不是统计结果。」后缀。服务端指令要求「最多／最常」先调排行，再自行筛选类别、复核出处；非 exact 不得声称最多，非 ok 必须说明原因而非估计。
+
+MCP 统一使用单库 v2 编码游标，整数页号 `p` 与页大小 `l`（不接受 bool）满足 `p>=0`、`1<=l<=20`、`p*limit<80`、`l==limit`，并绑定问题、范围、参与库、世代和 `d` 摘要。带主题时 `d` 还绑定候选 canonical 集合；翻页重取候选，摘要变化即为 `RankCursorStaleError`（「排行已变化，请从第一页重新开始」）。旧 v1 偏移及 reflect 短句柄拒绝，改参数或图谱漂移须从第一页重来。失权沿用统一的 `notebook_unreadable` / `notebook_not_allowed` 映射；超时返回 `unavailable` 并提示稍后重试。limit=10 时 p0/p1/p2 分别从第 1/11/21 行开始。只有 p+1 确有行时产生下一页游标，否则为 `""`，调用方原样回传。
+
+共享 12,000 字节上限把每行引用按 3→2→1 逐档缩减；展示名超过 200 字时投影为前 200 字加「…」，计数一律不截。`truncation` 披露这些有界投影，使单行页面始终可交付、游标能够前进。较大页面仍超限时提示减小 limit 并从第一页重试，不截半页后推进游标。
+
 ### 论文检索、论文卡片与逐篇抽取（`find_sources` / `get_paper_cards` / `extract_from_sources`）
 
 **用途。**「列出这个笔记本里所有与 X 相关的论文，并给出主要技术指标和关键创新点」靠对段落排序答不好：名录每轮最多只给 20 个标题，段落检索每次只返回固定数量的段落。三个 reflect 动作（仅逐步推理；chunk 模式行为不变）加一种回答版式解决这件事。每个动作有自己的部署闸（`REASONING_FIND_SOURCES_ENABLED`、`REASONING_PAPER_CARDS_ENABLED`、`REASONING_EXTRACT_ENABLED`），闸关掉时 prompt 行、schema 分支、白名单三处一起消失；`answer_layout` 字段只在卡片闸或抽取闸开着时才存在。部署插件不得使用这几个动作 id 与 `answer_layout`（见[Reflect 插件动作](#reflect-插件动作askreflect_action)的注册红线）。
@@ -3599,17 +3646,17 @@ V2 实验协议与布局已退役。Ask、Deep Report 和 Knowhow 均使用 Lega
 
 **档位预算（`AskRetrievalLimits`）。**每次运行：
 
-| 档位 | `find_sources` 次数（含翻页） | 卡片读取篇数 | 卡片生成篇数（元数据+卡片合计） | 抽取篇数 | 表格内联行数 |
-| --- | --- | --- | --- | --- | --- |
-| overview | 1 | 6 | 3 | 0 | 6 |
-| standard | 2 | 12 | 6 | 6 | 12 |
-| deep | 3 | 20 | 10 | 8 | 20 |
-| thorough | 3 | 30 | 16 | 12 | 30 |
-| exhaustive | 4 | 40 | 24 | 16 | 40 |
+| 档位 | `find_sources` 次数（含翻页） | 卡片读取篇数 | 卡片生成篇数（元数据+卡片合计） | 抽取篇数 | 表格内联行数 | `rank_calls_per_run`（含翻页） |
+| --- | --- | --- | --- | --- | --- | --- |
+| overview | 1 | 6 | 3 | 0 | 6 | 1 |
+| standard | 2 | 12 | 6 | 6 | 12 | 2 |
+| deep | 3 | 20 | 10 | 8 | 20 | 3 |
+| thorough | 3 | 30 | 16 | 12 | 30 | 3 |
+| exhaustive | 4 | 40 | 24 | 16 | 40 | 4 |
 
 单次 `get_paper_cards` 最多读 10 篇，单次 `extract_from_sources` 最多 8 篇。生成走有界线程池（`PAPER_CARD_MAX_WORKERS`，再与 `paper_metadata` 服务的并发取小），沿用调用方的交互优先级，响应取消，对同一来源的重复请求等待第一个结果。卡片摘要占用结构化侧的提示词预算（顺序：Knowhow、枚举预览、卡片、文档读取）。`REASONING_MAX_DOCUMENT_READS × DOCUMENT_OVERVIEW_MAX_ELEMENTS` 超过 2000 时 `read_document` 动作被整体关闭，启动时记一条警告。轨迹、经验与画像词表增加 `find_documents`、`paper_cards`、`extract_fields` 步骤。
 
-**MCP 工具。**`find_sources`、`get_paper_cards`、`extract_from_sources` 都是 `read` 档（工具总数 24）。**后两个会在 `read` 档凭证上消耗模型配额**（产品裁决）；每次调用重读凭证、白名单与主人当下的读权，并显式传入来源集合（MCP 没有运行作用域）：全部可见来源，加上主人自己的隐藏来源——**仅当凭证带 `memory:read`**（与 `search` 同一开关）；没有它时只加入 Knowhow 投影，所以只读凭证读不到主人的私人 Memory（经最佳片段或抽取都不行），别的成员的 Memory 也不会出现在结果里。MCP 上的抽取只由 `read` 档控制（`REASONING_EXTRACT_ENABLED` 只管 reasoning 动作）；`PAPER_CARD_ENABLED` 对两条路径都生效。
+**MCP 工具。**`find_sources`、`get_paper_cards`、`extract_from_sources` 都是 `read` 档（工具总数 26）。**后两个会在 `read` 档凭证上消耗模型配额**（产品裁决）；每次调用重读凭证、白名单与主人当下的读权，并显式传入来源集合（MCP 没有运行作用域）：全部可见来源，加上主人自己的隐藏来源——**仅当凭证带 `memory:read`**（与 `search` 同一开关）；没有它时只加入 Knowhow 投影，所以只读凭证读不到主人的私人 Memory（经最佳片段或抽取都不行），别的成员的 Memory 也不会出现在结果里。MCP 上的抽取只由 `read` 档控制（`REASONING_EXTRACT_ENABLED` 只管 reasoning 动作）；`PAPER_CARD_ENABLED` 对两条路径都生效。
 
 - `find_sources(notebook_id?, query?, terms?, year_from?, year_to?, venue?, author?, kind="papers", cursor?, limit=20)`：参数同上（无 `scope`），翻页只用 `cursor` 与 `limit`（1–20），不用裸偏移（偏移会绕过游标失效检查）。返回条目、`counts`、`coverage`（`lexical_complete`、`semantic_recall_capped`、`skipped_libraries` 与 `lanes`，即各库所走的检索车道）、顶层 `next_cursor` 与顶层 `refs` 表。游标失效时给出可读的句子（「从第一页重新检索」），并分别说明原因：两页之间有论文元数据被抽取，或笔记本里增删了来源；带游标时改动其他参数按游标无效拒绝。应先翻完全部结果，再调用 `get_paper_cards` / `extract_from_sources`：生成卡片可能顺带抽取论文元数据，让未翻完的游标失效。
 - `get_paper_cards(source_ids, notebook_id?)`：每次至多 3 篇，至多 3 次模型调用（元数据与卡片合计），其余返回 `deferred`，再调一次即可。每篇返回状态与卡片。每个请求的 id 单独核对是否属于该笔记本（不属于、或是别的成员的 Memory，返回 `not_found`）；本工具与 `extract_from_sources` 在模型调用结束、返回之前重新核对凭证与笔记本读权（同 `ask`）：调用期间凭证被吊销则返回 `token_inactive`，不带结果。
@@ -3765,7 +3812,7 @@ not-found 分支）**仍然留一行**。两个理由都是刻意的。一是它
 
 在上面的笔记本理解块之外，还有第二份独立的记忆（Agentic Memory P2，2026-09-22 起按笔记本分区）：一张检索打法库，由已完成的 Ask run 离线蒸馏而来，作为它自己有界的 prompt 块注入同一套规划/反思 prompt。理解块描述的是**这一本**笔记本，一条经验条目描述的却是**一类问题的形态**——「在具备这些特征的问题下，这个检索动作值得／不值得用」——它不携带任何来源或用户身份。表按 `notebook_id` 分区（`''` = 全局分区）：一个笔记本的条目只由该笔记本自己的 reasoning 提问蒸出、只注入该笔记本自己的 run，全体成员共享；全局分区继续由独立链路蒸馏、单独保留，作为新库或条目不足时的回退——注入时先取本库分区，名额未满再从全局分区补齐。
 
-**形态。** 一条经验是一对封闭的 IF→THEN：一个八键**情境**指纹（Ask 模式；`result_scope`；`retrieval_effort`；这次 run 是否要求完整性；实体数与必答主题数的**分桶**——`none`／`few`（≤2）／`many`；确认后的意图是否带约束；是否带排除项——每个值都取自封闭枚举，没有一个来自问题本身的措辞）映射到一个封闭**动作**词表里的一个词（reflect 循环自己的检索动作，折成它们的 trace-step 拼写：`retrieve`/`ppr`/`exact_lookup`/`expand`/`expand_community`/`follow_chain`/`enumerate`/`outline`/`search_chunks`/`read_document`——`enumerate` 是刻意的通配，代表 `enumerate_elements` 或 `enumerate_kg_objects` 两者之一，因为一次已完成 run 持久化的轨迹分不清它当时用的是哪一个；`search_chunks`/`read_document` 是唯二 trace-step 拼写与 reflect 动作 id 本就相同的两个），一个**极性**（`good`/`bad`），以及模型撰写的一句**理由**。`support` 计数记录有多少次蒸馏 run 支持这条结论；`adopted` 计数记录有多少次被展示过这条经验的 run 之后真的选了那个动作，它是表满之后淘汰排序的首要键。
+**形态。** 一条经验是一对封闭的 IF→THEN：一个八键**情境**指纹（Ask 模式；`result_scope`；`retrieval_effort`；这次 run 是否要求完整性；实体数与必答主题数的**分桶**——`none`／`few`（≤2）／`many`；确认后的意图是否带约束；是否带排除项——每个值都取自封闭枚举，没有一个来自问题本身的措辞）映射到一个含 16 个词的封闭**动作**词表里的一个词（reflect 循环自己的检索动作，折成它们的 trace-step 拼写：`retrieve`/`ppr`/`exact_lookup`/`expand`/`expand_community`/`follow_chain`/`enumerate`/`outline`/`search_chunks`/`read_document`/`browse_sections`/`read_section`/`find_documents`/`paper_cards`/`extract_fields`/`rank_concepts`——`enumerate` 是刻意的通配，代表 `enumerate_elements` 或 `enumerate_kg_objects` 两者之一，因为一次已完成 run 持久化的轨迹分不清它当时用的是哪一个；`search_chunks`、`read_document`、`browse_sections`、`read_section`、`rank_concepts` 与动作 id 同名，论文动作的轨迹名则为 `find_documents`、`paper_cards`、`extract_fields`），一个**极性**（`good`/`bad`），以及模型撰写的一句**理由**。`support` 计数记录有多少次蒸馏 run 支持这条结论；`adopted` 计数记录有多少次被展示过这条经验的 run 之后真的选了那个动作，它是表满之后淘汰排序的首要键。
 
 **outcome 口径——P4 已回收其中四个动作。** v1 只能在**步粒度**观测失败（零命中的动作），只能在**run 粒度**观测成功（这次 run 自己的引用数/`evidence_level`），因为没有任何持久化字段记录「答案实际引用的是哪一步的结果」。Agentic Memory P4（T1/T2）在写侧把这个缺口补上，且不改变每一步本身**做**了什么：四个自身结果就是可寻址对象/chunk id 列表的动作分支——`retrieve`（首次候选拉取，以及每一轮 `add_subquery`）、`ppr`、`exact_lookup`、`expand`——现在无条件把 `result_ids` 写进自己的 trace-step detail，覆盖每个调用点（确定性 seed pass 与模型主动选中的那一轮都写），零命中时的空列表本身就是信号，用来把「跑过、什么都没找到」与「老轨迹行、字段缺席」区分开；列表截到 `TRACE_RESULT_IDS_MAX`（见下方数值表）。`expand_community`/`follow_chain`/`enumerate`/`outline` **刻意不改**——它们的结果不是同一种 id 列表形状；`search_elements` 落在词表之外的 `fallback` 步，所以原文段落级的锚点结构上仍不可归因（已登记的边界，不是遗漏）。最终 `synthesis`/`answer` 步单独写 `anchor_evidence_ids`：答案真正绑定的 `[k]` 锚点（按 `object_id`），截到 `TRACE_ANCHOR_EVIDENCE_IDS_MAX`（这是**ranked** 答案锚点清单的协议上限——五档里最大的那档 `ranked_final_cap`，按现有各档预算这种形状的 run 实测不会真的触顶；**集合枚举**类 run 不受 `ranked_final_cap` 约束——每一行进入合成预览都会拿到自己独立的 `k5001+` 锚点 id，一份足够大的枚举清单真能超过 96、把这个上限顶到。触顶时稀疏标记 `anchor_evidence_ids_truncated` 会置位，投影 pass 1 据此把整条 run 判成不可归因——这是刻意选的安全方向：一次超大枚举 run 悄悄丢掉蒸馏信号只是样本薄一点，而接受一份被截断的锚点集会教会经验库假的「没命中」，因为真正命中的那个 id 可能恰好在被切掉的尾巴里）。逐动作的成功现在是 `RunObservation.ActionObservation.anchored_hits`——这个动作自己的 `result_ids`（本 run 内所有调用累计）里有多少个 id 最终被答案真正引用——外加一个独立的 `attributable` 布尔，而不是折成一个可空计数（隐私守卫的类型注解扫描器只认 `int`/`bool`/封闭 `Literal`，不认 `Optional[int]`）；`attributable=False` 表示「无法判断」（老轨迹行，或本 run 该动作没有写出任何 `result_ids`），绝不是「这个动作没帮上忙」。id 与 id 的求交只在蒸馏投影自己的循环里就地算一次，用的是函数局部变量，从不进入 `RunObservation` 的任何字段——原始 id 从未到达撰写理由的那个模型（见下面的隐私段落）。轨迹展示侧两个键都是没有任何分支去读的裸句柄：前端 `getTraceStepDetail` 在任何 step_type 下都没有读 `result_ids` 或 `anchor_evidence_ids` 的分支（它的通用兜底只读 `count`/`found`/`anchors` 这类，从不读 id 列表键）。这次改动之前写下的轨迹行本就没有这两个字段，蒸馏投影对它们照旧回落到 v1 的、只有 run 粒度的观测——`zero_hits`/`citations`/`answered` 仍是那种情形的兜底，不是同一个信号的冗余拷贝；不需要也没有回填，因为蒸馏读的本就是最近一批有界窗口内的已完成 run。这两个键对单条持久化轨迹行自身存储体积的贡献不大，且刻意不开一个可关的开关：一条典型行（每个被接入的步几条 `result_ids`,外加一份有界的 `anchor_evidence_ids`)给该行的 JSON 大约多带 2–4 KB,最坏情形(每个符合条件的步都顶到各自的上限)约 10 KB 封顶。不开开关的理由是硬的:开关会打破读侧的按键存在判据——缺键意味着「这一步从没写过结果」(P4 之前的老形态),带键意味着「这一步跑过,这就是它找到的」(哪怕是空列表也一样),而一个「有时写、有时按需隐藏」的开关会让这两种读法互相分不清。
 
@@ -4612,7 +4659,7 @@ provider 返回 Markdown 和按顺序排列的已签发句柄。核心对每个�
 
 **MCP**：`ask` 的 `anchors` 与 `citations` 携带与 HTTP 端点相同的 `url` 字段，只在 `tier` 为 `external` 的行上出现（`exclude_if` 空串，没有外部证据的既有 payload 因此逐字节不变）。
 
-**注册红线（启动期，响亮失败）**：动作名必须匹配 `^[a-z][a-z0-9_]{2,31}$`，且不得与 19 个核心 reflect 动作 id、或 18 个 reflect schema 顶层字段名中的任何一个相撞（两者的并集是 `RESERVED_REFLECT_KEYS`）——否则一个插件动作要么与核心动作同名，要么会把自己的参数写进一个核心 schema 槽位（文档内章节导航上线后，`browse_sections` 与 `read_section` 既是核心动作 id 也是顶层 schema 字段，所以升级前已经部署的插件如果动作叫这两个名字，升级后启动即失败，需先改名；论文工具的 `find_sources`、`get_paper_cards`、`extract_from_sources` 三个动作 id 与顶层字段 `answer_layout` 同理；通用分析交接的 `analysis` 也是保留顶层字段，同名插件动作必须先改名）。参数名不得是 `name` 或 `reason`，数量至多 `REFLECT_ACTION_PARAMETERS_MAX`（4）个；`enum` 参数的取值数必须在 2 到 `REFLECT_ACTION_ENUM_VALUES_MAX`（8）个之间——下界为 2 是因为 schema hint 校验层靠有没有 `|` 字符判定「这是个枚举」，单值枚举会让模型看到一个封闭选项，校验层却把它当自由文本放行。每一段插件写的字符串——动作描述、每个参数描述、来源标签——只校验、绝不静默夹取：超长或带控制字符（含换行）直接注册失败（`ExtensionRegistryError`，启动失败），因为描述符是启动期就该审过的部署配置，不是运行期可以夹一刀的用户数据。
+**注册红线（启动期，响亮失败）**：动作名必须匹配 `^[a-z][a-z0-9_]{2,31}$`，且不得与 20 个核心 reflect 动作 id、或 19 个 reflect schema 顶层字段名中的任何一个相撞（两者的并集是 `RESERVED_REFLECT_KEYS`）——否则一个插件动作要么与核心动作同名，要么会把自己的参数写进一个核心 schema 槽位（文档内章节导航上线后，`browse_sections` 与 `read_section` 既是核心动作 id 也是顶层 schema 字段，所以升级前已经部署的插件如果动作叫这两个名字，升级后启动即失败，需先改名；论文工具的 `find_sources`、`get_paper_cards`、`extract_from_sources` 三个动作 id 与顶层字段 `answer_layout` 同理；`rank_concepts` 也是保留名，仓库外同名插件动作会启动失败；通用分析交接的 `analysis` 也是保留顶层字段，同名插件动作必须先改名）。参数名不得是 `name` 或 `reason`，数量至多 `REFLECT_ACTION_PARAMETERS_MAX`（4）个；`enum` 参数的取值数必须在 2 到 `REFLECT_ACTION_ENUM_VALUES_MAX`（8）个之间——下界为 2 是因为 schema hint 校验层靠有没有 `|` 字符判定「这是个枚举」，单值枚举会让模型看到一个封闭选项，校验层却把它当自由文本放行。每一段插件写的字符串——动作描述、每个参数描述、来源标签——只校验、绝不静默夹取：超长或带控制字符（含换行）直接注册失败（`ExtensionRegistryError`，启动失败），因为描述符是启动期就该审过的部署配置，不是运行期可以夹一刀的用户数据。
 
 | 上限 | 取值 |
 | --- | ---: |

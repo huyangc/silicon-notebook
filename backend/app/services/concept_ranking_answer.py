@@ -310,7 +310,8 @@ def _cited_coverages(outcomes, cited_keys, key_owner):
 
 
 def ranking_notice(outcomes, *, cited_keys: frozenset,
-                   key_owner: Mapping[str, tuple[str, str]], query_candidates: int
+                   key_owner: Mapping[str, tuple[str, str]], query_candidates: int,
+                   answer_follows: bool = True,
                    ) -> tuple[str, list[RankingFailure]]:
     outcomes = _latest_outcomes(outcomes)
     has_ranking_reference = bool(cited_keys.intersection(key_owner))
@@ -322,8 +323,8 @@ def ranking_notice(outcomes, *, cited_keys: frozenset,
             grouped[reason].append(coverage.notebook_id)
     failures = [RankingFailure(
         reason=reason, notebook_ids=ids,
-        line=_failure_line(reason, len(ids), suffix=not has_ranking_reference),
-        fallback_line=(_failure_line("refresh_produced_nothing", suffix=not has_ranking_reference)
+        line=_failure_line(reason, len(ids), suffix=answer_follows and not has_ranking_reference),
+        fallback_line=(_failure_line("refresh_produced_nothing", suffix=answer_follows and not has_ranking_reference)
                        if reason == "not_computed" else ""),
     ) for reason, ids in grouped.items() if ids]
     lines = [failure.line for failure in failures]

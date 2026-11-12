@@ -160,9 +160,9 @@ RUNTIME_ATTRIBUTES = [
     "memory_suggest_service",
 ]
 
-# Attached by wire_source_ingestion after the eager domain mounts. Keep this
-# post-composition seat separate from __init__'s frozen explicit mount set.
-WIRED_RUNTIME_ATTRIBUTES = ["_collaboration_publisher"]
+# Attached by wire_source_ingestion / wire_ask after the eager domain mounts.
+# Keep these seats separate from __init__'s frozen explicit mount set.
+WIRED_RUNTIME_ATTRIBUTES = ["_collaboration_publisher", "concept_ranking"]
 
 
 def _runtime_tree() -> ast.Module:
@@ -423,6 +423,7 @@ def test_the_shared_instances_the_domains_hand_around_stay_shared(runtime):
     assert runtime.catalog._summaries is runtime.notebook_summaries
     assert runtime.report_application.notebooks is runtime.catalog
     assert runtime.collection_enumeration._catalog is runtime.collection_catalog
+    assert runtime.ask_service().concept_ranking is runtime.concept_ranking
     assert runtime.selected_source_graph._snapshots is runtime.source_subgraphs
     assert isinstance(runtime.selected_source_graph._primitives, SourceGraphPrimitives)
     assert runtime.selected_source_graph._online_ppr is runtime.source_subgraph_ppr
