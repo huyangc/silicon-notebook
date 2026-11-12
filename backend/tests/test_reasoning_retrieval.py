@@ -3602,6 +3602,8 @@ def _free_text_retrieval_fields(schema_hint: str) -> set:
     }
     if isinstance(schema.get("new_sub_query"), dict):
         fields.add("new_sub_query.query")
+    if isinstance(schema.get("rank_concepts"), dict):
+        fields.add("rank_concepts.query")
     return fields
 
 
@@ -5299,11 +5301,11 @@ def test_chunk_search_gate_is_the_only_gate_for_passage_recall(rrepo, gate, has_
 
 #: 无图 run 里必须整体消失的五个图动作(设计 T2)。
 _KG_ONLY_ACTIONS = ("expand_graph", "ppr_retrieve", "expand_community",
-                    "follow_chain", "enumerate_kg_objects")
+                    "follow_chain", "enumerate_kg_objects", "rank_concepts")
 
 #: 它们在 schema 里对应的参数分支/字段,一并不出现。
 _KG_ONLY_SCHEMA_FIELDS = ('"expand"', '"follow_chain"', '"types"',
-                          '"object_type"')
+                          '"object_type"', '"rank_concepts"')
 
 #: 无图 run 里必须**保留**的动作(枚举的那两条各自独立受闸)。
 _KG_FREE_ACTIONS = ("answer", "add_subquery", "search_elements",
@@ -5318,7 +5320,8 @@ def _all_gates(**overrides):
     )
     kwargs = dict(element_kinds=ENUMERABLE_ELEMENT_KINDS,
                   object_types=ENUMERABLE_KG_OBJECT_TYPES,
-                  outline=True, consult_memory=True, search_chunks=True)
+                  outline=True, consult_memory=True, search_chunks=True,
+                  rank_concepts=True)
     kwargs.update(overrides)
     return kwargs
 
@@ -5372,7 +5375,7 @@ def test_reflect_schema_drops_every_graph_branch_when_the_scope_has_no_kg():
     assert '"enumerate":{"kind":"' in off and '"collection":""' in off
     assert _free_text_retrieval_fields(off) == {"new_sub_query.query", "query"}
     on = reflect_schema_hint(**_all_gates())
-    assert _free_text_retrieval_fields(on) == {"new_sub_query.query", "query"}
+    assert _free_text_retrieval_fields(on) == {"new_sub_query.query", "query", "rank_concepts.query"}
 
 
 def test_reflect_prompt_drops_every_graph_sentence_when_the_scope_has_no_kg():
@@ -5406,6 +5409,8 @@ def test_reflect_prompt_drops_every_graph_sentence_when_the_scope_has_no_kg():
 #: 图/无图差异只有两类:整句删除(五个图动作的 `- 动作:` 说明),以及这张表里
 #: 的逐句改写。
 _CONDITIONED_PHRASES = (
+    ("you fill: new_sub_query.query and query.",
+     "you fill: new_sub_query.query, query and rank_concepts.query."),
     ("question from a document library",
      "question from a knowledge graph"),
     ("- search_elements: fall back to raw document ",
@@ -5477,6 +5482,7 @@ def _reflect_with_scope_gate(rrepo, notebook_id, action, *, fail_closed=False):
     bind_chat_client(rrepo, "reasoning_agent", capture)
     rr = ReasoningRetriever.from_repository(
         rrepo, rrepo.settings, fail_closed=fail_closed)
+    rr.concept_ranking = object()
     # 白名单里的枚举那半由 `enumeration and kg_actions` 双闸把守:枚举闸自己关着
     # 的话,`enumerate_kg_objects` 被拒是因为枚举关了,与本组要守的 kg 闸无关,
     # 变异也就不会红。这里先钉住枚举确实开着。
@@ -5523,6 +5529,7 @@ _KG_ACTION_PAYLOADS = {
     "expand_community": {"query": "DeepSeek-V4"},
     "follow_chain": {"follow_chain": {"start_object_id": "obj-1"}},
     "enumerate_kg_objects": {"enumerate": {"object_type": "claim"}},
+    "rank_concepts": {"rank_concepts": {"query": ""}},
 }
 
 
@@ -5547,6 +5554,7 @@ def test_no_kg_run_rejects_every_graph_action_when_fail_closed(rrepo):
         bind_chat_client(rrepo, "reasoning_agent", _Graph(payload))
         rr = ReasoningRetriever.from_repository(
             rrepo, rrepo.settings, fail_closed=True)
+        rr.concept_ranking = object()
         assert rr.enumeration_active(), "枚举闸必须开着,否则守卫是空的"
         with pytest.raises(ValueError, match="invalid action"):
             rr.reflect("布局布线怎么做", "候选", kg_actions=False)

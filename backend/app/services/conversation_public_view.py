@@ -519,10 +519,13 @@ def public_turn(
         for key, reference in selected
     ]
     notice = payload.get("completeness_notice")
+    ranking_notice = payload.get("ranking_notice")
     return {
         "question": _question_text(row.get("question")),
         "answer_md": answer_md,
         **({"completeness_notice": notice} if isinstance(notice, str) and notice else {}),
+        **({"ranking_notice": ranking_notice}
+           if isinstance(ranking_notice, str) and ranking_notice else {}),
         "asked_at": _text(payload.get("asked_at"), 64),
         "answered_at": _text(payload.get("answered_at"), 64),
         # Pessimistic default matches AskResponse.evidence_level for legacy

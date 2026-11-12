@@ -14,6 +14,15 @@ import json
 from app.services import catalog_job, concept_merge_review, document_guide, paper_meta, prompts
 
 
+def test_rank_concepts_nested_arguments_are_the_fields_taught_by_the_prompt():
+    schema = json.loads(prompts.reflect_schema_hint(rank_concepts=True))
+    assert set(schema["rank_concepts"]) == {"query", "scope", "cursor"}
+    prompt = prompts.reflect_prompt("Q", "C", rank_concepts=True, rank_cap=2)
+    assert "rank_concepts.query" in prompt
+    assert "scope=all" in prompt and "current_notebook" in prompt
+    assert "follow cursor" in prompt
+
+
 def test_sufficiency_prompt_closes_with_the_schema_hint_and_names_every_verdict():
     prompt = prompts.report_sufficiency_prompt("Q", "sections block")
     assert prompt.endswith(f"Return JSON only: {prompts.REPORT_SUFFICIENCY_SCHEMA_HINT}")

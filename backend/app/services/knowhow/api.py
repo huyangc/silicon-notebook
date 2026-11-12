@@ -2248,6 +2248,8 @@ def complete_row(
         # likewise: their queries would be the JSON envelope, and completion
         # never seats ``paper_tools`` -- the policy is still spelled out.
         reasoning_retriever.allow_paper_tools = False
+        # 补全不提供概念排行；明确策略，不依赖未接线的偶然状态。
+        reasoning_retriever.allow_rank_concepts = False
         reasoning_retriever.untrusted_evidence = True
         # 显式带上补全专用的收束句。通用主体是缺省值,只翻开关会少掉「只围绕
         # 这次空格补全来规划与反思」那一句 —— 那句话对 Ask 是错的(它不在做

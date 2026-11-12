@@ -64,10 +64,16 @@ SOURCE = (
 STATE_CLASS = "_ReasoningRunState"
 OWNER_CLASS = "ReasoningRetriever"
 CAPABILITY_OWNERS = {
+    "reasoning_rank_actions.py": "ReasoningRankActions",
     "reasoning_paper_actions.py": "ReasoningPaperActions",
     "reasoning_section_navigation.py": "ReasoningSectionNavigation",
 }
 CAPABILITY_METHODS = {
+    "ReasoningRankActions": frozenset({
+        "_rank_spent", "_rank_left", "_rank_skip", "_rank_failed",
+        "_rank_ledger", "_action_rank_concepts",
+        "_rank_request_chain", "_rank_publish", "_rank_cursor",
+    }),
     "ReasoningPaperActions": frozenset({
         "_paper_tools_spent", "_paper_budget_left", "_paper_allowed",
         "_paper_has_results", "_paper_skip", "_paper_tool_failed",
@@ -107,6 +113,9 @@ GUARDED = (
     "_action_find_sources", "_action_get_paper_cards", "_action_extract_from_sources",
     "_paper_allowed", "_paper_has_results", "_paper_skip", "_paper_tool_failed",
     "_resolved_paper_sources", "_paper_budget_left",
+    "_rank_spent", "_rank_left", "_rank_skip", "_rank_failed",
+    "_rank_ledger", "_action_rank_concepts",
+    "_rank_request_chain", "_rank_publish", "_rank_cursor",
 )
 #: ``run`` parameters that are frozen inputs (state keeps an identical copy);
 #: exempt in ``run`` only
@@ -375,13 +384,23 @@ def test_moved_implementations_keep_scalar_and_rebound_container_guards(
 def test_capability_views_read_and_write_the_unique_live_run_authority():
     from types import SimpleNamespace
 
-    from app.services.reasoning_retrieval import _PaperRunView, _SectionRunView
+    from app.services.reasoning_retrieval import _PaperRunView, _RankRunView, _SectionRunView
 
     state = SimpleNamespace(
         paper_card_reads=0, paper_cards={}, section_reads=0,
         section_hint_detail={}, chunks=[], steps=1, max_steps=3,
+        rank_calls_used=0, rank_progress=0, rank_handles={}, rank_chains={},
+        rank_memo={}, rank_log=[], rankings=[],
     )
     paper, section = _PaperRunView(state), _SectionRunView(state)
+    rank = _RankRunView(state)
+    rank.rank_calls_used += 1
+    rank.rank_progress += 2
+    assert (state.rank_calls_used, state.rank_progress) == (1, 2)
+    state.rank_calls_used = 3
+    assert rank.rank_calls_used == 3
+    assert rank.rank_memo is state.rank_memo
+    assert rank.rankings is state.rankings
     paper.paper_card_reads += 1
     section.section_reads += 1
     assert (state.paper_card_reads, state.section_reads) == (1, 1)
@@ -395,7 +414,7 @@ def test_capability_views_read_and_write_the_unique_live_run_authority():
     section.section_hint_detail = {"entries": 2}
     assert section.section_hint_detail is state.section_hint_detail
     assert state.section_hint_detail is not old_detail
-    for view in (paper, section):
+    for view in (paper, section, rank):
         with pytest.raises(AttributeError):
             _ = view.max_outline_updates
 
@@ -404,7 +423,7 @@ def view_authority_violations(source: str) -> set:
     """A view can forward named fields, but cannot cache or redirect authority."""
     tree = ast.parse(source)
     found = set()
-    for view_name in ("PaperRunView", "SectionRunView"):
+    for view_name in ("PaperRunView", "SectionRunView", "RankRunView"):
         protocol = _class(tree, view_name)
         expected = {node.target.id for node in protocol.body
                     if isinstance(node, ast.AnnAssign)}
@@ -437,6 +456,9 @@ def test_every_capability_view_field_forwards_the_same_authority(source):
 @pytest.mark.parametrize(
     ("before", "after", "expected"),
     [("return self._state.paper_card_reads", "return 0", ("PaperRunView", "paper_card_reads")),
+     ("return self._state.rank_calls_used", "return 0", ("RankRunView", "rank_calls_used")),
+     ("self._state.rank_progress = value", "self._state.rank_calls_used = value",
+      ("RankRunView", "rank_progress")),
      ("self._state.section_reads = value", "self._state.section_browses = value",
       ("SectionRunView", "section_reads"))],
 )
@@ -584,6 +606,9 @@ PINNED_READS = {
     ("_action_find_sources", "state.enum_limits"): 1,
     ("_action_get_paper_cards", "state.enum_limits"): 3,
     ("_action_extract_from_sources", "state.enum_limits"): 2,
+    ("_action_rank_concepts", "state.enum_limits"): 1,
+    ("_rank_left", "state.enum_limits"): 1,
+    ("_rank_spent", "state.enum_limits"): 1,
 }
 
 

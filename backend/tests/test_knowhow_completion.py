@@ -1117,6 +1117,7 @@ def test_completion_turns_off_every_channel_unsafe_for_a_json_envelope(monkeypat
     assert retriever.allow_section_nav is False
     # 论文工具同理(补全从不接 paper_tools 座位,策略位仍显式关)。
     assert retriever.allow_paper_tools is False
+    assert retriever.allow_rank_concepts is False
     assert retriever.allow_community_expansion is False
     assert retriever.allow_ppr is False
     assert retriever.allow_exact_lookup is False

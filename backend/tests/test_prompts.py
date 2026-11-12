@@ -8,6 +8,20 @@ import json
 import pytest
 
 
+@pytest.mark.parametrize("scope", [True, False])
+def test_rank_concepts_schema_and_prompt_explain_counts_scope_and_paging(scope):
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+
+    schema = json.loads(reflect_schema_hint(rank_concepts=True, rank_scope=scope))
+    assert schema["rank_concepts"] == {"query": "", "cursor": "", **(
+        {"scope": "all|current_notebook"} if scope else {})}
+    prompt = reflect_prompt("q", "c", rank_concepts=True, rank_scope=scope, rank_cap=3)
+    assert "rank_concepts.query" in prompt and "at most 3 calls this run" in prompt
+    assert "number of distinct sources that mention it" in prompt
+    assert "可能是同一概念" in prompt and "do not add their counts" in prompt
+    assert "Unless exact is true" in prompt and "counting failed, why" in prompt
+
+
 def test_global_answer_prompt_uses_peer_provenance_without_changing_notebook_authority():
     context = '{"key":"k1","notebook":"A","source":"trial","text":"result"}'
     global_prompt = answer_prompt("compare", context, peer_notebooks=True)

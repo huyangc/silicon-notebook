@@ -71,6 +71,8 @@ _READER_WHITELIST = frozenset({
     # ``find_sources`` 的 peer 库读时限:联邦运行里取 ``current_federated_run_plan``
     # 的逐库时限,与 chunk_federation 的逐库失败隔离同一口径;只读不装。
     "app/services/source_finder.py",
+    # 概念排行只读取联邦运行开关以应用逐库时限；参与库仍唯一经枚举服务解析。
+    "app/services/concept_ranking.py",
 })
 _WRITER_WHITELIST = frozenset({
     # D1-2:``global_ask_run`` —— 唯一同时安装覆盖、逐库天花板、detached turn 与
@@ -885,6 +887,8 @@ def test_injection_guard_catches_a_positional_lambda():
 # ⚠ 新增一个会触达座位的 fail-soft handler 时,必须在同一个 diff 里登记到这里。
 _SEAT_FAILSOFT_SITES = (
     # (文件, 函数 qualname, 让它可达座位的标记调用)
+    ("app/services/reasoning_rank_actions.py",
+     "ReasoningRankActions._action_rank_concepts", "rank"),
     ("app/services/ask_service.py",
      "AskService._no_kg_scope_admits_run", "collection_map"),
     ("app/services/ask_service.py",

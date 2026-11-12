@@ -475,6 +475,16 @@ class SqliteDatabase:
             return _BudgetedReadConnection(conn, budget)
         return conn
 
+    @contextmanager
+    def connect_read(self):
+        """Reuse healthy reads after rollback; discard driver-interrupted sessions."""
+        try:
+            with self.connect() as db:
+                yield db
+        except sqlite3.Error:
+            self.close_local()
+            raise
+
     def is_connection_held(self) -> bool:
         """Whether this execution is inside a live read/write DB boundary."""
         conn = getattr(self._local, "conn", None)

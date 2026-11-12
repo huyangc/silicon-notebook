@@ -118,7 +118,7 @@ STEP_TYPES: tuple[str, ...] = (
     "extract_fields", "fallback", "find_documents",
     "follow_chain", "gap_consult", "intent", "memory",
     "outline", "paper_cards", "plan",
-    "plugin", "ppr", "profile", "read_document", "read_section", "reflect",
+    "plugin", "ppr", "profile", "rank_concepts", "read_document", "read_section", "reflect",
     "rerank", "retrieve", "search_chunks", "skip", "spreadsheet", "synthesis",
 )
 STEP_TYPE_OTHER = "other"
@@ -143,7 +143,7 @@ KG_UNAVAILABLE_REASONS: frozenset[str] = frozenset({"kg_unavailable"})
 #: 不在其中——它同时服务图检索与原文检索,单看 step_type 分不清,只能按
 #: detail 里的产出键区分(见 `_is_kg_shaped_retrieve`)。
 KG_SHAPED_STEP_TYPES: frozenset[str] = frozenset({
-    "expand", "ppr", "follow_chain", "expand_community",
+    "expand", "ppr", "follow_chain", "expand_community", "rank_concepts",
 })
 
 STALE_BREAKER_REASON = "stale_circuit_breaker"

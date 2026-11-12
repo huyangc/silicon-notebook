@@ -321,6 +321,7 @@ def test_ask_retrieval_threshold_table_is_complete_monotonic_and_exact():
     assert [row.paper_card_generations_per_run for row in limits] == [3, 6, 10, 16, 24]
     assert [row.extract_sources_per_run for row in limits] == [0, 6, 8, 12, 16]
     assert [row.paper_table_rows for row in limits] == [6, 12, 20, 30, 40]
+    assert [row.rank_calls_per_run for row in limits] == [1, 2, 3, 3, 4]
 
 
 def test_generic_reasoning_question_requires_clarification_before_retrieval():

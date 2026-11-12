@@ -97,7 +97,7 @@ def _stage(notebook_id, chunks, *, batch=None, sheets=()):
         cell_excerpt_chars=200, structured_payload_chars=1_000_000)
     return SimpleNamespace(
         prepared=SimpleNamespace(limits=limits, notebook_id=notebook_id),
-        structured_batch=batch, enumerations=[], document_reads=[],
+        structured_batch=batch, enumerations=[], document_reads=[], rankings=(),
         spreadsheet_results=list(sheets), chunks=list(chunks))
 
 
@@ -106,7 +106,9 @@ def _floor(prefix):
 
 
 def _structured(service, stage, map_block=""):
-    return service._assemble_structured_evidence(stage, _Echo(), map_block)
+    (*existing, _ranking_results, _ranking_citations) = service._assemble_structured_evidence(
+        stage, _Echo(), map_block)
+    return tuple(existing)
 
 
 @pytest.fixture
@@ -430,7 +432,7 @@ def _stage_at(nb, chunks, batch, partition):
     return SimpleNamespace(
         prepared=SimpleNamespace(limits=limits, notebook_id=nb),
         structured_batch=batch, enumerations=[SimpleNamespace(items=[])],
-        document_reads=[object()], spreadsheet_results=[], chunks=list(chunks))
+        document_reads=[object()], spreadsheet_results=[], chunks=list(chunks), rankings=())
 
 
 def test_no_reservation_for_a_document_read_that_cannot_go_in(service, monkeypatch):

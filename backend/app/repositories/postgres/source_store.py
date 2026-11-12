@@ -66,6 +66,7 @@ from app.repositories.find_sources_rows import (
 from app.repositories.paper_card_rows import paper_card_row, utc_iso
 from app.repositories.postgres import memory_sql
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.source_ceiling import ceiling_param
 from app.repositories.postgres.id_binding import (
     BoundIds,
     bind_ids,
@@ -452,6 +453,20 @@ class SourceStore:
                 (notebook_id,),
             ).fetchall()
         return [row["id"] for row in rows]
+
+    def visible_source_count(self, notebook_id: str, *, ceiling: frozenset | None = None) -> int:
+        """Count the same visible universe as all_visible_source_ids in SQL."""
+        if ceiling is not None and not ceiling:
+            return 0
+        bound = ceiling_param(ceiling) if ceiling is not None else None
+        scope_sql = f" AND {member_of('id', bound)}" if bound is not None else ""
+        params = (notebook_id, bound.param) if bound is not None else (notebook_id,)
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) AS count FROM sources WHERE notebook_id=%s "
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}{scope_sql}", params,
+            ).fetchone()
+        return int(row["count"])
 
     def visible_source_ids_by_notebook(self, notebook_ids: Sequence[str]) -> dict[str, list[str]]:
         """Freeze a bounded global participant set in one read snapshot."""

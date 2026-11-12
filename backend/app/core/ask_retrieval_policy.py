@@ -160,6 +160,8 @@ class AskRetrievalLimits:
     paper_card_generations_per_run: int
     extract_sources_per_run: int
     paper_table_rows: int
+    # 含翻页的每次运行排行调用数（设计 §5.5 / §9）。
+    rank_calls_per_run: int
     overflow_semantics: Literal["explicit_partial"] = EXPLICIT_PARTIAL_OVERFLOW
 
 # Threshold table (counts are intentionally literal and reviewable here):
@@ -191,6 +193,13 @@ class AskRetrievalLimits:
 # thorough             3               30             16             12           30
 # exhaustive           4               40             24             16           40
 #
+# effort       rank_concepts calls (including page turns)
+# overview             1
+# standard             2
+# deep                 3
+# thorough             3
+# exhaustive           4
+#
 # Enumeration limits do not shrink in overview mode: "all" still means all up
 # to the shared safety cap.  The exhaustive profile spends more reasoning effort
 # on that bounded set; it does not convert enumeration into a larger top-N.
@@ -200,35 +209,35 @@ _ASK_RETRIEVAL_LIMITS: dict[RetrievalEffort, AskRetrievalLimits] = {
         4, 8, 2, 12, 4, 2,
         25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 4_000, 12_000, 4,
         50, 2, 100,
-        1, 6, 3, 0, 6
+        1, 6, 3, 0, 6, 1
     ),
     "standard": AskRetrievalLimits(
         "standard",
         8, 20, 3, 36, 8, 5,
         25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 6_000, 30_000, 6,
         50, 4, 200,
-        2, 12, 6, 6, 12
+        2, 12, 6, 6, 12, 2
     ),
     "deep": AskRetrievalLimits(
         "deep",
         8, 24, 4, 48, 16, 6,
         25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 8_000, 50_000, 8,
         50, 6, 300,
-        3, 20, 10, 8, 20
+        3, 20, 10, 8, 20, 3
     ),
     "thorough": AskRetrievalLimits(
         "thorough",
         12, 32, 5, 64, 32, 8,
         25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 12_000, 80_000, 12,
         50, 8, 400,
-        3, 30, 16, 12, 30
+        3, 30, 16, 12, 30, 3
     ),
     "exhaustive": AskRetrievalLimits(
         "exhaustive",
         16, 40, 6, 96, 50, 10,
         25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 16_000, 120_000, 16,
         50, 12, 600,
-        4, 40, 24, 16, 40
+        4, 40, 24, 16, 40, 4
     ),
 }
 ASK_RETRIEVAL_LIMITS: Mapping[RetrievalEffort, AskRetrievalLimits] = (

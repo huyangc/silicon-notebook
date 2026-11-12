@@ -96,6 +96,7 @@ from app.services.paper_card_service import PaperCardService
 from app.services.paper_cards import PAPER_CARD_VERSION
 from app.services.paper_extraction import PaperExtractionService
 from app.services.reasoning_paper_tools import ReasoningPaperTools
+from app.services.concept_ranking import ConceptRankingService
 from app.services.source_finder import SourceFinder
 from app.services.spreadsheet_analysis import SpreadsheetAnalysisService
 from app.services.chunk_question_index import ChunkQuestionIndexService
@@ -121,6 +122,15 @@ from app.services.pending_actions_service import PendingActionsService
 from app.services.parser_chain_execution import BuiltinParserChainHost
 
 _log = logging.getLogger("silicon_notebook.repository_runtime")
+
+
+def _safe_notebook_names(database, governance, notebook_ids: Sequence[str]) -> dict[str, str]:
+    try:
+        with database.connect() as db:
+            return {row["id"]: str(row["name"] or "") for row in
+                    governance.notebook_name_rows(db, list(notebook_ids))}
+    except Exception:
+        return {}
 
 
 class _AskCompletedAccess:
@@ -2971,6 +2981,18 @@ class RepositoryRuntime:
                     finder=self.source_finder,
                     cards=self.paper_cards,
                     extraction=self.paper_extraction,
+                ),
+                concept_ranking=ConceptRankingService(
+                    database=self.database,
+                    unified_kg=self.unified_kg,
+                    sources=self.source_store,
+                    catalog=self.collection_catalog,
+                    enumeration=self.collection_enumeration,
+                    settings=self.settings,
+                    producible=self.knowledge_lifecycle.concept_ranks_producible,
+                    refresh_settled=self.knowledge_lifecycle.concept_rank_refresh_settled,
+                    notebook_names=lambda ids: _safe_notebook_names(
+                        self.database, self.governance, ids),
                 ),
                 # Agentic Memory P1:Agent 对该库的已有理解 store。交座位本身
                 # (形态同上面两个集合服务),提问者身份由 ask 在构造 retriever

@@ -981,7 +981,7 @@ def test_the_digest_reserve_shrinks_the_enumeration_preview_budget(repo, monkeyp
     limits = ask_retrieval_limits("standard")
     stage = SimpleNamespace(
         prepared=SimpleNamespace(limits=limits, notebook_id="nb"), structured_batch=None,
-        enumerations=[SimpleNamespace(items=())], spreadsheet_results=[], document_reads=())
+        enumerations=[SimpleNamespace(items=())], spreadsheet_results=[], document_reads=(), rankings=())
     paper = _evidence(_tools(cards=[_card_outcome("nb", "s1", "A", _card("s1"))]))
     client = SimpleNamespace(configured=True)
     service._response_drafting._render_structured_side(stage, client, None, {}, None)
@@ -1107,7 +1107,7 @@ def test_the_roster_preview_is_left_out_only_for_a_find_sources_paper_table(repo
     stage = SimpleNamespace(
         prepared=SimpleNamespace(limits=ask_retrieval_limits("standard"), notebook_id="nb"),
         structured_batch=None, enumerations=[SimpleNamespace(items=())],
-        spreadsheet_results=[], document_reads=())
+        spreadsheet_results=[], document_reads=(), rankings=())
     cards = [_card_outcome("nb", "s1", "A", _card("s1"))]
     searched = _evidence(_tools(finds=[_find([_found("nb", "s1", "A")])], cards=cards))
     direct = _evidence(_tools(cards=cards))

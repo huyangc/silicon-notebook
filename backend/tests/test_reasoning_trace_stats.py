@@ -75,6 +75,16 @@ def test_project_run_row_is_within_the_closed_set():
     assert set(row) <= RUN_PROJECTION_KEYS
 
 
+def test_ranking_is_a_graph_action_with_result_count_but_no_result_ids():
+    row = project_run(JOB, [
+        reflect("rank_concepts"),
+        step("rank_concepts", {"listed": 0, "returned_total": 0}),
+    ], PAYLOAD)
+    assert row["action_seq"] == ["rank_concepts"]
+    assert row["empty_actions_by_type"] == {"rank_concepts": 1}
+    assert_projection_values(row)
+
+
 def test_assert_closed_rejects_an_extra_key():
     """守卫的变异形态:往投影里加一个 `question` 键必须炸。"""
     row = dict(project_run(JOB, [], PAYLOAD))

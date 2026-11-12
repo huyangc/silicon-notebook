@@ -389,6 +389,21 @@ _PROMPT_LINE_EXCERPT_CHARS = 200
 # start at k5001 so their reverse bindings cannot collide with any ranked
 # retrieval producer.
 COLLECTION_KEY_BASE = 5000
+COLLECTION_KEY_LAST = COLLECTION_KEY_BASE + 999
+
+
+class CollectionKeyAllocator:
+    """Continuous collection/ranking evidence namespace (design §6.1)."""
+
+    def __init__(self, start: int = COLLECTION_KEY_BASE + 1):
+        self.next_key = start
+
+    def take(self, n: int) -> int:
+        start = self.next_key
+        if n < 0 or start + n - 1 > COLLECTION_KEY_LAST:
+            raise ValueError("collection evidence key namespace exhausted")
+        self.next_key += n
+        return start
 
 # ``UNNAMED_SOURCE_LABEL`` (what a document with no display name is called) and
 # ``SOURCE_ROW_FIELD_SEPARATOR`` (what separates a roster row's title from the
@@ -800,6 +815,7 @@ def enumeration_prompt_block(
     budget_chars: int,
     citations_by_item_id: Mapping[str, object] | None = None,
     omit_collections: frozenset = frozenset(),
+    keys: CollectionKeyAllocator | None = None,
 ) -> EnumerationPreview:
     """Bound the enumeration preview injected into answer synthesis.
 
@@ -844,7 +860,7 @@ def enumeration_prompt_block(
     shown_rows: List[int] = [0] * len(outcomes)
     evidence_by_id: dict[str, dict[str, Any]] = {}
     item_citations = citations_by_item_id or {}
-    next_key = COLLECTION_KEY_BASE + 1
+    keys = keys if keys is not None else CollectionKeyAllocator()
 
     def room() -> int:
         return budget - used
@@ -874,9 +890,10 @@ def enumeration_prompt_block(
             continue
         for shown in range(quota[index], -1, -1):
             candidate = _outcome_block(
-                outcome, shown=shown, key_start=next_key
+                outcome, shown=shown, key_start=keys.next_key
             )
             if try_commit(candidate):
+                next_key = keys.take(shown)
                 shown_rows[index] = shown
                 for offset, item in enumerate(outcome.items[:shown]):
                     key = f"k{next_key + offset}"
@@ -884,7 +901,6 @@ def enumeration_prompt_block(
                     evidence_by_id[key] = _preview_evidence(
                         outcome.collection, item, item_citations.get(item_id)
                     )
-                next_key += shown
                 break
         # Falling through the loop without committing (even at shown=0) means
         # this outcome's bare header does not fit in what remains; it is

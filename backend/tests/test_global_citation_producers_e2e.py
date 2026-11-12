@@ -72,6 +72,33 @@ def test_collection_enumeration_of_kg_objects_is_clean(tmp_path, monkeypatch):
         repo.close()
 
 
+def test_concept_ranking_citations_are_attested_and_clean(tmp_path, monkeypatch):
+    repo = kit.make_repo(tmp_path, monkeypatch)
+    try:
+        nb = kit.notebook(repo)
+        kit.seed_document(repo, nb.id, "s-ranking", "低温实验", ["低温增益的概念说明"])
+        repo.store_kg(nb.id, "s-ranking", [{
+            "local_id": "C1", "object_type": "concept",
+            "payload": {"name": "低温增益", "section_path": "1"},
+            "evidence": [kit.evidence("s-ranking", "s-ranking-000", "低温增益")],
+        }], [])
+        events = kit.capture_events(repo, monkeypatch)
+        kit.bind_models(repo, kit.ScriptedAgent([{
+            "next_action": "rank_concepts", "rank_concepts": {"query": ""},
+            "reason": "统计概念提及次数",
+        }]))
+        result = kit.global_answer(repo, [nb.id], "哪些概念提及最多")
+        kit.assert_clean(result, events, "collection_enumeration")
+        card = next(row for row in result.answer.result_sets if row.kind == "concept_ranking")
+        assert card.sections[0].rows[0].source_count == 1
+        assert card.sections[0].rows[0].citations[0].element_id == "s-ranking-000"
+        assert result.answer.ranking_notice
+        assert any(anchor.provenance.get("producer") == "concept_ranking"
+                   and anchor.element_id == "s-ranking-000" for anchor in result.answer.anchors)
+    finally:
+        repo.close()
+
+
 def test_document_read_is_clean(tmp_path, monkeypatch):
     from tests.test_reasoning_document_read import _read_action
     from tests.test_reasoning_enumeration_tools import _enumerate_sources_action

@@ -831,6 +831,7 @@ class _ReasoningStageRun:
     chunks: Any = _UNSET
     chains: Any = _UNSET
     enumerations: Any = _UNSET
+    rankings: Any = _UNSET
     document_reads: Any = _UNSET
     paper_tools: Any = _UNSET
     collection_map_text: Any = _UNSET
@@ -964,6 +965,7 @@ class AskService:
         overview_sources=None,
         overview_source_generation=None,
         paper_tools=None,
+        concept_ranking=None,
         note_ask_completed: "Callable[..., None] | None" = None,
         ceiling_readers: "CeilingReaders | None" = None,
         report_followup_readers: "ReportFollowupReaders | None" = None,
@@ -975,6 +977,7 @@ class AskService:
         # find_sources / paper cards / extraction), seated only here like
         # ``overview_sources``; ``None`` keeps every reflect turn byte-identical.
         self.paper_tools = paper_tools
+        self.concept_ranking = concept_ranking
         self.retrieval = retrieval
         self.candidates = candidates
         self.evidence_context = evidence_context
@@ -1031,6 +1034,7 @@ class AskService:
             memory_context=(memory_retriever.context if memory_retriever is not None else None),
             effective_schemas=schemas.effective_schemas,
             logger=getattr(event_log, "logger", LOGGER),
+            emit_event=getattr(event_log, "emit", None),
             paper_display_reader=getattr(
                 getattr(paper_tools, "finder", None), "display_metadata", None),
         )
@@ -5515,6 +5519,7 @@ class AskService:
             # 论文工具(find_sources / get_paper_cards / extract_from_sources):
             # 与 ``sources`` 同理,生产唯一的接线点就在这里。
             paper_tools=self.paper_tools,
+            concept_ranking=self.concept_ranking,
         )
 
     def _attach_gap_consult_result(
@@ -6031,6 +6036,7 @@ class AskService:
             # 本 run 的按篇原文取样产物(含见证失败的空产物)。同款原样带出。
             document_reads = result.document_reads
             paper_tools = result.paper_tools  # 论文工具的产物(无则 None),同款原样带出
+            rankings = list(getattr(result, "rankings", ()) or ())
             # 本 run 的集合地图。run 内已经建过一次(计数走有界缓存),这里
             # 带出来直接进合成上下文,不重建。
             collection_map_text = result.collection_map_text
@@ -6050,6 +6056,7 @@ class AskService:
             enumerations = []
             document_reads = []
             paper_tools = None
+            rankings = []
             collection_map_text = ""
             reasoning_outline = []
             reasoning_outline_evidence = []
@@ -6061,6 +6068,7 @@ class AskService:
         run.chunks, run.chains = chunks, chains
         run.enumerations, run.document_reads = enumerations, document_reads
         run.paper_tools = paper_tools
+        run.rankings = rankings
         run.collection_map_text = collection_map_text
         run.outline, run.outline_evidence = reasoning_outline, reasoning_outline_evidence
         run.historical_chunks = historical_reasoning_chunks
@@ -6179,6 +6187,7 @@ class AskService:
             enumerations=tuple(run.ready("enumerations")),
             document_reads=tuple(run.ready("document_reads")),
             paper_tools=run.ready("paper_tools"),
+            rankings=tuple(run.ready("rankings")),
             collection_map_text=run.ready("collection_map_text"),
             outline=tuple(run.ready("outline")),
             outline_evidence=tuple(run.ready("outline_evidence")),
@@ -6265,7 +6274,8 @@ class AskService:
         map_block = collection_map_block(stage.collection_map_text)
         paper = self._paper_card_evidence(stage, for_answer=False)  # 只登记摘要能出现的键
         (structured_block, structured_map, _result_sets, _enumeration_dropped,
-         _collection_citations, _read_dropped) = self._assemble_structured_evidence(
+         _collection_citations, _read_dropped,
+         _ranking_results, _ranking_citations) = self._assemble_structured_evidence(
             stage, _EvidenceAssemblyClient(), map_block, paper)
         common = {
             "conversation_id": prepared.conversation_id,
@@ -6278,6 +6288,7 @@ class AskService:
             top_hits or elements or chunks or stage.chains
             or stage.memory_hits or stage.structured_batch is not None
             or stage.enumerations or map_block or stage.external_evidence
+            or stage.rankings
             or paper is not None
         )
         context = None

@@ -1336,6 +1336,30 @@ class Settings(BaseSettings):
         True, validation_alias="REASONING_PAPER_CARDS_ENABLED")
     reasoning_extract_enabled: bool = Field(
         True, validation_alias="REASONING_EXTRACT_ENABLED")
+    # 概念提及排行部署开关；关闭时 reflect 不提供 rank_concepts（设计 §9）。
+    reasoning_rank_concepts_enabled: bool = Field(
+        True, validation_alias="REASONING_RANK_CONCEPTS_ENABLED")
+    # 小库整库在线统计的对象上限，也是大库收窄范围不支持的判据。
+    kg_rank_online_max_objects: int = Field(
+        50_000, ge=1, le=10_000_000, validation_alias="KG_RANK_ONLINE_MAX_OBJECTS")
+    # 主题路径按相关性取得的候选对象数。
+    kg_rank_query_candidates: int = Field(
+        100, ge=1, le=1_000, validation_alias="KG_RANK_QUERY_CANDIDATES")
+    # 单库一次重算允许扫描的成员行上限。
+    kg_rank_recount_max_rows: int = Field(
+        200_000, ge=10_000, le=10_000_000, validation_alias="KG_RANK_RECOUNT_MAX_ROWS")
+    # 单库重算时间预算，经 read_budget 执行。
+    kg_rank_recount_budget_ms: int = Field(
+        1_500, ge=100, le=60_000, validation_alias="KG_RANK_RECOUNT_BUDGET_MS")
+    # 多库单次排行调用的总时间预算。
+    kg_rank_call_budget_ms: int = Field(
+        3_000, ge=100, le=120_000, validation_alias="KG_RANK_CALL_BUDGET_MS")
+    # 重算截断后的取名、引用与问题提示独立收尾预算，仍受整次调用预算约束。
+    kg_rank_finish_budget_ms: int = Field(
+        500, ge=1, le=60_000, validation_alias="KG_RANK_FINISH_BUDGET_MS")
+    # 每行取名与引用时最多扫描的成员数。
+    kg_rank_citation_scan: int = Field(
+        50, ge=3, le=1_000, validation_alias="KG_RANK_CITATION_SCAN")
     # 逐步推理的大纲便签(reflect 动作 update_outline)总开关。它**另外**受档位
     # 约束:只有用户把检索档位选到「穷尽」时才提供(设计文档 §3.1,用户拍板),
     # 因为按节合成的成本要由用户显式选择来承担。关掉即两处都回到接入前:prompt
