@@ -229,6 +229,7 @@ class ReasoningEvidenceSnapshot:
     paper_tools: PaperToolsSnapshot | None = None
     analysis: AnalysisHandoff = field(default_factory=AnalysisHandoff)
     analysis_evidence: tuple[AnalysisEvidence, ...] = ()
+    rankings: tuple[object, ...] = ()
 
     @classmethod
     def from_result(cls, result: object) -> "ReasoningEvidenceSnapshot":
@@ -258,6 +259,7 @@ class ReasoningEvidenceSnapshot:
                 getattr(result, "document_reads", ()) or ()
             ),
             paper_tools=PaperToolsSnapshot.from_result(result),
+            rankings=tuple(getattr(result, "rankings", ()) or ()),
         )
 
 
@@ -331,6 +333,7 @@ class ResponseDraftInput:
     paper_tools: PaperToolsSnapshot | None = None
     analysis: AnalysisHandoff = field(default_factory=AnalysisHandoff)
     analysis_evidence: tuple[AnalysisEvidence, ...] = ()
+    rankings: tuple[object, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

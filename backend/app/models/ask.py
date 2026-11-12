@@ -1119,6 +1119,58 @@ def _receipt_or_absent(value: object, handler: Callable[[object], Any]) -> Any:
         return None
 
 
+class ConceptRankingRow(BaseModel):
+    name: str
+    source_count: int = Field(ge=0)
+    object_count: int = Field(ge=0)
+    same_name_group: str = Field(default="", exclude_if=lambda value: not value)
+    notebook_id: str = ""
+    tier: str = "personal"
+    citations: List[Citation] = Field(default_factory=list, max_length=3)
+
+
+class ConceptRankingCoverage(BaseModel):
+    notebook_id: str = ""
+    notebook_name: str = ""
+    status: Literal["ok", "unsupported", "unavailable"]
+    reason: str = ""
+    path: str = ""
+    scoped: bool = False
+    drifted: bool = False
+    scope_sources: int = 0
+    candidates_lexical_only: bool = False
+    stale_counts: bool = False
+    seq_behind: int = 0
+    recount_capped: bool = False
+    recount_skipped: int = 0
+    unnamed_dropped: int = 0
+    duplicate_import_pairs: int = 0
+    exact: bool = False
+    skipped: str = ""
+    next_cursor: str = ""
+
+
+class ConceptRankingSection(BaseModel):
+    coverage: ConceptRankingCoverage
+    rows: List[ConceptRankingRow] = Field(default_factory=list)
+    notice: str = ""
+
+
+class ConceptRankingResult(BaseModel):
+    kind: Literal["concept_ranking"] = "concept_ranking"
+    query: str = ""
+    scope: str = "all"
+    sections: List[ConceptRankingSection] = Field(default_factory=list)
+
+
+class RankingFailure(BaseModel):
+    reason: Literal["scoped_large_notebook", "not_computed", "analysis_unavailable",
+                    "refresh_produced_nothing", "recount_budget_exhausted", "rank_failed", "library_skipped"]
+    notebook_ids: List[str] = Field(default_factory=list)
+    line: str
+    fallback_line: str = Field(default="", exclude_if=lambda value: not value)
+
+
 class AskResponse(BaseModel):
     answer_id: str = ""
     asked_at: str = Field(default="", exclude_if=lambda value: not value)
@@ -1130,6 +1182,8 @@ class AskResponse(BaseModel):
     answer: str = ""
     # 服务端完整性披露；网页端在模型 Markdown 正文外单独渲染。
     completeness_notice: str = Field(default="", exclude_if=lambda value: not value)
+    ranking_notice: str = Field(default="", exclude_if=lambda value: not value)
+    ranking_failures: List[RankingFailure] = Field(default_factory=list, exclude_if=lambda value: not value)
     grounded: bool = False
     # 相关度感知证据分档：grounded(有据) | overview(概述) | inferred(推断)
     evidence_level: str = "inferred"
@@ -1166,6 +1220,7 @@ class AskResponse(BaseModel):
             Union[
                 StructuredKnowhowResult,
                 TypedCollectionResult,
+                ConceptRankingResult,
                 SpreadsheetAnalysisResult,
             ],
             Field(discriminator="kind"),
@@ -1634,6 +1689,7 @@ class PublicTurn(BaseModel):
     question: str = ""
     answer_md: str = ""
     completeness_notice: str = Field(default="", exclude_if=lambda value: not value)
+    ranking_notice: str = Field(default="", exclude_if=lambda value: not value)
     asked_at: str = ""
     answered_at: str = ""
     # grounded / overview / inferred (答案可信度分档).

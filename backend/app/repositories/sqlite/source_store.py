@@ -58,6 +58,7 @@ from app.repositories.sqlite import memory_sql
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.sqlite.id_binding import BoundIds, bind_ids, drive_by, member_of
+from app.repositories.sqlite.source_ceiling import ceiling_param
 from app.repositories.sqlite.memory_sql import (
     memory_source_readable,
     memory_source_type_predicate,
@@ -389,6 +390,20 @@ class SourceStore:
                 f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} ORDER BY id",
                 (notebook_id,),
             ).fetchall()]
+
+    def visible_source_count(self, notebook_id: str, *, ceiling: frozenset | None = None) -> int:
+        """Count the same visible universe as all_visible_source_ids in SQL."""
+        if ceiling is not None and not ceiling:
+            return 0
+        bound = ceiling_param(ceiling) if ceiling is not None else None
+        scope_sql = f" AND {member_of('id', bound)}" if bound is not None else ""
+        params = (notebook_id, bound.param) if bound is not None else (notebook_id,)
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) AS count FROM sources WHERE notebook_id=? "
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}{scope_sql}", params,
+            ).fetchone()
+        return int(row["count"])
 
     def visible_source_ids_by_notebook(self, notebook_ids: Sequence[str]) -> dict[str, list[str]]:
         """Freeze a bounded global participant set in one read snapshot."""

@@ -51,6 +51,16 @@ def test_band_constants_match_ask_service():
     assert module._DOCUMENT_READ_BASE == AskService._DOCUMENT_READ_KEY_BASE
 
 
+def test_ranking_bracket_entries_keep_counts_and_collection_kind():
+    context, spans = _assembled(["[k5001] 概念 — 在 3 篇来源中出现，共 4 条",
+                                "[k5002] 概念二 — 在 2 篇来源中出现，共 2 条"])
+    segments, missing = split_context_by_spans(context, spans, ["k5001", "k5002"])
+    assert not missing
+    assert segments == [("k5001", "概念 — 在 3 篇来源中出现，共 4 条"),
+                        ("k5002", "概念二 — 在 2 篇来源中出现，共 2 条")]
+    assert kind_for_key("k5001", {"k5001": {"object_type": "concept"}}) == "collection"
+
+
 def _assembled(*blocks):
     """Assemble a context the way the real code does: each list is one
     renderer's entries (``entry_lines``), each ``Glue`` an assembler's

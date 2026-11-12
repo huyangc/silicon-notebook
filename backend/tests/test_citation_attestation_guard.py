@@ -95,6 +95,8 @@ GLOBAL_ENGINE_MODULES = (
     "services/reasoning_section_navigation.py", "services/reasoning_outline.py",
     "services/graph_retrieval.py", "services/collection_enumeration.py",
     "services/collection_enumeration_answer.py", "services/document_catalog_overview.py",
+    "services/concept_ranking.py", "services/concept_ranking_answer.py",
+    "services/reasoning_rank_actions.py",
     "services/kg/follow_chain.py", "services/kg/graph_reason.py",
     "services/memory_retrieval.py", "services/evidence_attestation.py",
     "services/global_citation_check.py", "services/reference_liveness.py",
@@ -143,6 +145,11 @@ def _import_gate(module_path: str):
 
 #: (file, enclosing function, callee) -> (classification, proofs, reason, count)
 REGISTRY = {
+    ("services/concept_ranking_answer.py", "_preview_evidence", 'dict:"element_id"'): (
+        "read-registered", _COLLECTION_PROOF + (
+            ("calls", "services/response_drafting.py", "DefaultResponseDraftStage._add_ranking_block",
+             "collection_item_citations"),),
+        "concept-ranking rows, keyed only from the citation collection_item_citations minted for them", 1),
     # --- evidence_context -------------------------------------------------
     (EC, "EvidenceContextService.chunk_citations", "Citation"): (
         "federated", _FEDERATED_PROOF, "chunk cards name element_ids[0] of a fingerprinted passage", 1),

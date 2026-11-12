@@ -715,8 +715,14 @@ def reflect_schema_hint(
     paper_cards: bool = False,
     extract: bool = False,
     answer_layout: bool = False,
+    rank_concepts: bool = False,
+    rank_scope: bool = True,
 ) -> str:
     """The reflect response schema, with the enumeration branch iff offered.
+
+    ``rank_concepts`` adds its action and query/scope/cursor branch only when
+    graph actions are offered. ``rank_scope`` removes the current-notebook
+    option in peer runs. The closed gate preserves every byte of the schema.
 
     The two whitelists are ARGUMENTS rather than imports: their single literal
     definition lives in ``app.services.collection_catalog`` (guarded), and this
@@ -940,6 +946,13 @@ def reflect_schema_hint(
             + ('"scope":"all|current_notebook",' if enumerate_scope else "")
             + '"source_id":"","source_title":""},'
         )
+    rank_branch = ""
+    if rank_concepts and kg_actions:
+        actions += "|rank_concepts"
+        rank_branch = (
+            '"rank_concepts":{"query":"",'
+            + ('"scope":"all|current_notebook",' if rank_scope else "")
+            + '"cursor":""},')
     # The per-document sampling branch (PR-A). It is spliced between the
     # enumerate branch and the plugin projection because that is where it
     # belongs in reading order: the model picks a document out of the roster
@@ -1036,6 +1049,7 @@ def reflect_schema_hint(
         '"prefer":"keyword|semantic|balanced","reason":""},'
         + chain_branch
         + enumerate_branch
+        + rank_branch
         + read_document_branch
         + section_nav_branches
         + paper_tool_branches
@@ -1221,6 +1235,9 @@ def reflect_prompt(
     paper_cards_cap: int = 0,
     extract_cap: int = 0,
     answer_layout: bool = False,
+    rank_concepts: bool = False,
+    rank_scope: bool = True,
+    rank_cap: int = 0,
 ) -> str:
     """Next-step decision prompt.
 
@@ -1480,6 +1497,8 @@ def reflect_prompt(
     # That ``exact_lookup`` and ``keywords`` match LITERALLY (a scope word there
     # is a guaranteed zero-hit probe) is said in their own descriptions.
     scope_fields = ["new_sub_query.query", "query"]
+    if rank_concepts and kg_actions:
+        scope_fields.append("rank_concepts.query")
     if search_chunks and keyword_search:
         scope_fields.append("keywords")
     if offer_browse:
@@ -1497,6 +1516,24 @@ def reflect_prompt(
             if enumeration_tools else ""
         )
     )
+    rank_concepts_action = ""
+    if rank_concepts and kg_actions:
+        rank_concepts_action = (
+            "- rank_concepts: rank concepts when asked which are mentioned most often. "
+            "Write the topic in rank_concepts.query; leave it empty for the whole library. "
+            + ("Use scope=all for participating libraries or current_notebook for the current library. "
+               if rank_scope else "")
+            + "Select semantically relevant rows yourself and skip overly generic concepts. "
+            "If fewer than the requested N remain, follow cursor to another page "
+            "by copying the run's short chain:page handle (for example c2:p1); "
+            "keep query and scope unchanged when paging "
+            f"(each page costs one call; at most {rank_cap} calls this run) or change query. "
+            "Copy the counts exactly and explain that they are the number of distinct sources that mention it. "
+            "Rows sharing same_name_group may be one concept (可能是同一概念); do not add their counts. "
+            "Unless exact is true, do not claim these are the most mentioned concepts. "
+            "Keep libraries separate; never sum counts across libraries. "
+            "When status is not ok, never estimate the most mentioned from retrieval samples: "
+            "the answer must state that counting failed, why, and what to do next.\n")
     enumerate_actions = (
         "- enumerate_elements: the question asks you to LIST or INVENTORY a "
         "kind of document element rather than to find the most relevant ones. "
@@ -1834,6 +1871,7 @@ def reflect_prompt(
         "it heads, so a name you invent or paraphrase, or a scope word, returns "
         "nothing.\n"
         f"{enumerate_actions}"
+        f"{rank_concepts_action}"
         f"{read_document_action}"
         f"{paper_tool_actions}"
         f"{outline_action}"

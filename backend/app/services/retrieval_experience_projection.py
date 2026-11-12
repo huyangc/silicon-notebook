@@ -124,6 +124,8 @@ RETRIEVAL_ACTIONS: tuple[str, ...] = (
     "find_documents",
     "paper_cards",
     "extract_fields",
+    # 步类型与动作 id 同名，同 search_chunks；不含 source/scope 词。
+    "rank_concepts",
 )
 
 RetrievalAction = Literal[
@@ -142,6 +144,7 @@ RetrievalAction = Literal[
     "find_documents",
     "paper_cards",
     "extract_fields",
+    "rank_concepts",
 ]
 
 #: An entry's verdict. Two values, and the second one carries most of the

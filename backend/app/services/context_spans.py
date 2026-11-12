@@ -47,9 +47,9 @@ class Glue(str):
     __slots__ = ()
 
 
-# The renderer-written head of a keyed entry: ``k12: ...``.  Read only at a
+# The renderer-written head of a keyed entry: ``k12: ...`` or ``[k12] ...``. Read only at a
 # recorded entry start, never searched for.
-_ENTRY_KEY = re.compile(r"k\d+(?=:)")
+_ENTRY_KEY = re.compile(r"(?:\[(k\d+)\]|(k\d+)(?=:))")
 
 _RECORDER: ContextVar["dict[str, tuple[Span, ...]] | None"] = ContextVar(
     "context_span_recorder", default=None
@@ -105,7 +105,8 @@ def entry_lines(
             offset += len(sep)
         unit = sep.join(lines[head:tail])
         match = _ENTRY_KEY.match(unit) if head in opens else None
-        spans.append(Span(match.group(0) if match else "", offset, offset + len(unit)))
+        key = (match.group(1) or match.group(2)) if match else ""
+        spans.append(Span(key, offset, offset + len(unit)))
         offset += len(unit)
     registry[text] = tuple(spans)
     return text

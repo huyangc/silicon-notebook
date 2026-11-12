@@ -138,6 +138,7 @@ CORE_REFLECT_ACTION_IDS = frozenset({
     "search_chunks",
     "enumerate_elements",
     "enumerate_kg_objects",
+    "rank_concepts",  # 设计 2026-11-12：按来源提及数排行。
     "update_outline",
     "consult_memory",
     # PR-A: bounded per-document source sampling (reuses
@@ -169,6 +170,7 @@ REFLECT_SCHEMA_TOP_LEVEL_FIELDS = frozenset({
     "new_sub_query",
     "follow_chain",
     "enumerate",
+    "rank_concepts",  # 设计 2026-11-12：query / scope / cursor。
     # The outline scratchpad's section list (``update_outline``).
     "outline_sections",
     # The one search string every single-string action reads as its own

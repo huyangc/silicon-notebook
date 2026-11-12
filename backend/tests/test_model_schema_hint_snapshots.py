@@ -150,12 +150,18 @@ _BUILT_HINTS: tuple[tuple[str, str, str | None, tuple[str, ...]], ...] = (
      "model_response_6e0e9726ac796601", ("questions",)),
     ("prompts.REFLECT_SCHEMA_HINT", prompts.REFLECT_SCHEMA_HINT,
      "model_response_d9a1d2ffbb7228c8", ("next_action", "reason", "sufficient")),
+    ("reflect_schema_hint(pre-ranking gates open)", prompts.reflect_schema_hint(
+        ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES, outline=True,
+        consult_memory=True, search_chunks=True, read_document=True,
+        keyword_search=True, section_nav=True, find_sources=True,
+        paper_cards=True, extract=True, rank_concepts=False,
+    ), "model_response_f44c47346f8a20cb", ("next_action", "reason", "sufficient")),
     ("reflect_schema_hint(every gate open)", prompts.reflect_schema_hint(
         ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES, outline=True,
         consult_memory=True, search_chunks=True, read_document=True,
         keyword_search=True, section_nav=True, find_sources=True,
-        paper_cards=True, extract=True,
-    ), "model_response_f44c47346f8a20cb", ("next_action", "reason", "sufficient")),
+        paper_cards=True, extract=True, rank_concepts=True,
+    ), "model_response_7ebd2c86fb03ff1d", ("next_action", "reason", "sufficient")),
     ("reflect_schema_hint(kg_actions=False)", prompts.reflect_schema_hint(kg_actions=False),
      "model_response_dee37f2018f1636a", ("next_action", "reason", "sufficient")),
 )

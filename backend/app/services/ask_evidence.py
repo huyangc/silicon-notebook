@@ -116,7 +116,7 @@ def split_context_by_spans(
     its assemblers recorded (``context_spans``), never at boundaries found in
     the text.
 
-    A keyed span becomes ``(key, text)`` with the renderer's ``"kN: "`` head
+    A keyed span becomes ``(key, text)`` with the renderer's ``"kN: "`` or ``"[kN] "`` head
     removed; its key must be one of ``ordered_keys`` (the id_map) and seen for
     the first time, otherwise the span is delivered as keyless content.
     Keyless content becomes ``("", text)``; neighbouring keyless pieces with
@@ -140,11 +140,14 @@ def split_context_by_spans(
             continue
         key = span.key if (
             span.key in wanted and span.key not in seen
-            and piece.startswith(f"{span.key}:")
+            and (piece.startswith(f"{span.key}:") or piece.startswith(f"[{span.key}]"))
         ) else ""
         if key:
             seen.add(key)
-            head = len(key) + (2 if piece.startswith(f"{key}: ") else 1)
+            if piece.startswith(f"[{key}]"):
+                head = len(key) + (3 if piece.startswith(f"[{key}] ") else 2)
+            else:
+                head = len(key) + (2 if piece.startswith(f"{key}: ") else 1)
             segments.append((key, piece[head:]))
             joinable = False
         elif joinable and not pending_glue.strip():

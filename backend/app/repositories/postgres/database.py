@@ -641,6 +641,19 @@ class PostgresDatabase:
                 ))),
             ) if budget else conn
 
+    @contextmanager
+    def connect_read(self):
+        """Discard driver failures; application budget expiry rolls back for reuse."""
+        with self.connect() as db:
+            try:
+                yield db
+            except psycopg.Error:
+                try:
+                    db.close()
+                except Exception:
+                    pass  # Cleanup must not replace the timeout/cancellation.
+                raise
+
     def is_connection_held(self) -> bool:
         """Whether this execution currently owns any pooled connection."""
         return _CONNECTION_DEPTH.get() > 0

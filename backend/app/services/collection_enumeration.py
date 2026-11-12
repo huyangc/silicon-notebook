@@ -144,6 +144,7 @@ from app.services.collection_catalog import (
 from app.services.evidence_attestation import attest_read
 from app.services.extraction_profiles import PROFILES
 from app.services.knowledge_contracts import USABLE_STATUSES
+
 # Reader #4 on ``retrieval_participants``' frozen whitelist: the typed
 # enumerations must walk the same libraries federated retrieval walks, and both
 # the rows and the denominator come from the list resolved here.
@@ -151,8 +152,8 @@ from app.services.retrieval_participants import (
     resolve_retrieval_participant_ids,
     resolve_retrieval_participants,
 )
-from app.services.source_display import source_display_title
 from app.services.retrieval_run import current_viewer_id
+from app.services.source_display import source_display_title
 from app.services.source_scope import (
     current_source_scope,
     record_collection_ceiling_drift,
@@ -160,7 +161,6 @@ from app.services.source_scope import (
     source_allowed,
     subjectless_run_active,
 )
-
 
 # ``truncated_reason`` vocabulary.  "budget" covers both row and page ceilings
 # on purpose: they are the same statement to a reader ("the action ran out of
@@ -1465,6 +1465,13 @@ class CollectionEnumerationService:
         return frozenset(
             (entry.notebook_id, entry.source_id) for entry in plan.sources
         )
+
+    def rank_participants(
+        self, active_notebook_id: str,
+    ) -> Tuple[Tuple[str, ...], Dict[str, str]]:
+        """排行唯一的参与库读者，沿用枚举的参与库解析与库勾选范围。"""
+        with self._database.connect() as db:
+            return self._participants(db, active_notebook_id)
 
     def _source_scope_moved(
         self, walk: _Walk, total: Optional[int]

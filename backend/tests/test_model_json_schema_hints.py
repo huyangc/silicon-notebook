@@ -137,9 +137,10 @@ def _schema_hint_constants() -> list[tuple[str, str]]:
 
 def _reflect_hint_cases() -> list[tuple[str, str]]:
     cases = []
-    for kinds, types, outline, memory, chunks, kg in itertools.product(
+    for kinds, types, outline, memory, chunks, kg, rank in itertools.product(
         ((), ENUMERABLE_ELEMENT_KINDS),
         ((), ENUMERABLE_KG_OBJECT_TYPES),
+        (False, True),
         (False, True),
         (False, True),
         (False, True),
@@ -147,12 +148,12 @@ def _reflect_hint_cases() -> list[tuple[str, str]]:
     ):
         label = (
             f"kinds={bool(kinds)}-types={bool(types)}-outline={outline}"
-            f"-memory={memory}-chunks={chunks}-kg={kg}"
+            f"-memory={memory}-chunks={chunks}-kg={kg}-rank={rank}"
         )
         cases.append((
             label,
             prompts.reflect_schema_hint(
-                kinds, types, outline, memory, chunks, kg
+                kinds, types, outline, memory, chunks, kg, rank_concepts=rank
             ),
         ))
     return cases

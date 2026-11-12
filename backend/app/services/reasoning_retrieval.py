@@ -143,6 +143,11 @@ from app.services.reasoning_paper_tools import (
     parse_paper_tool_arguments,
     resolve_answer_layout,
 )
+from app.services.reasoning_rank_actions import (
+    RANK_CONCEPTS_ACTION,
+    RankActionDependencies,
+    ReasoningRankActions,
+)
 from app.services.reasoning_section_navigation import (
     _SECTION_ECHO_CHARS as _SECTION_ECHO_CHARS,
 )
@@ -816,6 +821,7 @@ def core_reflect_actions(
     search_elements: bool, ppr_retrieve: bool, section_nav: bool,
     section_browse: bool = True, section_read: bool = True,
     find_sources: bool = False, paper_cards: bool = False, extract: bool = False,
+    rank_concepts: bool = False,
 ) -> Tuple[str, ...]:
     """本轮 reflect 提供的**核心**动作 id(插件动作另由 ``project_reflect_actions``
     给出)。纯函数、零 I/O。
@@ -856,6 +862,8 @@ def core_reflect_actions(
         (ENUMERATE_ELEMENTS_ACTION,) if enumeration else ()
     ) + (
         (ENUMERATE_KG_OBJECTS_ACTION,) if enumeration and kg_actions else ()
+    ) + (
+        (RANK_CONCEPTS_ACTION,) if rank_concepts and kg_actions else ()
     ) + (
         (READ_DOCUMENT_ACTION,) if read_document else ()
     ) + tuple(
@@ -2470,6 +2478,7 @@ CORE_REFLECT_ACTION_IDS: "frozenset[str]" = frozenset(core_reflect_actions(
     kg_actions=True, chunk_search=True, enumeration=True, read_document=True,
     outline=True, consult_memory=True, search_elements=True, ppr_retrieve=True,
     section_nav=True, find_sources=True, paper_cards=True, extract=True,
+    rank_concepts=True,
 ))
 
 #: deep 及以上档才提供这个动作。与大纲便签的档位闸同一条道理(低档不该为一次
@@ -3191,6 +3200,9 @@ class ReflectDecision:
     # 本轮写下的 `answer_layout`("prose" | "paper_table"),空串 = 本轮没写。任何
     # 一轮都可以写,run 取最后一次写下的值(`_note_reflect_decision`)。
     answer_layout: str = ""
+    rank_concepts_query: str = ""
+    rank_concepts_scope: str = ""
+    rank_concepts_cursor: str = ""
     # update_outline 携带的**整份章节结构**;同 id 的证据 union/显式删除在 run()
     # 应用。解析期只夹形状与边界,证据 key 的合法性要看 run 局部候选集合——
     # reflect() 在这一层根本不知道候选是什么。
@@ -3377,6 +3389,7 @@ class ReasoningResult:
     answer_layout: str = ANSWER_LAYOUT_PROSE
     answer_layout_fallback: str = ""
     paper_finds: List[FoundSourcesOutcome] = field(default_factory=list)
+    rankings: List[Any] = field(default_factory=list)
     paper_cards: List[PaperCardOutcome] = field(default_factory=list)
     paper_extractions: List[PaperExtractionOutcome] = field(default_factory=list)
     # Internal selected-source regression oracle.  It is never serialized into
@@ -3739,6 +3752,13 @@ class _ReasoningRunState:
     extract_sources_used: int = 0
     # 新发的句柄、带内容的卡片、抽到的值:进循环的进展尺(与 enum_rows_used 同口径)。
     paper_progress: int = 0
+    rank_calls_used: int = 0
+    rank_progress: int = 0
+    rank_handles: Dict[tuple, str] = field(default_factory=dict)
+    rank_chains: Dict[str, Any] = field(default_factory=dict)
+    rank_memo: dict = field(default_factory=dict)
+    rank_log: List[str] = field(default_factory=list)
+    rankings: List[Any] = field(default_factory=list)
     # 模型最后一次写下的 answer_layout(空串 = 从没写过)。
     answer_layout_requested: str = ""
     # 本轮卡片/抽取有推迟的篇(额度、模型暂不可用):账目教模型再调一次,循环链尾与
@@ -3746,6 +3766,63 @@ class _ReasoningRunState:
     paper_deferred_this_turn: bool = False
     # 本 run 已经抽取过的 (属主库, source_id, 规范化字段元组):重复请求不再花额度。
     paper_extracted_keys: set = field(default_factory=set)
+
+
+class _RankRunView:
+    """Explicit live projection; authority remains on the run state."""
+
+    __slots__ = ("_state",)
+
+    def __init__(self, state: _ReasoningRunState) -> None:
+        self._state = state
+
+    @property
+    def enum_limits(self) -> AskRetrievalLimits:
+        return self._state.enum_limits
+
+    @property
+    def notebook_id(self) -> str:
+        return self._state.notebook_id
+
+    @property
+    def rank_calls_used(self) -> int:
+        return self._state.rank_calls_used
+
+    @rank_calls_used.setter
+    def rank_calls_used(self, value: int) -> None:
+        self._state.rank_calls_used = value
+
+    @property
+    def rank_progress(self) -> int:
+        return self._state.rank_progress
+
+    @rank_progress.setter
+    def rank_progress(self, value: int) -> None:
+        self._state.rank_progress = value
+
+    @property
+    def rank_handles(self) -> Dict[tuple, str]:
+        return self._state.rank_handles
+
+    @property
+    def rank_chains(self) -> Dict[str, Any]:
+        return self._state.rank_chains
+
+    @property
+    def rank_memo(self) -> dict:
+        return self._state.rank_memo
+
+    @property
+    def rank_log(self) -> List[str]:
+        return self._state.rank_log
+
+    @property
+    def rankings(self) -> List[Any]:
+        return self._state.rankings
+
+    @property
+    def record(self) -> Callable[[TraceStep], None]:
+        return self._state.record
 
 
 class _PaperRunView:
@@ -4021,6 +4098,7 @@ class ReasoningRetriever:
         report_outline: str = "",
         reflection_context=None,
         paper_tools=None,
+        concept_ranking=None,
     ):
         self.retrieval = retrieval
         # 论文工具三个服务(`ReasoningPaperTools`:find_sources / 卡片 / 抽取)。只有
@@ -4028,6 +4106,7 @@ class ReasoningRetriever:
         # 动作与 answer_layout 不进 prompt / schema / 白名单,报告逐节深挖与 knowhow
         # 补全逐字节不变。
         self.paper_tools = paper_tools
+        self.concept_ranking = concept_ranking
         self.model_clients = model_clients
         self.communities = communities
         self.settings = settings
@@ -4158,6 +4237,8 @@ class ReasoningRetriever:
         # completion sets it False explicitly -- it never seats ``paper_tools``
         # either, but a policy must not rest on a wiring accident.
         self.allow_paper_tools = True
+        # Knowhow completion disables this Ask-only capability explicitly.
+        self.allow_rank_concepts = True
         # Authoring flows whose synthesis only accepts server-issued evidence
         # keys (knowhow completion) turn this off: an enumerated list would
         # spend the run's budget on items their prompt cannot cite.
@@ -4182,6 +4263,15 @@ class ReasoningRetriever:
         # 每次运行新建(Ask `_build_reasoning_retriever`、报告每节各自
         # `ReasoningRetriever(...)`、knowhow 补全不走播种),所以不会跨运行串用。
         self._chunk_recall_gate = None
+        self._rank_actions = ReasoningRankActions(RankActionDependencies(
+            active=lambda limits, spent: self.rank_concepts_active(limits, spent),
+            service=lambda: self.concept_ranking,
+            retrieval=lambda: self.retrieval,
+            ceiling_binds=lambda: self._run_ceiling_binds(),
+            cancel_event=lambda: self.cancel_event,
+            fail_closed=lambda: self.fail_closed,
+            display_text=_section_text,
+        ))
         self._paper_actions = ReasoningPaperActions(PaperActionDependencies(
             flags=lambda limits, spent: self.paper_tool_flags(limits, spent),
             source_scope_pairs=lambda notebook_id: self.collection_enumeration.source_scope_pairs(
@@ -4435,6 +4525,19 @@ class ReasoningRetriever:
             offered(EXTRACT_FROM_SOURCES_ACTION, "reasoning_extract_enabled",
                     tools.extraction, "extract_sources_per_run"),
         )
+
+    def rank_concepts_active(self, limits=None, spent=frozenset()) -> bool:
+        """Single admission predicate for rank prompt/schema/parser/execution."""
+        budget = limits if limits is not None else ask_retrieval_limits(
+            DEFAULT_RETRIEVAL_EFFORT)
+        return bool(
+            self.concept_ranking is not None and self.allow_rank_concepts
+            and self.allow_enumeration
+            and enumeration_wiring_active(
+                self.settings, self.collection_catalog, self.collection_enumeration)
+            and getattr(self.settings, "reasoning_rank_concepts_enabled", True)
+            and int(getattr(budget, "rank_calls_per_run", 0) or 0) > 0
+            and RANK_CONCEPTS_ACTION not in spent)
 
     def _kg_in_scope(self, notebook_id) -> bool:
         """本 run 的检索范围内有没有知识图谱。判据单点在 `kg_in_scope_for`。"""
@@ -5101,7 +5204,8 @@ class ReasoningRetriever:
                 limits: "AskRetrievalLimits | None" = None,
                 corpus_langs: "Optional[List[str]]" = None,
                 section_spent: "frozenset[str]" = frozenset(),
-                paper_spent: "frozenset[str]" = frozenset()):
+                paper_spent: "frozenset[str]" = frozenset(),
+                rank_spent: frozenset = frozenset()):
         """规划后的轻量反思：判断材料是否齐备，或选择下一次检索。
 
         ``paper_spent`` = 本轮不提供的论文工具(``_paper_tools_spent``:本 run 已用完
@@ -5192,6 +5296,7 @@ class ReasoningRetriever:
         # 每 run 额度与执行体 cap skip 报的是同一份档位预算(`limits`)。
         find_sources, paper_cards, extract = self.paper_tool_flags(
             limits, paper_spent)
+        rank = self.rank_concepts_active(limits, rank_spent) and kg_actions
         # answer_layout 跟着**未扣用量**的卡片/抽取闸:额度用完的最后一轮(往往正是
         # 作答那一轮)仍然可以写它,否则论文表在最需要它的时候消失。
         answer_layout = any(self.paper_tool_flags(limits)[1:])
@@ -5244,6 +5349,8 @@ class ReasoningRetriever:
                     extract_cap=(
                         paper_budget.extract_sources_per_run if extract else 0),
                     answer_layout=answer_layout,
+                    rank_concepts=rank, rank_scope=enumerate_scope,
+                    rank_cap=paper_budget.rank_calls_per_run,
                 ),
             }]
             if self.untrusted_evidence:
@@ -5270,6 +5377,7 @@ class ReasoningRetriever:
                     paper_cards=paper_cards,
                     extract=extract,
                     answer_layout=answer_layout,
+                    rank_concepts=rank, rank_scope=enumerate_scope,
                 ),
                 timeout=self.settings.reasoning_timeout_seconds,
                 **({"candidates_summary": candidates_summary, "client": client}
@@ -5304,6 +5412,7 @@ class ReasoningRetriever:
                 section_nav=section_nav, section_browse=section_browse,
                 section_read=section_read, find_sources=find_sources,
                 paper_cards=paper_cards, extract=extract,
+                rank_concepts=rank,
             # 白名单条目与 prompt 行、schema 分支同源:三处都由
             # `project_reflect_actions` 这一个纯函数出,所以插件动作不可能出现
             # 「告诉了模型却调不动」或反过来的那种漂移。空元组 ⇒ 这里一个字节
@@ -5500,6 +5609,14 @@ class ReasoningRetriever:
                     d.read_section_section = as_text(read_request.get("section"))
             # 论文工具:与上面几个分支同形,闸关时连读都不读;answer_layout 随卡片/
             # 抽取两把闸之一开着才读(规则在 `parse_paper_tool_arguments`)。
+            if rank:
+                request = data.get("rank_concepts")
+                if isinstance(request, dict):
+                    d.rank_concepts_query = as_text(request.get("query"))
+                    d.rank_concepts_scope = as_text(request.get("scope")) if enumerate_scope else ""
+                    if d.rank_concepts_scope not in ("all", "current_notebook"):
+                        d.rank_concepts_scope = ""
+                    d.rank_concepts_cursor = as_text(request.get("cursor"))
             parse_paper_tool_arguments(
                 d, data, find_sources=find_sources, paper_cards=paper_cards,
                 extract=extract, enumerate_scope=enumerate_scope,
@@ -5587,6 +5704,9 @@ class ReasoningRetriever:
                         f"reasoning {action} action is missing {missing_argument}"
                     )
                 bounded_fields = (
+                    d.rank_concepts_query,
+                    d.rank_concepts_scope,
+                    d.rank_concepts_cursor,
                     d.reason,
                     d.expand_object_id,
                     d.community_focal,
@@ -6530,6 +6650,7 @@ class ReasoningRetriever:
             section_browse=state.action_policy.max_section_browses > 0,
             section_read=state.action_policy.max_section_reads > 0,
             find_sources=find_sources, paper_cards=paper_cards, extract=extract,
+            rank_concepts=self.rank_concepts_active(state.enum_limits),
         ))
 
     def _ppr_seed_offered(self) -> bool:
@@ -7409,6 +7530,15 @@ class ReasoningRetriever:
         state.paper_deferred_this_turn = False
         if decision.answer_layout:
             state.answer_layout_requested = decision.answer_layout
+
+    def _action_rank_concepts(self, state: "_ReasoningRunState", decision) -> None:
+        return self._rank_actions._action_rank_concepts(_RankRunView(state), decision)
+
+    def _rank_spent(self, state: "_ReasoningRunState") -> frozenset:
+        return self._rank_actions._rank_spent(_RankRunView(state))
+
+    def _rank_ledger(self, state: "_ReasoningRunState") -> str:
+        return self._rank_actions._rank_ledger(_RankRunView(state))
 
     def _paper_tools_spent(self, state: "_ReasoningRunState") -> frozenset[str]:
         return self._paper_actions._paper_tools_spent(_PaperRunView(state))
@@ -8495,7 +8625,7 @@ class ReasoningRetriever:
                 break
             before = (
                 len(state.collected) + len(state.elements) + len(state.chunks) + len(state.chains)
-                + state.enum_rows_used + state.document_read_elements_used + state.paper_progress
+                + state.enum_rows_used + state.document_read_elements_used + state.paper_progress + state.rank_progress
             )
             if not self._dispatch_reflect_action(
                 state, decision,
@@ -8507,7 +8637,7 @@ class ReasoningRetriever:
             # 并进这把尺(见证失败时它不动,那一轮仍如实算作无进展)。
             state.no_progress = (
                 len(state.collected) + len(state.elements) + len(state.chunks) + len(state.chains)
-                + state.enum_rows_used + state.document_read_elements_used + state.paper_progress
+                + state.enum_rows_used + state.document_read_elements_used + state.paper_progress + state.rank_progress
             ) == before
             # consult 建议、插件外部材料、章节目录、推迟的卡片/抽取:送达了但不带库内新证据,stale 持平。
             if not (state.no_progress and (
@@ -8576,6 +8706,7 @@ class ReasoningRetriever:
         # 论文工具账目(规格 §7.1):没用过这些工具、也没写过 answer_layout 的 run
         # 一个字节都不加。
         summary += self._paper_tools_ledger(state)
+        summary += self._rank_ledger(state)
         # 未执行的已确认方向回喂 reflect(镜像上面几份账目):模型据此知道哪些
         # 用户确认过的方向还没跑过,可以优先用 add_subquery 把它们补上,而不是
         # 另起炉灶猜一个新角度。每轮按 attempted 现算 —— 模型真把某条补上了,
@@ -8762,6 +8893,9 @@ class ReasoningRetriever:
             # 有才传:没用完任何一个时调用形状与接入前相同。
             reflect_kwargs["section_spent"] = section_spent
         paper_spent = self._paper_tools_spent(state)
+        rank_spent = self._rank_spent(state)
+        if rank_spent:
+            reflect_kwargs["rank_spent"] = rank_spent
         # ⚠ 最后一轮**不**像 browse_sections 那样摘掉 find_sources:目录只进下一轮
         # reflect 摘要,而 find_sources 的结果(`state.paper_finds`)原样进
         # `ReasoningResult`,合成侧据它列出「其余相关论文(未展开)」与覆盖说明——
@@ -8837,6 +8971,8 @@ class ReasoningRetriever:
             self._action_get_paper_cards(state, decision)
         elif decision.next_action == EXTRACT_FROM_SOURCES_ACTION:
             self._action_extract_from_sources(state, decision)
+        elif decision.next_action == RANK_CONCEPTS_ACTION:
+            self._action_rank_concepts(state, decision)
         elif decision.next_action == "ppr_retrieve":
             self._action_ppr_retrieve(state, decision)
         elif decision.next_action == "exact_lookup":
@@ -9752,6 +9888,7 @@ class ReasoningRetriever:
             paper_finds=list(state.paper_finds),
             paper_cards=list(state.paper_cards.values()),
             paper_extractions=list(state.paper_extractions),
+            rankings=list(state.rankings),
             baseline_manifest=baseline_manifest,
             # `failed` 是**稀疏**键:只有检索本身抛过异常且未被后续成功清除的
             # 查询才带它——常规行形状逐字不变(reflect 回喂/trace 消费方按具名

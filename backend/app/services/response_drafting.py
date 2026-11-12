@@ -33,6 +33,14 @@ from app.services.analysis_handoff import assemble_analysis_evidence
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.chunk_federation import reasoning_order_for
 from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
+from app.services.collection_enumeration_answer import COLLECTION_KEY_BASE, CollectionKeyAllocator
+from app.services.concept_ranking_answer import (
+    rank_citation_items,
+    ranking_line_rendered,
+    ranking_notice,
+    ranking_prompt_block,
+    ranking_result_sets,
+)
 from app.services.context_spans import Glue, clip, concat
 from app.services.document_read_answer import document_read_block_reserve
 from app.services.evidence_context import CitationLookups, anchor_image_targets
@@ -468,6 +476,10 @@ class _ReasoningDraftRun:
     structured_block: Any = _UNSET
     structured_map: Any = _UNSET
     typed_collection_result_sets: Any = _UNSET
+    typed_ranking_result_sets: Any = _UNSET
+    ranking_citations: Any = _UNSET
+    ranking_notice: str = ""
+    ranking_failures: Any = _UNSET
     enumeration_block_dropped: Any = _UNSET
     collection_item_citations: Any = _UNSET
     document_read_block_dropped: Any = _UNSET
@@ -523,7 +535,7 @@ class DefaultResponseDraftStage:
 
     def __init__(self, *, settings, evidence_context, model_clients,
                  note_model_error, memory_context, effective_schemas, logger,
-                 paper_display_reader=None):
+                 paper_display_reader=None, emit_event=None):
         self.settings = settings
         self.evidence_context = evidence_context
         self.model_clients = model_clients
@@ -531,6 +543,7 @@ class DefaultResponseDraftStage:
         self.memory_context = memory_context
         self.effective_schemas = effective_schemas
         self.logger = logger
+        self.emit_event = emit_event
         self.paper_display_reader = (
             paper_display_reader if callable(paper_display_reader) else None)
 
@@ -599,7 +612,8 @@ class DefaultResponseDraftStage:
             ) + 1
         merged = dict(id_map)
         for key, value in block_map.items():
-            if re.search(rf"(?m)^{re.escape(str(key))}:", rendered):
+            escaped = re.escape(str(key))
+            if re.search(rf"(?m)^(?:{escaped}:|\[{escaped}\])", rendered):
                 merged[key] = value
         return concat(context_block, rendered), merged
 
@@ -2195,13 +2209,50 @@ class DefaultResponseDraftStage:
             citations.append(citation)
 
     @staticmethod
-    def _reasoning_result_sets(structured_batch, collections: list, sheets: list) -> list:
+    def _reasoning_result_sets(structured_batch, collections: list, rankings: list, sheets: list) -> list:
         """Keep the response union ordering explicit outside the draft monolith."""
         return (
             (structured_batch.result_sets if structured_batch else [])
             + collections
+            + rankings
             + sheets
         )
+
+    def _add_ranking_block(self, structured_block, structured_map, rankings, keys,
+                           answer_client, limits, room, *, notebook_id, memo, reserve=0):
+        """Hydrate/attest once; reuse those exact citations if the budget tightens."""
+        if not rankings or memo.get("ranking_failed"):
+            return structured_block, [], {}
+        start = keys.next_key
+        try:
+            cached = memo.get("ranking_mapping")
+            if cached is None:
+                citations = self.evidence_context.collection_item_citations(
+                    rank_citation_items(rankings), active_notebook_id=notebook_id)
+                results = ranking_result_sets(rankings, citations)
+                memo["ranking_mapping"] = (citations, results)
+            else:
+                citations, results = cached
+            if answer_client.configured:
+                preview = ranking_prompt_block(
+                    rankings, keys=keys, citations=citations,
+                    budget_chars=max(0, (room if room is not None else limits.chunk_context_chars // 2)
+                                     - len(structured_block) - (2 if structured_block else 0) - reserve))
+                block = (concat(structured_block, Glue("\n\n"), preview.text)
+                         if structured_block and preview.text else structured_block or preview.text)
+                structured_map.update(preview.evidence_by_id)
+                structured_block = block
+            return structured_block, results, citations
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception as exc:  # cards and prompt are one optional projection
+            keys.next_key = start
+            memo.pop("ranking_mapping", None)
+            memo["ranking_failed"] = True
+            self.logger.warning("ranking projection failed (%s)", type(exc).__name__)
+            if callable(self.emit_event):
+                self.emit_event({"kind": "concept_ranking_projection_failed", "error_type": type(exc).__name__})
+            return structured_block, [], {}
 
     def _assemble_structured_evidence(
         self, stage, answer_client, collection_map_prompt_block: str,
@@ -2242,7 +2293,8 @@ class DefaultResponseDraftStage:
 
         Returns ``(structured_block, structured_map,
         typed_collection_result_sets, enumeration_block_dropped,
-        collection_item_citations, document_read_block_dropped)``.
+        collection_item_citations, document_read_block_dropped,
+        typed_ranking_result_sets, ranking_citations)``.
         """
         limits = stage.prepared.limits
         notebook_id = stage.prepared.notebook_id
@@ -2301,6 +2353,7 @@ class DefaultResponseDraftStage:
         enumeration_block_dropped = False
         collection_item_citations: dict = {}
         structured_map: dict = {}
+        keys = CollectionKeyAllocator()
         knowhow_block_len = len(structured_block)   # 花名册拼上来之前的长度
         if enumerations:
             try:
@@ -2373,12 +2426,15 @@ class DefaultResponseDraftStage:
                     omit = roster_omitted_for(paper)
 
                     def _preview(budget):
+                        # A fitting retry replaces this rendering, including its allocation.
+                        keys.next_key = COLLECTION_KEY_BASE + 1
                         return enumeration_prompt_block(
                             delivered,
                             inline_rows=limits.inline_answer_rows,
                             budget_chars=budget,
                             citations_by_item_id=collection_item_citations,
                             omit_collections=omit,
+                            keys=keys,
                         )
                     preview = _preview(enum_budget_chars)
                     # 挤占时(room 非空)才收紧,半分区上限仍按整份分区算。只为
@@ -2421,6 +2477,11 @@ class DefaultResponseDraftStage:
             except Exception:
                 typed_collection_result_sets = []
                 enumeration_block_dropped = False
+        structured_block, typed_ranking_result_sets, ranking_citations = self._add_ranking_block(
+            structured_block, structured_map, stage.rankings, keys, answer_client, limits,
+            room, notebook_id=notebook_id, memo=memo,
+            reserve=document_read_block_reserve(stage.document_reads)
+            + paper_digest_reserve(paper, limits.chunk_context_chars))
         structured_block = self._add_paper_digest(
             structured_block, structured_map, paper, answer_client, limits,
             knowhow_block_len, room, document_read_block_reserve(stage.document_reads))
@@ -2435,7 +2496,7 @@ class DefaultResponseDraftStage:
                 0, room - len(structured_block) - (2 if structured_block else 0))))
         return (structured_block, structured_map, typed_collection_result_sets,
                 enumeration_block_dropped, collection_item_citations,
-                document_read_block_dropped)
+                document_read_block_dropped, typed_ranking_result_sets, ranking_citations)
 
     def _reasoning_chunk_cards(self, chunks, baseline: Mapping[str, Any],
                                notebook_id: str) -> list[Citation]:
@@ -2700,7 +2761,8 @@ class DefaultResponseDraftStage:
         paper = self._paper_card_evidence(stage)  # 论文工具的登记与表格(见其 docstring)
         (structured_block, structured_map, typed_collection_result_sets,
          enumeration_block_dropped, collection_item_citations,
-         document_read_block_dropped) = self._assemble_structured_evidence(
+         document_read_block_dropped, typed_ranking_result_sets,
+         ranking_citations) = self._assemble_structured_evidence(
             stage, answer_client, collection_map_prompt_block, paper)
         if paper is not None:  # 登记的引用卡按锚点的 object_id(元素 id)发;
             for element_id, citation in paper.citations.items():  # 清单行的卡不被顶掉
@@ -2715,6 +2777,8 @@ class DefaultResponseDraftStage:
         run.collection_map_prompt_block = collection_map_prompt_block
         run.structured_block, run.structured_map = structured_block, structured_map
         run.typed_collection_result_sets = typed_collection_result_sets
+        run.typed_ranking_result_sets = typed_ranking_result_sets
+        run.ranking_citations = ranking_citations
         run.enumeration_block_dropped = enumeration_block_dropped
         run.collection_item_citations = collection_item_citations
         run.document_read_block_dropped = document_read_block_dropped
@@ -2776,7 +2840,8 @@ class DefaultResponseDraftStage:
                 # 写散文,把手上已有的完整清单丢在回退路径里,甚至自称不完整。
                 # 单次合成路径的清单预览/覆盖披露机制是成熟的,清单类问题本来
                 # 就该走它;清单进节切片是 v2 的设计题,不在绕过里偷做。
-                if (len(outline_slices) >= 2 and not enumerations
+                # Design §6.1: section slices do not carry counted ranking evidence.
+                if (len(outline_slices) >= 2 and not enumerations and not stage.rankings
                         and structured_batch is None and report is None):
                     outline_attempted = True
                     sectioned = self._answer_reasoning_sections(
@@ -2869,7 +2934,7 @@ class DefaultResponseDraftStage:
         # 花名册只会 skip,故有取样必有 `enumerations`(拆那把闸要同改这里)。
         elif answer_client.configured and (
                 top_hits or elements or chunks or chains or memory_hits
-                or structured_batch is not None or enumerations
+                or structured_batch is not None or enumerations or stage.rankings
                 or collection_map_prompt_block or stage.external_evidence or report
                 or paper is not None or stage.analysis.findings or stage.analysis.unresolved
                 or stage.analysis.issues):
@@ -2993,6 +3058,12 @@ class DefaultResponseDraftStage:
         paper_card_ids = {id(c) for c in paper.citations.values()} if paper is not None else set()
         for anchor in anchors:
             citation = collection_item_citations.get(anchor.object_id)
+            context = run.ready("structured_map").get(anchor.key, {})
+            if context.get("provenance", {}).get("producer") == "concept_ranking":
+                citation = next((item for item in run.ready("ranking_citations").values()
+                                 if item.element_id == context.get("element_id")
+                                 and item.source_id == context.get("source_id")
+                                 and (item.notebook_id or notebook_id) == context.get("notebook_id")), None)
             if citation is None:
                 continue
             identity = (citation.source_id, citation.element_id)
@@ -3174,6 +3245,12 @@ class DefaultResponseDraftStage:
         grounded = run.ready("grounded")
         synth_failed = run.ready("synth_failed")
         typed_collection_result_sets = run.ready("typed_collection_result_sets")
+        rankings = run.stage.rankings
+        cited = frozenset(key for match in LOOSE_MARKER_RE.finditer(answer)
+                          for key in marker_keys(match.group(0)))
+        owner = {key: (context.get("notebook_id", ""), context.get("object_id", ""))
+                 for key, context in run.ready("structured_map").items()
+                 if context.get("provenance", {}).get("producer") == "concept_ranking"}
         if answer and not synth_failed:
             conclusion = _MARKER_GROUP_RE.sub("", answer).strip()
             llm_mode = "grounded" if grounded else "ungrounded"
@@ -3235,7 +3312,8 @@ class DefaultResponseDraftStage:
             intent_contract.result_scope != "aggregate"
             and not has_scoping_predicate
             and has_complete_collection_result
-        ) or coverage_line_rendered(answer, run.ready("paper_evidence"))
+        ) or coverage_line_rendered(answer, run.ready("paper_evidence")) or ranking_line_rendered(
+            cited, owner, rankings)
         warning = ""
         if completeness_unavailable and not suppress_completeness_warning:
             warning = "本次回答未验证完整性，不能视为全部结果。"
@@ -3257,6 +3335,13 @@ class DefaultResponseDraftStage:
             coverage_line = f"{enumeration_line} {analysis_line}"
             conclusion = f"{coverage_line}\n\n{conclusion}"
             answer = f"> {coverage_line}\n\n{answer}" if answer else coverage_line
+        notice, failures = ranking_notice(
+            rankings, cited_keys=cited, key_owner=owner,
+            query_candidates=self.settings.kg_rank_query_candidates)
+        if notice:
+            answer = f"> {notice}\n\n{answer}" if answer else notice
+            conclusion = f"{notice}\n\n{conclusion}"
+        run.ranking_notice, run.ranking_failures = notice, failures
         run.answer, run.conclusion = answer, conclusion
         run.llm_mode, run.warning = llm_mode, warning
 
@@ -3281,6 +3366,7 @@ class DefaultResponseDraftStage:
         response = AskResponse(
             answer_id="", conclusion=conclusion, answer=answer,
             completeness_notice=warning, grounded=grounded,
+            ranking_notice=run.ranking_notice, ranking_failures=run.ranking_failures,
             evidence_level=evidence_level, anchors=anchors,
             related_knowledge=related_knowledge, citations=citations,
             llm_mode=llm_mode, conversation_id=conversation_id,
@@ -3289,7 +3375,8 @@ class DefaultResponseDraftStage:
             intent=intent_contract,
             retrieval_effort=retrieval_effort,
             result_sets=self._reasoning_result_sets(
-                structured_batch, typed_collection_result_sets, spreadsheet_results
+                structured_batch, typed_collection_result_sets,
+                run.ready("typed_ranking_result_sets"), spreadsheet_results
             ),
             result_coverage=structured_batch.coverage() if structured_batch else None,
             # 走到这里说明这一轮真的跑了检索与作答,但「本笔记本还没有知识

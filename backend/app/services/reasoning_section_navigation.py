@@ -361,21 +361,21 @@ class ReasoningSectionNavigation:
             if (state.section_hint_sims.get((owner, source_id)) or (None,))[0] != texts]
         for key, sims in self._section_similarities_parallel(recompute, texts).items():
             state.section_hint_sims[key] = (texts, sims)
-        rankings: List[SourceRanking] = []
+        source_rankings: List[SourceRanking] = []
         best = None
         for owner, source_id, title, source_outline in outlines:
             sims = state.section_hint_sims[(owner, source_id)][1]
             for chunk_id in run_ids:
                 if chunk_id in sims and (best is None or sims[chunk_id] > best):
                     best = sims[chunk_id]
-            rankings.append(SourceRanking(
+            source_rankings.append(SourceRanking(
                 owner, source_id, title, tuple(rank_sections(
                     source_outline, sims, exclude_chunk_ids=run_ids,
                     limit=max_entries))))
         if best is None:
-            return "", len(rankings), 0
+            return "", len(source_rankings), 0
         hints = select_hints(
-            rankings, max_entries=max_entries,
+            source_rankings, max_entries=max_entries,
             relative_floor=float(getattr(
                 self._dependencies.settings(), "reasoning_section_hint_relative_floor", 0.5)),
             best_chunk_sim=best)
@@ -384,7 +384,7 @@ class ReasoningSectionNavigation:
             (state.surfaced_sections.assign(hint.notebook_id, hint.source_id,
                                             hint.occurrence),
              replace(hint, occurrence=_display_occurrence(hint.occurrence)))
-            for hint in hints]), len(rankings), len(hints)
+            for hint in hints]), len(source_rankings), len(hints)
 
     def _section_skip(
         self, state: "SectionRunView", reason: str, summary: str,

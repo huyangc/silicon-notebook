@@ -690,9 +690,6 @@
   "backend/app/services/collection_catalog.py": {
     "I001": 1
   },
-  "backend/app/services/collection_enumeration.py": {
-    "I001": 1
-  },
   "backend/app/services/collection_enumeration_answer.py": {
     "I001": 1
   },

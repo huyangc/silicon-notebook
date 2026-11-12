@@ -101,6 +101,7 @@ def build_saved_share(
             sections.append("回答依据：" + _EVIDENCE_LABELS[turn["evidence_level"]])
         if turn.get("completeness_notice"):
             sections.append(str(turn["completeness_notice"]))
+        # ranking_notice is already the answer_md prefix, preserved verbatim above.
         if turn.get("omitted_result_sets"):
             sections.append("此轮部分结果卡未包含在分享页中，本副本也未保存这些结果卡。")
         if turn.get("truncated_references"):

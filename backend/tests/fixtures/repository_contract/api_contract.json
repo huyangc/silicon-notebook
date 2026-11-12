@@ -2808,6 +2808,18 @@
               "title": "Model Errors",
               "type": "array"
             },
+            "ranking_failures": {
+              "items": {
+                "$ref": "#/components/schemas/RankingFailure"
+              },
+              "title": "Ranking Failures",
+              "type": "array"
+            },
+            "ranking_notice": {
+              "default": "",
+              "title": "Ranking Notice",
+              "type": "string"
+            },
             "reasoning_trace": {
               "anyOf": [
                 {
@@ -2844,6 +2856,7 @@
                 "discriminator": {
                   "mapping": {
                     "collection": "#/components/schemas/TypedCollectionResult",
+                    "concept_ranking": "#/components/schemas/ConceptRankingResult",
                     "knowhow": "#/components/schemas/StructuredKnowhowResult",
                     "spreadsheet": "#/components/schemas/SpreadsheetAnalysisResult"
                   },
@@ -2855,6 +2868,9 @@
                   },
                   {
                     "$ref": "#/components/schemas/TypedCollectionResult"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ConceptRankingResult"
                   },
                   {
                     "$ref": "#/components/schemas/SpreadsheetAnalysisResult"
@@ -4173,6 +4189,210 @@
             "job"
           ],
           "title": "CommandCatalogStartResponse",
+          "type": "object"
+        },
+        "ConceptRankingCoverage": {
+          "properties": {
+            "candidates_lexical_only": {
+              "default": false,
+              "title": "Candidates Lexical Only",
+              "type": "boolean"
+            },
+            "drifted": {
+              "default": false,
+              "title": "Drifted",
+              "type": "boolean"
+            },
+            "duplicate_import_pairs": {
+              "default": 0,
+              "title": "Duplicate Import Pairs",
+              "type": "integer"
+            },
+            "exact": {
+              "default": false,
+              "title": "Exact",
+              "type": "boolean"
+            },
+            "next_cursor": {
+              "default": "",
+              "title": "Next Cursor",
+              "type": "string"
+            },
+            "notebook_id": {
+              "default": "",
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "notebook_name": {
+              "default": "",
+              "title": "Notebook Name",
+              "type": "string"
+            },
+            "path": {
+              "default": "",
+              "title": "Path",
+              "type": "string"
+            },
+            "reason": {
+              "default": "",
+              "title": "Reason",
+              "type": "string"
+            },
+            "recount_capped": {
+              "default": false,
+              "title": "Recount Capped",
+              "type": "boolean"
+            },
+            "recount_skipped": {
+              "default": 0,
+              "title": "Recount Skipped",
+              "type": "integer"
+            },
+            "scope_sources": {
+              "default": 0,
+              "title": "Scope Sources",
+              "type": "integer"
+            },
+            "scoped": {
+              "default": false,
+              "title": "Scoped",
+              "type": "boolean"
+            },
+            "seq_behind": {
+              "default": 0,
+              "title": "Seq Behind",
+              "type": "integer"
+            },
+            "skipped": {
+              "default": "",
+              "title": "Skipped",
+              "type": "string"
+            },
+            "stale_counts": {
+              "default": false,
+              "title": "Stale Counts",
+              "type": "boolean"
+            },
+            "status": {
+              "enum": [
+                "ok",
+                "unsupported",
+                "unavailable"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "unnamed_dropped": {
+              "default": 0,
+              "title": "Unnamed Dropped",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "title": "ConceptRankingCoverage",
+          "type": "object"
+        },
+        "ConceptRankingResult": {
+          "properties": {
+            "kind": {
+              "const": "concept_ranking",
+              "default": "concept_ranking",
+              "title": "Kind",
+              "type": "string"
+            },
+            "query": {
+              "default": "",
+              "title": "Query",
+              "type": "string"
+            },
+            "scope": {
+              "default": "all",
+              "title": "Scope",
+              "type": "string"
+            },
+            "sections": {
+              "items": {
+                "$ref": "#/components/schemas/ConceptRankingSection"
+              },
+              "title": "Sections",
+              "type": "array"
+            }
+          },
+          "title": "ConceptRankingResult",
+          "type": "object"
+        },
+        "ConceptRankingRow": {
+          "properties": {
+            "citations": {
+              "items": {
+                "$ref": "#/components/schemas/Citation"
+              },
+              "maxItems": 3,
+              "title": "Citations",
+              "type": "array"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "notebook_id": {
+              "default": "",
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "object_count": {
+              "minimum": 0.0,
+              "title": "Object Count",
+              "type": "integer"
+            },
+            "same_name_group": {
+              "default": "",
+              "title": "Same Name Group",
+              "type": "string"
+            },
+            "source_count": {
+              "minimum": 0.0,
+              "title": "Source Count",
+              "type": "integer"
+            },
+            "tier": {
+              "default": "personal",
+              "title": "Tier",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "source_count",
+            "object_count"
+          ],
+          "title": "ConceptRankingRow",
+          "type": "object"
+        },
+        "ConceptRankingSection": {
+          "properties": {
+            "coverage": {
+              "$ref": "#/components/schemas/ConceptRankingCoverage"
+            },
+            "notice": {
+              "default": "",
+              "title": "Notice",
+              "type": "string"
+            },
+            "rows": {
+              "items": {
+                "$ref": "#/components/schemas/ConceptRankingRow"
+              },
+              "title": "Rows",
+              "type": "array"
+            }
+          },
+          "required": [
+            "coverage"
+          ],
+          "title": "ConceptRankingSection",
           "type": "object"
         },
         "ConceptWhitelistAdd": {
@@ -11930,6 +12150,11 @@
               "title": "Question",
               "type": "string"
             },
+            "ranking_notice": {
+              "default": "",
+              "title": "Ranking Notice",
+              "type": "string"
+            },
             "reference_count": {
               "default": 0,
               "title": "Reference Count",
@@ -12384,6 +12609,45 @@
             }
           },
           "title": "QuestionSuggestionsResponse",
+          "type": "object"
+        },
+        "RankingFailure": {
+          "properties": {
+            "fallback_line": {
+              "default": "",
+              "title": "Fallback Line",
+              "type": "string"
+            },
+            "line": {
+              "title": "Line",
+              "type": "string"
+            },
+            "notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Notebook Ids",
+              "type": "array"
+            },
+            "reason": {
+              "enum": [
+                "scoped_large_notebook",
+                "not_computed",
+                "analysis_unavailable",
+                "refresh_produced_nothing",
+                "recount_budget_exhausted",
+                "rank_failed",
+                "library_skipped"
+              ],
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "line"
+          ],
+          "title": "RankingFailure",
           "type": "object"
         },
         "RebuildScaleIndexRequest": {
