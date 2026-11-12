@@ -57,6 +57,16 @@ import assert from "node:assert/strict";
 import ts from "typescript";
 
 import { appSourceModules } from "../../test-support/semantic-source.mjs";
+import { getTraceStepLabel } from "../../app/reasoning-trace.ts";
+import { experienceActionLabel } from "../../features/agent-profile/profile-model.ts";
+
+test("排行动作在轨迹与经验中用中文，未知动作仍不泄漏枚举值", () => {
+  assert.equal(getTraceStepLabel({ step_type: "rank_concepts" }), "排行");
+  assert.equal(experienceActionLabel("rank_concepts"), "概念排行");
+  const unknown = "future_ranking_action";
+  assert.ok(!getTraceStepLabel({ step_type: unknown }).includes(unknown));
+  assert.ok(!experienceActionLabel(unknown).includes(unknown));
+});
 
 // 确定**不会**被用户读到的 JSX 属性。见上文 R3:这里是反白名单,列不全的那一侧
 // 是「可见属性」,所以枚举不可见的这一侧。aria-* 刻意不在内(读屏会念出来)。

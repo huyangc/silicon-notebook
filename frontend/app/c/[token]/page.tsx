@@ -26,7 +26,8 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 
 import { remarkCitations } from "../../answer-citations";
-import { answerBodyWithoutCompletenessNotice } from "../../answer-completeness";
+import { answerBodyWithoutCompletenessNotice, answerBodyWithoutRankingNotice } from "../../answer-completeness";
+import { RankingFailureNotice } from "../../ranking-failure-notice";
 import {
   citationCheckNotice,
   hasFailedCitationCheck,
@@ -469,10 +470,12 @@ function PublicTurnView({
       components={PUBLIC_MARKDOWN_COMPONENTS}
     >
       {normalizeInferenceListMarkers(normalizeMathMarkdown(
-        answerBodyWithoutCompletenessNotice(turn.answer_md, turn.completeness_notice),
+        answerBodyWithoutCompletenessNotice(
+          answerBodyWithoutRankingNotice(turn.answer_md, turn.ranking_notice), turn.completeness_notice,
+        ),
       ))}
     </ReactMarkdown>
-  ), [turn.answer_md, turn.completeness_notice, markdownCitationRefs, imageIdsByCitationKey, citationImageOrder]);
+  ), [turn.answer_md, turn.ranking_notice, turn.completeness_notice, markdownCitationRefs, imageIdsByCitationKey, citationImageOrder]);
 
   const evidenceLabel = EVIDENCE_LABELS[turn.evidence_level];
 
@@ -494,6 +497,7 @@ function PublicTurnView({
         {evidenceLabel && (
           <span className={`public-turn-evidence evidence-${turn.evidence_level}`}>{evidenceLabel}</span>
         )}
+        <RankingFailureNotice notice={turn.ranking_notice ?? ""} failures={[]} />
         <PublicTurnRenderContext.Provider value={{
           token,
           turnIndex: index,

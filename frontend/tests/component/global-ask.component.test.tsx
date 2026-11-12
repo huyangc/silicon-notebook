@@ -838,6 +838,30 @@ const answeredJob: GlobalJob = {
   ...job("done"), cited_notebook_ids: ["nb-0"], answer: standardAnswer(),
 };
 
+test("排行失败的重新提问回填原问题并聚焦，不自动发送", async () => {
+  const notice = "没能按提及次数排行：统计超时。下面的回答只基于检索到的部分内容，不是统计结果。";
+  window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
+  api.detail.mockResolvedValue(detail("conv-a", [{
+    ...answeredJob,
+    answer: standardAnswer({
+      answer: `> ${notice}\n\n跨库正文。`,
+      ranking_notice: notice,
+      ranking_failures: [{ reason: "recount_budget_exhausted", notebook_ids: ["nb-0"], line: notice }],
+    }),
+  }]));
+  render(<GlobalAskPage />);
+  const reask = await screen.findByRole("button", { name: "重新提问" });
+  const input = screen.getByRole("textbox", { name: "输入问题" });
+  fireEvent.change(input, { target: { value: "尚未发送的另一个问题" } });
+  fireEvent.click(reask);
+  expect(input).toHaveValue(answeredJob.question);
+  expect(input).toHaveFocus();
+  expect(api.ask).not.toHaveBeenCalled();
+  expect(api.intent).not.toHaveBeenCalled();
+  expect(screen.getAllByText(notice, { exact: false })).toHaveLength(1);
+  expect(screen.getByText("跨库正文。")).toBeInTheDocument();
+});
+
 test("page opens the shared citation card beside the inline marker, with source, notebook and an open-notebook link", async () => {
   window.history.replaceState(null, "", "/ask?conversation_id=conv-a");
   api.list.mockResolvedValue([conversation()]);

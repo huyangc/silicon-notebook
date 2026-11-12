@@ -232,6 +232,7 @@ class KgAnalysisResponse(BaseModel):
     findings_summary: FindingsSummary
     merge_code: MergeCodeState
     concept_ranks_built_at_seq: Optional[FindingSeq] = None
+    concept_ranks_stale: bool = True
 
 
 class FindingSubject(BaseModel):

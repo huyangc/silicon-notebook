@@ -106,6 +106,8 @@ export type KgBoardEdgeView = {
 
 export type KgAnalysisReport = {
   notebook_id: string;
+  concept_ranks_built_at_seq: { kg_seq: number; cluster_seq: number } | null;
+  concept_ranks_stale?: boolean;
   generated_at: string;
   level: number;
   ledger_state: string;

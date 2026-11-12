@@ -50,6 +50,19 @@ type RowLike = { citation?: Markable };
 type ResultSetLike = { kind?: string };
 
 function markResultSet<T extends ResultSetLike>(resultSet: T, gone: ReadonlySet<string>): T {
+  const ranking = resultSet as T & { sections?: { rows: { citations: Markable[] }[] }[] };
+  if (resultSet.kind === "concept_ranking" && Array.isArray(ranking.sections)) {
+    return {
+      ...resultSet,
+      sections: ranking.sections.map((section) => ({
+        ...section,
+        rows: section.rows.map((row) => ({
+          ...row,
+          citations: row.citations.map((citation) => mark(citation, gone)),
+        })),
+      })),
+    };
+  }
   const collection = resultSet as T & { items?: CollectionItemLike[] };
   if (resultSet.kind === "collection" && Array.isArray(collection.items)) {
     return {

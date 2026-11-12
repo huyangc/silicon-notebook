@@ -69,7 +69,7 @@ export function upsertSessionFromDetail(
   sessions: ConversationSummary[],
   detail: Pick<
     ConversationDetail,
-    "id" | "title" | "updated_at" | "turn_count" | "used_reasoning" | "linked_report" | "turns"
+    "id" | "title" | "updated_at" | "turn_count" | "used_reasoning" | "submitted_via" | "linked_report" | "turns"
   >,
 ): ConversationSummary[] {
   const existing = sessions.find((session) => session.id === detail.id);
@@ -81,6 +81,7 @@ export function upsertSessionFromDetail(
     title: detail.title,
     updated_at: detail.updated_at,
     turn_count: detail.turn_count,
+    ...(detail.submitted_via !== undefined ? { submitted_via: detail.submitted_via } : {}),
     used_reasoning: detail.used_reasoning ?? Boolean(
       detail.turns[detail.turns.length - 1]?.response.reasoning_trace?.length,
     ),

@@ -63,6 +63,8 @@ function summary(overrides = {}) {
 function report(overrides = {}) {
   return {
     notebook_id: "nb-1",
+    concept_ranks_built_at_seq: { kg_seq: 128, cluster_seq: 7 },
+    concept_ranks_stale: false,
     generated_at: "",
     level: 0,
     ledger_state: "complete",
@@ -146,6 +148,24 @@ test("S4 第 2 档:dirty / 任一在场产物或板块明确落后 / 账本不�
   }
   // 账本是空的:按钮叫「生成分析」。
   assert.equal(analysisUpdateState(report({ ledger_state: "empty" })).label, "生成分析");
+});
+
+test("S4:排行是否需要更新只读服务端新鲜度，不自行比较世代", () => {
+  assert.equal(analysisUpdateState(report({ concept_ranks_stale: true })).kind, "needs_update");
+  for (const stamp of [null, { kg_seq: 127, cluster_seq: 7 }, { kg_seq: 128, cluster_seq: 6 }]) {
+    assert.equal(analysisUpdateState(report({ concept_ranks_built_at_seq: stamp, concept_ranks_stale: false })).kind, "current");
+  }
+  assert.equal(analysisUpdateState(report()).kind, "current");
+  assert.equal(analysisUpdateState(report({ state: { ...report().state, dirty: true } })).kind, "needs_update");
+});
+
+test("S4:旧报告缺少排行字段时保留原判据且不抛错", () => {
+  const legacy = report();
+  delete legacy.concept_ranks_stale;
+  delete legacy.concept_ranks_built_at_seq;
+  assert.equal(analysisUpdateState(legacy).kind, "current");
+  legacy.state.dirty = true;
+  assert.equal(analysisUpdateState(legacy).kind, "needs_update");
 });
 
 test("S4:合法缺席(零板块的库不出依赖板块的产物)不算账本不齐", () => {

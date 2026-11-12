@@ -126,6 +126,34 @@ test("公开分享中完整性提示不会被未闭合的代码围栏吞掉", as
   expect(visibleNotice).toHaveClass("answer-completeness-notice");
 });
 
+test("公开分享逐行显示排行说明且不重复，也没有任何排行操作", async () => {
+  const lines = [
+    "没能按提及次数排行：本笔记本还没有排行数据。",
+    "统计期间来源有变化。",
+  ];
+  const notice = lines.join("\n");
+  const completeness = "本次回答未验证完整性，不能视为全部结果。";
+  mocks.fetchPublicConversation.mockResolvedValue({
+    ...CONVERSATION,
+    turns: [{
+      ...CONVERSATION.turns[0],
+      answer_md: `> ${notice}\n\n分享正文。\n\n> ${completeness}`,
+      ranking_notice: notice,
+      completeness_notice: completeness,
+      references: [],
+      images: [],
+    }],
+  });
+  render(<PublicConversationPage />);
+  await screen.findByText("分享正文。");
+  for (const line of lines) expect(screen.getAllByText(line)).toHaveLength(1);
+  expect(screen.getAllByText(completeness)).toHaveLength(1);
+  const noticeElement = screen.getByText(lines[0]).closest('[role="note"]')!;
+  expect(noticeElement.querySelector("button, a")).toBeNull();
+  expect(screen.queryByRole("button", { name: "更新分析" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "重新提问" })).toBeNull();
+});
+
 test("正文 [k] 标记编号取自 key 的序号，且每轮号段互相隔离", async () => {
   const { container } = render(<PublicConversationPage />);
 

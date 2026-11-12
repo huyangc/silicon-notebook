@@ -870,7 +870,26 @@ Inside a notebook:
 
   The user-triggered `POST /notebooks/{id}/unified-kg/rebuild` checks this header even when
   the other analysis artifacts are fresh. The analysis overview returns
-  `concept_ranks_built_at_seq` (`{kg_seq, cluster_seq}` or null), read from the header on every request.
+  `concept_ranks_built_at_seq` (`{kg_seq, cluster_seq}` or null) and `concept_ranks_stale`,
+  read from the header on every request. A missing header is stale; otherwise the backend
+  uses the same generation predicate as the rebuild freshness gate.
+
+  Ask renders `concept_ranking` result sets as concept-ranking cards, grouped by notebook,
+  with source counts, mention counts, same-name group labels, citations and coverage notes.
+  Cards show the backend's delivered rows without repaginating them; a later page failure
+  preserves earlier successful pages. The backend-owned `ranking_notice` appears once before
+  the answer. Available inline actions select all local sources and reask (advanced, non-MCP
+  conversations), update analysis for the writable current notebook, or reask. Global Ask's
+  reask fills the composer without submitting. Shared answers, copying and exports retain
+  plain-text notices. Missing ranking data or `concept_ranks_stale: true` contributes to
+  `needs_update` (“需要更新”); older reports without the stale field retain the existing criteria.
+  The ranking update action probes `GET .../unified-kg/rebuild/model-calls`
+  once on click: `false` starts directly; `true` or `null` requires model-use confirmation.
+  A probe returning 403 removes the action for the current notebook; other probe errors are
+  treated as `null` and require confirmation. Status polling does not probe model use.
+  After successful rebuilding, any ranking header permits reasking, including stale data
+  that the backend can disclose; an absent header shows the backend's `fallback_line`.
+  Failure or polling timeout permits retrying and does not imply that no ranking was produced.
 
 - The Analysis menu itself contains only the promotion queue (admin), publish / unpublish public knowledge base (admin), and edge-review queue. Dashboard and the full-screen Knowledge Graph are separate top-toolbar actions; 「图谱 Schema」 is entered from the Knowledge Graph view header rather than a separate top-toolbar action. Editors also get **删除知识图谱** in the Knowledge Graph view's 「图谱处理」 group: after a confirmation it deletes the notebook's source-derived graph in the background while keeping sources and their parsed content, keeps the other graph-processing actions disabled while it runs, and reports the outcome next to the button (contract in the KG delete bullet under the KG maintenance endpoints). Administrators manage the global object-type baseline. Notebook owners can inspect the effective baseline, copy-on-write an inherited definition, disable it only in that notebook, or add a notebook-only type; deleting an override restores the global definition. Read-only members see the same effective definitions without write controls. An administrator can switch to the global-baseline view, whose changes affect only notebooks that have not overridden the same type. The panel is laid out in three parts so that "which types exist" and "change one" stay separate: a **scope** row on top (current notebook / global baseline, switchable by admins only) decides which registry is on screen and where a write lands; the **type list** on the left groups rows into pending proposals / active / disabled and shows each type's identifier, display name, field count, and provenance badge (inherited / override / notebook-owned / built-in), with `新增类型` and `从当前笔记本归纳候选类型` docked at the bottom of that column (a proposal does not shadow the inherited type of the same name, so the two occupy separate, separately selectable rows); the **selected type's definition** on the right is read-only until `编辑` swaps it for the form, and a proposal shows its rationale plus approve/reject there. Edit drafts are kept per object type, so switching to another type and back does not lose typing, and the list row carries an unsaved-changes dot. Writes are driven by a receipt: the panel only returns to the read view or clears the create form once the backend write succeeded and the list was reloaded; without a receipt it keeps the input and explains why next to the button. No retired content-generation or derived-rule actions are exposed. The existing notebook analytics view includes separate Memory and Knowhow content-asset cards: Memory metrics are restricted to the signed-in user and current notebook (including for admins), while Knowhow metrics follow notebook read access. The cards show counts, health/recency summaries, and links only; they navigate to the existing Memory and Knowhow pages/editors rather than duplicating a browser or editor.
 

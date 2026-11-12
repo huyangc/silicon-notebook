@@ -35,7 +35,7 @@ Red lines preserved verbatim from the facade:
   rebuild.
 """
 from __future__ import annotations
-from app.domain.concept_ranking_contracts import ConceptRankWrite, PrecomputedRankRow
+from app.domain.concept_ranking_contracts import ConceptRankWrite, PrecomputedRankRow, concept_ranks_are_current
 from app.services.collab_jobs import pulse_touch_for_job
 from app.domain.collaboration import KG_BUILD_TERMINAL_PULSE_KINDS
 
@@ -8187,7 +8187,7 @@ class KnowledgeLifecycleService:
         )
         if graph_fresh and analysis_ledger_is_current(
             _ledger, _seq, _cseq, has_boards=_boards > 0
-        ) and (not ensure_concept_ranks or _rank_header == (_seq, _cseq)):
+        ) and (not ensure_concept_ranks or concept_ranks_are_current(_rank_header, _seq, _cseq)):
             return _boards
         # 社区检测后端:igraph(整数边表 + C 核,10^6–10^7 边内存/耗时有界)优先;
         # 缺失(未装)才回退 networkx(纯 Python dict-of-dicts,大库会 OOM)。

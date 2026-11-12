@@ -86,6 +86,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from app.domain.concept_ranking_contracts import concept_ranks_are_current
 from app.domain.kg_analysis_contracts import (
     ARTIFACT_FINDINGS,
     LEDGER_CONTRACT_KEY,
@@ -490,6 +491,7 @@ class KgAnalysisOverview:
     findings_summary: FindingsSummary
     merge_code: MergeCodeState
     concept_ranks_built_at_seq: Optional[Dict[str, int]] = None
+    concept_ranks_stale: bool = True
 
 
 @dataclass(frozen=True)
@@ -725,6 +727,8 @@ class KgAnalysisService:
             merge_code=_merge_code(state_row, self._current_merge_code()),
             concept_ranks_built_at_seq=(
                 {"kg_seq": header[0], "cluster_seq": header[1]} if header else None),
+            concept_ranks_stale=not concept_ranks_are_current(
+                header, state.kg_mutation_seq, state.cluster_mutation_seq),
         )
 
     # ---------------------------------------------------------- /findings
