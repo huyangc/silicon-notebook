@@ -9333,6 +9333,12 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/mcp_tools/sources.py",
+        "scope": "<module>.register_source_tools.rank_concepts.run",
+        "target": "retrieval"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/eval/find_sources_calibrate.py",
         "scope": "<module>.wide_open_finder",
         "target": "retrieval"

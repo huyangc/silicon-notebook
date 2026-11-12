@@ -944,6 +944,7 @@ the graph. Each notebook's first such update after an upgrade can take several m
 The job holds that notebook's maintenance slot throughout; competing “补上关联” or
 “删除知识图谱” starts return 409. Automatic maintenance does not request this rank-only
 backfill; a rebuild that already recomputes graph analysis publishes ranks with it.
+Deployed large notebooks return `not_computed` until their next “更新分析” produces ranking data.
 
 ## Merge rule upgrade: concept seed space 2
 
@@ -2988,6 +2989,8 @@ index; autovacuum reaches the same state on its own. So after building these ind
 freshly loaded database, `VACUUM` (or wait for autovacuum) before judging any plan — and if
 the surcharge is unwanted permanently, the indexes may be built `WITH (fastupdate=off)`,
 which the migration's pre-existing-index validation deliberately tolerates.
+
+**Concept-ranking covering index.** Optional batch 11 covering index `idx_knowledge_objects_rank_recount` accelerates member recounts on the concept-ranking Q path. Only `scripts/build_hotpath_indexes.py --apply` builds it; there is no migration, and counts remain correct without it. Design §16 measured the worst recount falling from 0.27–1.23 s to about 0.14 s, at roughly twice the primary-key index size. Index-only gains depend on the visibility map and timely vacuum; otherwise heap visits remain. Every write to the large table maintains another index, adding write amplification and storage. Cold reads without it more readily hit the recount budget and disclose partial results; these measurements are not a latency guarantee for every deployment.
 
 From the repository root, first inspect without changing the database, then apply during a
 controlled low-traffic window:

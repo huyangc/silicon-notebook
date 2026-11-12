@@ -1783,6 +1783,24 @@ PAPER_CARD_MAX_WORKERS # per-request card generation pool (default 4; 1..16); th
 PAPER_CARD_RETRY_SECONDS # cooldown after a content failure (malformed reply, a card empty after verification, or a failed metadata extraction) or a model failure deterministic for that document (context exceeded, the provider refusing the content, other non-auth 4xx) of the same content version (default 3600; ge=0); auth/config errors are not cooled down; after 3 consecutive failures the cooldown is fixed at 24 hours. Re-parsing the source (a new element generation) or a new card version starts over
 ```
 
+**Concept ranking configuration.** These advanced deployment settings govern `rank_concepts`; numeric product rails remain in the [product/API contract](./product-and-api.md#concept-mention-ranking-rank_concepts).
+
+| Environment variable | Default | Validation | Purpose |
+| --- | --- | --- | --- |
+| `REASONING_RANK_CONCEPTS_ENABLED` | `true` | boolean | Reflect action gate; MCP follows the `read` tier |
+| `KG_RANK_ONLINE_MAX_OBJECTS` | 50000 | 1..10000000 | Unscoped usable-concept threshold for the small-notebook path |
+| `KG_RANK_QUERY_CANDIDATES` | 100 | 1..1000 | Topic candidate objects before canonical deduplication |
+| `KG_RANK_RECOUNT_MAX_ROWS` | 200000 | 10000..10000000 | Member-row recount budget |
+| `KG_RANK_RECOUNT_BUDGET_MS` | 1500 | 100..60000 | Recount time budget in milliseconds |
+| `KG_RANK_FINISH_BUDGET_MS` | 500 | 1..60000 | Additional finish time for names, citations and F2 |
+| `KG_RANK_CALL_BUDGET_MS` | 3000 | 100..120000 | Whole-call time budget in milliseconds |
+| `KG_RANK_CITATION_SCAN` | 50 | 3..1000 | Bounded member scan for names and representative citations |
+
+The effort-tier values for `AskRetrievalLimits.rank_calls_per_run` are owned by the [product/API budget table](./product-and-api.md#paper-search-paper-cards-and-per-paper-extraction-find_sources--get_paper_cards--extract_from_sources).
+
+The names/citations/F2 finish deadline is `min(call_deadline, max(recount_deadline, now + finish_budget))`, with budgets converted to seconds. It grants finish work time after an early cutoff without shortening unused recount time. Recount timeouts preserve completed batches and disclose partial results; actual driver interruption is classified as a timeout too. The first batch executes even above the row budget and sets `recount_capped`; only later batches are cut by row count, so zero-completion failure can come only from time exhaustion. Only driver errors discard the connection; a budget expiry before SQL rolls back and reuses the healthy connection. Transient failures, zero-completion results and time-truncated libraries are not written to the run memo, so a retry recomputes them. Multi-library retry reuses successful libraries only, and memo hits do not reread notebook names.
+
+
 Reflect uses only Legacy. The retired `REASONING_REFLECT_*` settings no longer
 select a protocol, layout or measurement mode; remove them from deployment
 configuration. This cleanup requires no data migration. Fixed reflect instructions

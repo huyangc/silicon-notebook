@@ -3146,6 +3146,7 @@ SURFACE_MEMBERS = (
         owner='RetrievalService',
         kind='property',
         consumers=(
+            ConsumerSite(path='backend/app/api/mcp_tools/sources.py', scope='<module>.register_source_tools.rank_concepts.run', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/eval/find_sources_calibrate.py', scope='<module>.wide_open_finder', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/eval/retrieval_metrics.py', scope='<module>.run_recall', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='retrieval'),

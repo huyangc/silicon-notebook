@@ -23,11 +23,21 @@ from app.core.memory_inputs import normalize_text
 from app.domain.agent_tools import principal_has_capability
 from app.domain.cancellation import CoreCancellation
 from app.domain.collaboration import SOURCE_TERMINAL_PULSE_KINDS
+from app.domain.concept_ranking_contracts import (
+    CONCEPT_RANK_PAGE_SIZE,
+    CONCEPT_RANK_QUERY_MAX_CHARS,
+)
 from app.domain.promotion_source import PROMOTION_SOURCE_TYPE
 from app.models.sources import SourceDetail
 from app.repositories.ports import DocumentCapacityExceeded, UploadedSourceFile
 from app.repositories.source_files import FILESYSTEM_NAME_MAX_BYTES, safe_filename
 from app.services.collab_jobs import pulse_touch_for_mcp
+from app.services.concept_ranking import (
+    ConceptRankRequest,
+    RankCursorError,
+    RankCursorStaleError,
+    RankRequestError,
+)
 from app.services.kg import scheduler as kg_scheduler
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.model_work import ModelPriority, model_work_scope
@@ -48,6 +58,7 @@ from app.services.source_format_admission import (
     supported_source_extensions,
     supported_source_suffixes,
 )
+from app.services.source_scope import memory_access_context
 
 from . import global_ask as _global
 from ._shared import (
@@ -61,6 +72,7 @@ from ._shared import (
     _selected_notebook,
     _writable_notebook,
 )
+from .concept_rank_pages import concept_rank_page
 from .paper_pages import extraction_page, find_sources_page, paper_cards_page
 
 # This names a document rather than a Memory item. The full title is stored;
@@ -774,6 +786,70 @@ def register_source_tools(
         return await _run_with_progress(
             ctx, run, label="find_sources", on_cancel=stop.set
         )
+
+    @server.tool(
+        description=(
+            "Rank merged concepts by the number of distinct owner sources "
+            "mentioning them. No generative model calls; a non-empty query "
+            "makes one embedding call on every invocation, including pages. "
+            "Topic rankings count only among the concepts most relevant to "
+            "the topic. query restricts the topic (up to 200 "
+            "characters); empty means the whole notebook. notebook_id omitted "
+            "uses the token's default notebook. limit is 1-20. Pass next_cursor "
+            "unchanged as cursor with the same query and limit; an empty "
+            "next_cursor means no next page. If the topic candidate set changes, "
+            "restart from page 1. Never claim 'most' when "
+            "coverage.exact is false. When coverage.status is not ok, explain "
+            "the reason and never estimate. Each row's refs are indices into "
+            "the top-level refs string table; pass each string to read_reference "
+            "to verify representative mentions. Rows with the same "
+            "same_name_group may be one concept: do not add their counts. "
+            "Requires the read permission."
+        ),
+        tier="read",
+    )
+    async def rank_concepts(
+        ctx: Context, notebook_id: str = "", query: str = "",
+        cursor: str = "", limit: int = CONCEPT_RANK_PAGE_SIZE,
+    ) -> dict[str, Any]:
+        repo = repository_provider()
+        stop = threading.Event()
+
+        def run() -> dict[str, Any]:
+            if type(limit) is not int or not 1 <= limit <= CONCEPT_RANK_PAGE_SIZE:
+                raise AgentToolError(
+                    "invalid_argument", f"limit 必须在 1 到 {CONCEPT_RANK_PAGE_SIZE} 之间"
+                )
+            if len(query.strip()) > CONCEPT_RANK_QUERY_MAX_CHARS:
+                raise AgentToolError(
+                    "invalid_argument", f"query 最多 {CONCEPT_RANK_QUERY_MAX_CHARS} 字，请缩短主题词"
+                )
+            principal, selected = _selected_notebook(repo, notebook_id, "knowledge:read")
+            with _paper_work(principal, selected), memory_access_context(_memory_viewer(principal) != ""):
+                try:
+                    page = _runtime_service(repo, "concept_ranking").rank(
+                        selected, ConceptRankRequest(query, "all", cursor, limit),
+                        retrieval=repo.retrieval, ceiling_binds=False,
+                        cancel_event=stop, memo=None, participants=(selected,),
+                        bind_query_candidates=True,
+                    )
+                except RankCursorStaleError:
+                    raise AgentToolError(
+                        "invalid_argument", "排行已变化，请去掉 cursor 后从第一页重新开始"
+                    ) from None
+                except RankCursorError:
+                    raise AgentToolError(
+                        "invalid_argument", "cursor 无效：翻页时 query 和 limit 必须保持不变；请去掉 cursor 后从第一页重新排行"
+                    ) from None
+                except RankRequestError:
+                    raise AgentToolError(
+                        "invalid_argument", "排行参数无效，请检查主题词和每页条数后重新排行"
+                    ) from None
+                except TimeoutError:
+                    raise AgentToolError("unavailable", "排行超时，请稍后重试") from None
+                return concept_rank_page(selected, page)
+
+        return await _run_with_progress(ctx, run, label="rank_concepts", on_cancel=stop.set)
 
     @server.tool(
         description=(

@@ -333,6 +333,103 @@ def test_cursor_pagination_memo_identity_and_staleness(repo, monkeypatch):
     assert page.next_cursor == ""
 
 
+def test_query_cursor_binds_canonical_set_without_binding_recall_order(repo):
+    nb = seed_rank_world(repo, postgres=False)
+    seed_extra_rows(repo, nb)
+    candidates = [f"extra-{i:03}" for i in range(30)]
+    retrieval = hits("wide-00", "wide-01", *candidates)
+    svc = service(repo)
+    rank = lambda cursor="": svc.rank(
+        nb, ConceptRankRequest(query="主题", cursor=cursor, page_size=10),
+        retrieval=retrieval, ceiling_binds=False, participants=(nb,), bind_query_candidates=True)
+    first = rank()
+    # Changing aliases and duplicates preserves the mapped canonical set.
+    retrieval.retrieve_scored.return_value = hits(*reversed(candidates), "wide-01").retrieve_scored.return_value
+    second = rank(first.next_cursor)
+    assert second.page_number == 1
+    assert first.page_rows() + second.page_rows() == first.computation.libraries[0].rows[:20]
+    assert first.computation.ceiling_digest == second.computation.ceiling_digest
+    assert retrieval.retrieve_scored.call_count == 2
+    retrieval.retrieve_scored.return_value = hits(*candidates[:-1], "extra-030", "wide-00").retrieve_scored.return_value
+    with pytest.raises(RankCursorStaleError, match="query candidates changed"):
+        rank(second.next_cursor)
+    assert retrieval.retrieve_scored.call_count == 3
+
+
+def test_query_cursor_binds_candidates_beyond_retained_eighty_rows(repo):
+    nb = seed_rank_world(repo, postgres=False)
+    seed_extra_rows(repo, nb, count=91)
+    candidates = [f"extra-{i:03}" for i in range(90)]
+    retrieval, svc = hits(*candidates), service(repo)
+    first = request(svc, nb, query="主题", retrieval=retrieval, bind_query_candidates=True)
+    assert len(first.computation.libraries[0].rows) == 80
+    assert all(row.canonical_id != "extra-089" for row in first.computation.libraries[0].rows)
+    retrieval.retrieve_scored.return_value = hits(*candidates[:-1], "extra-090").retrieve_scored.return_value
+    with pytest.raises(RankCursorStaleError, match="query candidates changed"):
+        svc.rank(nb, ConceptRankRequest(query="主题", cursor=first.next_cursor),
+                 retrieval=retrieval, ceiling_binds=True, participants=(nb,), bind_query_candidates=True)
+    assert retrieval.retrieve_scored.call_count == 2
+
+
+def test_reflect_query_cursor_keeps_existing_run_memo_and_digest(repo):
+    nb = seed_rank_world(repo, postgres=False)
+    seed_extra_rows(repo, nb)
+    retrieval = hits(*(f"extra-{i:03}" for i in range(30)))
+    svc, memo = service(repo), {}
+    first = request(svc, nb, query="主题", retrieval=retrieval, memo=memo)
+    retrieval.retrieve_scored.return_value = hits(*(f"extra-{i:03}" for i in range(1, 31))).retrieve_scored.return_value
+    second = svc.rank(nb, ConceptRankRequest(query="主题", cursor=first.next_cursor),
+                      retrieval=retrieval, ceiling_binds=True, participants=(nb,), memo=memo)
+    assert second.computation is first.computation
+    assert second.computation.ceiling_digest == ""
+    retrieval.retrieve_scored.assert_called_once()
+    recomputed = svc.rank(nb, ConceptRankRequest(query="主题", cursor=first.next_cursor),
+                          retrieval=retrieval, ceiling_binds=True, participants=(nb,))
+    assert recomputed.page_number == 1 and not recomputed.failed_libraries()
+    assert retrieval.retrieve_scored.call_count == 2
+
+
+@pytest.mark.parametrize("failure", ["retrieval", "mapping", "member_counts", "recount", "source_count"])
+def test_query_cursor_returns_failures_instead_of_candidate_staleness(repo, monkeypatch, failure):
+    nb = seed_rank_world(repo, postgres=False)
+    seed_extra_rows(repo, nb)
+    retrieval = hits(*(f"extra-{i:03}" for i in range(30)))
+    svc = service(repo)
+    first = request(svc, nb, query="主题", retrieval=retrieval, bind_query_candidates=True)
+    retrieval.retrieve_scored.return_value = hits(*(f"extra-{i:03}" for i in range(1, 31))).retrieve_scored.return_value
+    if failure == "retrieval":
+        retrieval.retrieve_scored.side_effect = RuntimeError("recall failed")
+    elif failure == "source_count":
+        monkeypatch.setattr(repo._runtime.source_store, "visible_source_count",
+                            Mock(side_effect=ReadBudgetExceeded("source read timeout")))
+    else:
+        method = {"mapping": "concept_rank_candidate_canonicals", "member_counts": "concept_rank_member_counts",
+                  "recount": "concept_recount_rows"}[failure]
+        monkeypatch.setattr(repo._runtime.unified_kg, method, Mock(side_effect=ReadBudgetExceeded("count timeout")))
+    second = svc.rank(nb, ConceptRankRequest(query="主题", cursor=first.next_cursor),
+                      retrieval=retrieval, ceiling_binds=True, participants=(nb,), bind_query_candidates=True)
+    assert second.page_number == 1 and second.page_rows() == () and second.next_cursor == ""
+    failed = second.failed_libraries()[0]
+    assert failed.status == "unavailable"
+    if failure == "source_count":
+        assert failed.skipped == "timeout"
+    else:
+        assert failed.reason == ("rank_failed" if failure == "retrieval" else "recount_budget_exhausted")
+
+
+def test_query_cursor_checks_scope_before_fresh_candidate_retrieval(repo, monkeypatch):
+    nb = seed_rank_world(repo, postgres=False)
+    seed_extra_rows(repo, nb)
+    retrieval = hits(*(f"extra-{i:03}" for i in range(30)))
+    svc = service(repo)
+    first = request(svc, nb, query="主题", retrieval=retrieval, bind_query_candidates=True)
+    monkeypatch.setattr(repo._runtime.collection_catalog, "scope_ceiling_digest", lambda *args, **kwargs: "changed")
+    with pytest.raises(RankCursorStaleError, match="source ceiling changed"):
+        svc.rank(nb, ConceptRankRequest(query="主题", cursor=first.next_cursor),
+                 retrieval=retrieval, ceiling_binds=True, participants=(nb,), bind_query_candidates=True)
+    retrieval.retrieve_scored.assert_called_once()
+
+
 @pytest.mark.parametrize("changes", [{"query": "x" * 201}, {"scope": "wrong"}, {"page_size": 0}, {"page_size": 21}, {"page_size": True}])
 def test_request_validation(repo, changes):
     with pytest.raises(RankRequestError):
