@@ -3156,7 +3156,7 @@ def test_share_request_blocks_on_the_notebook_row_and_fails_closed(
 
     * 把 `_lock_notebook_on` 整个删掉 → `lock_attempted` 永远不 set,第一条断言红
       (真实后果就是那次 `ForeignKeyViolation`);
-    * 把 `FOR KEY SHARE` 摘成一条普通 `SELECT` → 未提交的 DELETE 在 `read committed` 下
+    * 把 `FOR SHARE` 摘成一条普通 `SELECT` → 未提交的 DELETE 在 `read committed` 下
       看不见,存在性检查**照常通过**、当场返回,`lock_returned` 立刻 set,第二条断言红
       (真实后果同样是随后 INSERT 的外键违例,只是窗口更窄)。
 
@@ -3189,10 +3189,10 @@ def test_share_request_blocks_on_the_notebook_row_and_fails_closed(
     lock_returned = threading.Event()
     original_lock = store._lock_notebook_on
 
-    def hooked_lock(connection, notebook_id):
+    def hooked_lock(connection, notebook_id, *, require_live=False):
         lock_attempted.set()
         try:
-            return original_lock(connection, notebook_id)
+            return original_lock(connection, notebook_id, require_live=require_live)
         finally:
             # 「这次取锁结束了」——正常返回与抛 NotebookNotFoundError 都算,要观察的是
             # 它有没有**阻塞**,不是它的结论。
@@ -3223,7 +3223,7 @@ def test_share_request_blocks_on_the_notebook_row_and_fails_closed(
             assert lock_attempted.wait(timeout=10), (
                 "申请压根没去复核笔记本行 —— 那次 INSERT 会直接撞 notebook_id 外键"
             )
-            # 锁模式承重的证明:`FOR KEY SHARE` 与 deleter 那条未提交 DELETE 的
+            # 锁模式承重的证明:`FOR SHARE` 与 deleter 那条未提交 DELETE 的
             # `FOR UPDATE` 冲突,所以这一刻它必须还卡着。裸 SELECT 会当场通过。
             assert not lock_returned.wait(timeout=0.5), (
                 "复核没有阻塞在未提交的删库上 —— 锁模式被摘掉了,存在性检查看到的是"
@@ -3255,7 +3255,7 @@ def test_create_grant_owner_branch_blocks_on_the_notebook_row_and_fails_closed(
     `UniqueViolation`,`ForeignKeyViolation` 一路冒成 500。
 
     编排与 `test_share_request_blocks_on_the_notebook_row_and_fails_closed` 相同,断言也同样
-    **两件都钉**(删掉锁 → 第一条红;摘掉 `FOR KEY SHARE` → 第二条红)。
+    **两件都钉**(删掉锁 → 第一条红;摘掉 `FOR SHARE` → 第二条红)。
 
     ⚠ 发起人**就是库主**是本用例的要件:换成非 owner 会走进那条自带 `FOR SHARE OF ng` 的
     分支,竞态本来就不存在,用例会变成一条对着 bug 也全绿的空转。
@@ -3286,10 +3286,10 @@ def test_create_grant_owner_branch_blocks_on_the_notebook_row_and_fails_closed(
     lock_returned = threading.Event()
     original_lock = store._lock_notebook_on
 
-    def hooked_lock(connection, notebook_id):
+    def hooked_lock(connection, notebook_id, *, require_live=False):
         lock_attempted.set()
         try:
-            return original_lock(connection, notebook_id)
+            return original_lock(connection, notebook_id, require_live=require_live)
         finally:
             lock_returned.set()   # 正常返回与抛 NotebookNotFoundError 都算「结束了」
 
