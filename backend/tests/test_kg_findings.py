@@ -150,6 +150,7 @@ def _run(lib: _Library, *, cap: int = 1_000_000, object_order: Optional[int] = N
         tally=tally, structure=structure, can2idx=can2idx, names=lib.names,
         relations_by_source=relations, decisions=lib.decisions,
         member_seeds=member_seeds, max_candidate_pairs=cap,
+        visible_source_ids=frozenset(sid for sid, _cid, _concept in lib.objects),
     )
     can2idx.clear()                        # the protocol: nothing needs it any more
     rounds = []
@@ -933,7 +934,8 @@ def test_corpus_is_freed_once_compute_returns(monkeypatch):
     draft = compute_findings(
         tally=tally, structure=structure, can2idx={}, names=lib.names,
         relations_by_source={}, decisions={}, member_seeds=lambda ids: {},
-        max_candidate_pairs=1_000)
+        max_candidate_pairs=1_000,
+        visible_source_ids=frozenset(sid for sid, _cid, _concept in lib.objects))
     gc.collect()
     assert draft.pending() is not None                  # F4 / S1 candidates are alive
     assert refs and refs[0]() is None
@@ -1112,7 +1114,8 @@ def test_tally_is_one_shot():
     tally = FindingsObjectTally({}, structure)
     tally.add("s", "K-a", True)
     kwargs = dict(structure=structure, can2idx={}, names={}, relations_by_source={},
-                  decisions={}, member_seeds=lambda ids: {}, max_candidate_pairs=10)
+                  decisions={}, member_seeds=lambda ids: {}, max_candidate_pairs=10,
+                  visible_source_ids=frozenset({"s"}))
     compute_findings(tally=tally, **kwargs)
     with pytest.raises(RuntimeError):
         compute_findings(tally=tally, **kwargs)
@@ -1127,7 +1130,8 @@ def test_result_refuses_while_lookups_are_outstanding():
         tally.add(source_id, cid, c)
     draft = compute_findings(tally=tally, structure=structure, can2idx=can2idx,
                              names=lib.names, relations_by_source={},
-                             decisions={}, member_seeds=lambda ids: {}, max_candidate_pairs=10)
+                             decisions={}, member_seeds=lambda ids: {}, max_candidate_pairs=10,
+                             visible_source_ids=frozenset(sid for sid, _cid, _c in lib.objects))
     with pytest.raises(RuntimeError):
         draft.result()
 
@@ -1437,6 +1441,58 @@ def test_findings_kind_is_registered_with_its_producer():
 
 
 # ===================================================================== settings
+@pytest.mark.parametrize("chain_members", [False, True])
+def test_concept_rank_large_boundary_tie_keeps_resolution_bounded(monkeypatch, chain_members):
+    from app.domain.concept_ranking_contracts import top_concept_ranks
+
+    lib = _Library()
+    # Reverse graph insertion order; include non-ASCII ids to pin C ordering.
+    ids = [f"概念-{index:05d}" for index in reversed(range(5_000))]
+    lib.add_source("visible", ids, chain=chain_members)
+    lib.add_source("another", ["strictly-higher"], chain=False)
+    lib.add_source("visible", ["strictly-higher"], chain=False)
+    resolved = []
+    original = kg_findings._resolve_canonical_ids
+
+    def capture(can2idx, corpus, needed):
+        resolved.append(set(needed))
+        return original(can2idx, corpus, needed)
+
+    monkeypatch.setattr(kg_findings, "_resolve_canonical_ids", capture)
+    result = _run(lib).result
+    expected = top_concept_ranks([(cid, 1, 1) for cid in ids] + [("strictly-higher", 2, 2)])
+    assert list(result.concept_ranks) == expected
+    monkeypatch.setattr(kg_findings, "concept_rank_top", lambda *args, **kwargs: [])
+    _run(lib)
+    assert len(resolved[0] - resolved[1]) <= 80
+
+
+def test_concept_rank_packed_boundary_matches_full_sort_with_orphans():
+    from app.domain.concept_ranking_contracts import top_concept_ranks
+
+    rng = random.Random(42)
+    can2idx = {f"概念-{index:04d}": index for index in range(300)}
+    structure = GraphStructure.from_edges(
+        np.array([], dtype=np.int32), np.array([], dtype=np.int32), len(can2idx))
+    tally = FindingsObjectTally(can2idx, structure)
+    expected = []
+    for cid in can2idx:
+        sources, objects = rng.randrange(1, 8), rng.randrange(1, 4)
+        for sid in range(sources):
+            for _ in range(objects):
+                tally.add(f"s{sid}", cid, True)
+        tally.add("orphan", cid, True)
+        expected.append((cid, sources, sources * objects))
+    corpus = kg_findings._drain_tally(tally, structure)
+    df_before, objects_before = corpus.df.copy(), corpus.can_objects.copy()
+    selected = kg_findings.concept_rank_top(
+        corpus, frozenset(f"s{sid}" for sid in range(7)), 80, can2idx=can2idx)
+    ids = kg_findings._resolve_canonical_ids(can2idx, corpus, {i for i, _, _ in selected})
+    assert top_concept_ranks((ids[i], sc, oc) for i, sc, oc in selected) == top_concept_ranks(expected)
+    np.testing.assert_array_equal(corpus.df, df_before)
+    np.testing.assert_array_equal(corpus.can_objects, objects_before)
+
+
 def test_candidate_pair_budget_is_a_validated_setting(monkeypatch):
     from pydantic import ValidationError
 

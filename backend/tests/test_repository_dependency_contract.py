@@ -132,6 +132,11 @@ LIFECYCLE_STORE_CALLS = {
         "community_graph_rows",
         "community_rows_for_summary",
         "concept_clusters_count",
+        # Rank precomputation: visible owners and representatives read outside
+        # publication; its header is the explicit refresh's freshness gate.
+        "concept_rank_visible_source_ids",
+        "concept_rank_representatives",
+        "concept_rank_header",
         # codex #772 r16: `_unified_graph_version` reads the four-part graph
         # version so a cross-process writer (the sync importer) invalidates
         # `unified_cache` -- one primary-key read, the seam every other unified

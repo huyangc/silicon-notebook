@@ -635,6 +635,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.group_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.identity_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.knowledge_governance_service', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.knowledge_lifecycle_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.memory_membership_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.memory_preview_client', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.memory_suggest_service', kind='attribute', target='_runtime'),

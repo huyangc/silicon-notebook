@@ -59,6 +59,10 @@ def knowledge_governance_service():
     ``own_status_only``). The facade's public surface stays as it is."""
     return repository()._runtime.knowledge_governance  # type: ignore[attr-defined]
 
+def knowledge_lifecycle_service():
+    """Lifecycle-only reads such as the explicit rebuild model-call probe."""
+    return repository()._runtime.knowledge_lifecycle  # type: ignore[attr-defined]
+
 def notebook_delete_repository():
     """批 3·W1 PR-3 §T-2 的删除 tombstone + 后台作业入口；不进
     `NotebookCatalogRepository` Protocol——`delete_notebook`（同步、

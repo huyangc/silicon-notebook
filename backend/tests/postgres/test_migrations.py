@@ -888,13 +888,13 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     for column_name in ("table_name", "operation", "parent_key", "notebook_id"):
         assert capture_columns[("sync_change_log", column_name)]["collation_name"] == "C"
     assert set(capture_functions) == set(expected_postgres_functions())
-    # 0064's 46 tables plus 0077's kg_analysis_findings (since_schema=97).
-    assert len(capture_functions) == 47
+    # 0064's 46 tables, 0077's findings, and 0090's concept ranks.
+    assert len(capture_functions) == 48
     for row in capture_functions.values():
         assert row["prokind"] == "f"
         assert row["prosecdef"] is False
     assert capture_triggers == expected_postgres_triggers()
-    assert len(capture_triggers) == 47
+    assert len(capture_triggers) == 48
     # The gate row is NOT seeded: an absent row reads as disabled.
     assert capture_control_rows == 0
     # v65 (the incremental exporter's watermark state) — see

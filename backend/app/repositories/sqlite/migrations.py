@@ -383,7 +383,10 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # backfill. See ``_migration_106``.
 # v107 / PostgreSQL 0088 add local collaboration activity hints. Actor ids
 # remain audit-kept without a user FK; notebook deletion cascades.
-SCHEMA_VERSION = 108
+# v108 / PostgreSQL 0089 add local public-share evidence snapshots.
+# v109 / PostgreSQL 0090 add independent concept-rank rows and their synced
+# capture triggers; rank=0 carries generation stamps even for an empty ranking.
+SCHEMA_VERSION = 109
 
 # Frozen copy of ``element_reading_order.INDEX_DIGITS_SQL`` as v105 built it (a
 # migration must not change meaning when the live module changes). The readers
@@ -6534,6 +6537,28 @@ class SqliteMigrator:
             db.execute("CREATE TABLE IF NOT EXISTS public_share_evidence (token TEXT NOT NULL, "
                        "turn_key TEXT NOT NULL, reference_key TEXT NOT NULL, "
                        "payload TEXT NOT NULL, PRIMARY KEY (token, turn_key, reference_key))")
+
+    def _migration_109(self) -> None:
+        """Concept ranks, paired with PostgreSQL 0090; see design §10/D1."""
+        from app.migration.sync.capture import sqlite_trigger_sql
+
+        with self._connect() as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS kg_concept_ranks (
+                    notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                    rank INTEGER NOT NULL CHECK (rank >= 0),
+                    canonical_id TEXT NOT NULL,
+                    representative_object_id TEXT NOT NULL,
+                    source_count INTEGER NOT NULL,
+                    object_count INTEGER NOT NULL,
+                    built_at_kg_seq INTEGER NOT NULL,
+                    built_at_cluster_seq INTEGER NOT NULL,
+                    PRIMARY KEY (notebook_id, rank)
+                );
+            """)
+            for name, (_table, sql) in sqlite_trigger_sql(added_at=109).items():
+                db.execute(f'DROP TRIGGER IF EXISTS "{name}"')
+                db.execute(sql)
 
     def migrate(self) -> list[int]:
         with self._connect() as db:

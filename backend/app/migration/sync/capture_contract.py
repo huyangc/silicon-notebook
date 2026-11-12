@@ -44,6 +44,7 @@ CAPTURE_BASE_SCHEMA = 84
 CAPTURE_MIGRATION_FILES: dict[int, str] = {
     84: "0064_sync_change_capture.sql",
     97: "0077_kg_analysis_findings.sql",
+    109: "0090_kg_concept_ranks.sql",
 }
 
 

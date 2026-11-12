@@ -43,7 +43,7 @@ def test_concurrent_second_start_is_rejected_while_the_first_runs(repo):
     entered = threading.Event()
     release = threading.Event()
 
-    def _blocking(notebook_id, force=False):
+    def _blocking(notebook_id, force=False, *, ensure_concept_ranks=False):
         entered.set()
         assert release.wait(timeout=10)
         return 7
@@ -77,7 +77,7 @@ def test_claim_is_released_on_base_exception(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb")).id
     lifecycle = repo._runtime.knowledge_lifecycle
 
-    def _interrupted(_notebook_id, force=False):
+    def _interrupted(_notebook_id, force=False, *, ensure_concept_ranks=False):
         raise KeyboardInterrupt
 
     lifecycle.rebuild_unified_kg = _interrupted
@@ -102,7 +102,7 @@ def test_failure_settles_the_claim_and_reports_once(repo):
     emitted = []
     lifecycle.event_log.emit = lambda payload: emitted.append(payload)
 
-    def _boom(_notebook_id, force=False):
+    def _boom(_notebook_id, force=False, *, ensure_concept_ranks=False):
         raise RuntimeError("boom")
 
     lifecycle.rebuild_unified_kg = _boom
@@ -184,21 +184,23 @@ def test_start_unified_kg_rebuild_404s_on_unknown_notebook(repo):
         repo.unified_kg_rebuild_status("nb-missing")
 
 
-def test_background_job_runs_the_pass_under_the_version_gate(repo):
+@pytest.mark.parametrize("ensure_concept_ranks", [False, True])
+def test_background_job_runs_the_pass_under_the_version_gate(repo, ensure_concept_ranks):
     """`force=False` is the whole reason an unchanged notebook still answers in
     milliseconds. Backgrounding must not quietly turn every click into a full
     recluster (that stays with scripts/recluster_kg.py)."""
     nb = repo.create_notebook(NotebookCreate(name="nb")).id
     calls = []
 
-    def _record(notebook_id, force=False):
-        calls.append((notebook_id, force))
+    def _record(notebook_id, force=False, *, ensure_concept_ranks=False):
+        calls.append((notebook_id, force, ensure_concept_ranks))
         return 3
 
     repo._runtime.knowledge_lifecycle.rebuild_unified_kg = _record
     job = repo.start_unified_kg_rebuild(nb)
-    assert repo.run_unified_kg_rebuild_job(nb, job["job_id"]) == 3
-    assert calls == [(nb, False)]
+    assert repo.run_unified_kg_rebuild_job(
+        nb, job["job_id"], ensure_concept_ranks=ensure_concept_ranks) == 3
+    assert calls == [(nb, False, ensure_concept_ranks)]
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +303,8 @@ def test_lifecycle_public_maintenance_surface_is_one_hop(repo, monkeypatch):
         monkeypatch.setattr(collaborator, name, _delegate)
         assert getattr(lifecycle, name)(*args) == expected
 
-    expected_kw = {"start_notebook_relink": (("exempt_build_marker", False),)}
+    expected_kw = {"start_notebook_relink": (("exempt_build_marker", False),),
+                   "run_unified_kg_rebuild_job": (("ensure_concept_ranks", False),)}
     assert calls == [
         (name, args, expected_kw.get(name, ()))
         for name, args, _expected in cases

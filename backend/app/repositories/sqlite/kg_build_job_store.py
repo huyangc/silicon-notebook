@@ -526,6 +526,7 @@ class KgBuildJobStore:
             # as "content arrived since", and a dismissal is a member's
             # judgment, not derived state.
             "kg_analysis_findings",
+            "kg_concept_ranks",
             "kg_rebuild_checkpoint",
             "kg_cluster_scratch",
             "kg_canonical_scratch",

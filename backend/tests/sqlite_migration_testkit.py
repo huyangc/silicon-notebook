@@ -43,8 +43,14 @@ V78_AUTH_TABLES = {
 }
 
 
+def rollback_v109(db: sqlite3.Connection) -> None:
+    """Undo concept ranks and their table-owned capture triggers."""
+    db.execute("DROP TABLE kg_concept_ranks")
+
+
 def rollback_v108(db: sqlite3.Connection) -> None:
     """Undo the token-scoped public citation evidence snapshots."""
+    rollback_v109(db)
     db.execute("DROP TABLE public_share_evidence")
 
 

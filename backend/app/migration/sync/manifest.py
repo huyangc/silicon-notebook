@@ -362,6 +362,10 @@ _SYNCED: tuple[TableSyncSpec, ...] = (
         scope=_NOTEBOOK_SCOPE,
         since_schema=97,
     ),
+    # 独立派生产物（v109/0090）；目标环境世代戳对不上时按陈旧处理。
+    TableSyncSpec(
+        "kg_concept_ranks", SyncClass.SYNCED, scope=_NOTEBOOK_SCOPE, since_schema=109,
+    ),
     # Knowhow
     TableSyncSpec(
         "knowhow_columns",

@@ -642,6 +642,10 @@ def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
             "VALUES (?,?,?,?,?)",
             (notebook.id, "source_profiles", 0, "{}", _now()),
         )
+        db.execute(
+            "INSERT INTO kg_concept_ranks VALUES (?,0,'','',0,0,1,1)",
+            (notebook.id,),
+        )
         # v97:问题清单明细与它的账本一起作废;两种标记都留下(发布把
         # kg_mutation_seq 推前而不是归零,relink 标记自然读成「之后有新内容」);
         # 合并代码分量随 cluster_input_version 一起清空。
@@ -728,7 +732,7 @@ def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
                 (notebook.id,),
             ).fetchone()["c"])
             for table in ("canonical_relations", "kg_analysis_artifacts",
-                          "kg_analysis_findings", "kg_analysis_marks")
+                          "kg_analysis_findings", "kg_analysis_marks", "kg_concept_ranks")
         }
         generational = dict(db.execute(
             "SELECT cluster_generation, community_generation, "
@@ -774,6 +778,7 @@ def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
     assert derived_counts == {
         "canonical_relations": 0, "kg_analysis_artifacts": 0,
         "kg_analysis_findings": 0, "kg_analysis_marks": 2,
+        "kg_concept_ranks": 0,
     }
     assert (state["cluster_input_version"], state["cluster_code_version"]) == ("", "")
     # The publication cleared the clusters and the decisions: nothing is

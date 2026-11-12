@@ -2337,6 +2337,11 @@
         "type": "table"
       },
       {
+        "name": "kg_concept_ranks",
+        "sql_sha256": "3e686004e7b05ac2f70fb78d324af79b07fb881c1f413ffbb0b0eedfedfd5426",
+        "type": "table"
+      },
+      {
         "name": "kg_conflict_candidates",
         "sql_sha256": "ef9a2cb3a87f9fa19a4c5af85073370062d53a85c6e6024d007e50e145cef78d",
         "type": "table"
@@ -2962,6 +2967,21 @@
         "type": "trigger"
       },
       {
+        "name": "sync_capture_kg_concept_ranks_delete",
+        "sql_sha256": "b0a564c7462888162bb85be28ee08588fa72f463b2a9ad345a7e251c1b95b437",
+        "type": "trigger"
+      },
+      {
+        "name": "sync_capture_kg_concept_ranks_insert",
+        "sql_sha256": "faa82f95c82a7b85c167f48536ebefff327e767a4f7f060a3ee9cc2423007636",
+        "type": "trigger"
+      },
+      {
+        "name": "sync_capture_kg_concept_ranks_update",
+        "sql_sha256": "825dde8a576bd297d2a97504cf0bc29ebd8044c92908f5959c95164fd096bbcc",
+        "type": "trigger"
+      },
+      {
         "name": "sync_capture_kg_source_profiles_delete",
         "sql_sha256": "0d7dd22bf5e1b755662328f670721dc776e299cd56cb65b211e53a72a30e2a21",
         "type": "trigger"
@@ -3442,6 +3462,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 108
+    "user_version": 109
   }
 }

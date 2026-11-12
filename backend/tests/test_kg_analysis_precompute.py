@@ -1241,6 +1241,7 @@ def test_precompute_takes_every_snapshot_outside_any_write_transaction(repo, mon
     findings_reads = (
         "kg_finding_member_name_rows", "kg_finding_display_name_rows",
         "kg_finding_source_states", "kg_analysis_mark_rows",
+        "concept_rank_visible_source_ids", "concept_rank_representatives",
     )
     for name in (*ANALYSIS_SNAPSHOTS, "source_canonical_rows", *findings_reads):
         instrument(store, name)

@@ -611,6 +611,7 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int, bool], ...] = (
     ("kg_relation_completion_state", "notebook_id = ?", 1, True),
     ("kg_analysis_artifacts", "notebook_id = ?", 1, True),
     ("kg_analysis_findings", "notebook_id = ?", 1, True),
+    ("kg_concept_ranks", "notebook_id = ?", 1, True),
     ("kg_community_edges", "notebook_id = ?", 1, True),
     ("kg_source_profiles", "notebook_id = ?", 1, True),
     # SQLite v97: the relink-attempt marks go with the graph (the generation
@@ -989,6 +990,7 @@ class KnowledgeStore:
             # kg_analysis_findings (v97): the detail of the ledger's findings
             # kind — one unit with its ledger row, like the two below.
             "kg_analysis_findings",
+            "kg_concept_ranks",
             # kg_community_edges / kg_source_profiles: the DETAIL tables the
             # ledger's two board-dependent kinds describe. R1 (P2-1, post-
             # review): must be deleted in the SAME transaction as the ledger

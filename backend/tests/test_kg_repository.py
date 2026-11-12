@@ -966,6 +966,10 @@ def test_delete_notebook_kg_clears_findings_and_relink_marks_keeps_dismissals(re
     with rt.database.write() as db:
         for notebook_id in (nb.id, other.id):
             db.execute(
+                "INSERT INTO kg_concept_ranks VALUES (?,0,'','',0,0,4,2)",
+                (notebook_id,),
+            )
+            db.execute(
                 "INSERT INTO kg_analysis_findings (notebook_id, rule_id, subject_key, "
                 "subject_kind, severity, first_seen_kg_seq, first_seen_cluster_seq) "
                 "VALUES (?, 'F1', 'src-1', 'source', 'high', 4, 2)", (notebook_id,))
@@ -997,6 +1001,9 @@ def test_delete_notebook_kg_clears_findings_and_relink_marks_keeps_dismissals(re
         assert rows(marks, other.id) == [("F1", "dismissed"), ("F5", "relink_attempted")]
         assert rows(state, other.id) == [("v-in", "code-1")]
     assert counts["kg_analysis_findings"] == 1
+    assert counts["kg_concept_ranks"] == 1
+    with rt.database.connect() as db:
+        assert [r[0] for r in db.execute("SELECT notebook_id FROM kg_concept_ranks")] == [other.id]
     assert counts["kg_analysis_marks"] == 1
 
 

@@ -6371,5 +6371,35 @@ MIGRATION_MANIFEST[(107, 108)] = {
     "columns": {}, "triggers": {}, "views": {},
 }
 
+KG_CONCEPT_RANKS_TABLES = {
+    "kg_concept_ranks": """CREATE TABLE kg_concept_ranks (
+                    notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                    rank INTEGER NOT NULL CHECK (rank >= 0),
+                    canonical_id TEXT NOT NULL,
+                    representative_object_id TEXT NOT NULL,
+                    source_count INTEGER NOT NULL,
+                    object_count INTEGER NOT NULL,
+                    built_at_kg_seq INTEGER NOT NULL,
+                    built_at_cluster_seq INTEGER NOT NULL,
+                    PRIMARY KEY (notebook_id, rank)
+                )""",
+}
+KG_CONCEPT_RANKS_TRIGGERS = {
+    name: sql for name, (_table, sql) in sqlite_trigger_sql(added_at=109).items()
+}
+assert len(KG_CONCEPT_RANKS_TRIGGERS) == 3
+MIGRATION_MANIFEST = {
+    (key[0], 109, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **KG_CONCEPT_RANKS_TABLES},
+        "triggers": {**manifest["triggers"], **KG_CONCEPT_RANKS_TRIGGERS},
+    } for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(108, 109)] = {
+    "tables": KG_CONCEPT_RANKS_TABLES, "indexes": {}, "columns": {},
+    "triggers": KG_CONCEPT_RANKS_TRIGGERS, "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

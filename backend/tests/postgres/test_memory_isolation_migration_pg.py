@@ -40,6 +40,8 @@ MIGRATION = (
 
 def _roll_back_to_66(database) -> None:
     with database.write() as db:
+        db.execute("DROP TABLE kg_concept_ranks")
+        db.execute("DROP FUNCTION sync_capture_kg_concept_ranks()")
         db.execute("DROP TABLE public_share_evidence")
         db.execute("DROP TABLE notebook_activity")
         # 87 (auto user-memory suggestions) adds three tables, two partial
@@ -291,7 +293,8 @@ def test_rebuild_pass_sets_the_marker_through_the_ordinary_slot(
         for later in ("0077_kg_analysis_findings.sql",
                       "0079_kg_cluster_scratch_ordinal.sql",
                       "0082_chunk_navigation.sql",
-                      "0083_kg_seed_space_and_board_partition.sql"):
+                      "0083_kg_seed_space_and_board_partition.sql",
+                      "0090_kg_concept_ranks.sql"):
             db.execute(
                 (MIGRATION.parent / later).read_text(encoding="utf-8"),
                 prepare=False,

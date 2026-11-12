@@ -228,6 +228,8 @@ class FakeConn:
             return lib.objects
         if "FROM concept_merge_candidates" in flat:
             return lib.decision_rows
+        if flat.startswith("SELECT id FROM sources WHERE notebook_id="):
+            return [(sid,) for sid in sorted(lib.titles)]
         if flat.startswith("SELECT id, title, created_at FROM sources"):
             return [(sid, lib.titles[sid], lib.created.get(sid)) for sid in params[0]]
         if flat.startswith("SELECT id, created_at FROM sources"):
@@ -648,6 +650,7 @@ def test_the_query_builders_only_build_selects():
         rehearsal.state_query(NOTEBOOK), rehearsal.names_query(NOTEBOOK),
         rehearsal.graph_query(NOTEBOOK), rehearsal.object_query(NOTEBOOK),
         rehearsal.decisions_query(NOTEBOOK),
+        rehearsal.visible_sources_query(NOTEBOOK),
         rehearsal.source_facts_query(["s"], with_titles=True),
         rehearsal.source_facts_query(["s"], with_titles=False),
         rehearsal.source_titles_query(["s"]), rehearsal.chunk_counts_query(NOTEBOOK),
@@ -891,6 +894,17 @@ def test_graph_and_object_sql_share_the_product_tail():
     assert _from(mine_sql, "FROM knowledge_objects o") == _from(
         product_objects, "FROM knowledge_objects o")
     assert tuple(mine_params) == tuple(product_object_params)
+
+    class _FetchedProductDb(_ProductDb):
+        def execute(self, sql, params=(), **kwargs):
+            return _Result(super().execute(sql, params, **kwargs))
+
+    db = _FetchedProductDb()
+    UnifiedKgStore.concept_rank_visible_source_ids(db, NOTEBOOK)
+    (product_sources, product_source_params), = db.executed
+    mine_sql, mine_params = rehearsal.visible_sources_query(NOTEBOOK)
+    assert _flat(mine_sql) == _flat(product_sources)
+    assert tuple(mine_params) == tuple(product_source_params)
 
 
 def test_decisions_are_read_and_keyed_like_the_product_reader():

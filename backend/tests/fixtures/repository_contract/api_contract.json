@@ -6793,6 +6793,16 @@
             "boards": {
               "$ref": "#/components/schemas/BoardOverview"
             },
+            "concept_ranks_built_at_seq": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/FindingSeq"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "findings_summary": {
               "$ref": "#/components/schemas/FindingsSummary"
             },
@@ -31378,7 +31388,7 @@
       },
       "/api/notebooks/{notebook_id}/unified-kg/rebuild": {
         "post": {
-          "description": "「重新合并」(background thread). Same shape as kg/relink above.\n\nIt runs off the request thread for the same reason relink does: the work is\nproportional to the notebook, not to the click. The version gate (force=False,\napplied inside `run_unified_kg_rebuild_job`) still makes an unchanged notebook\nanswer in milliseconds, but a real recluster streams seed representatives over\nthe whole graph — minutes to hours on a base-tier library, well past\nPostgreSQL's statement timeout, with a request worker pinned for the duration.\nNo LLM PRECONDITION gate — unlike kg/build, this endpoint does not require a\nmodel to be configured and keeps working without one. That is not the same as\nthe pass being purely deterministic: when `kg_merge_review` and/or\n`kg_concept_description` ARE configured, `rebuild_unified_kg` calls them as a\nfail-open enhancement (candidate-pair adjudication, canonical description\ngeneration) — an unexpected failure there is swallowed and the rebuild still\nproceeds, but a configured model genuinely gets called. Single flight is\nshared with relink (409, see `_kg_maintenance_busy`), so neither pass can\npublish over the other's inputs.\nThe old synchronous `{\"clusters\": N}` is gone — the count now arrives from\n`unified-kg/rebuild/status` once the pass actually finishes.",
+          "description": "「重新合并」(background thread). Same shape as kg/relink above.\n\nIt runs off the request thread for the same reason relink does: the work is\nproportional to the notebook, not to the click. The version gate (force=False,\napplied inside `run_unified_kg_rebuild_job`) still makes an unchanged notebook\nanswer in milliseconds, but a real recluster streams seed representatives over\nthe whole graph — minutes to hours on a base-tier library, well past\nPostgreSQL's statement timeout, with a request worker pinned for the duration.\nNo LLM PRECONDITION gate — unlike kg/build, this endpoint does not require a\nmodel to be configured and keeps working without one. That is not the same as\nthe pass being purely deterministic: when `kg_merge_review` and/or\n`kg_concept_description` ARE configured, `rebuild_unified_kg` calls them as a\nfail-open enhancement (candidate-pair adjudication, canonical description\ngeneration) — an unexpected failure there is swallowed and the rebuild still\nproceeds, but a configured model genuinely gets called. Single flight is\nshared with relink (409, see `_kg_maintenance_busy`), so neither pass can\npublish over the other's inputs.\nThe old synchronous `{\"clusters\": N}` is gone — the count now arrives from\n`unified-kg/rebuild/status` once the pass actually finishes.\nThis user-click endpoint always sets `ensure_concept_ranks=True`.",
           "operationId": "rebuild_unified_kg_api_notebooks__notebook_id__unified_kg_rebuild_post",
           "parameters": [
             {
@@ -31416,6 +31426,48 @@
             }
           },
           "summary": "Rebuild Unified Kg"
+        }
+      },
+      "/api/notebooks/{notebook_id}/unified-kg/rebuild/model-calls": {
+        "get": {
+          "description": "Click-time model probe: true or unknown (null) requires confirmation.\n\nKept separate from the frequently polled rebuild status because input-version\nchecks count notebook objects. A failed probe records only the exception class.",
+          "operationId": "unified_kg_rebuild_model_calls_api_notebooks__notebook_id__unified_kg_rebuild_model_calls_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Unified Kg Rebuild Model Calls Api Notebooks  Notebook Id  Unified Kg Rebuild Model Calls Get",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Unified Kg Rebuild Model Calls"
         }
       },
       "/api/notebooks/{notebook_id}/unified-kg/rebuild/status": {

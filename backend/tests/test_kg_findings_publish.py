@@ -207,7 +207,7 @@ def test_findings_publish_atomically_with_boards(repo, monkeypatch):
     database = repo._runtime.database
     original_write = database.write
     per_transaction: list = []
-    watched = {*_PUBLISHED, "unified_kg_state", "kg_analysis_marks"}
+    watched = {*_PUBLISHED, "unified_kg_state", "kg_analysis_marks", "kg_concept_ranks"}
 
     @contextmanager
     def tracing_write(**kwargs):
@@ -229,6 +229,8 @@ def test_findings_publish_atomically_with_boards(repo, monkeypatch):
     assert len(touching) == 1, per_transaction
     assert touching[0] >= {*_PUBLISHED, "unified_kg_state"}, (
         f"the findings detail is not in the flip + ledger transaction: {touching[0]}")
+    rank_transactions = [t for t in per_transaction if "kg_concept_ranks" in t]
+    assert rank_transactions == touching
     assert sorted(_keys(_rows(repo, world.notebook_id))) == EXPECTED_KEYS
 
 

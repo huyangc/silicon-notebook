@@ -616,6 +616,7 @@ def test_merge_keeps_dismissals_and_drops_relink_marks_and_findings(tmp_path):
                 "INSERT INTO kg_analysis_findings (notebook_id, rule_id, subject_key, "
                 "subject_kind, severity, first_seen_kg_seq, first_seen_cluster_seq) "
                 "VALUES (?, 'F1', 'src-1', 'source', 'high', 9, 3)", (nb,))
+            conn.execute("INSERT INTO kg_concept_ranks VALUES (?,0,'','',0,0,9,3)", (nb,))
         conn.close()
 
     primary, secondary, out = tmp_path / "a.db", tmp_path / "b.db", tmp_path / "out.db"
@@ -632,6 +633,7 @@ def test_merge_keeps_dismissals_and_drops_relink_marks_and_findings(tmp_path):
         findings = {
             row[0] for row in conn.execute("SELECT notebook_id FROM kg_analysis_findings")
         }
+        ranks = {row[0] for row in conn.execute("SELECT notebook_id FROM kg_concept_ranks")}
     finally:
         conn.close()
     assert marks == {
@@ -639,6 +641,7 @@ def test_merge_keeps_dismissals_and_drops_relink_marks_and_findings(tmp_path):
         ("nb-sec", "dismissed"),
     }
     assert findings == {"nb-main"}
+    assert ranks == {"nb-main"}
 
 
 def test_merge_keeps_primary_memory_suggest_state_and_folds_the_mode(tmp_path):
