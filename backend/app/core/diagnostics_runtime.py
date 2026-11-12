@@ -188,6 +188,7 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("unified-kg",),
     ("unified-kg", "rebuild"),
     ("unified-kg", "rebuild", "status"),
+    ("unified-kg", "rebuild", "model-calls"),
     ("unified-kg", "status"),
     ("unified-kg", "pending-merges"),
     ("unified-kg", "merges", "review"),

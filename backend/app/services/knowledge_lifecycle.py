@@ -35,6 +35,7 @@ Red lines preserved verbatim from the facade:
   rebuild.
 """
 from __future__ import annotations
+from app.domain.concept_ranking_contracts import ConceptRankWrite, PrecomputedRankRow
 from app.services.collab_jobs import pulse_touch_for_job
 from app.domain.collaboration import KG_BUILD_TERMINAL_PULSE_KINDS
 
@@ -45,7 +46,7 @@ import re
 import threading
 import time
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import (
     Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Mapping, NamedTuple,
@@ -279,6 +280,7 @@ class KgAnalysisBatch(NamedTuple):
     payloads: Dict[str, dict]
     findings: FindingsResult
     prune_marks: List[Tuple[str, str, str]]
+    concept_ranks: "Optional[ConceptRankWrite]" = None
 
 
 class ModelSkipPolicy:
@@ -803,8 +805,8 @@ class KnowledgeLifecycleService:
             relink_notebook_kg=lambda notebook_id: self.relink_notebook_kg(
                 notebook_id
             ),
-            rebuild_unified_kg=lambda notebook_id: self.rebuild_unified_kg(
-                notebook_id, force=False
+            rebuild_unified_kg=lambda notebook_id, **kw: self.rebuild_unified_kg(
+                notebook_id, force=False, **kw
             ),
             # 「删除知识图谱」:同槽第三种维护动作。围栏论证见
             # _delete_notebook_kg_for_maintenance 的 docstring。
@@ -2535,10 +2537,43 @@ class KnowledgeLifecycleService:
     def unified_kg_rebuild_status(self, notebook_id: str) -> dict:
         return self.kg_maintenance.unified_kg_rebuild_status(notebook_id)
 
-    def run_unified_kg_rebuild_job(self, notebook_id: str, job_id: str) -> int:
+    def unified_kg_rebuild_model_calls(self, notebook_id: str) -> dict:
+        """Explicit click-time probe; an uncertain result requires confirmation."""
+        try:
+            possible = bool(self.rebuild_would_call_models(notebook_id))
+        except Exception as exc:
+            self.event_log.emit({"kind": "rebuild_model_calls_probe_failed",
+                                 "notebook_id": notebook_id,
+                                 "error_class": type(exc).__name__})
+            possible = None
+        return {"model_calls_possible": possible}
+
+    def run_unified_kg_rebuild_job(
+        self, notebook_id: str, job_id: str, *, ensure_concept_ranks: bool = False,
+    ) -> int:
         return self.kg_maintenance.run_unified_kg_rebuild_job(
-            notebook_id, job_id
+            notebook_id, job_id, ensure_concept_ranks=ensure_concept_ranks
         )
+
+    def concept_rank_refresh_settled(self, notebook_id: str) -> bool:
+        """Whether this process has completed the notebook's requested refresh."""
+        return self.kg_maintenance.unified_kg_rebuild_status(notebook_id).get("status") == "succeeded"
+
+    def rebuild_would_call_models(self, notebook_id: str) -> bool:
+        """Use `_cluster_inputs_unchanged` and the task's shared `_unchanged_cluster_state`.
+
+        Binding checks match merge-review and concept-description execution;
+        unconfigured and running notebooks avoid the input-version reads.
+        """
+        configured = self.model_clients.configured("kg_merge_review") or (
+            self.settings.kg_concept_desc_enabled
+            and self.model_clients.configured("kg_concept_description"))
+        if not configured:
+            return False
+        if self.kg_maintenance.busy_refusal(notebook_id) is not None:
+            return False
+        ver = self._cluster_input_version(notebook_id, facts=self._cluster_input_facts(notebook_id))
+        return not self._cluster_inputs_unchanged(notebook_id, ver)
 
     def fail_unified_kg_rebuild_submission(
         self, notebook_id: str, job_id: str
@@ -6728,7 +6763,7 @@ class KnowledgeLifecycleService:
     @notebook_model_artifact_scope
     def rebuild_unified_kg(self, notebook_id: str,
                            progress: Optional[Callable[[str, int, int], None]] = None,
-                           force: bool = False, fresh: bool = False) -> int:
+                           force: bool = False, fresh: bool = False, *, ensure_concept_ranks: bool = False) -> int:
         """Cluster the notebook's Concepts; persist concept_clusters + refresh
         pending candidates (preserving confirmed/rejected). Returns #clusters.
 
@@ -6767,7 +6802,7 @@ class KnowledgeLifecycleService:
         _facts = self._cluster_input_facts(notebook_id)
         _ver = self._cluster_input_version(notebook_id, facts=_facts)
         if not force:
-            cached = self._unified_rebuild_skip(notebook_id, _ver, progress)
+            cached = self._unified_rebuild_skip(notebook_id, _ver, progress, ensure_concept_ranks=ensure_concept_ranks)
             if cached is not None:
                 return cached
         run = self._unified_rebuild_claim(notebook_id, _facts, progress, fresh)
@@ -6792,18 +6827,29 @@ class KnowledgeLifecycleService:
         self._unified_rebuild_derived_tail(notebook_id)
         return run.ready("cluster_count")
 
+    def _unchanged_cluster_state(self, notebook_id: str, ver: str) -> Optional[Any]:
+        """Read the skip decision and the state it authorizes on one connection."""
+        with self._connect() as db:
+            row = self.unified_kg.state_row(db, notebook_id)
+            cc = self.unified_kg.concept_clusters_count(db, notebook_id)
+        if row and row["cluster_input_version"] and row["cluster_input_version"] == ver and cc > 0:
+            return row
+        return None
+
+    def _cluster_inputs_unchanged(self, notebook_id: str, ver: str) -> bool:
+        return self._unchanged_cluster_state(notebook_id, ver) is not None
+
     def _unified_rebuild_skip(
         self, notebook_id: str, ver: str,
         progress: Optional[Callable[[str, int, int], None]],
+        *, ensure_concept_ranks: bool = False,
     ) -> Optional[int]:
         """The skip-when-unchanged gate of ``rebuild_unified_kg``: the cached
         cluster count when the stored input version still equals ``ver`` and
         clusters exist (after the skip path's own settle step and its three
         gated derived passes), else ``None`` — the caller rebuilds."""
-        with self._connect() as db:
-            row = self.unified_kg.state_row(db, notebook_id)
-            cc = self.unified_kg.concept_clusters_count(db, notebook_id)
-        if row and row["cluster_input_version"] and row["cluster_input_version"] == ver and cc > 0:
+        row = self._unchanged_cluster_state(notebook_id, ver)
+        if row is not None:
             cached = int(row["cluster_count"] or 0)
             self._settle_skip_path(notebook_id, row, ver)
             self.event_log.logger.info(
@@ -6830,7 +6876,8 @@ class KnowledgeLifecycleService:
             # 自带版本闸,只在需要时建(纯图、无 LLM、秒级)。这让「只需重建社区」的
             # 场景在原有刷新流程里零额外成本达成;fail-open,不拖垮跳过路径。
             try:
-                self.rebuild_communities(notebook_id, level=0)
+                self.rebuild_communities(notebook_id, level=0,
+                                         ensure_concept_ranks=ensure_concept_ranks)
             except Exception as exc:  # noqa: BLE001
                 self.event_log.emit({"kind": "communities_rebuild_failed",
                                      "notebook_id": notebook_id, "error": str(exc)[:200]})
@@ -7806,6 +7853,8 @@ class KnowledgeLifecycleService:
             db, notebook_id, seq, analysis.edges, analysis.profiles, payloads, now,
             findings_rows=[finding_row_values(row) for row in rows],
             prune_marks=analysis.prune_marks,
+            concept_ranks=(replace(analysis.concept_ranks, built_at_kg_seq=seq)
+                           if analysis.concept_ranks is not None else None),
         )
 
     def _partition_boards_for_rebuild(
@@ -7981,7 +8030,20 @@ class KnowledgeLifecycleService:
         del edge_builder
         return names, can2idx, idx2can, edge_table, relations_by_source, scanned_at
 
-    def rebuild_communities(self, notebook_id: str, level: int = 0, force: bool = False) -> int:
+    def _community_build_refused(self, notebook_id: str) -> bool:
+        try:
+            import igraph as _ig
+        except Exception:
+            _ig = None
+        return (_ig is None
+                and not self.notebook_copy_stats(notebook_id)["copyable"]
+                and self.scale_artifacts.load(notebook_id, allow_stale=True) is None)
+
+    def concept_ranks_producible(self, notebook_id: str) -> bool:
+        return bool(self.settings.community_layer_enabled) and not self._community_build_refused(notebook_id)
+
+    def rebuild_communities(self, notebook_id: str, level: int = 0, force: bool = False,
+                            *, ensure_concept_ranks: bool = False) -> int:
         """在 canonical 实体图(关系两端经 cluster_map 映射)上划分主题板块,持久化到
         communities + community_members(反向索引,存 canonical_name/centrality)。无 LLM、
         确定性(同一输入图 + 同一上一代划分 → 逐字相同,含 board_key)。划分见 `kg_partition`
@@ -8105,6 +8167,8 @@ class KnowledgeLifecycleService:
             _st = self.unified_kg.state_row(_db, notebook_id)
             _cnt = self.unified_kg.communities_count(_db, notebook_id, level)
             _ledger = self.unified_kg.kg_analysis_artifact_rows(_db, notebook_id)
+            _rank_header = (self.unified_kg.concept_rank_header(_db, notebook_id)
+                            if ensure_concept_ranks else None)
         _seq = int(_st["kg_mutation_seq"]) if _st else 0
         _cseq = int(_st["cluster_mutation_seq"]) if _st else 0
         _boards = int(_cnt["c"]) if _cnt else 0
@@ -8123,22 +8187,16 @@ class KnowledgeLifecycleService:
         )
         if graph_fresh and analysis_ledger_is_current(
             _ledger, _seq, _cseq, has_boards=_boards > 0
-        ):
+        ) and (not ensure_concept_ranks or _rank_header == (_seq, _cseq)):
             return _boards
         # 社区检测后端:igraph(整数边表 + C 核,10^6–10^7 边内存/耗时有界)优先;
         # 缺失(未装)才回退 networkx(纯 Python dict-of-dicts,大库会 OOM)。
-        try:
-            import igraph as _ig
-        except Exception:
-            _ig = None
         # 大库守卫:仅在 networkx 回退(无 igraph)时才拒 scale-tier 无 CSR(避免 OOM)。
         # igraph 路径整数边表 + C 核,10^7 边安全,无需 CSR、不拒。
         # 只补账本时同样要过这道守卫:那条路径不划分,但仍然要把 canonical 边图
         # 拉进内存,拒的理由(内存)一样成立。区别只在返回值 —— 社区还在,如实返回它的
         # 数量,不能因为一份辅助报告没补上就谎报「一个社区都没有」。
-        if (_ig is None
-                and not self.notebook_copy_stats(notebook_id)["copyable"]
-                and self.scale_artifacts.load(notebook_id, allow_stale=True) is None):
+        if self._community_build_refused(notebook_id):
             self.event_log.emit({"kind": "community_build_refused",
                                  "notebook_id": notebook_id, "reason": "no_scale_index"})
             return _boards if graph_fresh else 0
@@ -8518,9 +8576,22 @@ class KnowledgeLifecycleService:
                 "total_members": total_members,
             }
         del community_of_index
+        visible = frozenset()
+        rank_visibility_available = True
+        try:
+            with self._connect() as db:
+                visible = frozenset(self.unified_kg.concept_rank_visible_source_ids(db, notebook_id))
+        except KgBuildAborted:
+            raise
+        except Exception as exc:
+            rank_visibility_available = False
+            self.event_log.emit({"kind": "concept_rank_visible_sources_failed",
+                                 "notebook_id": notebook_id,
+                                 "error_class": type(exc).__name__})
         # ⑥ 问题清单:`compute_findings` 返回时已把要用的下标全部还原成 canonical id。
         draft = self._findings_draft(
-            notebook_id, tally, structure, can2idx, names, relations_by_source)
+            notebook_id, tally, structure, can2idx, names, relations_by_source,
+            visible_source_ids=visible)
         del tally, structure
         # ⚠ membership 到此为止。`can2idx` 是**调用方**(`rebuild_communities`)的局部
         # 变量,它那个栈帧的名字在本方法执行期间一直活着,`del` 自己的形参一个字节也放
@@ -8528,6 +8599,21 @@ class KnowledgeLifecycleService:
         # 就地清空来兑现。调用方在本方法返回之后不得再用它(今天也没有任何使用点)。
         can2idx.clear()
         findings = self._findings_lookups(notebook_id, draft)
+        top = findings.concept_ranks
+        reps = {}
+        if top:
+            try:
+                with self.unified_kg.read_snapshot() as db:
+                    reps = self.unified_kg.concept_rank_representatives(
+                        db, notebook_id, [c for c, _, _ in top])
+            except KgBuildAborted:
+                raise
+            except Exception as exc:
+                self.event_log.emit({"kind": "concept_rank_representatives_failed",
+                                     "notebook_id": notebook_id,
+                                     "error_class": type(exc).__name__})
+        rank_rows = tuple(PrecomputedRankRow(i + 1, c, reps.get(c, ""), sc, oc)
+                          for i, (c, sc, oc) in enumerate(top))
         del draft
         payloads[ARTIFACT_FINDINGS] = {**findings.payload, "scanned_at": str(scanned_at)}
         # 发布时要清掉的豁免:只有**主体已不存在**的(F1/F3 来源被删、F2 任一来源被删;
@@ -8562,14 +8648,18 @@ class KnowledgeLifecycleService:
             payloads, cluster_seq, partition_rebuilt=partition_rebuilt))
         return KgAnalysisBatch(
             edges=edges, profiles=profiles, payloads=stamped,
-            findings=FindingsResult(findings.rows, stamped[ARTIFACT_FINDINGS]),
+            findings=FindingsResult(findings.rows, stamped[ARTIFACT_FINDINGS], top),
             prune_marks=prune_marks,
+            # Publication supplies the target KG seq atomically with all artifacts.
+            concept_ranks=(ConceptRankWrite(0, int(cluster_seq), rank_rows)
+                           if rank_visibility_available else None),
         )
 
     def _findings_draft(
         self, notebook_id: str, tally: "FindingsObjectTally",
         structure: "GraphStructure", can2idx: "Dict[str, int]",
         names: "Mapping[str, str]", relations_by_source: "Mapping[str, int]",
+        *, visible_source_ids: "frozenset[str]",
     ) -> "FindingsDraft":
         """第 ⑥ 步的规则计算(设计 2026-10-19 §7.1),写事务之外。
 
@@ -8595,6 +8685,7 @@ class KnowledgeLifecycleService:
             relations_by_source=relations_by_source, decisions=decisions,
             member_seeds=member_seeds,
             max_candidate_pairs=self.settings.kg_findings_max_candidate_pairs,
+            visible_source_ids=visible_source_ids,
         )
 
     def _findings_lookups(

@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.api.deps import (
     get_current_user,
     kg_analysis_service,
+    knowledge_lifecycle_service,
     repository,
     require_notebook_capability,
     require_notebook_read,
@@ -338,6 +339,7 @@ def rebuild_unified_kg(notebook_id: str, user: UserProfile = Depends(get_current
     publish over the other's inputs.
     The old synchronous `{"clusters": N}` is gone — the count now arrives from
     `unified-kg/rebuild/status` once the pass actually finishes.
+    This user-click endpoint always sets `ensure_concept_ranks=True`.
     """
     repo = repository()
     try:
@@ -354,6 +356,7 @@ def rebuild_unified_kg(notebook_id: str, user: UserProfile = Depends(get_current
             notebook_id,
             job["job_id"],
             name=f"unifiedkg-{notebook_id}",
+            ensure_concept_ranks=True,
         )
     except Exception:
         repo.fail_unified_kg_rebuild_submission(notebook_id, job["job_id"])
@@ -386,6 +389,19 @@ def unified_kg_rebuild_status(notebook_id: str) -> dict:
         return repository().unified_kg_rebuild_status(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get(
+    "/notebooks/{notebook_id}/unified-kg/rebuild/model-calls",
+    dependencies=[Depends(require_notebook_capability("kg:write"))],
+)
+def unified_kg_rebuild_model_calls(notebook_id: str) -> dict:
+    """Click-time model probe: true or unknown (null) requires confirmation.
+
+    Kept separate from the frequently polled rebuild status because input-version
+    checks count notebook objects. A failed probe records only the exception class.
+    """
+    return knowledge_lifecycle_service().unified_kg_rebuild_model_calls(notebook_id)
 
 
 @router.get("/notebooks/{notebook_id}/unified-kg/status", dependencies=[Depends(require_notebook_read)])

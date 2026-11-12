@@ -41,6 +41,8 @@ import re
 from array import array
 from dataclasses import dataclass
 from fractions import Fraction
+from heapq import nsmallest
+from itertools import chain
 from typing import (
     Callable,
     Dict,
@@ -56,6 +58,10 @@ from typing import (
 
 import numpy as np
 
+from app.domain.concept_ranking_contracts import (
+    CONCEPT_RANK_PRECOMPUTED_ROWS,
+    top_concept_ranks,
+)
 from app.domain.kg_analysis_contracts import (
     CLUSTER_SEQ_PAYLOAD_KEY,
     FINDING_ROW_FIELDS,
@@ -1558,6 +1564,7 @@ class FindingsResult:
 
     rows: List[dict]
     payload: dict
+    concept_ranks: Tuple[Tuple[str, int, int], ...] = ()
 
 
 class _Window:
@@ -1651,6 +1658,8 @@ class FindingsDraft:
         s1_candidates: List[_Pending],
         statuses: Dict[str, dict],
         payload_base: dict,
+        *,
+        concept_ranks: Sequence[Tuple[str, int, int]] = (),
     ) -> None:
         self._fixed = fixed
         self._windows = {
@@ -1659,6 +1668,7 @@ class FindingsDraft:
         }
         self._statuses = statuses
         self._payload_base = payload_base
+        self._concept_ranks = tuple(concept_ranks)
         self._lookups = _Lookups()
         self._asked_names: Set[NameKey] = set()
         self._asked_sources: Set[str] = set()
@@ -1753,10 +1763,50 @@ class FindingsDraft:
             status["truncated"] = bool(status.get("truncated")) or (
                 persisted[rule] < int(status["total"])
             )
-        return FindingsResult(rows, {**self._payload_base, "rules": statuses})
+        return FindingsResult(rows, {**self._payload_base, "rules": statuses},
+                              self._concept_ranks)
 
 
 # ============================================================== compute
+def concept_rank_top(
+    corpus: _Corpus, visible_source_ids: "frozenset[str]", limit: int,
+    *, can2idx: Mapping[str, int],
+) -> List[Tuple[int, int, int]]:
+    """Select at most ``limit`` indices, resolving boundary ties in a bounded heap.
+
+    This projection excludes orphan owners without changing findings' corpus.
+    """
+    if limit <= 0:
+        return []
+    keep = np.fromiter((sid in visible_source_ids for sid in corpus.source_ids),
+                       bool, len(corpus.source_ids))
+    if keep.all():
+        incidence, objects = corpus.inc_can, corpus.inc_objects
+    else:
+        mask = keep[corpus.inc_src]
+        incidence, objects = corpus.inc_can[mask], corpus.inc_objects[mask]
+    df = np.bincount(incidence, minlength=corpus.stride)
+    objs = np.bincount(incidence, weights=objects,
+                       minlength=corpus.stride).astype(np.int64)
+    candidates = np.flatnonzero(df > 0)
+    if len(candidates) > limit:
+        keys = df * (int(objs.max()) + 1) + objs
+        ranked_keys = keys[candidates]
+        boundary = np.partition(ranked_keys, len(candidates) - limit)[len(candidates) - limit]
+        selected = candidates[ranked_keys > boundary].tolist()
+        # Stream ids already owned by the corpus/map: never materialize the
+        # potentially notebook-wide tie in ``needed`` or an inverse id map.
+        tied_ids = chain(
+            ((cid, index) for cid, index in can2idx.items()
+             if index < corpus.n_nodes and keys[index] == boundary),
+            ((cid, index) for index, cid in enumerate(corpus.extra_ids, corpus.n_nodes)
+             if keys[index] == boundary),
+        )
+        selected.extend(index for _cid, index in nsmallest(limit - len(selected), tied_ids))
+        candidates = selected
+    return [(int(index), int(df[index]), int(objs[index])) for index in candidates]
+
+
 def compute_findings(
     *,
     tally: FindingsObjectTally,
@@ -1767,6 +1817,7 @@ def compute_findings(
     decisions: Mapping[frozenset, str],
     member_seeds: Callable[[Sequence[str]], Mapping[str, Iterable[str]]],
     max_candidate_pairs: int,
+    visible_source_ids: "frozenset[str]",
 ) -> FindingsDraft:
     """Run F2 → F3 → F1 → F4 → F5 on the drained step-⑤ tally (step ⑥).
 
@@ -1826,7 +1877,7 @@ def compute_findings(
         }
         statuses[RULE_SEED_DEFECT] = {"status": RULE_STATUS_SKIPPED,
                                       "reason": SKIP_NO_OBJECTS}
-        return FindingsDraft([], [], [], statuses, payload_base)
+        return FindingsDraft([], [], [], statuses, payload_base, concept_ranks=())
 
     named, fragmented, squash_hashes, squash_indices = _names_pass(names, can2idx, corpus)
     comparable = int((corpus.concepts > 0).sum()) >= 2
@@ -1865,10 +1916,16 @@ def compute_findings(
     collisions = _squash_collisions(squash_hashes, squash_indices)
     del squash_hashes, squash_indices
     needed = set(collisions)
+    rank_candidates = concept_rank_top(corpus, visible_source_ids,
+                                       CONCEPT_RANK_PRECOMPUTED_ROWS, can2idx=can2idx)
+    needed.update(index for index, _sc, _oc in rank_candidates)
     for specs in windows.values():
         for spec in specs:
             needed.update(spec.indices)
     ids = _resolve_canonical_ids(can2idx, corpus, needed)
+    concept_ranks = top_concept_ranks(
+        ((ids[index], sc, oc) for index, sc, oc in rank_candidates),
+        CONCEPT_RANK_PRECOMPUTED_ROWS)
 
     groups: Dict[str, List[int]] = {}
     for index in sorted(collisions):
@@ -1955,7 +2012,8 @@ def compute_findings(
         "objects_checked": usable,
         "total": len(f5_specs),
     }
-    return FindingsDraft(fixed, f4_pending, s1_pending, statuses, payload_base)
+    return FindingsDraft(fixed, f4_pending, s1_pending, statuses, payload_base,
+                         concept_ranks=concept_ranks)
 
 
 def _structure_payload(structure: GraphStructure, corpus: _Corpus, usable: int) -> dict:

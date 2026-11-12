@@ -352,6 +352,7 @@ PG 多行 fence 删除与写入保持同一主键锁序。迁移不回溯历史�
 
 | 能力 | PostgreSQL（规范） | SQLite（镜像） | 差异与义务 | 出处 |
 |---|---|---|---|---|
+| 概念排行重算 | 已发布簇索引驱动 LATERAL 成员点查；第 11 批可选覆盖索引只由运维 `--apply` 建立，无迁移 | 已发布簇索引驱动普通 JOIN；名字与引用以相关子查询限制前 scan 个成员 | 返回口径一致，排除隐藏来源与孤儿；覆盖索引只影响性能，index-only 依赖 visibility map，并增加写放大 | `backend/app/repositories/postgres/unified_kg_store.py:UnifiedKgStore.concept_recount_rows`、`backend/app/repositories/sqlite/unified_kg_store.py:UnifiedKgStore.concept_recount_rows`、`backend/app/repositories/postgres/hotpath_indexes.py:HOTPATH_INDEX_SPECS` |
 | 协作最近改动 | `notebook_activity`，时间与笔记本复合索引、随库级联删除 | 同形表与索引，时刻使用固定宽度 UTC 串 | 非 owner 写入的本地提示，actor 无用户外键且 audit_kept；同步为 LOCAL，不进库复制闭包；启动按配置保留期清扫 | `backend/app/repositories/postgres/migrations/0088_notebook_activity.sql:notebook_activity`、`backend/app/repositories/sqlite/migrations.py:SqliteMigrator._migration_107`、`backend/app/repositories/postgres/sharing_store.py:SharingStore.insert_activity`、`backend/app/repositories/sqlite/sharing_store.py:SharingStore.insert_activity` |
 | schema 版本配对 | 连续编号 SQL 迁移，版本数即 `postgres_version` | `_migration_N` + `SCHEMA_VERSION` | 两侧编号不相等（PostgreSQL 基线建得晚），每一对只在 manifest 登记一次；守卫钉住三处同值与连续编号 | `backend/app/repositories/postgres/schema_manifest.py:POSTGRES_SCHEMA_MANIFEST`、`backend/app/repositories/sqlite/migrations.py:SCHEMA_VERSION`、`backend/app/repositories/postgres/migrator.py:load_migrations` |
 | 自动记忆取样索引 | 完成的网页回答按本人、笔记本与时间的部分索引，支持两个方向的有界取样 | 按本人、笔记本、状态与精确 UTC 微秒的部分表达式索引，另有不排除任何原始轮次的会话前序索引；标量范围帮助规划器寻址，时间/id 元组仍决定页界 | 两侧取样资格与精确时间顺序相同，物理索引按各自规划器选择；PG 部署前可在线预建，SQLite 应用与离线维护连接注册同一纯时间函数 | `backend/app/repositories/postgres/migrations/0087_memory_suggest.sql:idx_ask_jobs_memory_suggest_sample`、`backend/app/repositories/sqlite/migrations.py:SqliteMigrator._migration_106`、`backend/app/repositories/sqlite_functions.py:register_sqlite_functions`、`backend/app/repositories/sqlite/memory_suggest_store.py:MemorySuggestStore.clarified_scan` |
@@ -866,6 +867,12 @@ build id 时必须同代，缺失/不匹配时该能力不可用，不能退回�
 `ScaleArtifactStore` 的所有工件根（包括 viz）共用 claim 检查、临时目录 staging 与
 原子 swap，在线写入不得绕过此发布协议。构建、导入和恢复操作见
 [运维参考](./docs/operations_zh.md#离线--异机-scale-构建scriptsbuild_scale_indexpy)。
+
+概念排行的 `kg_concept_ranks` 是独立的同步派生产物（SQLite v109 / PostgreSQL 0090），
+不扩展分析账本种类或契约版本。分析构建在写事务外从同一份 findings corpus 屏蔽孤儿后
+计算前列并读取代表成员，发布时与问题清单同事务整删整插；rank=0 表头为零结果也保存
+KG 与 cluster 两条世代序。删图及重建清理会删除它，cutover 与跨环境同步会复制它，
+目标世代不符时按陈旧处理；深拷贝、归档及数据库合并不携带它。
 
 **簇图代际发布协议（批 3·W2）。** 三张派生表（`concept_clusters`/`communities`/
 `community_members`）带 `generation` 列；一切读者按 `unified_kg_state` 上的

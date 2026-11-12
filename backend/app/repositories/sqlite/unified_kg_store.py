@@ -77,6 +77,10 @@ from app.domain.kg_analysis_contracts import (
     check_mark_kind,
 )
 from app.domain.concept_description_rewrite import CONCEPT_DESC_REWRITE_STAGE
+from app.domain.concept_ranking_contracts import (
+    CONCEPT_RANK_HEADER_RANK, CONCEPT_RANK_PRECOMPUTED_ROWS, ConceptRankWrite,
+)
+from app.repositories.sqlite.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 from app.domain.kg_merge_seed import check_concept_seed_version
 from app.domain.knowledge_contracts import (
     COMMUNITY_OVERVIEW_MAX,
@@ -92,6 +96,11 @@ from app.domain.knowledge_contracts import (
 _PUBLISHED_CLUSTER_GEN = (
     "COALESCE((SELECT cluster_generation FROM unified_kg_state "
     "WHERE notebook_id = ?), 0)"
+)
+_RANK_MEMBER_PREDICATE = (
+    "o.object_type = 'concept' AND o.status IN ({statuses}) AND o.source_id <> '' "
+    "AND EXISTS (SELECT 1 FROM sources rs WHERE rs.id = o.source_id "
+    "AND rs.notebook_id = o.notebook_id AND rs.source_type NOT IN ('memory','knowhow'))"
 )
 # write_cluster_map_generation 的 keyset 定义域(rowid 是 64 位有符号整数):
 # 首页从下界起、末页收到上界,闭区间覆盖整个定义域(PG 孪生的
@@ -2811,6 +2820,257 @@ class UnifiedKgStore:
         )
 
     @staticmethod
+    def concept_rank_visible_source_ids(db: sqlite3.Connection, notebook_id: str) -> List[str]:
+        """Visible owner sources; orphan objects never enter the rank corpus."""
+        return [str(row["id"]) for row in db.execute(
+            f"SELECT id FROM sources WHERE notebook_id=? "
+            f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} ORDER BY id", (notebook_id,),
+        ).fetchall()]
+
+    @staticmethod
+    def concept_rank_header(
+        db: sqlite3.Connection, notebook_id: str,
+    ) -> Optional[Tuple[int, int]]:
+        row = db.execute(
+            "SELECT built_at_kg_seq,built_at_cluster_seq FROM kg_concept_ranks "
+            "WHERE notebook_id=? AND rank=?",
+            (notebook_id, CONCEPT_RANK_HEADER_RANK),
+        ).fetchone()
+        return (int(row["built_at_kg_seq"]), int(row["built_at_cluster_seq"])) if row else None
+
+    @staticmethod
+    def concept_rank_full_rows(
+        db: sqlite3.Connection, notebook_id: str, *, ceiling: Optional[frozenset],
+    ) -> List[Tuple[str, int, int]]:
+        """Online full aggregation, only after the service's object-count gate."""
+        if ceiling is not None and not ceiling:
+            return []
+        predicate = _RANK_MEMBER_PREDICATE.format(
+            statuses=",".join("?" for _ in USABLE_STATUSES))
+        scope, scope_params = "", ()
+        if ceiling is not None:
+            bound = ceiling_param(ceiling)
+            scope, scope_params = f" AND {member_of('o.source_id', bound)}", (bound.param,)
+        rows = db.execute(
+            f"""SELECT COALESCE(c.canonical_id,o.id) AS can,
+                       COUNT(DISTINCT o.source_id) AS sc, COUNT(*) AS oc
+                FROM knowledge_objects o LEFT JOIN concept_clusters c
+                  ON c.notebook_id=o.notebook_id AND c.member_object_id=o.id
+                 AND c.generation={_PUBLISHED_CLUSTER_GEN}
+                WHERE o.notebook_id=? AND {predicate}{scope} GROUP BY 1""",
+            (notebook_id, notebook_id, *USABLE_STATUSES, *scope_params),
+        ).fetchall()
+        return [(str(r["can"]), int(r["sc"]), int(r["oc"])) for r in rows]
+
+    @staticmethod
+    def concept_rank_member_counts(
+        db: sqlite3.Connection, notebook_id: str, canonical_ids: Sequence[str],
+    ) -> Dict[str, int]:
+        if not canonical_ids:
+            return {}
+        canon = bind_ids(canonical_ids)
+        # The canonical keys drive bounded cluster-index seeks.
+        rows = db.execute(
+            f"""SELECT canonical_id, COUNT(*) AS n FROM concept_clusters
+                WHERE notebook_id=? AND {drive_by('canonical_id', canon)}
+                  AND generation={_PUBLISHED_CLUSTER_GEN} GROUP BY canonical_id""",
+            (notebook_id, canon.param, notebook_id),
+        ).fetchall()
+        return {str(r["canonical_id"]): int(r["n"]) for r in rows}
+
+    @staticmethod
+    def concept_rank_candidate_canonicals(
+        db: sqlite3.Connection, notebook_id: str, object_ids: Sequence[str],
+    ) -> Dict[str, str]:
+        if not object_ids:
+            return {}
+        ids = bind_ids(object_ids)
+        # Each listed object is a primary-key probe; notebook only filters it.
+        rows = db.execute(
+            f"""SELECT o.id, COALESCE(c.canonical_id,o.id) AS can
+                FROM knowledge_objects o LEFT JOIN concept_clusters c
+                  ON c.notebook_id=o.notebook_id AND c.member_object_id=o.id
+                 AND c.generation={_PUBLISHED_CLUSTER_GEN}
+                WHERE +o.notebook_id=? AND {drive_by('o.id', ids)}
+                  AND o.object_type='concept'""",
+            (notebook_id, notebook_id, ids.param),
+        ).fetchall()
+        return {str(r["id"]): str(r["can"]) for r in rows}
+
+    @staticmethod
+    def concept_rank_precomputed_rows(db: sqlite3.Connection, notebook_id: str) -> List[dict]:
+        rows = [dict(row) for row in db.execute(
+            "SELECT rank,canonical_id,representative_object_id,source_count,object_count "
+            "FROM kg_concept_ranks WHERE notebook_id=? AND rank BETWEEN 1 AND ? ORDER BY rank",
+            (notebook_id, CONCEPT_RANK_PRECOMPUTED_ROWS),
+        ).fetchall()]
+        rep_ids = [str(row["representative_object_id"]) for row in rows
+                   if row["representative_object_id"]]
+        current = {}
+        if rep_ids:
+            reps = bind_ids(rep_ids)
+            predicate = _RANK_MEMBER_PREDICATE.format(
+                statuses=",".join("?" for _ in USABLE_STATUSES))
+            # At most the precomputed row cap; each representative is a PK seek.
+            resolved = db.execute(
+                f"""SELECT o.id, COALESCE(c.canonical_id,o.id) AS can
+                    FROM knowledge_objects o LEFT JOIN concept_clusters c
+                      ON c.notebook_id=o.notebook_id AND c.member_object_id=o.id
+                     AND c.generation={_PUBLISHED_CLUSTER_GEN}
+                    WHERE +o.notebook_id=? AND {drive_by('o.id', reps)} AND {predicate}""",
+                (notebook_id, notebook_id, reps.param, *USABLE_STATUSES),
+            ).fetchall()
+            current = {str(r["id"]): str(r["can"]) for r in resolved}
+        for row in rows:
+            row["current_canonical_id"] = current.get(row["representative_object_id"])
+        return rows
+
+    @staticmethod
+    def concept_recount_rows(
+        db: sqlite3.Connection, notebook_id: str, canonical_ids: Sequence[str], *,
+        ceiling: Optional[frozenset],
+    ) -> List[Tuple[str, int, int]]:
+        if not canonical_ids or (ceiling is not None and not ceiling):
+            return []
+        canon = bind_ids(canonical_ids)
+        predicate = _RANK_MEMBER_PREDICATE.format(
+            statuses=",".join("?" for _ in USABLE_STATUSES))
+        scope, scope_params = "", ()
+        if ceiling is not None:
+            bound = ceiling_param(ceiling)
+            scope, scope_params = f" AND {member_of('o.source_id', bound)}", (bound.param,)
+        # Canonical keys drive the cluster index; singleton keys drive the
+        # object primary key. Unary + prevents the notebook index winning.
+        rows = db.execute(
+            f"""SELECT can, COUNT(DISTINCT source_id) AS sc, COUNT(*) AS oc FROM (
+                SELECT c.canonical_id AS can, o.source_id
+                FROM concept_clusters c JOIN knowledge_objects o
+                  ON o.id=c.member_object_id AND +o.notebook_id=c.notebook_id
+                WHERE c.notebook_id=? AND {drive_by('c.canonical_id', canon)}
+                  AND c.generation={_PUBLISHED_CLUSTER_GEN} AND {predicate}{scope}
+                UNION ALL
+                SELECT o.id AS can, o.source_id FROM knowledge_objects o
+                WHERE +o.notebook_id=? AND {drive_by('o.id', canon)}
+                  AND {predicate}{scope}
+                  AND NOT EXISTS (SELECT 1 FROM concept_clusters cc
+                    WHERE cc.notebook_id=o.notebook_id AND cc.member_object_id=o.id
+                      AND cc.generation={_PUBLISHED_CLUSTER_GEN})
+                ) t GROUP BY can""",
+            (notebook_id, canon.param, notebook_id, *USABLE_STATUSES, *scope_params,
+             notebook_id, canon.param, *USABLE_STATUSES, *scope_params, notebook_id),
+        ).fetchall()
+        return [(str(r["can"]), int(r["sc"]), int(r["oc"])) for r in rows]
+
+    @staticmethod
+    def _concept_rank_member_rows(
+        db: sqlite3.Connection, notebook_id: str, canonical_ids: Sequence[str], *,
+        ceiling: Optional[frozenset], scan: int, names: bool = False,
+    ) -> list:
+        """A batch's correlated ordered cluster windows precede visibility
+        and name filtering; SQLite has no LATERAL, so first selection is Python."""
+        if not canonical_ids or (ceiling is not None and not ceiling) or scan <= 0:
+            return []
+        canonical_ids = tuple(dict.fromkeys(canonical_ids))
+        canon = bind_ids(canonical_ids)
+        predicate = _RANK_MEMBER_PREDICATE.format(
+            statuses=",".join("?" for _ in USABLE_STATUSES))
+        if names:
+            predicate += " AND trim(json_extract(o.payload,'$.name')) <> ''"
+        scope, scope_params = "", ()
+        if ceiling is not None:
+            bound = ceiling_param(ceiling)
+            scope, scope_params = f" AND {member_of('o.source_id', bound)}", (bound.param,)
+        window = f"""AND cc.member_object_id IN (
+            SELECT c2.member_object_id FROM concept_clusters c2
+            WHERE c2.notebook_id=? AND c2.canonical_id=k.value
+              AND c2.generation={_PUBLISHED_CLUSTER_GEN}
+            ORDER BY c2.member_object_id LIMIT ?)"""
+        window_params = (notebook_id, notebook_id, scan)
+        # The JSON driver is one bounded canonical page, bound by bind_ids.
+        # CROSS JOIN keeps each canonical's index window before object probes.
+        rows = db.execute(
+            f"""SELECT k.value AS can, o.id AS object_id, o.source_id,
+                       json_extract(o.payload,'$.name') AS name, o.evidence
+                FROM json_each(?) k CROSS JOIN concept_clusters cc
+                  ON cc.notebook_id=? AND cc.canonical_id=k.value
+                 AND cc.generation={_PUBLISHED_CLUSTER_GEN} {window}
+                CROSS JOIN knowledge_objects o
+                  ON o.id=cc.member_object_id AND +o.notebook_id=cc.notebook_id
+                WHERE {predicate}{scope}
+                UNION ALL
+                SELECT o.id AS can, o.id AS object_id, o.source_id,
+                       json_extract(o.payload,'$.name') AS name, o.evidence
+                FROM knowledge_objects o
+                WHERE +o.notebook_id=? AND {drive_by('o.id', canon)}
+                  AND {predicate}{scope}
+                  AND NOT EXISTS (SELECT 1 FROM concept_clusters cc
+                    WHERE cc.notebook_id=o.notebook_id AND cc.member_object_id=o.id
+                      AND cc.generation={_PUBLISHED_CLUSTER_GEN})""",
+            (canon.param, notebook_id, notebook_id, *window_params,
+             *USABLE_STATUSES, *scope_params, notebook_id, canon.param,
+             *USABLE_STATUSES, *scope_params, notebook_id),
+        ).fetchall()
+        order = {can: ordinal for ordinal, can in enumerate(canonical_ids)}
+        return sorted(rows, key=lambda r: (order[r["can"]], r["object_id"]))
+
+    @staticmethod
+    def concept_rank_names(
+        db: sqlite3.Connection, notebook_id: str, canonical_ids: Sequence[str], *,
+        ceiling: Optional[frozenset], scan: int,
+    ) -> Dict[str, str]:
+        rows = UnifiedKgStore._concept_rank_member_rows(
+            db, notebook_id, canonical_ids, ceiling=ceiling, scan=scan, names=True)
+        result = {}
+        for row in rows:
+            result.setdefault(str(row["can"]), str(row["name"]))
+        return result
+
+    @staticmethod
+    def concept_rank_citation_rows(
+        db: sqlite3.Connection, notebook_id: str, canonical_ids: Sequence[str], *,
+        ceiling: Optional[frozenset], scan: int,
+    ) -> List[Tuple[str, str, str, object]]:
+        rows = UnifiedKgStore._concept_rank_member_rows(
+            db, notebook_id, canonical_ids, ceiling=ceiling, scan=scan)
+        return [(str(r["can"]), str(r["object_id"]), str(r["source_id"]), r["evidence"])
+                for r in rows]
+
+    @staticmethod
+    def concept_rank_representatives(
+        db: sqlite3.Connection, notebook_id: str, canonical_ids: Sequence[str],
+    ) -> Dict[str, str]:
+        """Return at most one id per canonical, without hydrating member
+        names/evidence or materializing an entire cluster in Python."""
+        if not canonical_ids:
+            return {}
+        canon = bind_ids(tuple(dict.fromkeys(canonical_ids)))
+        predicate = _RANK_MEMBER_PREDICATE.format(
+            statuses=",".join("?" for _ in USABLE_STATUSES))
+        # The bounded canonical driver probes each ordered cluster until its
+        # first eligible member, then falls back to the unclustered singleton.
+        rows = db.execute(
+            f"""SELECT k.value AS can, COALESCE(
+                    (SELECT o.id FROM concept_clusters cc
+                     CROSS JOIN knowledge_objects o
+                       ON o.id=cc.member_object_id AND +o.notebook_id=cc.notebook_id
+                     WHERE cc.notebook_id=? AND cc.canonical_id=k.value
+                       AND cc.generation={_PUBLISHED_CLUSTER_GEN}
+                       AND {predicate}
+                     ORDER BY cc.member_object_id LIMIT 1),
+                    (SELECT o.id FROM knowledge_objects o
+                     WHERE o.id=k.value AND +o.notebook_id=? AND {predicate}
+                       AND NOT EXISTS (SELECT 1 FROM concept_clusters cc
+                         WHERE cc.notebook_id=o.notebook_id AND cc.member_object_id=o.id
+                           AND cc.generation={_PUBLISHED_CLUSTER_GEN})
+                     LIMIT 1)
+                ) AS object_id FROM json_each(?) k""",
+            (notebook_id, notebook_id, *USABLE_STATUSES,
+             notebook_id, *USABLE_STATUSES, notebook_id, canon.param),
+        ).fetchall()
+        return {str(row["can"]): str(row["object_id"])
+                for row in rows if row["object_id"] is not None}
+
+    @staticmethod
     def replace_kg_analysis_artifacts(
         db: sqlite3.Connection,
         notebook_id: str,
@@ -2822,6 +3082,7 @@ class UnifiedKgStore:
         *,
         findings_rows: "Iterable[tuple]",
         prune_marks: "Iterable[Tuple[str, str, str]]",
+        concept_ranks: "ConceptRankWrite | None" = None,
     ) -> None:
         """整批重写一个 notebook 的四张产物表 —— **必须由调用方包在一个写事务里**。
 
@@ -2860,6 +3121,12 @@ class UnifiedKgStore:
         """
         check_artifact_payloads(payloads)
         checked_findings = _checked_findings(payloads, findings_rows)
+        if concept_ranks is not None:
+            if len(concept_ranks.rows) > CONCEPT_RANK_PRECOMPUTED_ROWS or any(
+                row.rank != index or row.source_count < 0 or row.object_count < 0
+                for index, row in enumerate(concept_ranks.rows, 1)
+            ):
+                raise ValueError("invalid concept rank rows")
         db.execute(
             "DELETE FROM kg_community_edges WHERE notebook_id=?", (notebook_id,)
         )
@@ -2872,6 +3139,22 @@ class UnifiedKgStore:
         db.execute(
             "DELETE FROM kg_analysis_findings WHERE notebook_id=?", (notebook_id,)
         )
+        if concept_ranks is not None:
+            db.execute("DELETE FROM kg_concept_ranks WHERE notebook_id=?", (notebook_id,))
+            rank_rows = [(notebook_id, CONCEPT_RANK_HEADER_RANK, "", "", 0, 0,
+                          concept_ranks.built_at_kg_seq, concept_ranks.built_at_cluster_seq)]
+            rank_rows.extend(
+                (notebook_id, row.rank, row.canonical_id, row.representative_object_id,
+                 row.source_count, row.object_count, concept_ranks.built_at_kg_seq,
+                 concept_ranks.built_at_cluster_seq)
+                for row in concept_ranks.rows
+            )
+            db.executemany(
+                "INSERT INTO kg_concept_ranks "
+                "(notebook_id,rank,canonical_id,representative_object_id,source_count,"
+                "object_count,built_at_kg_seq,built_at_cluster_seq) "
+                "VALUES (?,?,?,?,?,?,?,?)", rank_rows,
+            )
         for batch in batched(
             (
                 (notebook_id, src, dst, int(weight))

@@ -275,6 +275,7 @@ _GROUP_D_STANDALONE: tuple[DirectTable, ...] = (
     DirectTable("kg_canonical_scratch", "two"),  # closure-external
     DirectTable("kg_cluster_scratch", "two"),  # closure-external
     DirectTable("kg_community_edges", "two"),
+    DirectTable("kg_concept_ranks", "two"),
     DirectTable("kg_conflict_candidates", "one", pk_column="id"),
     DirectTable("kg_rebuild_checkpoint", "two"),
     DirectTable("kg_relation_completion_state", "two"),
@@ -371,7 +372,8 @@ assert len(CURSOR_KEYS) == len(set(CURSOR_KEYS)), "PHASE_3_PLAN cursor keys must
 # 73 since SQLite v106 / PostgreSQL 0087: `memory_suggest_jobs`,
 # `memory_suggest_fingerprints` and `memory_suggest_read_fences`, A-class form two.
 # 74 since SQLite v107 / PostgreSQL 0088: `notebook_activity`, A-class form two.
-EXPECTED_PHASE_3_TABLE_COUNT = 74
+# 75 since SQLite v109 / PostgreSQL 0090: `kg_concept_ranks`, A-class form two.
+EXPECTED_PHASE_3_TABLE_COUNT = 75
 
 
 def phase_3_table_names() -> frozenset[str]:

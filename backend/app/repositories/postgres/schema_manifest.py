@@ -87,6 +87,7 @@ POSTGRES_BUSINESS_TABLES = (
     "kg_canonical_scratch",
     "kg_cluster_scratch",
     "kg_community_edges",
+    "kg_concept_ranks",
     "kg_conflict_candidates",
     "kg_rebuild_checkpoint",
     "kg_relation_completion_state",
@@ -566,7 +567,9 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # walks by (created_by, notebook_id, created_at, id); SQLite v106 instead
 # indexes deterministic sn_utc_us(created_at) for both owner/status sampling
 # and raw conversation predecessors, preserving the same exact UTC ordering.
+# SQLite v109 / PostgreSQL 0090: independent synced concept-rank derived
+# rows, with rank=0 recording freshness even when there are no ranked concepts.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=108,
-    postgres_version=89,
+    sqlite_version=109,
+    postgres_version=90,
 )

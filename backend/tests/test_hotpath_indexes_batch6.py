@@ -49,7 +49,10 @@ _DROPPED_NAMES = (
 
 # INCLUDE-carrying entries registered by later batches, with the test that
 # pins each shape: batch 7 (0084) -> test_hotpath_indexes_batch7.py.
-_LATER_INCLUDE_CARRYING = frozenset({"idx_source_paper_meta_source_nb"})
+_LATER_INCLUDE_CARRYING = frozenset({
+    "idx_source_paper_meta_source_nb",
+    "idx_knowledge_objects_rank_recount",  # batch 11, pinned by its own test
+})
 
 _STATEMENT_PATTERN = re.compile(
     r"CREATE (?P<unique>UNIQUE )?INDEX IF NOT EXISTS\s+(?P<name>\w+)\s+ON\s+(?P<table>\w+)"

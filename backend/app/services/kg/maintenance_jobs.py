@@ -64,7 +64,7 @@ class KgMaintenanceJobs:
         get_notebook: Callable[[str], object],
         new_id: Callable[[str], str],
         relink_notebook_kg: Callable[[str], dict] | None = None,
-        rebuild_unified_kg: Callable[[str], int] | None = None,
+        rebuild_unified_kg: Callable[..., int] | None = None,
         resolve_notebook_conflicts: Callable[[str], dict] | None = None,
         delete_notebook_kg: Callable[[str], dict] | None = None,
         kg_build_active: Callable[[str], bool] | None = None,
@@ -309,10 +309,13 @@ class KgMaintenanceJobs:
     def unified_kg_rebuild_status(self, notebook_id: str) -> dict:
         return self.status(notebook_id, "rebuild", dict(self.REBUILD_COUNTERS))
 
-    def run_unified_kg_rebuild_job(self, notebook_id: str, job_id: str) -> int:
+    def run_unified_kg_rebuild_job(
+        self, notebook_id: str, job_id: str, *, ensure_concept_ranks: bool = False,
+    ) -> int:
         """Run the version-gated rebuild and settle on every exit."""
         try:
-            clusters = int(self._rebuild_unified_kg(notebook_id))
+            clusters = int(self._rebuild_unified_kg(
+                notebook_id, ensure_concept_ranks=ensure_concept_ranks))
         except KgMaintenanceAlreadyRunning:
             # 批 3·W2(质量评 P2):数据级代际闸的拒绝在这里冒出来时,进程内
             # 槽已被本作业占下、202 已返回——占号的是**另一进程**(离线 CLI

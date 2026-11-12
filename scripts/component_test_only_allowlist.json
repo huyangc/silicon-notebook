@@ -117,6 +117,41 @@
       "reason": "主会话 2026-10-23 裁定保留:主题板块列表的「自开快照」入口与 community_overview_on 两个入口是刻意设计(ports.py 注明),供手上没有读连接的调用方用"
     },
     {
+      "member": "backend/app/repositories/postgres/unified_kg_store.py::UnifiedKgStore.concept_rank_candidate_canonicals",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
+    },
+    {
+      "member": "backend/app/repositories/postgres/unified_kg_store.py::UnifiedKgStore.concept_rank_citation_rows",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
+    },
+    {
+      "member": "backend/app/repositories/postgres/unified_kg_store.py::UnifiedKgStore.concept_rank_full_rows",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
+    },
+    {
+      "member": "backend/app/repositories/postgres/unified_kg_store.py::UnifiedKgStore.concept_rank_member_counts",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
+    },
+    {
+      "member": "backend/app/repositories/postgres/unified_kg_store.py::UnifiedKgStore.concept_rank_names",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
+    },
+    {
+      "member": "backend/app/repositories/postgres/unified_kg_store.py::UnifiedKgStore.concept_rank_precomputed_rows",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
+    },
+    {
+      "member": "backend/app/repositories/postgres/unified_kg_store.py::UnifiedKgStore.concept_recount_rows",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
+    },
+    {
       "member": "backend/app/repositories/postgres/unified_kg_store.py::UnifiedKgStore.replace_cluster_rows_streamed",
       "category": "test-observation",
       "reason": "直接写簇行的构造点,用例借它摆出指定的簇状态"
@@ -227,9 +262,49 @@
       "reason": "主会话 2026-10-23 裁定保留:主题板块列表的「自开快照」入口与 community_overview_on 两个入口是刻意设计(ports.py 注明),供手上没有读连接的调用方用"
     },
     {
+      "member": "backend/app/repositories/sqlite/unified_kg_store.py::UnifiedKgStore.concept_rank_candidate_canonicals",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/unified_kg_store.py::UnifiedKgStore.concept_rank_citation_rows",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/unified_kg_store.py::UnifiedKgStore.concept_rank_full_rows",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/unified_kg_store.py::UnifiedKgStore.concept_rank_member_counts",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/unified_kg_store.py::UnifiedKgStore.concept_rank_names",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/unified_kg_store.py::UnifiedKgStore.concept_rank_precomputed_rows",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
+    },
+    {
+      "member": "backend/app/repositories/sqlite/unified_kg_store.py::UnifiedKgStore.concept_recount_rows",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
+    },
+    {
       "member": "backend/app/repositories/sqlite/unified_kg_store.py::UnifiedKgStore.replace_cluster_rows_streamed",
       "category": "test-observation",
       "reason": "直接写簇行的构造点,用例借它摆出指定的簇状态"
+    },
+    {
+      "member": "backend/app/services/collection_catalog.py::CollectionCatalogService.unscoped_usable_counts",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
     },
     {
       "member": "backend/app/services/graph_retrieval.py::GraphRetrievalService.relation_support_count",
@@ -260,6 +335,16 @@
       "member": "backend/app/services/knowledge_governance.py::KnowledgeGovernanceService.write_merge_candidate",
       "category": "test-observation",
       "reason": "直接写合并候选的构造点"
+    },
+    {
+      "member": "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.concept_rank_refresh_settled",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
+    },
+    {
+      "member": "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.concept_ranks_producible",
+      "category": "pending-decision",
+      "reason": "概念排行 Phase A 固定接口；按阶段契约保留，Phase B 接入执行器，本阶段不接调用方。"
     },
     {
       "member": "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.write_clusters",

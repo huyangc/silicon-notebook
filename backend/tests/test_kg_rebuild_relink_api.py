@@ -321,6 +321,7 @@ def test_unified_rebuild_200_launches_background_and_returns_rebuilding(
     assert len(called) == 1
     assert called[0][1] == (nb, body["job_id"])
     assert called[0][2]["name"] == f"unifiedkg-{nb}"
+    assert called[0][2]["ensure_concept_ranks"] is True
 
 
 def test_unified_rebuild_no_llm_check(client, monkeypatch):
@@ -429,11 +430,12 @@ def test_unified_rebuild_status_reports_idle_then_terminal_count(client, monkeyp
         "clusters": 0,
     }
 
-    # Run the job body inline (submit is the only thing stubbed out) so the
-    # terminal counter the browser polls for comes from a real rebuild pass.
+    # Run the job body inline, forwarding task kwargs exactly as submit does.
+    def inline(fn, *args, name=None, **kwargs):
+        return fn(*args, **kwargs)
+
     monkeypatch.setattr(
-        background_jobs, "submit",
-        lambda fn, *args, **kwargs: fn(*args),
+        background_jobs, "submit", inline,
     )
     started = client.post(f"/api/notebooks/{nb}/unified-kg/rebuild").json()
     done = client.get(f"/api/notebooks/{nb}/unified-kg/rebuild/status").json()
@@ -479,3 +481,77 @@ def test_repo_rebuild_notebook_kg_delegates_to_lifecycle_runner(
 
     assert calls == ["nb-123"]
     assert result is build_result
+
+
+def test_unified_rebuild_status_never_probes_model_calls(client, monkeypatch):
+    from app.api import deps
+    nb = client.post("/api/notebooks", json={"name": "status"}).json()["id"]
+    lifecycle = deps.repository()._runtime.knowledge_lifecycle
+    calls = []
+    monkeypatch.setattr(lifecycle, "rebuild_would_call_models", lambda nb: calls.append(nb))
+    response = client.get(f"/api/notebooks/{nb}/unified-kg/rebuild/status")
+    assert response.status_code == 200
+    assert "model_calls_possible" not in response.json()
+    assert calls == []
+
+
+def test_model_call_probe_unconfigured_avoids_all_count_queries(client, monkeypatch):
+    from app.api import deps
+    nb = client.post("/api/notebooks", json={"name": "probe"}).json()["id"]
+    lifecycle = deps.repository()._runtime.knowledge_lifecycle
+    monkeypatch.setattr(lifecycle.model_clients, "configured", lambda name: False)
+    monkeypatch.setattr(lifecycle, "_cluster_input_facts",
+                        lambda nb: pytest.fail("unconfigured probe must not count objects"))
+    monkeypatch.setattr(lifecycle.unified_kg, "concept_clusters_count",
+                        lambda *a: pytest.fail("unconfigured probe must not count clusters"))
+    response = client.get(f"/api/notebooks/{nb}/unified-kg/rebuild/model-calls")
+    assert response.status_code == 200
+    assert response.json() == {"model_calls_possible": False}
+
+
+def test_model_call_probe_changed_inputs_are_true(client, monkeypatch):
+    from app.api import deps
+    nb = client.post("/api/notebooks", json={"name": "probe"}).json()["id"]
+    lifecycle = deps.repository()._runtime.knowledge_lifecycle
+    monkeypatch.setattr(lifecycle.model_clients, "configured", lambda name: name == "kg_merge_review")
+    monkeypatch.setattr(lifecycle.kg_maintenance, "_require_notebook",
+                        lambda *a: pytest.fail("probe must read maintenance state in memory"))
+    response = client.get(f"/api/notebooks/{nb}/unified-kg/rebuild/model-calls")
+    assert response.status_code == 200
+    assert response.json() == {"model_calls_possible": True}
+
+
+def test_model_call_probe_failure_is_unknown_and_logs_only_exception_class(client, monkeypatch):
+    from app.api import deps
+    nb = client.post("/api/notebooks", json={"name": "probe"}).json()["id"]
+    lifecycle = deps.repository()._runtime.knowledge_lifecycle
+    monkeypatch.setattr(lifecycle.model_clients, "configured", lambda name: name == "kg_merge_review")
+    def fail(nb):
+        raise RuntimeError("secret database details")
+    monkeypatch.setattr(lifecycle, "_cluster_input_facts", fail)
+    events = []
+    monkeypatch.setattr(lifecycle.event_log, "emit", events.append)
+    response = client.get(f"/api/notebooks/{nb}/unified-kg/rebuild/model-calls")
+    assert response.status_code == 200
+    assert response.json() == {"model_calls_possible": None}
+    assert events == [{"kind": "rebuild_model_calls_probe_failed", "notebook_id": nb,
+                       "error_class": "RuntimeError"}]
+
+
+def test_read_only_member_cannot_probe_model_calls(client, monkeypatch):
+    from app.api import deps
+    from tests.test_kg_delete_job import _login
+    owner = _login(client, "p00000001")
+    nb = client.post("/api/notebooks", json={"name": "probe"}, headers=owner).json()["id"]
+    member = _login(client, "p00000002")
+    member_id = client.get("/api/me", headers=member).json()["id"]
+    repo = deps.repository()
+    repo._runtime.sharing.add_member(nb, member_id)
+    calls = []
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "rebuild_would_call_models",
+                        lambda nb: calls.append(nb))
+    response = client.get(f"/api/notebooks/{nb}/unified-kg/rebuild/model-calls", headers=member)
+    # The shared kg:write guard deliberately conceals unauthorized notebooks.
+    assert response.status_code == 404
+    assert calls == []
+    assert client.get(f"/api/notebooks/{nb}/unified-kg/rebuild/status", headers=member).status_code == 200

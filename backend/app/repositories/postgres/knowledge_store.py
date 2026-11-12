@@ -104,6 +104,8 @@ _GRAPH_RESET_TABLES = frozenset({
     # ledger's findings kind, one unit with its ledger row -- same reasoning
     # as the two detail tables below.
     "kg_analysis_findings",
+    # Like the ledger, ranks are derived products removed with the graph.
+    "kg_concept_ranks",
     # kg_community_edges / kg_source_profiles: the DETAIL tables the ledger's
     # two board-dependent kinds describe. R1 (P2-1, post-review): the ledger
     # row and its detail rows are a documented single unit —
@@ -890,6 +892,7 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int, bool], ...] = (
     ("kg_analysis_artifacts", "notebook_id = %s", 1, True),
     ("kg_analysis_findings", "notebook_id = %s", 1, True),
     ("kg_community_edges", "notebook_id = %s", 1, True),
+    ("kg_concept_ranks", "notebook_id = %s", 1, True),
     ("kg_relation_completion_state", "notebook_id = %s", 1, True),
     ("kg_source_profiles", "notebook_id = %s", 1, True),
     # SQLite v97 / PostgreSQL 0077: a relink-attempt mark records the

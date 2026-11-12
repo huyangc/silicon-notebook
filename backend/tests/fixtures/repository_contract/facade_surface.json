@@ -1542,6 +1542,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
+        "scope": "<module>.knowledge_lifecycle_service",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
         "scope": "<module>.memory_membership_service",
         "target": "_runtime"
       },
@@ -9612,7 +9618,7 @@
     "owner": "KnowledgeLifecycleService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', job_id: 'str') -> 'int'"
+    "signature": "(self, notebook_id: 'str', job_id: 'str', *, ensure_concept_ranks: 'bool' = False) -> 'int'"
   },
   "scale_index_status": {
     "consumers": [

@@ -34,6 +34,7 @@ from app.repositories.public_share_ports import AnswerLinkStorePort as AnswerLin
 if TYPE_CHECKING:
     import numpy as np
 
+    from app.domain.concept_ranking_contracts import ConceptRankWrite
     from app.domain.share_disclosure import ShareMemoryGuard
 
 from app.core.config import Settings
@@ -3034,6 +3035,48 @@ class RetrievalKnowledgeStorePort(KnowledgeStorePort, Protocol):
 @runtime_checkable
 class UnifiedKgStorePort(Protocol):
     @staticmethod
+    def concept_rank_visible_source_ids(db: object, notebook_id: str) -> List[str]: ...
+    @staticmethod
+    def concept_rank_representatives(
+        db: object, notebook_id: str, canonical_ids: Sequence[str],
+    ) -> Dict[str, str]: ...
+    @staticmethod
+    def concept_rank_header(
+        db: object, notebook_id: str,
+    ) -> Optional[tuple[int, int]]: ...
+    @staticmethod
+    def concept_rank_precomputed_rows(db: object, notebook_id: str) -> List[dict]: ...
+    # concept_rank_full_rows 是禁止整库在线 GROUP BY 的唯一例外：仅当服务层
+    # 把整库可用 concept 数门控到 KG_RANK_ONLINE_MAX_OBJECTS（5 万）以内才调用。
+    # 设计 §4.1/§16：5 万对象 PG 17–32 ms；不得把它当作任意规模的在线读。
+    @staticmethod
+    def concept_rank_full_rows(
+        db: object, notebook_id: str, *, ceiling: Optional[frozenset],
+    ) -> List[tuple[str, int, int]]: ...
+    @staticmethod
+    def concept_rank_candidate_canonicals(
+        db: object, notebook_id: str, object_ids: Sequence[str],
+    ) -> Dict[str, str]: ...
+    @staticmethod
+    def concept_rank_member_counts(
+        db: object, notebook_id: str, canonical_ids: Sequence[str],
+    ) -> Dict[str, int]: ...
+    @staticmethod
+    def concept_recount_rows(
+        db: object, notebook_id: str, canonical_ids: Sequence[str], *,
+        ceiling: Optional[frozenset],
+    ) -> List[tuple[str, int, int]]: ...
+    @staticmethod
+    def concept_rank_names(
+        db: object, notebook_id: str, canonical_ids: Sequence[str], *,
+        ceiling: Optional[frozenset], scan: int,
+    ) -> Dict[str, str]: ...
+    @staticmethod
+    def concept_rank_citation_rows(
+        db: object, notebook_id: str, canonical_ids: Sequence[str], *,
+        ceiling: Optional[frozenset], scan: int,
+    ) -> List[tuple[str, str, str, object]]: ...
+    @staticmethod
     def canonical_relation_seed_rows(db: object, notebook_id: str) -> object: ...
     @staticmethod
     def canonical_relations_count(db: object, notebook_id: str) -> int: ...
@@ -3358,6 +3401,10 @@ class UnifiedKgStorePort(Protocol):
     # 还跑在另一条连接上,所以「哪个写事务碰过产物表」那类形状守卫对它们完全无效 ——
     # 评审用「把三条调用搬进 `_write()`」的移动变异实测过,25 条测试全绿。
     #
+    # concept_rank_full_rows 是整库在线 GROUP BY 禁令的唯一例外：服务层须先把
+    # 整库可用 concept 数门控到 KG_RANK_ONLINE_MAX_OBJECTS（5 万）以内。
+    # 设计 §4.1/§16 的 PG 5 万对象实测为 17–32 ms；不放宽下面三条预计算查询。
+    #
     # ⚠ **三条都是全表级的重活,一条都不能挂在在线请求路径上。** 别只盯着最后一条,
     # 也别以为 `largest_clusters` 因为有 LIMIT 就便宜 —— 三者**同一量级**:
     #   · cluster_size_histogram      本 notebook 的 concept_clusters 全扫 + 每行一次
@@ -3506,6 +3553,7 @@ class UnifiedKgStorePort(Protocol):
         *,
         findings_rows: object,
         prune_marks: object,
+        concept_ranks: "ConceptRankWrite | None" = None,
     ) -> None:
         """…and (SQLite v97 / PostgreSQL 0077) ``findings_rows``, the whole
         ``kg_analysis_findings`` detail as tuples in ``FINDING_ROW_FIELDS``

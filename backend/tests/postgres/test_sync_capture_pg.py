@@ -116,10 +116,10 @@ def test_the_migration_installs_the_generated_functions_and_triggers(migrated):
 
     expected_functions = expected_postgres_functions()
     assert set(functions) == set(expected_functions)
-    # 0064's 46 tables plus 0077's kg_analysis_findings (since_schema=97).
-    assert len(functions) == 47
+    # 0064's 46 tables, 0077's findings, and 0090's concept ranks.
+    assert len(functions) == 48
     assert triggers == expected_postgres_triggers()
-    assert len(triggers) == 47
+    assert len(triggers) == 48
     for name, row in functions.items():
         assert row["prokind"] == "f"
         assert row["prosecdef"] is False
@@ -141,7 +141,7 @@ def test_no_installed_function_materializes_a_whole_row(migrated):
             ).fetchall()
         ]
 
-    assert len(sources) == 47
+    assert len(sources) == 48
     for source in sources:
         assert "to_jsonb(" not in source
         assert "row_to_json(" not in source

@@ -801,7 +801,8 @@ def expect_skip(obs: Observation) -> None:
         "self.rebuild_communities"]
     for key in ("self.rebuild_canonical_relations", "self.rebuild_mention_bridge"):
         assert obs.calls(key)[0]["kwargs"] == {}, key
-    assert obs.calls("self.rebuild_communities")[0]["kwargs"] == {"level": 0}
+    assert obs.calls("self.rebuild_communities")[0]["kwargs"] == {
+        "level": 0, "ensure_concept_ranks": False}
     assert obs.after["published"] == obs.before["published"]
     assert obs.after["state"] == obs.before["state"]
     assert obs.progress == [["跳过:自上次 rebuild 起输入未变化(7 clusters)", 0, 0]]

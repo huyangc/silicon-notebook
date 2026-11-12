@@ -33,6 +33,8 @@ paper-metadata probe (``backend/tests/test_hotpath_indexes_batch7.py``
 cross-checks it). Batch 8 (``idx_sources_nb_summary_trgm``, find_sources'
 summary leg) has NO migration: it exists only once this builder's ``--apply``
 has built it (``backend/tests/test_hotpath_indexes_batch8.py``).
+Batch 11 (``idx_knowledge_objects_rank_recount``, rank_concepts recount)
+also has no migration and is built only by ``--apply``.
 Every migration and this module's ``HOTPATH_INDEX_SPECS`` are independent
 hand-authored copies of the same index shapes on purpose (a migration file
 cannot import Python at apply time): ``backend/tests/test_hotpath_indexes.py``
@@ -654,6 +656,18 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
             ("ask_jobs", "report_id", 'text COLLATE "C" NOT NULL DEFAULT \'\''),
         ),
         serves="owner-bound clarified ascending and repeated descending auto-memory sampling, with LIMIT stopping in the index",
+    ),
+    # Batch 11, design §9/§16: worst-case recount 0.27–1.23 s -> 0.14 s,
+    # about twice the primary-key size. Index-only scans depend on the
+    # visibility map; the optional coverage also increases write amplification.
+    HotpathIndexSpec(
+        name="idx_knowledge_objects_rank_recount",
+        table="knowledge_objects",
+        columns=("id",),
+        include=("notebook_id", "object_type", "status", "source_id"),
+        predicate="",
+        predicate_shape="",
+        serves="rank_concepts recount (concept_recount_rows) member lookups as an Index Only Scan",
     ),
 )
 

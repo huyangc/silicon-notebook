@@ -234,6 +234,7 @@ def _findings_payload() -> dict:
         tally=FindingsObjectTally({}, structure), structure=structure, can2idx={},
         names={}, relations_by_source={}, decisions={},
         member_seeds=lambda ids: {}, max_candidate_pairs=10,
+        visible_source_ids=frozenset(),
     )
     while draft.pending() is not None:
         pass

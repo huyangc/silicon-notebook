@@ -935,6 +935,16 @@ a large notebook the neighbour view says the node cannot be located yet — that
 built, or that the current preview does not hold this node — until the next index build. A
 neighbour focus the stored preview does not hold is answered the same way.
 
+## Knowledge graph maintenance: concept-rank refresh
+
+User clicks on “重新合并” or “更新分析” check the concept-rank header and both generation
+sequences. When the graph and its other analysis artifacts are fresh but ranks are missing
+or stale, the job uses the ledger-backfill path to publish the ranks without repartitioning
+the graph. Each notebook's first such update after an upgrade can take several minutes.
+The job holds that notebook's maintenance slot throughout; competing “补上关联” or
+“删除知识图谱” starts return 409. Automatic maintenance does not request this rank-only
+backfill; a rebuild that already recomputes graph analysis publishes ranks with it.
+
 ## Merge rule upgrade: concept seed space 2
 
 This version switches concept merge seeds to a new rule (product contract: "Concept merge seeds" in
@@ -2469,10 +2479,11 @@ long time does not hold one long-running transaction or a single unbounded `DELE
 
 ### Change capture (`sync capture`)
 
-Every deployment ships with AFTER INSERT/UPDATE/DELETE triggers on all 47 synced tables
-(§7 of the design doc; 141 triggers on SQLite -- one per operation per table, since SQLite has no
-combined "AFTER INSERT OR UPDATE OR DELETE" -- and 47 on PostgreSQL, one per table; 46 of the
-tables got theirs with v84/0064, `kg_analysis_findings` with v97/0077), but they are
+Every deployment ships with AFTER INSERT/UPDATE/DELETE triggers on all 48 synced tables
+(§7 of the design doc; 144 triggers on SQLite -- one per operation per table, since SQLite has no
+combined "AFTER INSERT OR UPDATE OR DELETE" -- and 48 on PostgreSQL, one per table; 46 of the
+tables got theirs with v84/0064, `kg_analysis_findings` with v97/0077, and
+`kg_concept_ranks` with v109/0090), but they are
 gated OFF by default: a fresh migration does not seed the `sync_capture_control` row, so nothing
 is logged until an operator runs `sync capture enable`. With the gate on, `sync export` reads
 that log to produce incremental packages automatically (see "Cross-environment notebook sync"
@@ -2578,7 +2589,7 @@ doc's §7 "升级窗口"](./incremental-sync-design.md#7-源端变更捕获) for
 `CREATE INDEX idx_sync_change_log_txid ON sync_change_log (txid, seq) WHERE txid IS NOT NULL`
 is a plain (non `CONCURRENTLY`) index build, which holds a SHARE lock on `sync_change_log`
 until it finishes;
-while the gate is open, every business write to any of the 47 synced tables also writes a row to
+while the gate is open, every business write to any of the synced tables also writes a row to
 that same table via its trigger, so those writes queue behind the index build for its entire
 duration. Startup migrations run over the application's own connection pool, whose defaults
 (`POSTGRES_STATEMENT_TIMEOUT_SECONDS=30`, `POSTGRES_LOCK_TIMEOUT_SECONDS=5`) were sized for
@@ -4732,4 +4743,3 @@ Start with the disabled [W3 example](../examples/extensions/w3-auth/README.md). 
 Fixing a wrong choice or an employee-number change: a user who created a new account instead of linking, and a user whose employee number changed so that the new number could only create a new account (the provider's subject changes with the number and the system does not recognize the same person; the old account has already signed in through external login, so it cannot be linked again), both ask an administrator. In the user overview, open "管理" on the old account's row, choose "合并统一认证账号", enter the new account's username (the employee number) and click "合并" then "确认合并": the new account is deleted and the old one takes the employee number (all its data stays), the old account's sessions end, and its next external login signs in directly. The merge works only while the new account owns no data at all; otherwise the categories and counts are listed beside the button, and the manual order applies instead: first **disable** the new account and **rename it** to something else (freeing the employee number); then **change the old account's username** to the employee number. Each action deletes the affected users' sessions and is audited. A user who forgot the old password can also get an administrator password reset first, then complete the link step. Once an account has signed in through external login (directly, by being linked or by being created) nobody else can link it by its password; neither an administrator rename nor a password reset clears that, so a correction always goes through the merge or the rename order above. Outstanding choices are not durable authority: they expire after `AUTH_TRANSACTION_TTL_SECONDS` and are one-time.
 
 Keep a compatible plugin build and the ability to change the deployment configuration and restart; authentication outages are repaired either by restoring the approved provider/configuration or by disabling the plugin. The built-in administrator works only while the plugin is disabled and is not a backup entry while external authentication is on. Provider offboarding without a trusted lifecycle feed requires an explicit operator-disable process (the administrator disable action above); do not promise immediate detection from browser expiry alone.
-

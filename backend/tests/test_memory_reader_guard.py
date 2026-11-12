@@ -307,7 +307,23 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "GovernanceStore.sweep_orphan_clusters_page": MAINTENANCE,
         "_base_dedup_rows_for_update": MAINTENANCE,
     },
+    "sqlite/unified_kg_store.py": {
+        # 每个预计算 canonical 的相关 LIMIT 1，只读首个可见可用代表对象 id。
+        "UnifiedKgStore.concept_rank_representatives": KEY_BOUNDED,
+    },
     "*/unified_kg_store.py": {
+        # 全量排行按来源天花板过滤，成员谓词排除隐藏来源及孤儿。
+        "UnifiedKgStore.concept_rank_full_rows": CEILING_BOUNDED,
+        # 重算仅探查传入 canonical，成员谓词排除隐藏来源及孤儿。
+        "UnifiedKgStore.concept_recount_rows": KEY_BOUNDED,
+        # 名字与引用共同 SQL（PG 另含代表成员）：给定 canonical 键，排除隐藏来源和孤儿。
+        "UnifiedKgStore._concept_rank_member_rows": KEY_BOUNDED,
+        # 候选映射只探查调用方持有的对象键，不返回内容。
+        "UnifiedKgStore.concept_rank_candidate_canonicals": KEY_BOUNDED,
+        # 簇大小只统计调用方持有的 canonical 键。
+        "UnifiedKgStore.concept_rank_member_counts": KEY_BOUNDED,
+        # 漂移解析只探查预计算排行中保存的代表成员键。
+        "UnifiedKgStore.concept_rank_precomputed_rows": KEY_BOUNDED,
         # E4-2 graph-build readers
         "UnifiedKgStore.seed_payload_rows": BUILD_READER,
         "UnifiedKgStore.stream_seed_rows": BUILD_READER,

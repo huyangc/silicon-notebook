@@ -231,6 +231,7 @@ class KgAnalysisResponse(BaseModel):
     board_edges: BoardEdgeView
     findings_summary: FindingsSummary
     merge_code: MergeCodeState
+    concept_ranks_built_at_seq: Optional[FindingSeq] = None
 
 
 class FindingSubject(BaseModel):

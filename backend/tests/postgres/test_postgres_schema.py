@@ -143,6 +143,7 @@ def test_kg_findings_storage_matches_the_sqlite_v97_contract(postgres_database):
 
         findings = columns("kg_analysis_findings")
         marks = columns("kg_analysis_marks")
+        ranks = columns("kg_concept_ranks")
         code_version = conn.execute(
             "SELECT data_type, is_nullable, column_default, collation_name FROM "
             "information_schema.columns WHERE table_schema=current_schema() "
@@ -156,7 +157,8 @@ def test_kg_findings_storage_matches_the_sqlite_v97_contract(postgres_database):
                 "JOIN pg_namespace n ON n.oid=c.connamespace "
                 "WHERE n.nspname=current_schema() AND c.contype='f' "
                 "AND c.conname IN ('fk_kg_analysis_findings_notebook_id__notebooks', "
-                "'fk_kg_analysis_marks_notebook_id__notebooks')"
+                "'fk_kg_analysis_marks_notebook_id__notebooks', "
+                "'fk_kg_concept_ranks_notebook_id__notebooks')"
             ).fetchall()
         }
     assert findings == [
@@ -173,6 +175,12 @@ def test_kg_findings_storage_matches_the_sqlite_v97_contract(postgres_database):
         ("at_kg_seq", "bigint", "NO"), ("actor_user_id", "text", "NO"),
         ("created_at", "timestamp with time zone", "NO"), ("note", "text", "NO"),
     ]
+    assert ranks == [
+        ("notebook_id", "text", "NO"), ("rank", "integer", "NO"),
+        ("canonical_id", "text", "NO"), ("representative_object_id", "text", "NO"),
+        ("source_count", "integer", "NO"), ("object_count", "integer", "NO"),
+        ("built_at_kg_seq", "bigint", "NO"), ("built_at_cluster_seq", "bigint", "NO"),
+    ]
     assert dict(code_version) == {
         "data_type": "text", "is_nullable": "NO", "column_default": "''::text",
         "collation_name": "C",
@@ -180,6 +188,7 @@ def test_kg_findings_storage_matches_the_sqlite_v97_contract(postgres_database):
     assert foreign == {
         "kg_analysis_findings": ("c", "notebooks"),
         "kg_analysis_marks": ("c", "notebooks"),
+        "kg_concept_ranks": ("c", "notebooks"),
     }
     with postgres_database.write() as db:
         db.execute(
@@ -605,6 +614,7 @@ def test_packaged_index_migration_phases_are_exact():
         (87, "memory_suggest"),
         (88, "notebook_activity"),
         (89, "public_share_evidence"),
+        (90, "kg_concept_ranks"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:

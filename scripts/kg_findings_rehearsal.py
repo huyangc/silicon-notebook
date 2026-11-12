@@ -356,6 +356,15 @@ def decisions_query(notebook_id: str) -> Query:
     )
 
 
+def visible_sources_query(notebook_id: str) -> Query:
+    """Owner visibility for the engine's rank projection, including orphan exclusion."""
+    return (
+        "SELECT id FROM sources WHERE notebook_id=%s "
+        f"AND {_store().VISIBLE_SOURCE_TYPES_PREDICATE} ORDER BY id",
+        (notebook_id,),
+    )
+
+
 class StoreReads:
     """The product store's own findings name reads, sent on this script's
     connection: ``kg_finding_member_name_rows`` (every member of each listed
@@ -1482,6 +1491,11 @@ def run_rehearsal(conn: Any, notebook_id: str, options: Options, timer: PhaseTim
         decisions = decisions_from_rows(decision_rows)
         conn.commit()
 
+    with timer.phase("5b_visible_sources", product=True):
+        visible_source_ids = frozenset(
+            row[0] for row in fetch_all(conn, visible_sources_query(notebook_id)))
+        conn.commit()
+
     seed_calls: List[int] = []
     seed_reads = StoreReads(conn)
 
@@ -1494,6 +1508,7 @@ def run_rehearsal(conn: Any, notebook_id: str, options: Options, timer: PhaseTim
             tally=objects.tally, structure=structure, can2idx=can2idx, names=names,
             relations_by_source=graph.relations_by_source, decisions=decisions,
             member_seeds=member_seeds, max_candidate_pairs=options.max_candidate_pairs,
+            visible_source_ids=visible_source_ids,
         )
 
     with timer.phase("7_engine_lookups", product=True):

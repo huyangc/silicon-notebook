@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=108, postgres_version=89, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=109, postgres_version=90, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -943,6 +943,8 @@ _TABLES = (
     ),
     _table("notebook_activity", ("id",), ReplicationKeyKind.DECLARED_PK, 118, "timestamptz"),
     TableSpec("public_share_evidence", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 119),
+    # Like findings, this derived product follows cutover and hangs off notebooks.
+    _table("kg_concept_ranks", ("notebook_id", "rank"), ReplicationKeyKind.DECLARED_PK, 120, "identity"),
 )
 
 MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)

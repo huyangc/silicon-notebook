@@ -84,6 +84,10 @@ def s(kind: str, klass: str, why: str) -> tuple[str, str, str]:
 # Reviewed exemptions: (file, function) -> one entry per site (kind, class,
 # reason); the guard compares the count of each kind.
 EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
+    ("sqlite/unified_kg_store.py", "UnifiedKgStore._concept_rank_member_rows"): (
+        s(JSON, BOUNDED, "≤20 canonicals of one result page"),),
+    ("sqlite/unified_kg_store.py", "UnifiedKgStore.concept_rank_representatives"): (
+        s(JSON, BOUNDED, "≤80 precomputed canonicals, one representative id per canonical"),),
     # ------------------------------------------------------------ PostgreSQL
     ("postgres/_store_utils.py", "placeholders"): (
         s(PG_EXP, NOT_IDS, "the expansion helper itself; each call is listed"),),

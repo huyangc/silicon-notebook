@@ -33,6 +33,41 @@ def _fresh_migrated_database(tmp_path: Path) -> tuple[SqliteDatabase, Settings]:
     return database, settings
 
 
+@pytest.mark.real_sqlite_migration
+def test_v109_concept_ranks_schema_capture_and_upgrade(tmp_path):
+    from app.migration.sync.capture import sqlite_trigger_sql
+    from tests.sqlite_migration_testkit import rollback_v109
+
+    database, settings = _fresh_migrated_database(tmp_path)
+    try:
+        with database.connect() as db:
+            rollback_v109(db)
+            db.execute("PRAGMA user_version=108")
+        assert SqliteMigrator(database, settings).migrate() == [109]
+        with database.connect() as db:
+            columns = db.execute("PRAGMA table_info(kg_concept_ranks)").fetchall()
+            assert [(row[1], row[2], row[3], row[5]) for row in columns] == [
+                ("notebook_id", "TEXT", 1, 1), ("rank", "INTEGER", 1, 2),
+                ("canonical_id", "TEXT", 1, 0),
+                ("representative_object_id", "TEXT", 1, 0),
+                ("source_count", "INTEGER", 1, 0), ("object_count", "INTEGER", 1, 0),
+                ("built_at_kg_seq", "INTEGER", 1, 0),
+                ("built_at_cluster_seq", "INTEGER", 1, 0),
+            ]
+            triggers = dict(db.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='trigger' "
+                "AND tbl_name='kg_concept_ranks'"
+            ).fetchall())
+            assert triggers == {name: sql for name, (_table, sql)
+                                in sqlite_trigger_sql(added_at=109).items()}
+            foreign = db.execute("PRAGMA foreign_key_list(kg_concept_ranks)").fetchone()
+            assert (foreign[2], foreign[3], foreign[4], foreign[6]) == (
+                "notebooks", "notebook_id", "id", "CASCADE",
+            )
+    finally:
+        database.close_local()
+
+
 def _set_user_version(database: SqliteDatabase, version: int) -> None:
     with database.connect() as db:
         db.execute(f"PRAGMA user_version = {int(version)}")
@@ -266,7 +301,7 @@ def test_v92_drops_the_staged_auth_schema_and_keeps_credentials(tmp_path):
         )
         db.execute("PRAGMA user_version = 91")
 
-    assert SqliteMigrator(database, settings).migrate() == [92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -341,7 +376,7 @@ def test_v93_adds_the_nullable_profile_deleted_at_without_touching_rows(tmp_path
         rollback_v93(db)
         db.execute("PRAGMA user_version = 92")
 
-    assert SqliteMigrator(database, settings).migrate() == [93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         columns = {row[1]: row for row in db.execute("PRAGMA table_info(agent_profiles)")}
@@ -409,7 +444,7 @@ def test_v94_adds_answer_links_and_the_token_flag(tmp_path):
             ("tk-v94", "agent-v94", "hash-v94", '["read", "ask"]', "nb-v94", None, now),
         )
 
-    assert SqliteMigrator(database, settings).migrate() == [94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db)[1:] == fresh[1:]
@@ -461,7 +496,7 @@ def test_v95_adds_global_ask_retained_until_without_backfill(tmp_path):
             ("gj-v95", "gc-v95", "u-v95", "{}", "done", "{}", "2026-10-19T00:00:00+00:00"),
         )
 
-    assert SqliteMigrator(database, settings).migrate() == [95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db) == fresh
@@ -508,7 +543,7 @@ def test_v96_adds_the_rated_global_jobs_partial_index(tmp_path):
                 "payload_json,created_at) VALUES(?,?,?,?,?,?,?)",
                 (job_id, "gconv-v96", "u-v96", "{}", "done", f'{{"feedback":"{rating}"}}', now))
 
-    assert SqliteMigrator(database, settings).migrate() == [96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert definition(db) == fresh
@@ -549,7 +584,7 @@ def test_v96_stops_with_the_ids_when_a_payload_is_not_json(tmp_path):
         assert db.execute("PRAGMA user_version").fetchone()[0] == 95
     with database.write() as db:
         db.execute("UPDATE global_ask_jobs SET payload_json='{}' WHERE id='g-bad'")
-    assert SqliteMigrator(database, settings).migrate() == [96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
     database.close_local()
 
 
@@ -632,7 +667,7 @@ def test_v97_adds_the_findings_tables_and_the_code_version_column(tmp_path):
         rollback_v97(db)
         db.execute("PRAGMA user_version = 96")
 
-    assert SqliteMigrator(database, settings).migrate() == [97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         upgraded = shape(db)
@@ -690,7 +725,7 @@ def test_v102_adds_the_concept_seed_space_columns(tmp_path):
         )
         db.execute("PRAGMA user_version = 101")
 
-    assert SqliteMigrator(database, settings).migrate() == [102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [102, 103, 104, 105, 106, 107, 108, 109]
     with database.write() as db:
         db.execute(
             "INSERT INTO notebooks (id, name, created_at, updated_at) VALUES "
@@ -795,7 +830,7 @@ def test_v98_adds_the_attribution_table_without_backfilling(tmp_path):
             ("g-v98", "gconv-v98", "u-v98", "{}", "done",
              '{"resolved_notebook_ids":["nb-x"],"searched_notebook_ids":["nb-x"]}', now))
 
-    assert SqliteMigrator(database, settings).migrate() == [98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db) == fresh
@@ -844,7 +879,7 @@ def test_v99_adds_ask_jobs_report_id(tmp_path):
             "VALUES (?,?,?,?,?,?)",
             ("job-v98", "nb-v99", "why?", "running", now, now))
 
-    assert SqliteMigrator(database, settings).migrate() == [99, 100, 101, 102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
     assert SqliteMigrator(database, settings).migrate() == []
     # The step re-runs cleanly: add_column_if_missing sees the column and a
     # bare ADD COLUMN would raise "duplicate column name".
@@ -916,7 +951,7 @@ def test_v100_adds_the_notebook_delete_window_without_backfilling(tmp_path):
                 (notebook_id, notebook_id, status, now, now),
             )
 
-    assert SqliteMigrator(database, settings).migrate() == [100, 101, 102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db) == fresh
@@ -974,7 +1009,7 @@ def test_v101_adds_the_navigation_marker_columns_without_backfilling(tmp_path):
     finally:
         raw.close()
 
-    assert SqliteMigrator(database, settings).migrate() == [101, 102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [101, 102, 103, 104, 105, 106, 107, 108, 109]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db) == fresh
@@ -1031,7 +1066,7 @@ def test_v102_adds_the_board_partition_columns_and_backfills_board_keys(tmp_path
                 "generation) VALUES (?, 'nb-v101', 0, '[\"K-x\"]', 1, ?, ?)", (cid, now, generation))
         db.execute("PRAGMA user_version = 101")
 
-    assert SqliteMigrator(database, settings).migrate() == [102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [102, 103, 104, 105, 106, 107, 108, 109]
     assert SqliteMigrator(database, settings).migrate() == []
     with database.connect() as db:
         assert shape(db) == fresh
@@ -1048,7 +1083,7 @@ def test_v102_adds_the_board_partition_columns_and_backfills_board_keys(tmp_path
         db.execute("UPDATE communities SET board_key = '' WHERE id = 'cm-b'")
         db.execute("UPDATE communities SET board_key = 'bk-kept' WHERE id = 'cm-c'")
         db.execute("PRAGMA user_version = 101")
-    assert SqliteMigrator(database, settings).migrate() == [102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [102, 103, 104, 105, 106, 107, 108, 109]
     with database.connect() as db:
         keys = {row[0]: row[1] for row in db.execute("SELECT id, board_key FROM communities")}
         assert keys == {"cm-a": "cm-a", "cm-b": "cm-b", "cm-c": "bk-kept"}
@@ -1093,7 +1128,7 @@ def test_v102_lands_both_halves_and_a_rerun_moves_no_seed_space(tmp_path):
             "generation) VALUES ('cm-a', 'nb-v101', 0, '[\"K-x\"]', 1, ?, 1)", (now,))
         db.execute("PRAGMA user_version = 101")
 
-    assert SqliteMigrator(database, settings).migrate() == [102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [102, 103, 104, 105, 106, 107, 108, 109]
     with database.connect() as db:
         assert state(db) == (1, 0, "")
         assert db.execute("SELECT board_key FROM communities WHERE id = 'cm-a'").fetchone()[0] == "cm-a"
@@ -1107,7 +1142,7 @@ def test_v102_lands_both_halves_and_a_rerun_moves_no_seed_space(tmp_path):
         db.execute("ALTER TABLE unified_kg_state DROP COLUMN community_partition_version")
         db.execute("UPDATE unified_kg_state SET concept_seed_version = 2 WHERE notebook_id = 'nb-v101'")
         db.execute("PRAGMA user_version = 101")
-    assert SqliteMigrator(database, settings).migrate() == [102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [102, 103, 104, 105, 106, 107, 108, 109]
     with database.connect() as db:
         assert state(db) == (2, 0, "")
         assert db.execute("SELECT board_key FROM communities WHERE id = 'cm-a'").fetchone()[0] == "cm-a"
@@ -1157,7 +1192,7 @@ def test_v102_gives_a_copy_without_a_state_row_one_in_seed_space_1(tmp_path):
     now = "2026-10-23T00:00:00+00:00"
     _v101_with_unrecorded_merges(database, now)
 
-    assert SqliteMigrator(database, settings).migrate() == [102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [102, 103, 104, 105, 106, 107, 108, 109]
     with database.write() as db:
         db.execute("INSERT INTO notebooks (id, name, created_at, updated_at) "
                    "VALUES ('nb-ref', 'n', ?, ?)", (now, now))
@@ -1216,7 +1251,7 @@ def test_v102_is_one_transaction_so_an_interrupted_run_starts_over(tmp_path, mon
         assert "concept_seed_version" not in columns
         assert "board_key" not in {r[1] for r in db.execute("PRAGMA table_info(communities)")}
 
-    assert SqliteMigrator(database, settings).migrate() == [102, 103, 104, 105, 106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [102, 103, 104, 105, 106, 107, 108, 109]
     with database.connect() as db:
         assert dict(db.execute(
             "SELECT notebook_id, concept_seed_version FROM unified_kg_state").fetchall()) == {
@@ -1320,7 +1355,7 @@ def test_v106_adds_memory_suggest_schema(tmp_path):
             "('mem-old','nb-v106','u-v106','ask_answer','candidate','t','c',?,?)",
             (now, now))
 
-    assert SqliteMigrator(database, settings).migrate() == [106, 107, 108]
+    assert SqliteMigrator(database, settings).migrate() == [106, 107, 108, 109]
     assert SqliteMigrator(database, settings).migrate() == []
     SqliteMigrator(database, settings)._migration_106()
     with database.connect() as db:

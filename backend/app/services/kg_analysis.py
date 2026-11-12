@@ -489,6 +489,7 @@ class KgAnalysisOverview:
     board_edges: BoardEdgeView
     findings_summary: FindingsSummary
     merge_code: MergeCodeState
+    concept_ranks_built_at_seq: Optional[Dict[str, int]] = None
 
 
 @dataclass(frozen=True)
@@ -657,6 +658,7 @@ class KgAnalysisService:
         # 方言细节留在 store 里(见 `read_snapshot`),本 service 不判后端。
         with self._unified_kg.read_snapshot() as db:
             state_row = self._unified_kg.state_row(db, notebook_id)
+            header = self._unified_kg.concept_rank_header(db, notebook_id)
             ledger = self._unified_kg.kg_analysis_artifact_rows(db, notebook_id)
             # 问题清单摘要要的标记(豁免计数 + 「补上关联」的持久标记):有界的主键前缀读
             # (≤ KG_ANALYSIS_MARKS_MAX 行),与账本同一个快照。明细一行都不读。
@@ -721,6 +723,8 @@ class KgAnalysisService:
                 ledger, marks, state, len(dismissed_present),
                 published_seed_version=published_concept_seed_version(state_row)),
             merge_code=_merge_code(state_row, self._current_merge_code()),
+            concept_ranks_built_at_seq=(
+                {"kg_seq": header[0], "cluster_seq": header[1]} if header else None),
         )
 
     # ---------------------------------------------------------- /findings

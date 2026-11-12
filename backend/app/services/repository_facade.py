@@ -2251,11 +2251,13 @@ class RepositoryFacade:
         """Latest unified-rebuild state for this notebook."""
         return self._runtime.knowledge_lifecycle.unified_kg_rebuild_status(notebook_id)
 
-    def run_unified_kg_rebuild_job(self, notebook_id: str, job_id: str) -> int:
+    def run_unified_kg_rebuild_job(
+        self, notebook_id: str, job_id: str, *, ensure_concept_ranks: bool = False,
+    ) -> int:
         """Background unified-rebuild entry point."""
         self.require_indexing_pipeline_write(notebook_id)
         return self._runtime.knowledge_lifecycle.run_unified_kg_rebuild_job(
-            notebook_id, job_id
+            notebook_id, job_id, ensure_concept_ranks=ensure_concept_ranks
         )
 
     def fail_unified_kg_rebuild_submission(

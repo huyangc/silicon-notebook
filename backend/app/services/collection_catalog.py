@@ -1384,9 +1384,22 @@ class CollectionCatalogService:
         under its own key (the ceiling's digest), never under the unscoped
         entry.
         """
-        ceiling = self.source_ceiling(
-            db, notebook_id, ceiling_binds=ceiling_binds,
-        )
+        return self._memoized_kg_counts(
+            db, notebook_id,
+            self.source_ceiling(db, notebook_id, ceiling_binds=ceiling_binds))
+
+    def unscoped_usable_counts(self, notebook_id: str) -> Dict[str, int]:
+        """Whole-notebook counts for the online ranking admission gate (§4.1).
+
+        `_notebook_kg_counts(ceiling_binds=True)` can count only selected sources,
+        admitting an oversized notebook. Share the unscoped memo without a ceiling.
+        """
+        with self._database.connect() as db:
+            return dict(self._memoized_kg_counts(db, notebook_id, None))
+
+    def _memoized_kg_counts(
+        self, db: object, notebook_id: str, ceiling: Optional[SourceCeiling],
+    ) -> Dict[str, int]:
         row = self._unified_kg.graph_seq_row(db, notebook_id)
         version = (int(row[3]), int(row[0]))
         key = (notebook_id, "" if ceiling is None else ceiling.digest)
