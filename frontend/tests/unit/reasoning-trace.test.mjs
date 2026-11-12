@@ -1225,6 +1225,20 @@ test("论文工具三步的 detail 各有专属读法,不被通用 found/count �
   assert.equal(getTraceStepDetail({ ...extract, detail: { sources: 3, deferred: 3, result_ids: [] } }), "推迟 3 篇");
 });
 
+test("concept ranking has its own badge, action wording, and success/failure counts", () => {
+  const step = { step_type: "rank_concepts", summary: "", detail: { status: "ok", listed: 20, has_more: true } };
+  assert.equal(getTraceStepLabel(step), "排行");
+  assert.equal(getTraceStepDetail(step), "列出 20 个概念（还有更多）");
+  assert.equal(getTraceStepDetail({ ...step, detail: { status: "ok", listed: 0, has_more: false } }), "列出 0 个概念");
+  assert.equal(getTraceStepDetail({ ...step, detail: { status: "ok" } }), "");
+  for (const status of ["unavailable", "unsupported"]) {
+    assert.equal(getTraceStepDetail({ ...step, detail: { status, listed: 0 } }), "没能统计");
+  }
+  assert.equal(getTraceStepDetail({ ...step, detail: { status: "partial", listed: 12, has_more: true } }), "列出 12 个概念（部分库没能统计）");
+  assert.equal(getTraceStepDetail({ ...step, detail: { status: "partial", listed: 0 } }), "没能统计");
+  assert.equal(getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "rank_concepts" } }), "按提及来源数排行概念");
+});
+
 test("the final citation check step (PR-D) has its own label and no borrowed detail", () => {
   const step = {
     step_type: "citation_check",

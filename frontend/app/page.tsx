@@ -1,9 +1,13 @@
 "use client";
 
 import { FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { AlertTriangle, ArrowLeft, BarChart3, Cpu, Database, ExternalLink, GitMerge, LayoutDashboard, LayoutGrid, Link2, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, ScrollText, Settings, Share2, Sparkles, Table2, Trash2, Users, X } from "lucide-react";
 import "katex/dist/katex.min.css";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
+import type { RankingRebuildPhase } from "./ranking-failure-notice";
+import { KG_BUSY_NOTICE_HOLD_MS, type KgRebuildStartResult } from "./use-kg-graph";
+import { fetchKgAnalysis } from "./kg-analysis-api";
 import { AuthedImage } from "./authed-image";
 import { GlobalAskLauncher, type GlobalConversationRequest } from "./ask/global-ask-launcher";
 import { FormulaView } from "./formula-view";
@@ -204,7 +208,7 @@ import { askQuestionLimitHint, fetchAnswerMemoryLinks } from "./ask-api";
 import { buildPublicReportLink } from "./public-report";
 import { ImportedShareText } from "./imported-share-text";
 import { importedShareReferences } from "./imported-share-references";
-import { cancelScaleIndex, fetchIndexStatus, fetchScaleIndexStatus, rebuildScaleIndex, type IndexStatus } from "../features/kg-maintenance/kg-api";
+import { cancelScaleIndex, fetchIndexStatus, fetchScaleIndexStatus, fetchRebuildModelCalls, rebuildScaleIndex, type IndexStatus } from "../features/kg-maintenance/kg-api";
 import {
   type ModelServiceStatusItem,
   type ModelServicesStatus,
@@ -401,6 +405,7 @@ type InfoModal = {
   sections?: Array<[string, string[]]>;
   // `action` 先关弹窗再执行;`run` 会被拒绝的写动作,原因落在按钮旁(见 info-modal-actions.tsx)。
   actions: InfoModalAction[];
+  onClose?: () => void;
 };
 
 // Domain-agnostic fallback prompts. Used when a notebook has no expected
@@ -994,6 +999,48 @@ export default function Home() {
     },
   });
   const { knowledge: kgKnowledge, schema: kgSchema, graph: kgGraph } = kgWorkspace;
+  const [rankingRebuildPhases, setRankingRebuildPhases] = useState<Record<string, RankingRebuildPhase>>({});
+  const [rankingRebuildRejections, setRankingRebuildRejections] = useState<Record<string, {
+    reason: Extract<KgRebuildStartResult, { accepted: false }>["reason"];
+    notice?: string;
+    expiresAt: number;
+    suppressRunning: boolean;
+  }>>({});
+  const [rankingRebuildForbidden, setRankingRebuildForbidden] = useState(false);
+  const rankingRebuildPending = useRef(new Map<string, symbol>());
+  const rankingOwnerKey = `${currentUser?.id ?? ""}:${currentNotebookId ?? ""}`;
+  const rankingOwnerRef = useRef(rankingOwnerKey);
+  rankingOwnerRef.current = rankingOwnerKey;
+  const rankingOwnerGeneration = useRef(0);
+  const [rankingRebuildOwner, setRankingRebuildOwner] = useState(rankingOwnerKey);
+  if (rankingRebuildOwner !== rankingOwnerKey) {
+    rankingOwnerGeneration.current += 1;
+    setRankingRebuildOwner(rankingOwnerKey);
+    setRankingRebuildPhases({});
+    setRankingRebuildRejections({});
+    setRankingRebuildForbidden(false);
+    rankingRebuildPending.current.clear();
+  }
+  // An unconfirmed maintenance claim belongs to the notebook, not just the
+  // answer whose button was pressed. It must not imply success on other turns.
+  const rankingRebuildUnaccepted = Object.values(rankingRebuildRejections).some((result) => result.suppressRunning);
+  const rankingRebuildConfirming = Object.values(rankingRebuildPhases).includes("confirming");
+  const rankingRebuildPrevious = useRef({ notebookId: currentNotebookId, running: false });
+  const rankingAnalysisRequest = useRef(0);
+  useEffect(() => {
+    const timers = Object.entries(rankingRebuildRejections)
+      .filter(([, result]) => result.reason !== "forbidden" && result.expiresAt > 0)
+      .map(([id, result]) => window.setTimeout(() => {
+        setRankingRebuildRejections((current) => {
+          if (current[id] !== result) return current;
+          const next = { ...current };
+          if (result.suppressRunning) next[id] = { ...result, expiresAt: 0 };
+          else delete next[id];
+          return next;
+        });
+      }, Math.max(0, result.expiresAt - Date.now())));
+    return () => timers.forEach(window.clearTimeout);
+  }, [rankingRebuildRejections]);
   // 为什么下面每个 root modal 曲面都逐字重复 `rootModals.view("<slot>")` 三四遍,
   // 而不像上面 kgWorkspace 那样抽出一个 `modalA11y(slot)` helper 一次性返回
   // `{ topmost, zIndex, ... }`:`root-modal-boundary.test.mjs` 按四元组
@@ -1204,18 +1251,26 @@ export default function Home() {
   // message 沿用既有「动作名？\n\n后果说明」模板,按首个 \n\n 拆成弹窗的标题/正文。
   // 非破坏性动作(首次构建/补连孤立节点)不经过此函数,直接执行——与既有设计一致
   // (见 relinkFromKgView 注释)。
-  function confirmIndexAction(message: string, onConfirm: () => void) {
+  function confirmIndexAction(message: string, onConfirm: () => void, options?: {
+    onClose?: () => void;
+    lease?: RootModalLease<"info">;
+  }) {
     const splitAt = message.indexOf("\n\n");
     const title = splitAt >= 0 ? message.slice(0, splitAt).replace(/[？?]$/, "") : "确认操作";
     const body = splitAt >= 0 ? message.slice(splitAt + 2) : message;
-    openInfoModal({
+    const modal: InfoModal = {
       title,
       message: body,
       actions: [
         { label: "取消", action: () => {} },
         { label: "确定", danger: true, action: onConfirm },
       ],
-    });
+      onClose: options?.onClose,
+    };
+    if (options?.lease) {
+      if (rootModals.publish(options.lease)) setInfoModal(modal);
+      else options.onClose?.();
+    } else openInfoModal(modal);
   }
   // Kick off a KG build for `nb`; the effect below then polls until it's ready.
   const startKgBuild = (nb: string) => {
@@ -1942,6 +1997,8 @@ export default function Home() {
     () => (isAdvanced(uiMode) ? sourceScopeSelection : defaultSourceScopeSelection()),
     [uiMode, sourceScopeSelection],
   );
+  const rankingSelectAllAvailable = isAdvanced(uiMode) && currentNotebook
+    && !(effectiveSourceScopeSelection.allSelected && effectiveSourceScopeSelection.ids.size === 0);
   const effectiveBaseScopeSelection = useMemo(
     () => (isAdvanced(uiMode) ? baseScopeSelection : defaultBaseScopeSelection()),
     [uiMode, baseScopeSelection],
@@ -2332,6 +2389,102 @@ export default function Home() {
     feedbackSent,
     inFlight: askInFlight,
   } = askSession;
+  const rankingReaskTarget = useRef<{ owner: string; index: number; pendingContainer?: HTMLElement; settled: boolean } | null>(null);
+  const [rankingReaskSettlement, setRankingReaskSettlement] = useState(0);
+  function submitRankingQuestion(nextQuestion: string, options?: Parameters<typeof askSession.submit>[1]) {
+    const target = { owner: rankingOwnerKey, index: turns.length, settled: false };
+    rankingReaskTarget.current = target;
+    void askSession.submit(nextQuestion, options).catch(reportError).finally(() => {
+      if (rankingReaskTarget.current !== target) return;
+      target.settled = true;
+      setRankingReaskSettlement((value) => value + 1);
+    });
+  }
+  useEffect(() => {
+    const target = rankingReaskTarget.current;
+    if (!target) return;
+    if (target.owner !== rankingOwnerKey) { rankingReaskTarget.current = null; return; }
+    if (turns.length <= target.index && !(askInFlight && pendingQuestion)) {
+      if (target.pendingContainer || target.settled) rankingReaskTarget.current = null;
+      return;
+    }
+    const container = document.getElementById(chatTurnDomId(target.index));
+    if (container) {
+      if (!target.pendingContainer || document.activeElement === document.body
+        || document.activeElement === target.pendingContainer) {
+        container.focus();
+        container.scrollIntoView({ block: "nearest" });
+      }
+      if (turns.length > target.index) rankingReaskTarget.current = null;
+      else target.pendingContainer = container;
+    }
+  }, [turns, askInFlight, pendingQuestion, rankingOwnerKey, rankingReaskSettlement]);
+  // The graph owner restores background work after reload. All affected answers
+  // follow that same job; only its falling edge reads the final analysis stamp.
+  useEffect(() => {
+    // The graph hook claims its slot before the POST is accepted. A rejected
+    // submission is not a running analysis and must not trigger stamp settlement.
+    const previous = rankingRebuildPrevious.current;
+    rankingRebuildPrevious.current = { notebookId: currentNotebookId, running: kgGraph.rebuilding };
+    if (currentNotebookId && rankingRebuildPending.current.has(currentNotebookId)) return;
+    if (!currentNotebookId) return;
+    if (!kgGraph.rebuilding) {
+      setRankingRebuildRejections((current) => {
+        if (!Object.values(current).some((result) => result.suppressRunning)) return current;
+        return Object.fromEntries(Object.entries(current).map(([id, result]) =>
+          [id, result.suppressRunning ? { ...result, suppressRunning: false } : result]));
+      });
+    }
+    const answerIds = turns.filter((turn) => turn.response.ranking_failures?.some((failure) =>
+      failure.reason === "not_computed" && failure.notebook_ids.includes(currentNotebookId)
+    ) && !rankingRebuildRejections[turn.response.answer_id]?.suppressRunning
+      && (!rankingRebuildPhases[turn.response.answer_id] || rankingRebuildPhases[turn.response.answer_id] === "idle"
+        || rankingRebuildPhases[turn.response.answer_id] === "running")).map((turn) => turn.response.answer_id);
+    if (kgGraph.rebuilding && !rankingRebuildUnaccepted) {
+      rankingAnalysisRequest.current += 1;
+      setRankingRebuildPhases((current) => {
+        if (answerIds.every((id) => current[id] === "running")) return current;
+        return { ...current, ...Object.fromEntries(answerIds.map((id) => [id, "running" as const])) };
+      });
+    } else if (!kgGraph.rebuilding && previous.notebookId === currentNotebookId && previous.running
+      && Object.values(rankingRebuildPhases).includes("running")) {
+      const notebookId = currentNotebookId;
+      const owner = rankingOwnerKey;
+      const generation = rankingOwnerGeneration.current;
+      const request = ++rankingAnalysisRequest.current;
+      if (kgGraph.rebuildOutcome !== "succeeded") {
+        const notice = kgGraph.rebuildOutcome === "failed"
+          ? "重新合并没有完成，请稍后重试"
+          : kgGraph.rebuildOutcome === "timed_out" ? "重新合并还在进行，稍后打开知识图谱即可看到结果"
+            : "暂时无法确认更新结果，请稍后重试";
+        const runningIds = Object.keys(rankingRebuildPhases).filter((id) => rankingRebuildPhases[id] === "running");
+        setRankingRebuildPhases((current) => ({ ...current, ...Object.fromEntries(runningIds.map((id) => [id, "idle" as const])) }));
+        setRankingRebuildRejections((current) => ({ ...current, ...Object.fromEntries(runningIds.map((id) => [id, {
+          reason: "error" as const, notice, expiresAt: Date.now() + KG_BUSY_NOTICE_HOLD_MS, suppressRunning: false,
+        }])) }));
+        return;
+      }
+      fetchKgAnalysis(notebookId, { boards: 1, topMembers: 1, edges: 1 }).then((report) => {
+        if (rankingOwnerRef.current !== owner || rankingOwnerGeneration.current !== generation
+          || rankingAnalysisRequest.current !== request) return;
+        const phase = report.concept_ranks_built_at_seq !== null ? "produced" : "nothing";
+        setRankingRebuildPhases((current) => {
+          const next = { ...current };
+          for (const id of Object.keys(next)) if (next[id] === "running") next[id] = phase;
+          return next;
+        });
+      }).catch((error: unknown) => {
+        if (rankingOwnerRef.current !== owner || rankingOwnerGeneration.current !== generation
+          || rankingAnalysisRequest.current !== request) return;
+        setRankingRebuildPhases((current) => {
+          const next = { ...current };
+          for (const id of Object.keys(next)) if (next[id] === "running") next[id] = "idle";
+          return next;
+        });
+        reportError(error);
+      });
+    }
+  }, [currentNotebookId, kgGraph.rebuilding, kgGraph.rebuildOutcome, turns, rankingRebuildPhases, rankingRebuildRejections, rankingRebuildUnaccepted, rankingOwnerKey]);
   // 「关联报告」选择器与标签的移除键何时锁住:与回答方式选择器同一组条件(提交中、问题理解
   // 中、会话加载中、审阅卡在场)。提交会冻结当时的标签,锁住是为了界面上显示的标签始终就是
   // 下一次提交会带的那一份,而不是为了保护在途请求。
@@ -3802,6 +3955,99 @@ export default function Home() {
     );
   }
 
+  async function startRankingRebuild(answerId: string) {
+    const notebookId = currentNotebookId;
+    if (!notebookId || rankingRebuildPending.current.has(notebookId)
+      || kgGraph.rebuilding || kgGraph.relinking || kgGraph.deleting || kgGraph.buildingKg) return;
+    const epoch = workspaceEpochRef.current;
+    const operation = Symbol("ranking-rebuild");
+    const owner = rankingOwnerKey;
+    const generation = rankingOwnerGeneration.current;
+    const lease = rootModals.issue("info", rootModals.captureWorkspaceOwner());
+    if (!lease) return;
+    const owns = () => activeNotebookIdRef.current === notebookId && workspaceEpochRef.current === epoch;
+    const ownsNotebook = () => rankingOwnerRef.current === owner && rankingOwnerGeneration.current === generation;
+    const phase = (value: RankingRebuildPhase) => {
+      if (ownsNotebook()) setRankingRebuildPhases((current) => ({ ...current, [answerId]: value }));
+    };
+    rankingRebuildPending.current.set(notebookId, operation);
+    setRankingRebuildRejections((current) => {
+      const next = { ...current };
+      delete next[answerId];
+      return next;
+    });
+    phase("confirming");
+    let confirmed = false;
+    const cancel = () => {
+      if (!confirmed) {
+        if (rankingRebuildPending.current.get(notebookId) !== operation) return;
+        rankingRebuildPending.current.delete(notebookId);
+        if (ownsNotebook()) setRankingRebuildPhases((current) => ({ ...current, [answerId]: "idle" }));
+      }
+    };
+    const run = async () => {
+      if (!owns()) { cancel(); return; }
+      confirmed = true;
+      // The confirmation dialog closes (and cancels its presentation lease)
+      // before invoking this action. Reclaim the submission guard here.
+      rankingRebuildPending.current.set(notebookId, operation);
+      rankingAnalysisRequest.current += 1;
+      phase("confirming");
+      try {
+        const result = await kgWorkspace.startRebuild();
+        if (!ownsNotebook()) return;
+        if (result.accepted) phase("running");
+        else {
+          phase("idle");
+          if (result.reason === "forbidden") setRankingRebuildForbidden(true);
+          setRankingRebuildRejections((current) => ({ ...current, [answerId]: {
+            reason: result.reason, expiresAt: Date.now() + KG_BUSY_NOTICE_HOLD_MS, suppressRunning: true,
+          } }));
+        }
+      } catch (error) {
+        phase("idle");
+        if (ownsNotebook()) setRankingRebuildRejections((current) => ({ ...current, [answerId]: {
+          reason: "error", expiresAt: Date.now() + KG_BUSY_NOTICE_HOLD_MS, suppressRunning: true,
+        } }));
+        throw error;
+      } finally {
+        if (rankingRebuildPending.current.get(notebookId) === operation) rankingRebuildPending.current.delete(notebookId);
+      }
+    };
+    try {
+      const probe = await fetchRebuildModelCalls(notebookId).catch((error: unknown) => {
+        if (httpErrorStatus(error) === 403) {
+          if (ownsNotebook()) setRankingRebuildForbidden(true);
+          return null;
+        }
+        return { model_calls_possible: null };
+      });
+      if (probe === null) { cancel(); return; }
+      if (!owns() || !rootModals.leaseIsCurrent(lease)) { cancel(); return; }
+      if (probe.model_calls_possible === false) {
+        await run();
+      } else {
+        await new Promise<void>((resolve, reject) => {
+          confirmIndexAction(
+            "生成或更新图谱分析？\n\n将重算跨文档概念合并、主题板块和质量统计（不重新分析来源）。后台进行，完成后分析页会自动刷新。\n\n这一步可能调用已配置的模型。",
+            () => { void run().then(resolve, reject); },
+            { lease, onClose: () => {
+              // Modal actions close before invoking their callback. Let that
+              // callback claim the submission before treating closure as cancel.
+              queueMicrotask(() => { if (!confirmed) { cancel(); resolve(); } });
+            } },
+          );
+        });
+      }
+    } catch (error) {
+      cancel();
+      if (owns()) setRankingRebuildRejections((current) => ({ ...current, [answerId]: {
+        reason: "error", expiresAt: Date.now() + KG_BUSY_NOTICE_HOLD_MS, suppressRunning: true,
+      } }));
+      throw error;
+    }
+  }
+
   // —— 图谱分析「问题清单」的处置入口(设计 §四)。面板不执行任何处置，只把用户带到既有
   // 入口：删除走既有删除确认框；重新解析先弹一个说明确认框再走体检同款批量重新解析；补上
   // 关联走知识图谱视图同一个后台任务；没合并的同名概念跳到「待确认合并」。后端是权限的
@@ -4447,6 +4693,7 @@ export default function Home() {
         sourceLibrary.closeSourceDetail();
         return;
       case "info":
+        infoModal?.onClose?.();
         setInfoModal(null);
         return;
       case "model-service":
@@ -4512,8 +4759,10 @@ export default function Home() {
     modal: InfoModal,
     owner: RootModalOwner | null = rootModals.captureWorkspaceOwner() ?? rootModals.captureActorOwner(),
   ): RootModalLease<"info"> | null {
+    const previousLease = rootModals.activeLease("info");
     const lease = rootModals.open("info", owner);
     if (!lease) return null;
+    if (lease.issue === previousLease?.issue) infoModal?.onClose?.();
     setInfoModal(modal);
     return lease;
   }
@@ -5772,7 +6021,7 @@ export default function Home() {
                 ) : (
                   <div className="chat-thread">
                     {turns.map((turn, index) => (
-                      <div className="chat-turn" id={chatTurnDomId(index)} key={turn.response.answer_id || index}>
+                      <div className="chat-turn" tabIndex={-1} id={chatTurnDomId(index)} key={turn.response.answer_id || index}>
                         <ChatQuestion question={turn.question} askedAt={turn.askedAt} />
                         <ChatAnswer answeredAt={turn.response.answered_at}>
                           <AnswerView
@@ -5833,6 +6082,41 @@ export default function Home() {
                             // 重提这一轮的问题。提交会清空输入框，所以里面有没发的内容时禁用，
                             // 不替用户丢掉草稿。
                             onReask={() => { askSession.submit(turn.question).catch(reportError); }}
+                            rankingActions={{
+                              selectAllAndReask: rankingSelectAllAvailable
+                                && sessions.find((session) => session.id === turn.response.conversation_id)?.submitted_via !== "mcp"
+                                ? () => {
+                                  // Publish the selection before submit checks the current
+                                  // empty-scope policy; keep every existing admission gate.
+                                  flushSync(() => sourceLibrary.selectAllSources());
+                                  submitRankingQuestion(turn.question, {
+                                    sourceScope: sourceScopePayload(defaultSourceScopeSelection(), notebookSourceTotal,
+                                      sourceQuery.trim() === "" && sources.length === notebookSourceTotal
+                                        ? sources.map((source) => source.id) : undefined),
+                                  });
+                                } : undefined,
+                              startRebuild: kgWorkspaceCapabilities.canWriteNotebook && !readOnlyWorkspace
+                                && !rankingRebuildForbidden
+                                ? () => startRankingRebuild(turn.response.answer_id).catch(reportError) : undefined,
+                              rebuildNotebookId: kgWorkspaceCapabilities.canWriteNotebook && !readOnlyWorkspace
+                                ? currentNotebook.id : undefined,
+                              rebuildBusyReason: kgGraph.relinking || kgGraph.deleting || kgGraph.buildingKg
+                                || (rankingRebuildUnaccepted && kgGraph.rebuilding)
+                                || (rankingRebuildRejections[turn.response.answer_id]?.reason === "busy"
+                                  && (rankingRebuildRejections[turn.response.answer_id].expiresAt > 0
+                                    || rankingRebuildRejections[turn.response.answer_id].suppressRunning))
+                                ? "图谱正在处理其他任务" : undefined,
+                              rebuildError: (rankingRebuildRejections[turn.response.answer_id]?.expiresAt ?? 0) > 0
+                                ? rankingRebuildRejections[turn.response.answer_id]?.notice : undefined,
+                              rebuildPhase: rankingRebuildPhases[turn.response.answer_id] && rankingRebuildPhases[turn.response.answer_id] !== "idle"
+                                ? rankingRebuildPhases[turn.response.answer_id]
+                                : rankingRebuildConfirming ? "confirming" : rankingRebuildUnaccepted
+                                  ? "idle" : kgGraph.rebuilding ? "running" : "idle",
+                              reask: () => submitRankingQuestion(turn.question),
+                              reaskDisabledReason: askInFlight || sessionLoading
+                                ? "上一个问题还在进行中，请稍候"
+                                : question.trim() ? "输入框里还有没发送的内容，先发送或清空它再重问" : undefined,
+                            }}
                             reaskDisabledReason={
                               askInFlight || sessionLoading
                                 ? "上一个问题还在进行中，请稍候"
@@ -5857,7 +6141,7 @@ export default function Home() {
                       </div>
                     )}
                     {askInFlight && (
-                      <div className="chat-turn" id={pendingQuestion ? chatTurnDomId(turns.length) : undefined}>
+                      <div className="chat-turn" tabIndex={-1} id={pendingQuestion ? chatTurnDomId(turns.length) : undefined}>
                         {pendingQuestion && <ChatQuestion question={pendingQuestion} askedAt={pendingAskedAt} />}
                         {/* 这一问提交时挂的报告(冻结在提交那一刻,之后改标签不影响它)。 */}
                         {askSession.pendingLinkedReport && (

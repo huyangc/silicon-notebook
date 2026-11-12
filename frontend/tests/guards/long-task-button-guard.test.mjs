@@ -74,6 +74,12 @@ const LONG_TASK_BUTTONS = [
     why: "生成/更新分析:与重新合并、补上关联、删除知识图谱共用维护槽,在跑时不能再点",
     requires: ["analysisRunning", "analysisBlocked"],
   },
+  {
+    match: "actions.startRebuild",
+    module: "ranking-failure-notice.tsx",
+    why: "排行说明里的更新分析:探测和确认期间不能重复提交,并与其他图谱维护任务互斥;开始后由 running 状态替换控件",
+    requires: ["starting", 'phase === "confirming"', "actions.rebuildBusyReason"],
+  },
   { match: "run(spec, event)", module: "kg-analysis-findings.tsx", why: "问题的处置按钮:删除/重新解析/补上关联都是后台或确认后的长动作", requires: "disabledFor" },
   { match: "void dismiss()", module: "kg-analysis-findings.tsx", why: "标为正常:等回执期间不能重复提交", requires: 'busy === "dismiss"' },
   { match: "void undo()", module: "kg-analysis-findings.tsx", why: "撤销标为正常:等回执期间不能重复提交", requires: "busy" },

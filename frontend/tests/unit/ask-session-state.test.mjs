@@ -170,3 +170,11 @@ test("a conversation the list does not have yet is inserted first, with its repo
   assert.deepEqual(result[0].linked_report, { report_id: "r-1", title: "电池安全综述" });
   assert.equal(result[0].used_reasoning, true, "falls back to the last turn's trace");
 });
+
+test("opened MCP conversation details preserve their origin on new and existing history rows", () => {
+  const detail = openedDetail({ submitted_via: "mcp" });
+  const [inserted] = upsertSessionFromDetail([], detail);
+  assert.equal(inserted.submitted_via, "mcp");
+  const [updated] = upsertSessionFromDetail([{ ...inserted, submitted_via: "web" }], detail);
+  assert.equal(updated.submitted_via, "mcp");
+});

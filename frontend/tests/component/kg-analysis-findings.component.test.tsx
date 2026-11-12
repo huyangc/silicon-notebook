@@ -112,6 +112,7 @@ function summary(overrides: Partial<KgFindingsSummary> = {}): KgFindingsSummary 
 function report(overrides: Partial<KgAnalysisReport> = {}): KgAnalysisReport {
   return {
     notebook_id: "nb-1",
+    concept_ranks_built_at_seq: { kg_seq: 128, cluster_seq: 7 },
     generated_at: "2026-10-19T10:00:00Z",
     level: 0,
     ledger_state: "complete",

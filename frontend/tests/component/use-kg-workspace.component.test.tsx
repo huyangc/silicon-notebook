@@ -55,6 +55,7 @@ vi.mock("../../features/kg-maintenance/kg-api.ts", async (importOriginal) => ({
 }));
 
 import { useKgWorkspace } from "../../app/use-kg-workspace";
+import { KG_MAINTENANCE_POLL_MS, MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK } from "../../app/kg-workspace-model";
 import { useCollabPulse } from "../../app/use-collab-pulse";
 import { KG_BUSY_NOTICE_HOLD_MS } from "../../app/use-kg-graph";
 import { humanizedError } from "../../app/errors";
@@ -742,7 +743,6 @@ test("read-only policy neither restores review work nor admits write commands", 
     value!.reviewPendingMerges();
     value!.reviewAllMerges();
     value!.startRelink();
-    value!.startRebuild();
     value!.startKgDelete("notebook-a");
     value!.startKgBuild();
     value!.updateKnowledge("knowledge-a", { status: "approved" });
@@ -754,6 +754,7 @@ test("read-only policy neither restores review work nor admits write commands", 
   expect(kgApi.rebuildUnifiedKg).not.toHaveBeenCalled();
   expect(kgApi.buildKg).not.toHaveBeenCalled();
   expect(knowledgeApi.updateKnowledge).not.toHaveBeenCalled();
+  await expect(value!.startRebuild()).resolves.toEqual({ accepted: false, reason: "forbidden" });
 });
 
 test("live permission loss stops review-job polling without another read", async () => {
@@ -799,12 +800,12 @@ test("maintenance submission suppresses stale terminal polls and rechecks permis
   rerender(<Harness policy={writablePolicy} />);
   const rebuildPending = deferred<Awaited<ReturnType<typeof kgApi.rebuildUnifiedKg>>>();
   kgApi.rebuildUnifiedKg.mockReturnValueOnce(rebuildPending.promise);
-  let rebuilding!: Promise<void>;
+  let rebuilding!: ReturnType<HookValue["startRebuild"]>;
   act(() => { rebuilding = value!.startRebuild(); });
   expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledOnce();
   rerender(<Harness policy={readOnly} />);
   await act(async () => rebuildPending.reject(httpConflict()));
-  await rebuilding;
+  expect(await rebuilding).toEqual({ accepted: false, reason: "forbidden" });
   expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(1);
 });
 
@@ -879,17 +880,39 @@ test("synchronous rebuild commands stay single-flight and release authority afte
   render(<Harness />);
   await waitFor(() => expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledOnce());
 
-  let firstRebuild!: Promise<void>;
+  let firstRebuild!: ReturnType<HookValue["startRebuild"]>;
+  let duplicate!: ReturnType<HookValue["startRebuild"]>;
   act(() => {
     firstRebuild = value!.startRebuild();
-    void value!.startRebuild();
+    duplicate = value!.startRebuild();
   });
   expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledOnce();
+  expect(await duplicate).toEqual({ accepted: false, reason: "busy" });
   await act(async () => rebuildPending.reject(new Error("rebuild failed")));
-  await firstRebuild;
+  expect(await firstRebuild).toEqual({ accepted: false, reason: "error" });
   await waitFor(() => expect(value!.graph.rebuilding).toBe(false));
-  await act(async () => value!.startRebuild());
+  await act(async () => {
+    expect(await value!.startRebuild()).toEqual({ accepted: true });
+  });
   expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(2);
+});
+
+test.each(["http-403", "permission-lost"])("rebuild reports forbidden after %s and releases its claim", async (refusal) => {
+  const pending = deferred<Awaited<ReturnType<typeof kgApi.rebuildUnifiedKg>>>();
+  kgApi.rebuildUnifiedKg.mockReturnValueOnce(pending.promise);
+  const { rerender } = render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledOnce());
+  let rebuilding!: ReturnType<HookValue["startRebuild"]>;
+  act(() => { rebuilding = value!.startRebuild(); });
+  expect(value!.graph.rebuilding).toBe(true);
+  if (refusal === "permission-lost") rerender(<Harness policy={{ ...writablePolicy, canWriteKg: false }} />);
+  await act(async () => {
+    pending.reject(refusal === "http-403" ? humanizedError("没有更新分析的权限", 403) : new Error("request failed"));
+    expect(await rebuilding).toEqual({ accepted: false, reason: "forbidden" });
+  });
+  expect(value!.graph.rebuilding).toBe(false);
+  expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledOnce();
+  expect(effects.reportError).toHaveBeenCalledTimes(refusal === "http-403" ? 1 : 0);
 });
 
 test("KG delete claims before POST, blocks sibling entries, then settles with a refreshed, notebook-scoped timed result", async () => {
@@ -1019,11 +1042,115 @@ test("rebuild also re-claims its slot before a retry POST that follows an all-id
   kgApi.rebuildUnifiedKg
     .mockRejectedValueOnce(httpConflict())
     .mockResolvedValueOnce({ status: "running", notebook_id: "notebook-a", job_id: "rebuild-retry" });
-  await act(async () => value!.startRebuild());
+  await act(async () => {
+    expect(await value!.startRebuild()).toEqual({ accepted: true });
+  });
   expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(2);
   expect(value!.graph.rebuilding).toBe(true);
   expect(value!.graph.busyNotice).toBe("");
 });
+
+test.each(["succeeded", "failed", "idle"] as const)("rebuild exposes its %s settlement and clears it when a new rebuild starts", async (status) => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledOnce());
+  expect(value!.graph.rebuildOutcome).toBeNull();
+  vi.useFakeTimers();
+  await act(async () => { await value!.startRebuild(); });
+  kgApi.fetchUnifiedKgRebuildStatus.mockResolvedValue({
+    job_id: "rebuild-a", notebook_id: "notebook-a", status, running: false, clusters: 1,
+  });
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(value!.graph.rebuilding).toBe(false);
+  expect(value!.graph.rebuildOutcome).toBe(status === "idle" ? null : status);
+  await act(async () => { await value!.startRebuild(); });
+  expect(value!.graph.rebuilding).toBe(true);
+  expect(value!.graph.rebuildOutcome).toBeNull();
+});
+
+test.each(["succeeded", "failed"] as const)("another rebuild's %s terminal status does not invent an outcome for this job", async (status) => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledOnce());
+  vi.useFakeTimers();
+  await act(async () => { await value!.startRebuild(); });
+  kgApi.fetchUnifiedKgRebuildStatus.mockResolvedValue({
+    job_id: "other-rebuild", notebook_id: "notebook-a", status, running: false, clusters: 1,
+  });
+  await act(async () => { await vi.advanceTimersByTimeAsync(KG_MAINTENANCE_POLL_MS * MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK); });
+  expect(value!.graph.rebuilding).toBe(false);
+  expect(value!.graph.rebuildOutcome).toBeNull();
+});
+
+test("rebuild terminal outcomes stay with their actor and notebook and reset on a fresh adoption", async () => {
+  const { rerender } = render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledOnce());
+  vi.useFakeTimers();
+  await act(async () => { await value!.startRebuild(); });
+  kgApi.fetchUnifiedKgRebuildStatus.mockResolvedValue({
+    job_id: "rebuild-a", notebook_id: "notebook-a", status: "succeeded", running: false, clusters: 1,
+  });
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(value!.graph.rebuildOutcome).toBe("succeeded");
+  await act(async () => { rerender(<Harness notebookId="notebook-b" />); });
+  expect(value!.graph.rebuildOutcome).toBeNull();
+  await act(async () => { rerender(<Harness actorId="user-b" />); });
+  expect(value!.graph.rebuildOutcome).toBeNull();
+  await act(async () => { rerender(<Harness />); });
+  expect(value!.graph.rebuildOutcome).toBe("succeeded");
+  await act(async () => { rerender(<Harness notebookId="notebook-b" />); });
+  kgApi.fetchUnifiedKgRebuildStatus.mockResolvedValue({
+    job_id: "rebuild-new", notebook_id: "notebook-a", status: "running", running: true, clusters: 0,
+  });
+  await act(async () => { rerender(<Harness />); });
+  expect(value!.graph.rebuilding).toBe(true);
+  expect(value!.graph.rebuildOutcome).toBeNull();
+});
+
+test("a rebuild that remains running publishes timed_out after the existing bounded poll limit", async () => {
+  render(<Harness />);
+  await waitFor(() => expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledOnce());
+  kgApi.fetchUnifiedKgRebuildStatus.mockResolvedValue({
+    job_id: "rebuild-a", notebook_id: "notebook-a", status: "running", running: true, clusters: 0,
+  });
+  vi.useFakeTimers();
+  await act(async () => { await value!.startRebuild(); });
+  await act(async () => { await vi.advanceTimersByTimeAsync((REBUILD_POLL_MAX_ATTEMPTS + 1) * 3_000); });
+  expect(value!.graph.rebuilding).toBe(false);
+  expect(value!.graph.rebuildOutcome).toBe("timed_out");
+});
+
+test("rebuild without a visible notebook owner reports forbidden without issuing a write", async () => {
+  render(<Harness notebookId={null} />);
+  await expect(value!.startRebuild()).resolves.toEqual({ accepted: false, reason: "forbidden" });
+  expect(kgApi.rebuildUnifiedKg).not.toHaveBeenCalled();
+});
+
+test.each(["rebuild", "relink", "delete", "unknown", "idle"] as const)(
+  "a 409 rebuild reports acceptance only when its adoption sees a running rebuild (%s)",
+  async (adoption) => {
+    render(<Harness />);
+    await waitFor(() => expect(kgApi.fetchUnifiedKgRebuildStatus).toHaveBeenCalledOnce());
+    kgApi.rebuildUnifiedKg.mockRejectedValue(httpConflict());
+    if (adoption === "rebuild") {
+      kgApi.fetchUnifiedKgRebuildStatus.mockResolvedValue({ job_id: "other-rebuild", notebook_id: "notebook-a", status: "running", running: true, clusters: 0 });
+    } else if (adoption === "relink") {
+      kgApi.fetchRelinkStatus.mockResolvedValue({ job_id: "other-relink", notebook_id: "notebook-a", status: "running", running: true, linked: 0 });
+    } else if (adoption === "delete") {
+      kgApi.fetchKgDeleteStatus.mockResolvedValue(deleteStatus("running", { job_id: "other-delete" }));
+    } else if (adoption === "unknown") {
+      kgApi.fetchUnifiedKgRebuildStatus.mockRejectedValue(new Error("status unavailable"));
+    }
+    await act(async () => {
+      expect(await value!.startRebuild()).toEqual(adoption === "rebuild"
+        ? { accepted: true }
+        : { accepted: false, reason: "busy" });
+    });
+    expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(adoption === "idle" ? 2 : 1);
+    if (adoption === "rebuild") expect(value!.graph.rebuilding).toBe(true);
+    if (adoption === "relink") expect(value!.graph.relinking).toBe(true);
+    if (adoption === "delete") expect(value!.graph.deleting).toBe(true);
+    if (adoption === "idle") expect(value!.graph.rebuilding).toBe(false);
+  },
+);
 
 async function refusedDeleteWithUnknownAdoption() {
   render(<Harness />);
@@ -1436,6 +1563,7 @@ test("pending rebuild retries remain bounded when every replacement POST stays o
   });
   expect(kgApi.rebuildUnifiedKg).toHaveBeenCalledTimes(REBUILD_POLL_MAX_ATTEMPTS + 1);
   expect(value!.graph.rebuilding).toBe(false);
+  expect(value!.graph.rebuildOutcome).toBe("timed_out");
   expect(notify.mock.calls.filter(
     ([message]) => message === REBUILD_POLL_TIMED_OUT.toast,
   )).toHaveLength(1);

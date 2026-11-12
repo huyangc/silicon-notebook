@@ -1,7 +1,7 @@
 """Shared concept-ranking contracts, independent of services and storage."""
 import heapq
 from dataclasses import dataclass
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 CONCEPT_RANK_PRECOMPUTED_ROWS = 80
 CONCEPT_RANK_HEADER_RANK = 0
@@ -58,6 +58,13 @@ class ConceptRankWrite:
     built_at_kg_seq: int
     built_at_cluster_seq: int
     rows: Tuple[PrecomputedRankRow, ...]
+
+
+def concept_ranks_are_current(
+    header: Optional[Tuple[int, int]], kg_seq: int, cluster_seq: int,
+) -> bool:
+    """The ranking header must exist and match both published graph generations."""
+    return header == (kg_seq, cluster_seq)
 
 
 def rank_sort_key(canonical_id: str, source_count: int, object_count: int) -> tuple:

@@ -967,7 +967,7 @@ export function mergeRulesChanged(mergeCode: KgMergeCodeState): boolean {
  *
  *   1. 合并结果建于旧的合并规则 → 可点,写「合并规则已更新，需要更新一次」;
  *   2. `dirty`;任一在场产物或板块 `stale === true`(问题清单的规则版本不同也算在它的
- *      新鲜度里);账本不齐(含「升级后还没生成」);数字互相对不上 → 可点;
+ *      新鲜度里);账本不齐(含「升级后还没生成」);排行数据缺失或陈旧;数字互相对不上 → 可点;
  *   3. 只剩 `stale === null`(合并代次无从判断)→ 置灰,写为什么普通更新改变不了它;
  *   4. 全部一致 → 置灰,写「已与当前图谱一致，无需更新」。
  *
@@ -989,6 +989,7 @@ export function analysisUpdateState(report: KgAnalysisReport): AnalysisUpdateSta
     (item.freshness.seq_behind ?? 0) < 0 || (item.freshness.cluster_seq_behind ?? 0) < 0
   ));
   const stale = report.state.dirty
+    || report?.concept_ranks_stale === true
     || report.artifacts.some((item) => item.present && item.freshness.stale === true)
     || boards.stale === true;
   if (incomplete || integrity || stale) {

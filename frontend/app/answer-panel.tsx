@@ -24,7 +24,9 @@ import {
   type AnswerReference,
 } from "./answer-formatting";
 import { AnswerMarkdown } from "./answer-markdown";
-import { answerBodyWithoutCompletenessNotice } from "./answer-completeness";
+import { answerBodyWithoutCompletenessNotice, answerBodyWithoutRankingNotice } from "./answer-completeness";
+import { ConceptRankingCard } from "./concept-ranking-card";
+import { RankingFailureNotice, type RankingNoticeActions } from "./ranking-failure-notice";
 import type { CitationImageOrder, CitationImageSlotItem } from "./rehype-citation-images";
 import { ExternalEvidenceSection, GapSuggestionsPanel } from "./answer-gap-suggestions";
 import { AuthedImage } from "./authed-image";
@@ -74,6 +76,7 @@ import { retrievalScopeSummary, skippedLibrariesNotice } from "./source-scope";
 import type {
   AskResponse,
   Citation,
+  ConceptRankingResult,
   LinkedReportReceipt,
   KnowhowBatchCoverage,
   KnowhowResultSet,
@@ -766,7 +769,7 @@ function KnowhowResultSets({
   notebookNames,
   onOpenSource,
 }: {
-  resultSets: (KnowhowResultSet | TypedCollectionResult | SpreadsheetAnalysisResult)[] | undefined;
+  resultSets: (KnowhowResultSet | TypedCollectionResult | SpreadsheetAnalysisResult | ConceptRankingResult)[] | undefined;
   batchCoverage: KnowhowBatchCoverage | undefined;
   /** 可选：不传时清单卡不渲染跳转按钮（见 KnowhowResultSetCard 上的说明）。 */
   onOpenKnowhowRow?: (tableId: string, rowId: string) => void;
@@ -804,6 +807,16 @@ function KnowhowResultSets({
           `.rows.slice(...)` 上抛 TypeError,炸穿整个答案面板(且答案持久化后,
           历史重开会继续炸)。这正是本函数存在的理由。 */}
       {resultSets.map((resultSet, position) => {
+        if (resultSet.kind === "concept_ranking") {
+          return (
+            <ConceptRankingCard
+              key={`concept-ranking-${position}-${resultSet.query}-${resultSet.scope}`}
+              resultSet={resultSet}
+              notebookNames={notebookNames}
+              onOpenSource={onOpenSource}
+            />
+          );
+        }
         if (resultSet.kind === "knowhow") {
           return (
             <KnowhowResultSetCard
@@ -1179,6 +1192,7 @@ export function AnswerView({
   testingAllModels,
   onReask,
   reaskDisabledReason,
+  rankingActions,
 }: {
   answer: AskResponse;
   feedbackSent: string;
@@ -1252,6 +1266,7 @@ export function AnswerView({
   onReask?: () => void;
   /** 非空时「再问一次」禁用，`title` 说明为什么（在途提问、输入框里有未发送的内容）。 */
   reaskDisabledReason?: string;
+  rankingActions?: RankingNoticeActions;
 }) {
   const [copied, setCopied] = useState(false);
   const [citePopover, setCitePopover] = useState<{
@@ -1274,7 +1289,10 @@ export function AnswerView({
   // 后端把完整性提示附在答案末尾。模型正文可能以未闭合的 Markdown 代码围栏
   // 结束；把已知的服务端提示单独渲染，避免它被吞进代码块。复制仍使用原文。
   const completenessNotice = answer.completeness_notice ?? "";
-  const renderedAnswerText = answerBodyWithoutCompletenessNotice(answerText, completenessNotice);
+  const rankingNotice = answer.ranking_notice ?? "";
+  const renderedAnswerText = answerBodyWithoutCompletenessNotice(
+    answerBodyWithoutRankingNotice(answerText, rankingNotice), completenessNotice,
+  );
   const scaleIndexQueued = scaleIndexStatus?.state === "queued"
     && !scaleIndexStatus.building;
   const references = useMemo(
@@ -1442,6 +1460,11 @@ export function AnswerView({
           </details>
         );
       })()}
+      <RankingFailureNotice
+        notice={rankingNotice}
+        failures={answer.ranking_failures ?? []}
+        actions={rankingActions}
+      />
       <AnswerMarkdown
         answer={renderedAnswerText}
         anchors={answer.anchors}

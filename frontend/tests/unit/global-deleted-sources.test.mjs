@@ -67,6 +67,26 @@ test("legacy answers and collection images of a deleted library are degraded too
   assert.equal(marked.response.citations[0].source_deleted, true);
 });
 
+test("concept ranking sections mark only citations in deleted libraries without losing rows", () => {
+  const live = citation("nb-live");
+  const gone = citation("nb-gone");
+  const result = {
+    kind: "concept_ranking", query: "概念", scope: "all",
+    sections: [
+      { coverage: { notebook_id: "nb-gone", status: "ok" }, rows: [{ name: "已删库概念", source_count: 5, citations: [gone] }] },
+      { coverage: { notebook_id: "nb-live", status: "ok" }, rows: [{ name: "可用概念", source_count: 3, citations: [live, gone] }] },
+    ],
+  };
+  const marked = withDeletedSources({ deleted_notebook_ids: ["nb-gone"], answer: { result_sets: [result] } }).answer.result_sets[0];
+  assert.equal(marked.sections.length, 2);
+  assert.equal(marked.sections[0].rows[0].source_count, 5);
+  assert.equal(marked.sections[0].rows[0].citations[0].source_deleted, true);
+  assert.equal("images" in marked.sections[0].rows[0].citations[0], false);
+  assert.equal(marked.sections[1].rows[0].citations[0], live);
+  assert.equal(marked.sections[1].rows[0].citations[1].source_deleted, true);
+  assert.equal(gone.source_deleted, undefined, "the original result is not mutated");
+});
+
 test("a turn with no deleted library passes through as the same object", () => {
   const plain = { job_id: "gask-3", answer: { answer_id: "gask-3", anchors: [], citations: [] } };
   assert.equal(withDeletedSources(plain), plain);

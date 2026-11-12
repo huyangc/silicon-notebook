@@ -119,6 +119,23 @@ function detailFixture(): AskDetail {
   };
 }
 
+test("排行说明在只读回答中只出现一次，复制仍保留原始纯文字", async () => {
+  const user = userEvent.setup();
+  const notice = "没能按提及次数排行：本笔记本还没有排行数据。";
+  const answer = { ...answerFixture(), answer: `> ${notice}\n\n正文内容。`, ranking_notice: notice,
+    ranking_failures: [{ reason: "not_computed" as const, notebook_ids: ["nb-1"], line: notice }],
+  };
+  const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+  render(<AnswerView answer={answer} feedbackSent="" notebookId="nb-1" notebookNames={{}}
+    buildingScaleIndex={false} memorySaved={false} />);
+  expect(screen.getAllByText(notice)).toHaveLength(1);
+  expect(screen.getByText("正文内容。")).toBeInTheDocument();
+  const noticeElement = screen.getByText(notice).closest('[role="note"]')!;
+  expect(noticeElement.querySelector("button, a")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "复制回答" }));
+  expect(writeText).toHaveBeenCalledWith(answer.answer);
+});
+
 
 test("只读活动详情里不出现任何点了没反应的控件", async () => {
   const user = userEvent.setup();

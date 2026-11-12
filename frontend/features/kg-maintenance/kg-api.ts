@@ -52,6 +52,13 @@ export const rebuildUnifiedKg = (nb: string) =>
     method: "POST",
   });
 
+/** Click-only probe; rebuild status polling must not perform this potentially costly read. */
+export const fetchRebuildModelCalls = (notebookId: string): Promise<{ model_calls_possible: boolean | null }> =>
+  requestJson<{ model_calls_possible: boolean | null }>(
+    `/notebooks/${notebookId}/unified-kg/rebuild/model-calls`,
+    options,
+  );
+
 export const fetchUnifiedKgRebuildStatus = (nb: string) =>
   requestJson<UnifiedKgRebuildStatus>(
     `/notebooks/${nb}/unified-kg/rebuild/status`,

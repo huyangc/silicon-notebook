@@ -778,6 +778,59 @@ export type ExternalEvidenceSection = {
   }[];
 };
 
+/** Concept ranking wire contract, mirrored from backend/app/models/ask.py. */
+export type ConceptRankingRow = {
+  name: string;
+  source_count: number;
+  object_count: number;
+  same_name_group?: string;
+  notebook_id: string;
+  tier: string;
+  citations: Citation[];
+};
+
+export type ConceptRankingCoverage = {
+  notebook_id: string;
+  notebook_name: string;
+  status: "ok" | "unsupported" | "unavailable";
+  reason: string;
+  path: string;
+  scoped: boolean;
+  drifted: boolean;
+  scope_sources: number;
+  candidates_lexical_only: boolean;
+  stale_counts: boolean;
+  seq_behind: number;
+  recount_capped: boolean;
+  recount_skipped: number;
+  unnamed_dropped: number;
+  duplicate_import_pairs: number;
+  exact: boolean;
+  skipped: string;
+  next_cursor: string;
+};
+
+export type ConceptRankingSection = {
+  coverage: ConceptRankingCoverage;
+  rows: ConceptRankingRow[];
+  notice: string;
+};
+
+export type ConceptRankingResult = {
+  kind: "concept_ranking";
+  query: string;
+  scope: string;
+  sections: ConceptRankingSection[];
+};
+
+export type RankingFailure = {
+  reason: "scoped_large_notebook" | "not_computed" | "analysis_unavailable"
+    | "refresh_produced_nothing" | "recount_budget_exhausted" | "rank_failed" | "library_skipped";
+  notebook_ids: string[];
+  line: string;
+  fallback_line?: string;
+};
+
 export type AskResponse = {
   answer_id: string;
   asked_at?: string;
@@ -787,6 +840,8 @@ export type AskResponse = {
   answer: string;
   /** 服务端完整性提示；在模型 Markdown 正文之外渲染。 */
   completeness_notice?: string;
+  ranking_notice?: string;
+  ranking_failures?: RankingFailure[];
   grounded: boolean;
   anchors: AnswerAnchor[];
   related_knowledge: KnowledgeRecord[];
@@ -812,7 +867,7 @@ export type AskResponse = {
    * 渲染必须按 kind 分派，不能按下标猜测；未知 kind 一律跳过，不得当作 knowhow
    * 卡片渲染（会在 `.rows` 上炸出 TypeError）。
    */
-  result_sets?: (KnowhowResultSet | TypedCollectionResult | SpreadsheetAnalysisResult)[];
+  result_sets?: (KnowhowResultSet | TypedCollectionResult | SpreadsheetAnalysisResult | ConceptRankingResult)[];
   /** 整个请求范围的覆盖率；与每张已选表自身的 coverage 分开。 */
   result_coverage?: KnowhowBatchCoverage;
   /** 站外来源建议（``ask.gap_consult``）：不是证据，缺席时后端按 `exclude_if`
@@ -846,6 +901,7 @@ export type AskResponse = {
 
 export type ChatTurn = { question: string; response: AskResponse; askedAt?: string };
 export type ConversationSummary = {
+  submitted_via?: string;
   id: string;
   title: string;
   updated_at: string;
@@ -855,6 +911,7 @@ export type ConversationSummary = {
   linked_report?: LinkedReportRef;
 };
 export type ConversationDetail = {
+  submitted_via?: string;
   id: string;
   notebook_id: string;
   title: string;

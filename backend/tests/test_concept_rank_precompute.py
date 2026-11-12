@@ -82,10 +82,36 @@ def test_empty_notebook_publishes_header_and_overview_reads_it_outside_cache(rep
     overview = service.overview(nb)
     header = _header(repo, nb)
     assert overview.concept_ranks_built_at_seq == {"kg_seq": header[0], "cluster_seq": header[1]}
+    assert overview.concept_ranks_stale is False
     assert KgAnalysisResponse(**asdict(overview)).concept_ranks_built_at_seq.kg_seq == header[0]
+    assert KgAnalysisResponse(**asdict(overview)).concept_ranks_stale is False
     _delete_ranks(repo, nb)
     assert service.overview(nb).concept_ranks_built_at_seq is None
+    assert KgAnalysisResponse(**asdict(service.overview(nb))).concept_ranks_stale is True
     lifecycle.rebuild_communities(nb, ensure_concept_ranks=True)
+    assert _header(repo, nb) == _seq(repo, nb)
+    assert service.overview(nb).concept_ranks_stale is False
+
+
+@pytest.mark.parametrize("changed_seq", ["kg", "cluster"])
+@pytest.mark.parametrize("offset", [-1, 1])
+def test_overview_rank_staleness_matches_write_gate_for_both_generations(repo, changed_seq, offset):
+    nb = repo.create_notebook(NotebookCreate(name="rank freshness")).id
+    lifecycle = repo._runtime.knowledge_lifecycle
+    lifecycle.rebuild_communities(nb)
+    kg_seq, cluster_seq = _seq(repo, nb)
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "UPDATE kg_concept_ranks SET built_at_kg_seq=?,built_at_cluster_seq=? "
+            "WHERE notebook_id=? AND rank=0",
+            (kg_seq + (offset if changed_seq == "kg" else 0),
+             cluster_seq + (offset if changed_seq == "cluster" else 0), nb),
+        )
+    assert repo._runtime.kg_analysis.overview(nb).concept_ranks_stale is True
+    lifecycle.rebuild_communities(nb, ensure_concept_ranks=False)
+    assert repo._runtime.kg_analysis.overview(nb).concept_ranks_stale is True
+    lifecycle.rebuild_communities(nb, ensure_concept_ranks=True)
+    assert repo._runtime.kg_analysis.overview(nb).concept_ranks_stale is False
     assert _header(repo, nb) == _seq(repo, nb)
 
 

@@ -117,6 +117,13 @@ const KG_MAINTENANCE_RETRY_MESSAGE = "当前有其他整理任务刚结束，请
 /** 按钮旁那句占用说明停留多久:一整句带人名,留够读完的时间。 */
 export const KG_BUSY_NOTICE_HOLD_MS = 6000;
 
+/** Whether this click started or adopted a rebuild, independently of other maintenance work. */
+export type KgRebuildStartResult =
+  | { accepted: true }
+  | { accepted: false; reason: "busy" | "forbidden" | "error" };
+
+export type KgRebuildOutcome = "succeeded" | "failed" | "timed_out";
+
 /**
  * 被 409 挡下的是哪一颗按钮:说明只画在**那一颗**旁边(AGENTS.md Interactive feedback)。
  * build = 整理;rebuild_all = 全部重新分析;relink = 补上关联;merge = 重新合并。
@@ -248,6 +255,15 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   const [reviewAllStarting, setReviewAllStarting] = useState(false);
   const [reviewAllRunning, setReviewAllRunning] = useState(false);
   const [rebuildingNotebookIds, setRebuildingNotebookIds] = useState<Set<string>>(new Set());
+  // Last settled rebuild, scoped exactly like the maintenance claim. A new
+  // launch or adoption clears its owner's old outcome before exposing running.
+  const [rebuildOutcomes, setRebuildOutcomes] = useState<Map<string, KgRebuildOutcome>>(new Map());
+  const clearRebuildOutcome = (key: string) => setRebuildOutcomes((current) => {
+    if (!current.has(key)) return current;
+    const next = new Map(current);
+    next.delete(key);
+    return next;
+  });
   const [relinkingNotebookIds, setRelinkingNotebookIds] = useState<Set<string>>(new Set());
   const [deletingNotebookIds, setDeletingNotebookIds] = useState<Set<string>>(new Set());
   // 「删除知识图谱」的结果按 actor+notebook 分格保存,和忙碌位同一把键:切到 B 看不到 A 的
@@ -372,6 +388,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     ]).then(([rebuild, relink, deletion]) => {
       if (!owns(owner)) return;
       if (rebuild && (rebuild.running || rebuild.status === "running")) {
+        clearRebuildOutcome(ownerKey(owner));
         setRebuildingNotebookIds((current) => claimNotebookSlot(current, ownerKey(owner)));
       }
       if (relink && (relink.running || relink.status === "running")) {
@@ -1177,19 +1194,20 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
 
   const adoptRunningMaintenance = async (
     owner: KgWorkspaceOwner,
-  ): Promise<"adopted" | "idle" | "unknown"> => {
+  ): Promise<{ verdict: "adopted" | "idle" | "unknown"; rebuildRunning: boolean }> => {
     const [rebuildResult, relinkResult, deletionResult] = await Promise.allSettled([
       fetchUnifiedKgRebuildStatus(owner.notebookId),
       fetchRelinkStatus(owner.notebookId),
       fetchKgDeleteStatus(owner.notebookId),
     ]);
-    if (!ownsIdentity(owner)) return "unknown";
+    if (!ownsIdentity(owner)) return { verdict: "unknown", rebuildRunning: false };
     const key = maintenanceOwnerKey(owner);
     let rebuildRunning = false;
     if (rebuildResult.status === "fulfilled") {
       rebuildRunning = Boolean(
         rebuildResult.value.running || rebuildResult.value.status === "running",
       );
+      if (rebuildRunning) clearRebuildOutcome(key);
       setRebuildingNotebookIds((current) => rebuildRunning
         ? claimNotebookSlot(current, key)
         : releaseNotebookClaim(current, key));
@@ -1218,10 +1236,10 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         ? claimNotebookSlot(current, key)
         : releaseNotebookClaim(current, key));
     }
-    if (rebuildRunning || relinkRunning || deleteRunning) return "adopted";
+    if (rebuildRunning || relinkRunning || deleteRunning) return { verdict: "adopted", rebuildRunning };
     if (rebuildResult.status === "rejected" || relinkResult.status === "rejected"
-      || deletionResult.status === "rejected") return "unknown";
-    return "idle";
+      || deletionResult.status === "rejected") return { verdict: "unknown", rebuildRunning };
+    return { verdict: "idle", rebuildRunning };
   };
 
   const startRelink = async () => {
@@ -1260,7 +1278,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
             return;
           }
           showBusyNotice(key, toUserMessage(error, KG_MAINTENANCE_RETRY_MESSAGE), "relink");
-          const verdict = await adoptRunningMaintenance(owner);
+          const { verdict } = await adoptRunningMaintenance(owner);
           if (verdict !== "idle") return;
           if (attempt === 0) continue;
           setRelinkingNotebookIds((current) => releaseNotebookClaim(current, key));
@@ -1281,14 +1299,15 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
   const launchRebuild = async (
     owner: KgWorkspaceOwner,
     options: { allowClaimed?: boolean; decision?: boolean; pendingRetry?: boolean } = {},
-  ): Promise<"started" | "adopted" | "waiting" | "denied" | "failed"> => {
+  ): Promise<"started" | "adopted" | "waiting" | "denied" | "failed" | "busy"> => {
     if (!owns(owner) || !policyRef.current.canWriteKg) return "denied";
     const key = maintenanceOwnerKey(owner);
     const jobKey = maintenanceJobKey(owner, "rebuild");
     if (!options.allowClaimed
       && (rebuildingNotebookIds.has(key) || relinkingNotebookIds.has(key) || buildingKg
         || deletingNotebookIds.has(key)
-        || submittingMaintenanceRef.current.has(jobKey))) return "failed";
+        || submittingMaintenanceRef.current.has(jobKey))) return "busy";
+    clearRebuildOutcome(key);
     setRebuildingNotebookIds((current) => claimNotebookSlot(current, key));
     expectedMaintenanceJobRef.current.delete(jobKey);
     for (const attempt of [0, 1]) {
@@ -1327,14 +1346,17 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
             return "denied";
           }
           showBusyNotice(key, toUserMessage(error, KG_MAINTENANCE_RETRY_MESSAGE), "merge");
-          const verdict = await adoptRunningMaintenance(owner);
+          const { verdict, rebuildRunning } = await adoptRunningMaintenance(owner);
           if (options.decision && verdict !== "idle") {
             setRebuildingNotebookIds((current) => claimNotebookSlot(current, key));
           }
-          if (verdict !== "idle") return "adopted";
+          // Merge decisions retain their pending-rebuild retry lifecycle. A
+          // direct caller only accepted a rebuild if that specific job exists;
+          // adopting another maintenance kind or an unreadable status is not it.
+          if (verdict !== "idle") return options.decision || rebuildRunning ? "adopted" : "busy";
           if (attempt === 0) continue;
           setRebuildingNotebookIds((current) => releaseNotebookClaim(current, key));
-          return "failed";
+          return "busy";
         }
         if (owns(owner) && policyRef.current.canWriteKg) {
           clearBusyNotice(key, "merge");
@@ -1342,6 +1364,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         }
         if (options.pendingRetry) return "waiting";
         setRebuildingNotebookIds((current) => releaseNotebookClaim(current, key));
+        if (httpErrorStatus(error) === 403 || !owns(owner) || !policyRef.current.canWriteKg) return "denied";
         return "failed";
       } finally {
         submittingMaintenanceRef.current.delete(jobKey);
@@ -1350,10 +1373,15 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     return "failed";
   };
 
-  const startRebuild = async () => {
+  const startRebuild = async (): Promise<KgRebuildStartResult> => {
     const owner = currentOwner();
-    if (!owner) return;
-    await launchRebuild(owner);
+    if (!owner) return { accepted: false, reason: "forbidden" };
+    const result = await launchRebuild(owner);
+    if (result === "started" || result === "adopted") return { accepted: true };
+    return {
+      accepted: false,
+      reason: result === "denied" ? "forbidden" : result === "failed" ? "error" : "busy",
+    };
   };
 
   // 「删除知识图谱」:破坏性后台任务,与补上关联/重新合并共用服务端一个维护槽。形态逐项
@@ -1396,7 +1424,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
             setDeletingNotebookIds((current) => releaseNotebookClaim(current, key));
             return;
           }
-          const verdict = await adoptRunningMaintenance(owner);
+          const { verdict } = await adoptRunningMaintenance(owner);
           if (verdict === "idle" && attempt === 0) continue;
           // 这次点击没有开始删除。领养到了正在跑的那件事(可能正是另一个标签页发起的删除,
           // 那时它的终态结果稍后会覆盖这一行),或者三种维护状态都说没在跑、服务端仍回 409
@@ -1566,6 +1594,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
     const settle = async (
       outcome: ReturnType<typeof rebuildPollOutcome>,
       terminalReceipt: string,
+      rebuildOutcome: KgRebuildOutcome | null,
     ) => {
       if (outcome.toast && owns(owner) && lastTerminalToastReceipt !== terminalReceipt) {
         lastTerminalToastReceipt = terminalReceipt;
@@ -1587,6 +1616,10 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
         } catch { /* the explicit pending marker remains retryable */ }
       }
       if (outcome.refresh && owns(owner)) await refreshAfterRebuild();
+      if (ownsIdentity(owner)) {
+        if (rebuildOutcome === null) clearRebuildOutcome(key);
+        else setRebuildOutcomes((current) => new Map(current).set(key, rebuildOutcome));
+      }
       expectedMaintenanceJobRef.current.delete(maintenanceJobKey(owner, "rebuild"));
       setRebuildingNotebookIds((current) => releaseNotebookClaim(current, key));
       return true;
@@ -1597,7 +1630,7 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       if (attempts > REBUILD_POLL_MAX_ATTEMPTS) {
         settled = true;
         window.clearInterval(timer);
-        await settle(REBUILD_POLL_TIMED_OUT, "timeout");
+        await settle(REBUILD_POLL_TIMED_OUT, "timeout", "timed_out");
         return;
       }
       inFlight = true;
@@ -1614,7 +1647,9 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
           if (mismatchStreak < MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK) return;
         }
         settled = true;
-        const finished = await settle(outcome, `${status.job_id}\0${status.status}`);
+        const finished = await settle(outcome, `${status.job_id}\0${status.status}`,
+          expected && status.job_id !== expected ? null
+            : status.status === "succeeded" ? "succeeded" : status.status === "failed" ? "failed" : null);
         if (finished) window.clearInterval(timer);
       } catch { /* transient status error; retain the claim */ }
       finally { inFlight = false; }
@@ -1736,6 +1771,9 @@ export function useKgGraph({ authority, policy, effects }: UseKgGraphOptions) {
       reviewAllRunning: visible && reviewAllRunning,
       rebuilding: visible && Boolean(currentOwner()
         && busyForNotebook(rebuildingNotebookIds, maintenanceOwnerKey(currentOwner()!))),
+      rebuildOutcome: visible
+        ? rebuildOutcomes.get(maintenanceOwnerKey(currentOwner()!)) ?? null
+        : null,
       relinking: visible && Boolean(currentOwner()
         && busyForNotebook(relinkingNotebookIds, maintenanceOwnerKey(currentOwner()!))),
       deleting: visible && Boolean(currentOwner()

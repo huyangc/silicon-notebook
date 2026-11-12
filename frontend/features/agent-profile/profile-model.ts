@@ -531,6 +531,7 @@ export const EXPERIENCE_ACTION_LABELS: Readonly<Record<string, string>> = {
   find_documents: "按主题找文档",
   paper_cards: "论文卡片",
   extract_fields: "逐篇提取",
+  rank_concepts: "概念排行",
 };
 
 /**

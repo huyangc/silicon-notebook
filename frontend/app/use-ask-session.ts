@@ -2249,7 +2249,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     return true;
   }
 
-  async function submit(nextQuestion = question) {
+  async function submit(nextQuestion = question, options?: { sourceScope?: SourceScopePayload }) {
     pageUnloadingRef.current = false;
     const owner = currentNotebookOwner();
     if (
@@ -2274,7 +2274,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     // The report tag is frozen in the same breath as the scope it is judged
     // under: what the run reads is what was on screen when Send was pressed.
     const scopeSnapshot: SubmissionSnapshot = {
-      sourceScope: copySourceScope(currentPolicy.sourceScope),
+      sourceScope: copySourceScope(options?.sourceScope ?? currentPolicy.sourceScope),
       baseScope: copyBaseScope(currentPolicy.baseScope),
       linkedReport: linkedReportRef.current,
     };

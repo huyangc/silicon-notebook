@@ -48,6 +48,8 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   find_documents: "找文",
   paper_cards: "卡片",
   extract_fields: "提取",
+  // 按提及来源数统计的独立动作，不用「枚举」或「检索」。
+  rank_concepts: "排行",
   // outline = 大纲便签(update_outline reflect 动作写的那一步);仅 exhaustive 档
   // 且 REASONING_OUTLINE_ENABLED 开启时出现(设计文档 §3.1)。
   outline: "大纲",
@@ -145,6 +147,7 @@ const NEXT_ACTION: Record<string, string> = {
   find_sources: "按主题找出相关文档",
   get_paper_cards: "读取论文要点卡片",
   extract_from_sources: "逐篇提取指定字段",
+  rank_concepts: "按提及来源数排行概念",
 };
 
 export type ReasoningTraceSummary = {
@@ -440,6 +443,14 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   // find_documents(论文工具 find_sources 的步):按主题排好序的一页文档。detail 带
   // strong/related(两档篇数)与 listed(本页篇数),listed 不是 found/count,必须排在
   // 通用分支之前;召回触顶时说明可能还有更多。
+  if (step.step_type === "rank_concepts") {
+    if (detail.status !== "ok") return typeof detail.listed === "number" && detail.listed > 0
+      ? `列出 ${detail.listed} 个概念（部分库没能统计）`
+      : "没能统计";
+    return typeof detail.listed === "number"
+      ? `列出 ${detail.listed} 个概念${detail.has_more ? "（还有更多）" : ""}`
+      : "";
+  }
   if (step.step_type === "find_documents") {
     if (typeof detail.strong !== "number" || typeof detail.related !== "number") return "";
     const capped = detail.semantic_recall_capped ? "（可能还有更多）" : "";

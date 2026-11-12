@@ -188,9 +188,10 @@ test("动作词表与推理轨迹的步标签同口径，认不出的退回中�
   assert.deepEqual(Object.keys(EXPERIENCE_ACTION_LABELS).sort(), [
     "browse_sections", "enumerate", "exact_lookup", "expand", "expand_community",
     "extract_fields", "find_documents", "follow_chain",
-    "outline", "paper_cards", "ppr", "read_document", "read_section", "retrieve", "search_chunks",
+    "outline", "paper_cards", "ppr", "rank_concepts", "read_document", "read_section", "retrieve", "search_chunks",
   ]);
   assert.equal(experienceActionLabel("find_documents"), "按主题找文档");
+  assert.equal(experienceActionLabel("rank_concepts"), "概念排行");
   assert.equal(experienceActionLabel("paper_cards"), "论文卡片");
   assert.equal(experienceActionLabel("extract_fields"), "逐篇提取");
   assert.equal(experienceActionLabel("browse_sections"), "章节目录");

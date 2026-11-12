@@ -272,6 +272,7 @@ export default function GlobalAskWorkspace({ compact = false, embedded = false, 
                     dismissSignal={active && !share}
                     buildingScaleIndex={false}
                     memorySaved={false}
+                    rankingActions={{ reask: () => { ask.setDraft(job.question); composer.current?.focus(); } }}
                   />
                   {/* 轨迹恒在回答**下方**：完成态由 AnswerView 自己渲染在这个位置
                       （answer.reasoning_trace），这里补的是它不渲染的那两种情形，

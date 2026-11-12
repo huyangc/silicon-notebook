@@ -7023,6 +7023,11 @@
                 }
               ]
             },
+            "concept_ranks_stale": {
+              "default": true,
+              "title": "Concept Ranks Stale",
+              "type": "boolean"
+            },
             "findings_summary": {
               "$ref": "#/components/schemas/FindingsSummary"
             },
