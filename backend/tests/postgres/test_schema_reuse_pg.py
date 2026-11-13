@@ -29,14 +29,21 @@ def base_url():
 
 @pytest.fixture(autouse=True)
 def isolated_pool(monkeypatch):
-    """Run every case against this module's own pool, never the session's."""
+    """Run every case against this module's own pool and outcome counts."""
     monkeypatch.setattr(pg, "_POOLED_SCHEMAS", {})
+    monkeypatch.setattr(pg, "_REUSE_OUTCOMES", {})
     yield
     url = os.environ.get("TEST_POSTGRES_URL")
     if url:
         with psycopg.connect(url, autocommit=True) as conn:
             for schema in pg._POOLED_SCHEMAS.values():
                 pg._drop_schema(conn, schema)
+
+
+def _parked(base_url):
+    """The schema the last teardown parked; names the refusal reason if none."""
+    assert base_url in pg._POOLED_SCHEMAS, f"teardown did not reuse: {pg._REUSE_OUTCOMES}"
+    return pg._POOLED_SCHEMAS[base_url]
 
 
 def _test_schemas(base_url):
@@ -96,7 +103,7 @@ def test_a_reused_schema_is_renamed_and_matches_a_freshly_migrated_one(base_url)
             conn.execute(
                 "SELECT setval(pg_get_serial_sequence('knowledge_objects', 'ordinal'), 1000, false)")
             conn.execute("SELECT pg_stat_force_next_flush()")
-    assert len(pg._POOLED_SCHEMAS) == 1
+    _parked(base_url)
     with pg._reused_postgres_scope(base_url) as reused:
         assert reused.schema != fresh.schema
         assert not {fresh.schema} & _test_schemas(base_url)
@@ -142,7 +149,7 @@ def test_a_late_writer_from_the_previous_test_cannot_reach_the_next_one(base_url
 def test_anything_a_data_reset_cannot_undo_drops_the_schema(base_url, change):
     with pg._reused_postgres_scope(base_url):
         pass  # migrate once so the case below runs on a reused schema
-    (parked,) = pg._POOLED_SCHEMAS.values()
+    parked = _parked(base_url)
     before = _test_schemas(base_url)
     with pg._reused_postgres_scope(base_url) as scoped:
         _write_rows(scoped.url)

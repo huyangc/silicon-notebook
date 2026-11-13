@@ -351,12 +351,20 @@ _LEDGER_TABLE = "silicon_schema_migrations"
 _RESET_LOCK_TIMEOUT = "3s"
 # base_url -> parked schema name ready for the next test.
 _POOLED_SCHEMAS: dict[str, str] = {}
-# base_url -> fingerprint of a freshly migrated schema on that database.
-_BASELINE_FINGERPRINTS: dict[str, str] = {}
+# base_url -> catalog items and ledger of a freshly migrated schema on that database.
+_BASELINE_FINGERPRINTS: dict[str, tuple[frozenset[str], str]] = {}
+# Outcome of every reuse teardown in this process ("reused" or why it was
+# dropped); reported in the PostgreSQL lane's terminal summary so a reuse rate
+# that silently collapses (for example only in CI) is visible.
+_REUSE_OUTCOMES: dict[str, int] = {}
+_REUSE_OUTCOMES_KEY = "postgres_schema_reuse"
+# For catalog_changed outcomes: the first differing catalog item (truncated), counted.
+_REUSE_CATALOG_DIFFS: dict[str, int] = {}
+_REUSE_DIFFS_KEY = "postgres_schema_reuse_catalog_diffs"
 
 _SCHEMA_FINGERPRINT_SQL = """
 WITH ns AS (SELECT oid, nspname FROM pg_namespace WHERE nspname = %(schema)s)
-SELECT md5(coalesce(string_agg(item, E'\\n' ORDER BY item), '')) FROM (
+SELECT item FROM (
   SELECT 'n|' || coalesce(n.nspacl::text, '') || '|' || pg_get_userbyid(n.nspowner)
     FROM pg_namespace n JOIN ns USING (oid)
   UNION ALL
@@ -459,7 +467,7 @@ def _migrate_scope(url: str) -> None:
         database.close()
 
 
-def _schema_fingerprint(conn, schema: str) -> str:
+def _schema_fingerprint(conn, schema: str) -> tuple[frozenset[str], str]:
     from psycopg import sql
 
     # Catalog text (type names, defaults, index and rule definitions) is printed
@@ -467,14 +475,16 @@ def _schema_fingerprint(conn, schema: str) -> str:
     # renamed for every test: pin search_path so the fingerprint is name-free.
     with conn.transaction():
         conn.execute(sql.SQL("SET LOCAL search_path = {}").format(sql.Identifier(schema)))
-        catalog = conn.execute(_SCHEMA_FINGERPRINT_SQL, {"schema": schema}).fetchone()[0]
+        catalog = frozenset(
+            row[0] for row in conn.execute(_SCHEMA_FINGERPRINT_SQL, {"schema": schema})
+        )
         ledger = conn.execute(
             sql.SQL(
                 "SELECT md5(coalesce(string_agg(version::text || ':' || checksum, ',' "
                 "ORDER BY version), '')) FROM {}.{}"
             ).format(sql.Identifier(schema), sql.Identifier(_LEDGER_TABLE))
         ).fetchone()[0]
-    return f"{catalog}:{ledger}"
+    return catalog, ledger
 
 
 def _capture_baseline(conn, base_url: str, schema: str) -> None:
@@ -520,13 +530,16 @@ def _drop_schema(conn, schema: str) -> None:
     conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
 
 
-def _reset_if_pristine(conn, base_url: str, schema: str) -> bool:
-    """Reset ``schema`` to its freshly migrated state; False when it must be dropped."""
+def _reset_if_pristine(conn, base_url: str, schema: str) -> str:
+    """Reset ``schema`` to its freshly migrated state.
+
+    Returns ``"reused"``, or the reason the schema must be dropped instead.
+    """
     from psycopg import sql
 
     baseline = _BASELINE_FINGERPRINTS.get(base_url)
     if baseline is None:
-        return False
+        return "no_baseline"
     with conn.transaction():
         conn.execute(sql.SQL("SET LOCAL lock_timeout = {}").format(sql.Literal(_RESET_LOCK_TIMEOUT)))
         all_tables = [
@@ -543,8 +556,14 @@ def _reset_if_pristine(conn, base_url: str, schema: str) -> bool:
                     sql.SQL(", ").join(sql.Identifier(schema, name) for name in all_tables)
                 )
             )
-        if _schema_fingerprint(conn, schema) != baseline:
-            return False
+        current = _schema_fingerprint(conn, schema)
+        if current != baseline:
+            if current[1] != baseline[1]:
+                return "ledger_changed"
+            first = min(current[0] ^ baseline[0])
+            marker = ("+" if first in current[0] else "-") + first[:120]
+            _REUSE_CATALOG_DIFFS[marker] = _REUSE_CATALOG_DIFFS.get(marker, 0) + 1
+            return "catalog_changed"
         # Ledger statistics are irrelevant to every plan the tests pin, and
         # autovacuum may produce them on a fresh schema too (migration inserts
         # its rows); any other table's statistics mean the planner state moved.
@@ -552,7 +571,7 @@ def _reset_if_pristine(conn, base_url: str, schema: str) -> bool:
             "SELECT EXISTS (SELECT 1 FROM pg_stats WHERE schemaname = %s AND tablename <> %s)",
             (schema, _LEDGER_TABLE),
         ).fetchone()[0]:
-            return False
+            return "planner_statistics"
         touched = [row[0] for row in conn.execute(_TOUCHED_TABLES_SQL, (schema, _LEDGER_TABLE))]
         if touched:
             conn.execute(
@@ -596,7 +615,7 @@ def _reset_if_pristine(conn, base_url: str, schema: str) -> bool:
                     sql.SQL(", ").join(sql.Identifier(schema, name) for name in busy)
                 )
             )
-    return True
+    return "reused"
 
 
 @contextmanager
@@ -654,10 +673,11 @@ def _reused_postgres_scope(base_url: str):
                 # longer reach the renamed one; statements already running are
                 # waited out by the reset's table locks.
                 _rename_schema(conn, schema, parking)
-                reusable = _reset_if_pristine(conn, base_url, parking)
-            except psycopg.Error:
-                reusable = False
-            if reusable:
+                outcome = _reset_if_pristine(conn, base_url, parking)
+            except psycopg.Error as exc:
+                outcome = f"error:{type(exc).__name__}"
+            _REUSE_OUTCOMES[outcome] = _REUSE_OUTCOMES.get(outcome, 0) + 1
+            if outcome == "reused":
                 _POOLED_SCHEMAS[base_url] = parking
             else:
                 _drop_schema(conn, parking)
@@ -666,6 +686,10 @@ def _reused_postgres_scope(base_url: str):
 
 def pytest_sessionfinish(session) -> None:
     """Drop this process's parked schemas; each xdist worker owns its own."""
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if workeroutput is not None:
+        workeroutput[_REUSE_OUTCOMES_KEY] = dict(_REUSE_OUTCOMES)
+        workeroutput[_REUSE_DIFFS_KEY] = dict(_REUSE_CATALOG_DIFFS)
     if not _POOLED_SCHEMAS:
         return
     import psycopg
@@ -1013,3 +1037,22 @@ def postgres_non_utf_database(postgres_non_utf_scope: ScopedPostgres):
         yield database
     finally:
         database.close()
+
+
+def pytest_testnodedown(node, error) -> None:
+    """Fold an xdist worker's reuse outcomes into the controller's counts."""
+    output = getattr(node, "workeroutput", {})
+    for outcome, count in output.get(_REUSE_OUTCOMES_KEY, {}).items():
+        _REUSE_OUTCOMES[outcome] = _REUSE_OUTCOMES.get(outcome, 0) + count
+    for marker, count in output.get(_REUSE_DIFFS_KEY, {}).items():
+        _REUSE_CATALOG_DIFFS[marker] = _REUSE_CATALOG_DIFFS.get(marker, 0) + count
+
+
+def pytest_terminal_summary(terminalreporter) -> None:
+    if not _REUSE_OUTCOMES or getattr(terminalreporter.config, "workeroutput", None) is not None:
+        return
+    total = sum(_REUSE_OUTCOMES.values())
+    detail = ", ".join(f"{outcome}={count}" for outcome, count in sorted(_REUSE_OUTCOMES.items()))
+    terminalreporter.write_line(f"PostgreSQL schema reuse: {total} teardowns; {detail}")
+    for marker, count in sorted(_REUSE_CATALOG_DIFFS.items(), key=lambda item: -item[1])[:8]:
+        terminalreporter.write_line(f"  catalog change x{count}: {marker}")
