@@ -127,7 +127,9 @@ def test_a_late_writer_from_the_previous_test_cannot_reach_the_next_one(base_url
     "ALTER TABLE notebooks ADD COLUMN purpose text COLLATE \"C\" NOT NULL DEFAULT ''",
     "CREATE INDEX reuse_probe_idx ON notebooks (name)",
     "CREATE TABLE reuse_probe (id int)",
-    "ALTER TABLE user_profiles DISABLE TRIGGER ALL",
+    # A table owner (the least-privilege CI role) may disable user triggers;
+    # foreign-key triggers need a superuser, so the ordinary lane cannot touch them.
+    "ALTER TABLE chunks DISABLE TRIGGER USER",
     "CREATE RULE reuse_probe AS ON INSERT TO notebooks DO INSTEAD NOTHING",
     "ALTER SEQUENCE knowledge_objects_ordinal_seq INCREMENT BY 5",
     "ALTER TABLE notebooks ALTER COLUMN name SET STATISTICS 5",
