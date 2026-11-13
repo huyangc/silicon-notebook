@@ -453,8 +453,22 @@ class ConceptRankingService:
         # layer applies the run's own ceiling, candidates only map to canonical
         # ids, and every count below is still taken inside `ceiling`.
         narrowed_ids = sorted(ceiling) if ceiling is not None and coverage.scoped else None
-        hits = retrieval.retrieve_scored(nb, query, types=["concept"],
-                                        allowed_source_ids=narrowed_ids)
+        # Candidate retrieval reads the database too: it runs inside the same
+        # deadline and Stop as the recount, so a slow read cannot overrun the
+        # library's budget. Running out of time here means nothing was counted.
+        try:
+            with read_budget(deadline, cancel_event):
+                hits = retrieval.retrieve_scored(nb, query, types=["concept"],
+                                                allowed_source_ids=narrowed_ids)
+        except (AskCancelled, RetrievalControlError):
+            raise
+        except Exception as exc:
+            raise_if_cancelled(cancel_event)
+            if classify_read_failure(exc) != "timeout":
+                raise
+            coverage = replace(coverage, status=RANK_STATUS_UNAVAILABLE,
+                               reason=RANK_REASON_RECOUNT_BUDGET_EXHAUSTED)
+            return [], coverage, False, hashlib.sha256(b"[]").hexdigest()
         object_ids = []
         for hit in hits:
             if hit.object_type == "concept":
