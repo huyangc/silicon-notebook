@@ -118,6 +118,13 @@ def check_scope(repo, monkeypatch, *, postgres):
         assert drifted.coverage.scope_sources == 12
         assert next(r for r in drifted.rows if r.canonical_id == "wide").source_count == 9
         assert next(r for r in drifted.rows if r.canonical_id == "scope").name == "范围内"
+        # An un-narrowed run with a bound ceiling keeps semantic candidate
+        # retrieval: no explicit allow-list reaches the retrieval layer.
+        retrieval = hits("wide-01")
+        unnarrowed = svc.rank(nb, ConceptRankRequest(query="主题"), retrieval=retrieval,
+                              ceiling_binds=True, participants=(nb,)).computation.libraries[0]
+        assert not unnarrowed.coverage.scoped and not unnarrowed.coverage.candidates_lexical_only
+        assert retrieval.retrieve_scored.call_args.kwargs["allowed_source_ids"] is None
 
 
 def test_narrowed_and_drifted_scopes(repo, monkeypatch):
@@ -268,7 +275,8 @@ def test_f2_and_owner_evidence_json_shapes(repo, monkeypatch):
     monkeypatch.setattr(store, "concept_rank_citation_rows", lambda *args, **kwargs: raw)
     lib = request(service(repo), nb).computation.libraries[0]
     assert lib.coverage.duplicate_import_pairs == 7
-    assert [e.element_id for e in lib.rows[0].evidence] == ["e0", "e1"]
+    # s02's unparseable evidence spends no slot, so s03 fills the third one.
+    assert [e.element_id for e in lib.rows[0].evidence] == ["e0", "e1", "fourth"]
     assert all(e.notebook_id == nb for e in lib.rows[0].evidence)
 
 
@@ -1020,3 +1028,22 @@ def test_new_drift_invalidates_bound_exact_memo_without_sequence_or_digest_chang
     coverage = second.computation.libraries[0].coverage
     assert coverage.drifted and not coverage.exact and coverage.scope_sources == 13
     assert full_rows.call_count == 2
+
+
+def test_citation_slot_is_spent_only_on_usable_evidence(repo, monkeypatch):
+    nb = seed_rank_world(repo, postgres=False)
+    store = repo._runtime.unified_kg
+    real = store.concept_rank_citation_rows
+
+    def citation_rows(db, notebook_id, ids, *, ceiling, scan):
+        rows = [row for row in real(db, notebook_id, ids, ceiling=ceiling, scan=scan)
+                if row[0] != "wide"]
+        # The first scanned member of s01 carries no usable evidence; the second does.
+        rows += [("wide", "wide-x1", "s01", "[]"),
+                 ("wide", "wide-x2", "s01", '[{"source_id": "s01", "element_id": "el-good"}]')]
+        return rows
+
+    monkeypatch.setattr(store, "concept_rank_citation_rows", citation_rows)
+    library = request(service(repo), nb).computation.libraries[0]
+    wide = next(r for r in library.rows if r.canonical_id == "wide")
+    assert [e.element_id for e in wide.evidence] == ["el-good"]
