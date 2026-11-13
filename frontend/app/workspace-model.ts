@@ -829,6 +829,7 @@ export type RankingFailure = {
   notebook_ids: string[];
   line: string;
   fallback_line?: string;
+  produced_line?: string;
 };
 
 export type AskResponse = {

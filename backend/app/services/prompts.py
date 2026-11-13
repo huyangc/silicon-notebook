@@ -1533,7 +1533,10 @@ def reflect_prompt(
             "Unless exact is true, do not claim these are the most mentioned concepts. "
             "Keep libraries separate; never sum counts across libraries. "
             "When status is not ok, never estimate the most mentioned from retrieval samples: "
-            "the answer must state that counting failed, why, and what to do next.\n")
+            "the answer must state that counting failed, why, in everyday words. "
+            "When ranking fails, never repeat internal codes or field names in the answer, "
+            "and never suggest narrowing the selected sources; the system already shows recovery actions, "
+            "so do not propose other remedies.\n")
     enumerate_actions = (
         "- enumerate_elements: the question asks you to LIST or INVENTORY a "
         "kind of document element rather than to find the most relevant ones. "

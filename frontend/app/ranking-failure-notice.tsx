@@ -75,6 +75,7 @@ function RankingNoticeLine({ line, failure, actions }: {
         if (phase === "nothing") {
           text = failure.fallback_line ?? line;
         } else if (phase === "produced") {
+          text = failure.produced_line ?? line;
           action = reask;
         } else if (phase === "running") {
           action = <span role="status">正在更新分析…</span>;

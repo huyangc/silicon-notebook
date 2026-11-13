@@ -136,6 +136,37 @@ def test_enabled_prompt_schema_and_parser_share_the_same_action(repo):
     assert "- rank_concepts:" in prompt
     assert "number of distinct sources that mention it" in prompt
     assert "same_name_group" in prompt and "never sum counts across libraries" in prompt
+    assert "never repeat internal codes or field names in the answer" in prompt
+    assert "never suggest narrowing the selected sources" in prompt
+
+
+def test_enabled_ranking_prompt_snapshot():
+    prompt = reflect_prompt("q", "c", rank_concepts=True, rank_cap=3)
+    assert hashlib.sha256(prompt.encode()).hexdigest() == "44a58dca0948efdea705e08a6d740d5760cd943f570628b1363b1c0265cbf67c"
+
+
+@pytest.mark.parametrize(("reason", "cause"), [
+    ("scoped_large_notebook", "this notebook is large and only part of its sources are selected."),
+    ("not_computed", "ranking data for this notebook has not been generated yet."),
+    ("analysis_unavailable", "this notebook does not support this kind of count."),
+    ("recount_budget_exhausted", "counting timed out."),
+    ("rank_failed", "counting hit an error."),
+    ("library_skipped", "1 notebook(s) could not be read."),
+])
+def test_failure_ledger_gives_plain_cause_and_forbids_invented_remedies(repo, reason, cause):
+    retriever, _ = _retriever(repo)
+    state = _state()
+    kwargs = {"skipped": "read_failed"} if reason == "library_skipped" else {"reason": reason}
+    page = _page(count=0, status="unavailable", **kwargs)
+    retriever.concept_ranking.rank = lambda *_args, **_kwargs: page
+    retriever._action_rank_concepts(state, ReflectDecision(next_action="rank_concepts"))
+    ledger = retriever._rank_ledger(state)
+    assert "Counting did not complete. Do not infer which items are mentioned most from retrieved samples." in ledger
+    assert "Never mention internal codes, field names or flags" in ledger
+    assert "do not propose other remedies" in ledger
+    assert "never suggest narrowing the selected sources." in ledger
+    assert f"Cause: {cause}" in ledger
+    assert reason not in ledger
 
 
 @pytest.mark.parametrize("scope", ["wrong", [], True])
