@@ -446,8 +446,15 @@ class ConceptRankingService:
                               query_candidates_digest=candidate_digest), cacheable
 
     def _query_rows(self, nb, query, coverage, retrieval, ceiling, deadline, cancel_event):
+        # Only a user-narrowed run passes its source set to candidate retrieval:
+        # an explicit allow-list turns off the retrieval layer's semantic lane
+        # (design §4.1). An un-narrowed run whose ceiling is still bound (another
+        # member's Memory excluded, or drift) keeps normal routing; the retrieval
+        # layer applies the run's own ceiling, candidates only map to canonical
+        # ids, and every count below is still taken inside `ceiling`.
+        narrowed_ids = sorted(ceiling) if ceiling is not None and coverage.scoped else None
         hits = retrieval.retrieve_scored(nb, query, types=["concept"],
-                                        allowed_source_ids=sorted(ceiling) if ceiling is not None else None)
+                                        allowed_source_ids=narrowed_ids)
         object_ids = []
         for hit in hits:
             if hit.object_type == "concept":
@@ -545,10 +552,13 @@ class ConceptRankingService:
                 selected = owners.setdefault(canonical, set())
                 if source_id in selected or len(selected) >= CONCEPT_RANK_CITATIONS_PER_ROW:
                     continue
-                selected.add(source_id)
                 for entry in json_list_value(raw):
                     if (isinstance(entry, dict) and entry.get("source_id") == source_id
                             and entry.get("element_id")):
+                        # A source's slot is spent only once it yields usable
+                        # evidence; a member without it leaves the slot for the
+                        # next member of the same source in the bounded scan.
+                        selected.add(source_id)
                         evidence.setdefault(canonical, []).append(ConceptRankEvidence(
                             str(entry["element_id"]), source_id, nb))
                         break
