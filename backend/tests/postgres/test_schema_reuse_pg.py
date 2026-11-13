@@ -140,6 +140,9 @@ def test_a_late_writer_from_the_previous_test_cannot_reach_the_next_one(base_url
     "CREATE RULE reuse_probe AS ON INSERT TO notebooks DO INSTEAD NOTHING",
     "ALTER SEQUENCE knowledge_objects_ordinal_seq INCREMENT BY 5",
     "ALTER TABLE notebooks ALTER COLUMN name SET STATISTICS 5",
+    # A column option set by DDL still counts; only internal pg_ options
+    # (pg_attver, which differs per migration) are ignored.
+    "ALTER TABLE notebooks ALTER COLUMN name SET (n_distinct = 5)",
     "REVOKE ALL ON notebooks FROM PUBLIC; GRANT SELECT ON notebooks TO PUBLIC",
     "ALTER TABLE notebooks SET (autovacuum_enabled = false)",
     "DELETE FROM silicon_schema_migrations WHERE version = "
