@@ -240,18 +240,27 @@ def _reset_postgres_knowledge_counts_cache():
     偏爱 ``nb-pending`` 这类好记的字面量),后一个测试就可能读到前一个测试留下的
     memo 快照,而它对应的 seq 在新 schema 里从未出现过,不会自然失效。这里在每个
     测试前清空一次,让直插 SQL(不经过会 bump ``kg_mutation_seq`` 的服务层)的测试
-    总是从冷状态开始。"""
-    from app.repositories.postgres import knowledge_counts_cache
+    总是从冷状态开始。
+
+    ``search._KNN_INDEX_CACHE`` 按 (库名, 表 OID) 缓存索引是否存在。schema 现在按
+    worker 复用,表 OID 跨测试不变,所以也在这里清空,免得上一个测试的「没有索引」
+    结论被下一个建了索引的测试读到。"""
+    from app.repositories.postgres import knowledge_counts_cache, search
 
     knowledge_counts_cache.invalidate()
+    search.reset_knn_index_cache()
 
 
 @pytest.fixture
-def postgres_scope() -> ScopedPostgres:
+def postgres_scope(request) -> ScopedPostgres:
     base_url = os.environ.get("TEST_POSTGRES_URL")
     if not base_url:
         pytest.skip("TEST_POSTGRES_URL is not configured")
-    with _isolated_postgres_scope(base_url) as scoped:
+    if request.node.get_closest_marker(FRESH_SCHEMA_MARKER) is not None:
+        with _isolated_postgres_scope(base_url) as scoped:
+            yield scoped
+        return
+    with _reused_postgres_scope(base_url) as scoped:
         yield scoped
 
 
@@ -300,6 +309,376 @@ def _isolated_postgres_scope(base_url: str):
             )
 
 
+# ---------------------------------------------------------------------------
+# Per-worker schema reuse.
+#
+# Migrating an empty schema (about 90 files) used to be most of every PG
+# test's setup: locally ~95% of setup, in CI about half of the whole PG lane.
+# A freshly migrated schema holds no rows except the migration ledger and has
+# never advanced a sequence (checked when the baseline is captured), so instead
+# of migrating and dropping a schema per test, each worker process keeps at
+# most one migrated schema per database and resets it between tests:
+#
+# * every test still gets its own ``sn_test_<uuid>`` name (the pooled schema is
+#   renamed), so URL-keyed process caches and stray connections from an earlier
+#   test can never address it;
+# * at teardown the schema is renamed to a parking name, then, inside one
+#   transaction that first takes ACCESS EXCLUSIVE on every table (so a
+#   statement the finished test still has in flight either finishes first or
+#   makes the reset time out), it is reused only if it is still pristine: the
+#   catalog fingerprint (tables, column order and definitions, column options,
+#   defaults, indexes, constraints, triggers including foreign-key enablement,
+#   rules, functions, types, policies, sequence parameters, ACLs, owners,
+#   reloptions, replica identity, extended statistics) and the migration ledger
+#   match the freshly migrated baseline, and the planner has no column
+#   statistics for it (``pg_stats`` empty). Anything else -- DDL, GRANTs, a
+#   rewritten ledger, ANALYZE-driven stats, a lock that blocks the reset -- falls
+#   back to dropping it, exactly as before;
+# * the reset truncates every table the test touched, except the ledger
+#   (RESTART IDENTITY; truncation also gives the table a new relfilenode, so
+#   relpages/reltuples/relallvisible return to their never-vacuumed values),
+#   restarts every sequence, and for tables whose cumulative modification
+#   counter could reach autovacuum's analyze threshold ANALYZEs the empty table
+#   and truncates it again, so autovacuum does not ANALYZE it during the next
+#   test.
+#
+# Tests that need an empty, unmigrated schema (migration tests that migrate to
+# a target version, raw-DDL tests) opt out with the ``postgres_fresh_schema``
+# marker and keep the old create-and-drop path.
+# ---------------------------------------------------------------------------
+FRESH_SCHEMA_MARKER = "postgres_fresh_schema"
+_LEDGER_TABLE = "silicon_schema_migrations"
+_RESET_LOCK_TIMEOUT = "3s"
+# base_url -> parked schema name ready for the next test.
+_POOLED_SCHEMAS: dict[str, str] = {}
+# base_url -> fingerprint of a freshly migrated schema on that database.
+_BASELINE_FINGERPRINTS: dict[str, str] = {}
+
+_SCHEMA_FINGERPRINT_SQL = """
+WITH ns AS (SELECT oid, nspname FROM pg_namespace WHERE nspname = %(schema)s)
+SELECT md5(coalesce(string_agg(item, E'\\n' ORDER BY item), '')) FROM (
+  SELECT 'n|' || coalesce(n.nspacl::text, '') || '|' || pg_get_userbyid(n.nspowner)
+    FROM pg_namespace n JOIN ns USING (oid)
+  UNION ALL
+  SELECT 'c|' || c.relname || '|' || c.relkind::text || '|' || pg_get_userbyid(c.relowner)
+         || '|' || coalesce(c.relacl::text, '') || '|' || coalesce(c.reloptions::text, '')
+         || '|' || c.relrowsecurity || '|' || c.relforcerowsecurity || '|' || c.relpersistence::text
+         || '|' || c.relnatts || '|' || c.relreplident::text
+         || '|' || coalesce((SELECT t.reloptions::text FROM pg_class t WHERE t.oid = c.reltoastrelid), '')
+    FROM pg_class c JOIN ns ON c.relnamespace = ns.oid
+  UNION ALL
+  SELECT 'a|' || c.relname || '|' || a.attnum || '|' || a.attname || '|'
+         || format_type(a.atttypid, a.atttypmod)
+         || '|' || a.attnotnull || '|' || a.attidentity::text || '|' || a.attgenerated::text
+         || '|' || coalesce(a.attcollation::regcollation::text, '')
+         || '|' || a.attstorage::text || '|' || coalesce(a.attstattarget::text, '')
+         || '|' || coalesce(a.attoptions::text, '')
+         || '|' || coalesce(replace(pg_get_expr(d.adbin, d.adrelid), ns.nspname || '.', ''), '')
+    FROM pg_attribute a
+    JOIN pg_class c ON c.oid = a.attrelid
+    JOIN ns ON c.relnamespace = ns.oid
+    LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+   WHERE a.attnum > 0
+  UNION ALL
+  SELECT 'i|' || replace(pg_get_indexdef(i.indexrelid), ns.nspname || '.', '')
+    FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid JOIN ns ON c.relnamespace = ns.oid
+  UNION ALL
+  SELECT 'k|' || c.relname || '|' || k.conname || '|' || k.condeferrable || '|' || k.condeferred
+         || '|' || k.convalidated || '|'
+         || replace(pg_get_constraintdef(k.oid), ns.nspname || '.', '')
+    FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid JOIN ns ON c.relnamespace = ns.oid
+  UNION ALL
+  SELECT 't|' || c.relname || '|' || t.tgname || '|' || t.tgenabled::text || '|'
+         || replace(pg_get_triggerdef(t.oid), ns.nspname || '.', '')
+    FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN ns ON c.relnamespace = ns.oid
+   WHERE NOT t.tgisinternal
+  UNION ALL
+  -- Internal (foreign-key) trigger names embed OIDs that change on every
+  -- migration, so only their per-table enablement is compared.
+  SELECT 'T|' || c.relname || '|' || string_agg(t.tgenabled::text, '' ORDER BY t.tgenabled::text)
+    FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN ns ON c.relnamespace = ns.oid
+   WHERE t.tgisinternal
+   GROUP BY c.relname
+  UNION ALL
+  SELECT 'r|' || c.relname || '|' || r.rulename || '|' || r.ev_enabled::text || '|'
+         || replace(pg_get_ruledef(r.oid), ns.nspname || '.', '')
+    FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class JOIN ns ON c.relnamespace = ns.oid
+  UNION ALL
+  SELECT 'p|' || p.proname || '|' || pg_get_function_identity_arguments(p.oid) || '|'
+         || md5(p.prosrc) || '|' || coalesce(p.proconfig::text, '') || '|'
+         || coalesce(p.proacl::text, '') || '|' || pg_get_userbyid(p.proowner)
+    FROM pg_proc p JOIN ns ON p.pronamespace = ns.oid
+  UNION ALL
+  SELECT 'd|' || y.typname || '|' || y.typtype::text || '|'
+         || coalesce(pg_get_userbyid(y.typowner), '') || '|' || coalesce(y.typacl::text, '')
+    FROM pg_type y JOIN ns ON y.typnamespace = ns.oid
+  UNION ALL
+  SELECT 'f|' || f.cfgname FROM pg_ts_config f JOIN ns ON f.cfgnamespace = ns.oid
+  UNION ALL
+  SELECT 's|' || c.relname || '|' || q.seqtypid::regtype::text || '|' || q.seqstart || '|'
+         || q.seqincrement || '|' || q.seqmin || '|' || q.seqmax || '|' || q.seqcache
+         || '|' || q.seqcycle
+    FROM pg_sequence q JOIN pg_class c ON c.oid = q.seqrelid JOIN ns ON c.relnamespace = ns.oid
+  UNION ALL
+  SELECT 'y|' || c.relname || '|' || y.polname || '|' || y.polcmd::text || '|'
+         || coalesce(pg_get_expr(y.polqual, y.polrelid), '') || '|'
+         || coalesce(pg_get_expr(y.polwithcheck, y.polrelid), '')
+    FROM pg_policy y JOIN pg_class c ON c.oid = y.polrelid JOIN ns ON c.relnamespace = ns.oid
+  UNION ALL
+  SELECT 'x|' || replace(pg_get_statisticsobjdef(e.oid), ns.nspname || '.', '')
+    FROM pg_statistic_ext e JOIN ns ON e.stxnamespace = ns.oid
+) catalog(item)
+"""
+# Tables whose storage or counters show that something wrote, deleted or
+# vacuumed them; a never-touched table has a zero-length heap and
+# never-vacuumed counters.
+_TOUCHED_TABLES_SQL = (
+    "SELECT c.relname FROM pg_class c "
+    "WHERE c.relnamespace = to_regnamespace(%s) AND c.relkind = 'r' "
+    "AND c.relname <> %s "
+    "AND (pg_relation_size(c.oid) > 0 OR c.reltuples <> -1 "
+    "     OR c.relpages <> 0 OR c.relallvisible <> 0) "
+    "ORDER BY c.relname"
+)
+
+
+def _new_test_schema() -> str:
+    schema = f"sn_test_{uuid.uuid4().hex}"
+    assert _TEST_SCHEMA.fullmatch(schema)
+    return schema
+
+
+def _migrate_scope(url: str) -> None:
+    from app.repositories.postgres.database import PostgresDatabase
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    database = PostgresDatabase(_scope_settings(url), Path(__file__).resolve().parents[3])
+    try:
+        PostgresMigrator(database).migrate()
+    finally:
+        database.close()
+
+
+def _schema_fingerprint(conn, schema: str) -> str:
+    from psycopg import sql
+
+    # Catalog text (type names, defaults, index and rule definitions) is printed
+    # schema-qualified unless the schema is on search_path, and the schema is
+    # renamed for every test: pin search_path so the fingerprint is name-free.
+    with conn.transaction():
+        conn.execute(sql.SQL("SET LOCAL search_path = {}").format(sql.Identifier(schema)))
+        catalog = conn.execute(_SCHEMA_FINGERPRINT_SQL, {"schema": schema}).fetchone()[0]
+        ledger = conn.execute(
+            sql.SQL(
+                "SELECT md5(coalesce(string_agg(version::text || ':' || checksum, ',' "
+                "ORDER BY version), '')) FROM {}.{}"
+            ).format(sql.Identifier(schema), sql.Identifier(_LEDGER_TABLE))
+        ).fetchone()[0]
+    return f"{catalog}:{ledger}"
+
+
+def _capture_baseline(conn, base_url: str, schema: str) -> None:
+    """Record the freshly migrated fingerprint, refusing reuse it cannot honour.
+
+    The reset empties every touched table and restarts every sequence. If a
+    migration ever seeds rows or advances a sequence, that reset would erase
+    the seed for every test after a worker's first one; fail loudly instead.
+    """
+    seeded = [row[0] for row in conn.execute(_TOUCHED_TABLES_SQL, (schema, _LEDGER_TABLE))]
+    advanced = [
+        row[0] for row in conn.execute(
+            "SELECT sequencename FROM pg_sequences "
+            "WHERE schemaname = %s AND last_value IS NOT NULL",
+            (schema,),
+        )
+    ]
+    if seeded or advanced:
+        raise RuntimeError(
+            "a freshly migrated schema is not empty (tables "
+            f"{seeded}, sequences {advanced}); per-worker schema reuse in "
+            "tests/postgres/conftest.py would erase that seed between tests -- "
+            "teach the reset to restore it before relying on reuse"
+        )
+    _BASELINE_FINGERPRINTS[base_url] = _schema_fingerprint(conn, schema)
+
+
+def _rename_schema(conn, old: str, new: str) -> None:
+    from psycopg import sql
+
+    if not (_TEST_SCHEMA.fullmatch(old) and _TEST_SCHEMA.fullmatch(new)):
+        raise RuntimeError("refusing to rename an unvalidated PostgreSQL test schema")
+    conn.execute(
+        sql.SQL("ALTER SCHEMA {} RENAME TO {}").format(sql.Identifier(old), sql.Identifier(new))
+    )
+
+
+def _drop_schema(conn, schema: str) -> None:
+    from psycopg import sql
+
+    if not _TEST_SCHEMA.fullmatch(schema):
+        raise RuntimeError("refusing to drop an unvalidated PostgreSQL test schema")
+    conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+
+
+def _reset_if_pristine(conn, base_url: str, schema: str) -> bool:
+    """Reset ``schema`` to its freshly migrated state; False when it must be dropped."""
+    from psycopg import sql
+
+    baseline = _BASELINE_FINGERPRINTS.get(base_url)
+    if baseline is None:
+        return False
+    with conn.transaction():
+        conn.execute(sql.SQL("SET LOCAL lock_timeout = {}").format(sql.Literal(_RESET_LOCK_TIMEOUT)))
+        all_tables = [
+            row[0] for row in conn.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname = %s ORDER BY tablename",
+                (schema,),
+            )
+        ]
+        if all_tables:
+            # Wait out (or time out on) anything the finished test still has in
+            # flight, so nothing commits into the schema after the checks below.
+            conn.execute(
+                sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(
+                    sql.SQL(", ").join(sql.Identifier(schema, name) for name in all_tables)
+                )
+            )
+        if _schema_fingerprint(conn, schema) != baseline:
+            return False
+        # Ledger statistics are irrelevant to every plan the tests pin, and
+        # autovacuum may produce them on a fresh schema too (migration inserts
+        # its rows); any other table's statistics mean the planner state moved.
+        if conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM pg_stats WHERE schemaname = %s AND tablename <> %s)",
+            (schema, _LEDGER_TABLE),
+        ).fetchone()[0]:
+            return False
+        touched = [row[0] for row in conn.execute(_TOUCHED_TABLES_SQL, (schema, _LEDGER_TABLE))]
+        if touched:
+            conn.execute(
+                sql.SQL("TRUNCATE {} RESTART IDENTITY CASCADE").format(
+                    sql.SQL(", ").join(sql.Identifier(schema, name) for name in touched)
+                )
+            )
+        for (sequence,) in conn.execute(
+            "SELECT sequencename FROM pg_sequences WHERE schemaname = %s", (schema,)
+        ).fetchall():
+            conn.execute(
+                sql.SQL("ALTER SEQUENCE {} RESTART").format(sql.Identifier(schema, sequence))
+            )
+    # Truncation keeps the cumulative modification counters. A table whose
+    # counter could reach autovacuum's analyze threshold would be ANALYZEd in
+    # the middle of the next test, which a fresh schema never does. ANALYZE of
+    # the now-empty table zeroes its counter without writing pg_stats, and the
+    # following truncation (its own transaction: PostgreSQL truncates in place a
+    # table already truncated in the same one) puts back the never-analyzed
+    # reltuples = -1 that ANALYZE replaced with 0. Half the threshold leaves room
+    # for counters a closing backend has not flushed yet. Most tests write far
+    # fewer rows, so this second pass is the exception.
+    conn.execute("SELECT pg_stat_clear_snapshot()")
+    busy = [
+        row[0] for row in conn.execute(
+            "SELECT relname FROM pg_stat_user_tables WHERE schemaname = %s AND relname <> %s "
+            "AND n_mod_since_analyze * 2 >= current_setting('autovacuum_analyze_threshold')::bigint "
+            "ORDER BY relname",
+            (schema, _LEDGER_TABLE),
+        )
+    ]
+    if busy:
+        with conn.transaction():
+            conn.execute(
+                sql.SQL("SET LOCAL lock_timeout = {}").format(sql.Literal(_RESET_LOCK_TIMEOUT))
+            )
+            for name in busy:
+                conn.execute(sql.SQL("ANALYZE {}").format(sql.Identifier(schema, name)))
+            conn.execute(
+                sql.SQL("TRUNCATE {} RESTART IDENTITY CASCADE").format(
+                    sql.SQL(", ").join(sql.Identifier(schema, name) for name in busy)
+                )
+            )
+    return True
+
+
+@contextmanager
+def _reused_postgres_scope(base_url: str):
+    _require_dedicated_test_database(base_url)
+
+    import psycopg
+    from psycopg import sql
+    from psycopg.rows import dict_row
+
+    schema = _new_test_schema()
+    with psycopg.connect(base_url, autocommit=True) as conn:
+        actual = conn.execute("SELECT current_database()").fetchone()[0]
+        _require_dedicated_test_database(base_url, actual)
+        parked = _POOLED_SCHEMAS.pop(base_url, None)
+        if parked is not None:
+            _rename_schema(conn, parked, schema)
+        else:
+            conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    scoped = ScopedPostgres(
+        base_url=base_url,
+        url=_url_with_search_path(base_url, schema),
+        schema=schema,
+    )
+    try:
+        if parked is None:
+            _migrate_scope(scoped.url)
+            if base_url not in _BASELINE_FINGERPRINTS:
+                with psycopg.connect(base_url, autocommit=True) as conn:
+                    _capture_baseline(conn, base_url, schema)
+        with psycopg.connect(scoped.url, row_factory=dict_row) as conn:
+            identity = conn.execute(
+                "SELECT current_database() AS database, current_schema() AS schema"
+            ).fetchone()
+            _require_dedicated_test_database(base_url, identity["database"])
+            if _safe_ascii_text(identity["schema"], "schema") != schema:
+                raise RuntimeError("scoped TEST_POSTGRES_URL did not select its isolated schema")
+    except BaseException:
+        # A failed migration or identity check must not leave a half-migrated
+        # schema behind for every later test to add another one.
+        with psycopg.connect(base_url, autocommit=True) as conn:
+            _drop_schema(conn, schema)
+        raise
+    try:
+        yield scoped
+    finally:
+        # never reset or drop a schema under pooled work a test left running (40P01)
+        quiesce_process_background_work()
+        parking = _new_test_schema()
+        with psycopg.connect(base_url, autocommit=True) as conn:
+            actual = conn.execute("SELECT current_database()").fetchone()[0]
+            _require_dedicated_test_database(base_url, actual)
+            try:
+                # New statements from this test address ``schema`` by name and no
+                # longer reach the renamed one; statements already running are
+                # waited out by the reset's table locks.
+                _rename_schema(conn, schema, parking)
+                reusable = _reset_if_pristine(conn, base_url, parking)
+            except psycopg.Error:
+                reusable = False
+            if reusable:
+                _POOLED_SCHEMAS[base_url] = parking
+            else:
+                _drop_schema(conn, parking)
+                _drop_schema(conn, schema)
+
+
+def pytest_sessionfinish(session) -> None:
+    """Drop this process's parked schemas; each xdist worker owns its own."""
+    if not _POOLED_SCHEMAS:
+        return
+    import psycopg
+
+    for base_url, schema in list(_POOLED_SCHEMAS.items()):
+        try:
+            with psycopg.connect(base_url, autocommit=True) as conn:
+                _drop_schema(conn, schema)
+        except psycopg.Error:
+            pass
+        _POOLED_SCHEMAS.pop(base_url, None)
+
+
 @pytest.fixture
 def postgres_non_c_scope() -> ScopedPostgres:
     base_url = os.environ.get("TEST_POSTGRES_NON_C_URL")
@@ -318,10 +697,9 @@ def postgres_non_utf_scope() -> ScopedPostgres:
         yield scoped
 
 
-@pytest.fixture
-def postgres_settings(postgres_scope: ScopedPostgres) -> Settings:
+def _scope_settings(url: str) -> Settings:
     return Settings(
-        database_url=postgres_scope.url,
+        database_url=url,
         postgres_pool_min_size=1,
         postgres_pool_max_size=2,
         postgres_pool_acquire_timeout_seconds=1,
@@ -331,6 +709,11 @@ def postgres_settings(postgres_scope: ScopedPostgres) -> Settings:
         postgres_chunk_fts_timeout_seconds=1.0,
         postgres_lock_timeout_seconds=1,
     )
+
+
+@pytest.fixture
+def postgres_settings(postgres_scope: ScopedPostgres) -> Settings:
+    return _scope_settings(postgres_scope.url)
 
 
 @pytest.fixture

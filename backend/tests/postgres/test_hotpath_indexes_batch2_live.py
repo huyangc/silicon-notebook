@@ -66,7 +66,11 @@ from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from app.repositories.text_whitespace import PY_WHITESPACE
 
-pytestmark = pytest.mark.postgres_integration
+pytestmark = [
+    pytest.mark.postgres_integration,
+    # Migrates to explicit target versions: needs an empty, unmigrated schema.
+    pytest.mark.postgres_fresh_schema,
+]
 
 _BATCH2_NAMES = frozenset(
     {"idx_knowledge_objects_nb_payload_trgm", "idx_source_elements_nonblank"}

@@ -12,7 +12,12 @@ from app.repositories.postgres.hotpath_indexes import (
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
-pytestmark = [pytest.mark.postgres_integration, pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch10")]
+pytestmark = [
+    pytest.mark.postgres_integration,
+    pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch10"),
+    # Migrates to explicit target versions: needs an empty, unmigrated schema.
+    pytest.mark.postgres_fresh_schema,
+]
 NAME = "idx_ask_jobs_memory_suggest_sample"
 
 

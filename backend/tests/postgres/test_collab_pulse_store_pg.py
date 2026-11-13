@@ -24,6 +24,7 @@ def test_collab_store(repo, case):
     CASES[case](build_world(repo, postgres=True))
 
 
+@pytest.mark.postgres_fresh_schema
 def test_notebook_activity_migration_fresh_equals_upgraded(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 

@@ -13,7 +13,11 @@ from app.migration.sync.capture import (
 from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from tests.postgres.conftest import _safe_ascii_text
 
-pytestmark = pytest.mark.postgres_integration
+pytestmark = [
+    pytest.mark.postgres_integration,
+    # Migrates to explicit target versions: needs an empty, unmigrated schema.
+    pytest.mark.postgres_fresh_schema,
+]
 
 
 def _migration(version: int, sql: str, name: str | None = None):

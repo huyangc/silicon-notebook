@@ -44,6 +44,8 @@ from tests.cli_schema_guest_support import (
 pytestmark = [
     pytest.mark.postgres_integration,
     pytest.mark.xdist_group(name="postgres_offline_maintenance"),
+    # Exercises CLIs against short and empty migration ledgers.
+    pytest.mark.postgres_fresh_schema,
 ]
 
 OWNER_PASSWORD = "owner-secret-at-first-start"

@@ -1,6 +1,6 @@
 """Quiesce the process pools that run fire-and-forget work before a PostgreSQL
-test schema is dropped (see ``_isolated_postgres_scope`` in this directory's
-conftest).
+test schema is dropped or reset for reuse (see ``_isolated_postgres_scope`` and
+``_reused_postgres_scope`` in this directory's conftest).
 
 Why: ``DROP SCHEMA ... CASCADE`` takes ACCESS EXCLUSIVE on the schema's tables
 one at a time. Work a test queued -- e.g. the Memory KG ingest that

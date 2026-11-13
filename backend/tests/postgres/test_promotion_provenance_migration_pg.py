@@ -23,6 +23,8 @@ from tests import promotion_provenance_migration_cases as cases
 pytestmark = [
     pytest.mark.postgres_integration,
     pytest.mark.xdist_group(name="postgres_promotion_provenance_migration"),
+    # Migrates to explicit target versions: needs an empty, unmigrated schema.
+    pytest.mark.postgres_fresh_schema,
 ]
 
 MIGRATION = (

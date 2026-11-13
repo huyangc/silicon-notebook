@@ -50,7 +50,11 @@ from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from app.repositories.postgres.source_store import SourceStore
 
-pytestmark = pytest.mark.postgres_integration
+pytestmark = [
+    pytest.mark.postgres_integration,
+    # Migrates to explicit target versions: needs an empty, unmigrated schema.
+    pytest.mark.postgres_fresh_schema,
+]
 
 _BATCH4_NAMES = (
     "idx_sources_nb_title_file_trgm",
