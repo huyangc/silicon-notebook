@@ -6,12 +6,13 @@ shows one mention and does not serve as proof of the count.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
 from app.domain.concept_ranking_contracts import (
     CONCEPT_RANK_CITATIONS_PER_ROW,
     CONCEPT_RANK_INLINE_ROWS_PER_RUN,
     RANK_FAILURE_REASONS,
+    ranking_failure_instruction,
 )
 from app.models.ask import (
     Citation,
@@ -21,9 +22,11 @@ from app.models.ask import (
     ConceptRankingSection,
     RankingFailure,
 )
-from app.services.collection_enumeration_answer import CollectionKeyAllocator
 from app.services.concept_ranking_paging import rank_next_cursor, rank_page_slices
 from app.services.context_spans import entry_lines, joined
+
+if TYPE_CHECKING:
+    from app.services.collection_enumeration_answer import CollectionKeyAllocator
 
 _FAILURE_LINES = {
     "scoped_large_notebook": "没能按提及次数排行：本笔记本内容较多，只勾选部分来源时不支持这类统计。",
@@ -42,9 +45,10 @@ _INSTRUCTION = (
 )
 _GAP_FIELDS = ("drifted", "candidates_lexical_only", "query", "stale_counts",
                "recount_capped", "unnamed_dropped")
-_FAILED_INSTRUCTION = (
-    "Counting did not complete; do not infer which items are mentioned most "
-    "from retrieved samples, and tell the user it could not be counted and why."
+_EXACT_INSTRUCTION = (
+    "These rows are the true top entries of a complete count over the stated scope; "
+    "you may state them as the most mentioned, quoting the counts. "
+    "Rows beyond those shown are lower-ranked."
 )
 _EMPTY_INSTRUCTION = (
     "No concept in scope matched this request; tell the user no matching concepts "
@@ -258,9 +262,13 @@ def ranking_prompt_block(outcomes, *, keys: CollectionKeyAllocator,
             header = (_failure_line("library_skipped" if coverage.skipped else coverage.reason, suffix=False)
                       if failed else _disclosure(coverage, None))
             prefix = (coverage.notebook_name or "另一个笔记本") + "：" if multiple else ""
+            instruction = (ranking_failure_instruction(
+                "library_skipped" if coverage.skipped else coverage.reason) if failed else joined([
+                    _EXACT_INSTRUCTION if coverage.exact else "",
+                    _EMPTY_INSTRUCTION if empty_libraries.get(coverage.notebook_id, False) else "",
+                ], "\n"))
             groups.append((outcome.fingerprint, coverage, rows, len(page_rows), prefix + header,
-                           multiple, _FAILED_INSTRUCTION if failed else
-                           (_EMPTY_INSTRUCTION if empty_libraries.get(coverage.notebook_id, False) else "")))
+                           multiple, instruction))
 
     def render_head(group, shown):
         _fingerprint, _coverage, _rows, total, header, _multiple, instruction = group
@@ -326,6 +334,7 @@ def ranking_notice(outcomes, *, cited_keys: frozenset,
         line=_failure_line(reason, len(ids), suffix=answer_follows and not has_ranking_reference),
         fallback_line=(_failure_line("refresh_produced_nothing", suffix=answer_follows and not has_ranking_reference)
                        if reason == "not_computed" else ""),
+        produced_line="排行数据已生成。" if reason == "not_computed" else "",
     ) for reason, ids in grouped.items() if ids]
     lines = [failure.line for failure in failures]
     multiple = len({coverage.notebook_id for coverage in all_coverage}) > 1

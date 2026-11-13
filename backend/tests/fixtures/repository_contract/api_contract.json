@@ -12634,6 +12634,11 @@
               "title": "Notebook Ids",
               "type": "array"
             },
+            "produced_line": {
+              "default": "",
+              "title": "Produced Line",
+              "type": "string"
+            },
             "reason": {
               "enum": [
                 "scoped_large_notebook",

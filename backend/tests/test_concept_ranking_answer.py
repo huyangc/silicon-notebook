@@ -121,6 +121,8 @@ def test_failures_always_render_with_one_fallback_reason_and_text_only_cards(rea
     assert failures[0].reason == reason
     assert failures[0].line == notice
     assert bool(failures[0].fallback_line) == (reason == "not_computed")
+    assert failures[0].produced_line == ("排行数据已生成。" if reason == "not_computed" else "")
+    assert ("produced_line" in failures[0].model_dump()) == (reason == "not_computed")
     card = ranking_result_sets([ranked], {})[0].sections[0]
     assert not card.rows
     assert card.notice and "下面的回答" not in card.notice
@@ -134,6 +136,35 @@ def test_failures_always_render_with_one_fallback_reason_and_text_only_cards(rea
         "rank_failed": "没能按提及次数排行：统计时出错。",
         "library_skipped": "有 1 个笔记本读取失败，没有计入排行。",
     }[reason]
+
+
+@pytest.mark.parametrize(("reason", "cause"), [
+    ("scoped_large_notebook", "this notebook is large and only part of its sources are selected."),
+    ("not_computed", "ranking data for this notebook has not been generated yet."),
+    ("analysis_unavailable", "this notebook does not support this kind of count."),
+    ("recount_budget_exhausted", "counting timed out."),
+    ("rank_failed", "counting hit an error."),
+    ("library_skipped", "1 notebook(s) could not be read."),
+])
+def test_failure_headers_explain_causes_without_inviting_codes_or_invented_remedies(reason, cause):
+    kwargs = {"skipped": "read_failed"} if reason == "library_skipped" else {"reason": reason}
+    text = preview(outcome(count=0, status="unavailable", exact=False, **kwargs)).text
+    assert "Counting did not complete. Do not infer which items are mentioned most from retrieved samples." in text
+    assert "Tell the user plainly that it could not be counted and why, in everyday words." in text
+    assert "Never mention internal codes, field names or flags (such as reason codes or exact/coverage flags)." in text
+    assert "The system already shows the user how to fix it above the answer; do not propose other remedies" in text
+    assert "never suggest narrowing the selected sources." in text
+    assert f"Cause: {cause}" in text
+
+
+@pytest.mark.parametrize("exact", [True, False])
+def test_only_exact_page_headers_authorize_top_entries_of_a_complete_count(exact):
+    text = preview(outcome(count=80, exact=exact, stale_counts=not exact)).text
+    instruction = ("These rows are the true top entries of a complete count over the stated scope; "
+                   "you may state them as the most mentioned, quoting the counts. "
+                   "Rows beyond those shown are lower-ranked.")
+    assert (instruction in text) is exact
+    assert "概念19" in text and "概念20" not in text
 
 
 def test_skipped_library_grouping_and_card_order():
@@ -303,13 +334,13 @@ def test_failed_ranking_header_reaches_answer_prompt_and_evidence(tmp_path, monk
         response, llm = _ask(repo, nb.id, ReasoningResult(rankings=[ranked]), monkeypatch,
                              answer=lambda _: "目前无法统计。")
         assert "没能按提及次数排行：统计时出错。" in llm.prompts[0]
-        assert "Counting did not complete; do not infer" in llm.prompts[0]
+        assert "Counting did not complete. Do not infer" in llm.prompts[0]
         assert response.ranking_failures[0].reason == "rank_failed"
         evidence = repo._runtime.ask_service().ask_evidence(
             nb.id, AskRequest(question="统计概念", mode="reasoning"), user_id=repo.current_user().id)
         text = "\n".join(item.text for item in evidence.items)
         assert "没能按提及次数排行：统计时出错。" in text
-        assert "Counting did not complete; do not infer" in text
+        assert "Counting did not complete. Do not infer" in text
         assert not any(item.key for item in evidence.items)
     finally:
         repo.close()

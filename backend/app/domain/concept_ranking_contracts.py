@@ -67,6 +67,32 @@ def concept_ranks_are_current(
     return header == (kg_seq, cluster_seq)
 
 
+# Model-facing instruction for a ranking call that did not complete. It lives in
+# this leaf module because both the reflect ledger and the synthesis evidence
+# block render it; importing it from either service would close an import cycle
+# through the reflect loop.
+RANK_FAILED_INSTRUCTION = (
+    "Counting did not complete. Do not infer which items are mentioned most from retrieved samples. "
+    "Tell the user plainly that it could not be counted and why, in everyday words. "
+    "Never mention internal codes, field names or flags (such as reason codes or exact/coverage flags). "
+    "The system already shows the user how to fix it above the answer; do not propose other remedies, "
+    "and never suggest narrowing the selected sources."
+)
+RANK_FAILURE_CAUSES = {
+    "scoped_large_notebook": "this notebook is large and only part of its sources are selected.",
+    "not_computed": "ranking data for this notebook has not been generated yet.",
+    "analysis_unavailable": "this notebook does not support this kind of count.",
+    "recount_budget_exhausted": "counting timed out.",
+    "rank_failed": "counting hit an error.",
+}
+
+
+def ranking_failure_instruction(reason: str, count: int = 1) -> str:
+    cause = (f"{count} notebook(s) could not be read." if reason == "library_skipped"
+             else RANK_FAILURE_CAUSES.get(reason, ""))
+    return RANK_FAILED_INSTRUCTION + (f"\nCause: {cause}" if cause else "")
+
+
 def rank_sort_key(canonical_id: str, source_count: int, object_count: int) -> tuple:
     return (-int(source_count), -int(object_count), str(canonical_id))
 

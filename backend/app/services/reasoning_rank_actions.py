@@ -9,6 +9,7 @@ from app.domain.concept_ranking_contracts import (
     CONCEPT_RANK_MAX_CHAINS,
     CONCEPT_RANK_PAGE_SIZE,
     RANK_REASON_RANK_FAILED,
+    ranking_failure_instruction,
 )
 from app.domain.retrieval_control import RetrievalControlError
 from app.models.ask import TraceStep
@@ -222,8 +223,8 @@ class ReasoningRankActions:
                 if marks:
                     lines.append("覆盖：" + ", ".join(marks))
                 if coverage.status != "ok" or coverage.skipped:
-                    lines.append(
-                        f"失败：{coverage.reason or coverage.skipped}；不得从检索样本推断『最多』")
+                    lines.append(ranking_failure_instruction(
+                        "library_skipped" if coverage.skipped else coverage.reason))
             if chain.last_page.next_cursor:
                 lines.append(f"继续翻页 cursor={chain.chain_id}:p{chain.last_page.page_number + 1}")
         lines.extend(state.rank_log)

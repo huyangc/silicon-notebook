@@ -16,7 +16,7 @@ const lines: Record<RankingFailure["reason"], string> = {
 };
 function failure(reason: RankingFailure["reason"]): RankingFailure {
   return { reason, notebook_ids: ["nb"], line: lines[reason],
-    ...(reason === "not_computed" ? { fallback_line: lines.refresh_produced_nothing } : {}) };
+    ...(reason === "not_computed" ? { fallback_line: lines.refresh_produced_nothing, produced_line: "排行数据已生成。" } : {}) };
 }
 function notice(reason: RankingFailure["reason"], actions?: RankingNoticeActions) {
   return <RankingFailureNotice notice={lines[reason]} failures={[failure(reason)]} actions={actions} />;
@@ -73,6 +73,8 @@ test("only the submitted transition moves focus; background completion preserves
   focus.mockClear();
   document.documentElement.scrollTop = 640;
   rerender(notice("not_computed", { ...actions, rebuildPhase: "produced" }));
+  expect(screen.getByRole("note").textContent).toBe("排行数据已生成。 重新提问");
+  expect(screen.queryByText(lines.not_computed)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "重新提问" })).toBeEnabled();
   expect(paragraph).toHaveFocus();
   expect(focus).not.toHaveBeenCalled();
@@ -169,6 +171,10 @@ test("line matching is exact and the backend owns the fallback suffix", () => {
   rerender(<RankingFailureNotice notice={currentFailure.line} failures={[currentFailure]}
     actions={{ ...actions, rebuildPhase: "nothing" }} />);
   expect(screen.getByRole("note").textContent).toBe(currentFailure.fallback_line);
+  rerender(<RankingFailureNotice notice={currentFailure.line} failures={[currentFailure]}
+    actions={{ ...actions, rebuildPhase: "produced", reask: vi.fn() }} />);
+  expect(screen.getByRole("note").textContent).toBe(currentFailure.produced_line + " 重新提问");
+  expect(screen.getByRole("note")).not.toHaveTextContent(suffix);
 });
 
 test("AnswerView draws the exact multiline ranking notice only once before the body", () => {

@@ -20,6 +20,9 @@ def test_rank_concepts_schema_and_prompt_explain_counts_scope_and_paging(scope):
     assert "number of distinct sources that mention it" in prompt
     assert "可能是同一概念" in prompt and "do not add their counts" in prompt
     assert "Unless exact is true" in prompt and "counting failed, why" in prompt
+    assert "never repeat internal codes or field names in the answer" in prompt
+    assert "never suggest narrowing the selected sources" in prompt
+    assert "do not propose other remedies" in prompt
 
 
 def test_global_answer_prompt_uses_peer_provenance_without_changing_notebook_authority():

@@ -1169,6 +1169,7 @@ class RankingFailure(BaseModel):
     notebook_ids: List[str] = Field(default_factory=list)
     line: str
     fallback_line: str = Field(default="", exclude_if=lambda value: not value)
+    produced_line: str = Field(default="", exclude_if=lambda value: not value)
 
 
 class AskResponse(BaseModel):

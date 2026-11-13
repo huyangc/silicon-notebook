@@ -47,6 +47,7 @@ afterEach(() => {
 const QUESTION = "哪些概念被提及得最多？";
 const HTTP_FAILURE = humanizeHttpError(503);
 const FALLBACK = "没能按提及次数排行：这次更新没有产出排行数据。下面的回答只基于检索到的部分内容，不是统计结果。";
+const PRODUCED = "排行数据已生成。";
 
 function serveWorkspace({
   reason = "not_computed", probe = false, submittedVia = "web", stamp = "current", alreadyRunning = false,
@@ -96,7 +97,7 @@ function serveWorkspace({
   const response = {
     answer_id: "answer-ranking", conversation_id: "conversation-ranking", conclusion: "排行回归回答",
     answer: `> ${line}\n\n排行回归回答`, ranking_notice: line,
-    ranking_failures: [{ reason, notebook_ids: [notebook.id], line, ...(reason === "not_computed" ? { fallback_line: FALLBACK } : {}) }],
+    ranking_failures: [{ reason, notebook_ids: [notebook.id], line, ...(reason === "not_computed" ? { fallback_line: FALLBACK, produced_line: PRODUCED } : {}) }],
     grounded: true, anchors: [], related_knowledge: [], citations: [], llm_mode: "test",
     mode: "chunk", retrieval_effort: "deep",
   };
@@ -258,7 +259,11 @@ test.each(["current", "stale", "missing"] as const)("false probe starts directly
   expect(Object.fromEntries(new URLSearchParams(server.calls.find((call) => call.path.endsWith("/kg-analysis"))!.query)))
     .toEqual({ boards: "1", top_members: "1", edges: "1" });
   expect(screen.queryByText("正在更新分析…")).toBeNull();
-  if (stamp !== "missing") expect(screen.getByRole("button", { name: "重新提问" })).toBeEnabled();
+  if (stamp !== "missing") {
+    expect(screen.getByRole("button", { name: "重新提问" })).toBeEnabled();
+    expect(screen.getByText(PRODUCED)).toBeVisible();
+    expect(screen.queryByText(server.line)).toBeNull();
+  }
   else {
     expect(screen.getByText(FALLBACK)).toBeVisible();
     expect(screen.queryByRole("button", { name: "重新提问" })).toBeNull();
@@ -544,7 +549,7 @@ test.each(["current", "missing"] as const)("a settled %s answer stays settled wh
   await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
   vi.useRealTimers();
   const expectSettled = () => {
-    const settledNote = (stamp === "current" ? screen.getAllByText(server.line)[0] : screen.getByText(FALLBACK))
+    const settledNote = (stamp === "current" ? screen.getByText(PRODUCED) : screen.getByText(FALLBACK))
       .closest('[role="note"]') as HTMLElement;
     expect(within(settledNote).queryByRole("button", { name: "更新分析" })).toBeNull();
     expect(within(settledNote).queryByText("正在更新分析…")).toBeNull();
