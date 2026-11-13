@@ -84,11 +84,13 @@ def _fresh_state(url):
                 "AND relname IN ('notebooks', 'knowledge_objects', 'user_profiles') "
                 "ORDER BY relname").fetchall(),
             # No table may carry enough modifications for autovacuum to ANALYZE
-            # it during the next test.
+            # it during the next test. The migration ledger is left out, as the
+            # reset leaves it alone: autovacuum may analyze it at any moment.
             "near_autoanalyze": conn.execute(
                 "SELECT count(*) FROM pg_stat_user_tables WHERE schemaname = current_schema() "
-                "AND n_mod_since_analyze * 2 >= "
-                "current_setting('autovacuum_analyze_threshold')::bigint").fetchone()[0],
+                "AND relname <> %s AND n_mod_since_analyze * 2 >= "
+                "current_setting('autovacuum_analyze_threshold')::bigint",
+                (pg._LEDGER_TABLE,)).fetchone()[0],
         }
 
 
