@@ -164,6 +164,7 @@ import { replacePageLocation, takeSignInReturnLocation } from "./auth-return-loc
 import { copyTextSafely } from "./copy-text";
 import { useCopyResult } from "./copy-result";
 import { httpErrorStatus, humanizedError, toUserMessage } from "./errors.ts";
+
 import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ParserEngineCapability, type ReadySnapshot } from "./system-api";
 import { AnalyticsAnswerQuality } from "./analytics-answer-quality";
 import { backfillPaperMetadata, fetchNotebookAnalytics, fetchNotebookContentOverview, fetchNotebookIndexingPipeline, getNotebook, listNotebooks } from "./notebook-api";
@@ -382,6 +383,9 @@ import {
 } from "./workspace-model";
 import { resolveDocumentCapacity } from "./document-limit";
 import { label, PARSE_STATUS, KNOWLEDGE_STATUS, SEVERITY, CHECKUP_FIX, CHECKUP_FIX_BUSY } from "./vocabulary";
+
+// Shown beside the 更新分析 option when the rebuild could not be started.
+const RANKING_REBUILD_START_FAILED = "更新分析没能开始，请稍后重试";
 
 /**
  * 标签页重新可见时,两次「访问权复核」之间至少隔这么久。
@@ -4002,12 +4006,15 @@ export default function Home() {
           if (result.reason === "forbidden") setRankingRebuildForbidden(true);
           setRankingRebuildRejections((current) => ({ ...current, [answerId]: {
             reason: result.reason, expiresAt: Date.now() + KG_BUSY_NOTICE_HOLD_MS, suppressRunning: true,
+            // The outcome sits beside the option, not only in the page banner.
+            notice: result.reason === "error" ? RANKING_REBUILD_START_FAILED : undefined,
           } }));
         }
       } catch (error) {
         phase("idle");
         if (ownsNotebook()) setRankingRebuildRejections((current) => ({ ...current, [answerId]: {
           reason: "error", expiresAt: Date.now() + KG_BUSY_NOTICE_HOLD_MS, suppressRunning: true,
+          notice: toUserMessage(error, RANKING_REBUILD_START_FAILED),
         } }));
         throw error;
       } finally {

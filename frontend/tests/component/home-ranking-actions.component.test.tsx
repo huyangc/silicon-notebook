@@ -301,13 +301,14 @@ test.each([409, 503, 403])("rebuild rejected with %s after confirmation reports 
       expect(within(note).getByText("图谱正在处理其他任务")).toBeVisible();
     } else {
       expect(retry).toBeEnabled();
-      expect(within(note).queryByText(HTTP_FAILURE)).toBeNull();
+      // The outcome is reported beside the option, not only in the page banner.
+      expect(within(note).getByText("更新分析没能开始，请稍后重试")).toBeVisible();
       expect(screen.getAllByText(HTTP_FAILURE)).toHaveLength(1);
       expect(retry).toHaveFocus();
     }
     await act(async () => { await vi.advanceTimersByTimeAsync(KG_BUSY_NOTICE_HOLD_MS); });
     expect(retry).toBeEnabled();
-    expect(within(note).queryByText(HTTP_FAILURE)).toBeNull();
+    expect(within(note).queryByText("更新分析没能开始，请稍后重试")).toBeNull();
     expect(within(note).queryByText("图谱正在处理其他任务")).toBeNull();
   }
 });

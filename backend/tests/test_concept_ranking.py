@@ -1047,3 +1047,39 @@ def test_citation_slot_is_spent_only_on_usable_evidence(repo, monkeypatch):
     library = request(service(repo), nb).computation.libraries[0]
     wide = next(r for r in library.rows if r.canonical_id == "wide")
     assert [e.element_id for e in wide.evidence] == ["el-good"]
+
+
+def test_topic_candidate_retrieval_runs_inside_the_read_budget(repo):
+    from app.repositories.read_budget import current_read_budget
+
+    nb = seed_rank_world(repo, postgres=False)
+    svc = service(repo)
+    seen = []
+
+    def retrieve(*args, **kwargs):
+        seen.append(current_read_budget())
+        return hits("wide-00").retrieve_scored.return_value
+
+    library = request(svc, nb, query="主题",
+                      retrieval=SimpleNamespace(retrieve_scored=retrieve)).computation.libraries[0]
+    assert library.coverage.status == "ok"
+    assert seen and seen[0] is not None
+
+    def slow(*args, **kwargs):
+        raise ReadBudgetExceeded("timeout")
+
+    timed_out = request(svc, nb, query="另一个主题",
+                        retrieval=SimpleNamespace(retrieve_scored=slow)).computation.libraries[0]
+    assert (timed_out.coverage.status, timed_out.coverage.reason) == (
+        "unavailable", "recount_budget_exhausted")
+    assert not timed_out.coverage.skipped
+
+    stop = threading.Event()
+    stop.set()
+
+    def cancelled(*args, **kwargs):
+        raise ReadBudgetExceeded("cancelled")
+
+    with pytest.raises(AskCancelled):
+        request(svc, nb, query="第三个主题", cancel_event=stop,
+                retrieval=SimpleNamespace(retrieve_scored=cancelled))
