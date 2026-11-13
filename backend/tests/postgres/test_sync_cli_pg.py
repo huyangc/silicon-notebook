@@ -476,6 +476,7 @@ def test_status_scoped_import_after_the_last_window_does_not_blur_mirrors_on_pos
     assert shanghai["ahead"][0]["head_package_id"] == "pkg-window"
 
 
+@pytest.mark.postgres_fresh_schema
 def test_status_missing_sync_tables_gives_named_message_on_postgres(
     postgres_scope, capsys
 ):

@@ -1185,8 +1185,24 @@ server endpoint. The launcher validates and preflights every target before start
 four pytest workers, maps each worker to only its own three databases, and keeps
 passwords in the temporary pgpass file. Missing/duplicate targets, mixed serial and
 parallel configuration, or an unexpected worker fail closed; worker restart is disabled.
-Each test still creates its own schema and runs real migrations. This database-level
-isolation avoids contention on the fixed migration advisory lock. Lock-observation
+Each test still gets its own schema name and a schema at the current migration
+version, but each pytest worker migrates only once per database and reuses that
+schema: the fixture renames it to the test's new `sn_test_<uuid>` name, and at
+teardown renames it to a parking name, then resets it only if it is still
+pristine — the catalog fingerprint (tables, columns, defaults, indexes,
+constraints, triggers, functions, policies, ACLs, owners, reloptions) and the
+migration ledger match the freshly migrated baseline and `pg_stats` holds no
+column statistics for it. The reset truncates the tables the test touched
+(except the ledger, with `RESTART IDENTITY`) and restarts used sequences; any
+other state (DDL, GRANTs, ANALYZE statistics, a changed ledger, a reset blocked
+by a lock) drops the schema as before. A test that needs an empty, unmigrated
+schema — migrating to an explicit target version, raw DDL against an empty
+schema — carries `@pytest.mark.postgres_fresh_schema` (or its module's
+`pytestmark` does) and keeps the create, migrate and drop path; such a test
+otherwise fails loudly with `PostgreSQL migration ledger is newer than
+requested target`. `tests/postgres/test_schema_reuse_pg.py` pins the reset and
+every drop condition. Per-worker databases avoid contention on the fixed migration
+advisory lock. Lock-observation
 queries must filter the current database; a server-global activity view is not isolated
 by schema. The batch4 read-only plan matrix shares one unchanged large corpus,
 while online installation and migration mutation tests retain independent schemas.
@@ -1201,8 +1217,8 @@ per matrix. Every original result/SQL/plan assertion and corpus cardinality stay
 intact. Store-evidence, id-binding, and certified-enumeration scenarios open fresh
 connection pools so prepared-statement controls cannot warm a later scenario's
 cache; recording patches are restored between scenarios. The uncertified
-reverse-index world retains its own schema. This does not introduce a shared
-mutable module fixture or a PostgreSQL migration template.
+reverse-index world retains its own schema. Matrix corpora are not shared across
+tests: each matrix seeds into its test's own reset schema.
 The id-binding repeated-execution cache test also retains its own schema: it
 toggles the reverse-index certificate and must not change the certified world
 used by the row-order checks.

@@ -23,6 +23,8 @@ from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 pytestmark = [
     pytest.mark.postgres_integration,
     pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch7"),
+    # Migrates to explicit target versions: needs an empty, unmigrated schema.
+    pytest.mark.postgres_fresh_schema,
 ]
 
 _INDEX = "idx_source_paper_meta_source_nb"

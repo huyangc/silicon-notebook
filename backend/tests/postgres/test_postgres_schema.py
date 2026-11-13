@@ -61,6 +61,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
     )
 
 
+@pytest.mark.postgres_fresh_schema
 @pytest.mark.postgres_integration
 def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
@@ -74,6 +75,7 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
     assert POSTGRES_SCHEMA_MANIFEST.postgres_version == len(migrator.migrations)
 
 
+@pytest.mark.postgres_fresh_schema
 @pytest.mark.postgres_integration
 def test_concept_seed_space_columns_match_the_sqlite_v102_contract(postgres_database):
     """0083 mirrors SQLite v102: concept_merge_candidates.seed_version NOT NULL
@@ -203,6 +205,7 @@ def test_kg_findings_storage_matches_the_sqlite_v97_contract(postgres_database):
             )
 
 
+@pytest.mark.postgres_fresh_schema
 @pytest.mark.postgres_integration
 def test_memory_suggest_storage_matches_the_sqlite_v106_contract(postgres_database):
     """0087 mirrors SQLite v106: the nullable ``memory_items.suggested_signal``
@@ -342,6 +345,7 @@ def test_memory_suggest_storage_matches_the_sqlite_v106_contract(postgres_databa
                 "fingerprint, kind, created_at) VALUES ('nb-0085','u-0085','f','other',now())")
 
 
+@pytest.mark.postgres_fresh_schema
 @pytest.mark.postgres_integration
 def test_ask_job_report_id_matches_the_sqlite_v99_contract(postgres_database):
     """0080 mirrors SQLite v99: ``ask_jobs.report_id`` is text NOT NULL DEFAULT

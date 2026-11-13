@@ -882,8 +882,19 @@ job 记录存储用量、容器内存峰值与 CPU 计数，以及 PostgreSQL 16
 服务端地址上的十二个数据库必须互不相同。launcher 在启动四个 pytest worker 前校验并
 预检全部目标，每个 worker 仅使用自己的三个库，密码只存放在临时 pgpass 文件。
 目标缺失或重复、串行与并行配置混用、未知 worker 都立即失败，禁用 worker 自动重启。
-每条测试仍创建独立 schema 并执行真实迁移；数据库级隔离避免固定迁移 advisory lock
-互相竞争。锁观察查询必须限定当前数据库，服务端全局活动视图不会因 schema 隔离而隔离。
+每条测试仍有自己的 schema 名和一份处于当前迁移版本的 schema，但每个 pytest worker 在每个
+数据库上只迁移一次并复用这份 schema：fixture 把它改名为本条测试新的 `sn_test_<uuid>`；
+测试结束时先改名为停放名，只有仍保持原样时才复位——catalog 指纹（表、列、默认值、索引、
+约束、触发器、函数、策略、ACL、owner、reloptions）与迁移 ledger 都和刚迁移完的基线一致，
+且 `pg_stats` 里没有它的列统计。复位会截断本条测试动过的表（ledger 除外，带
+`RESTART IDENTITY`）并重置用过的序列；其余任何状态（DDL、GRANT、ANALYZE 统计、改过的
+ledger、被锁挡住的复位）都照旧删除整个 schema。需要空的、未迁移 schema 的测试（迁移到
+指定目标版本、对空 schema 直接执行 DDL）标 `@pytest.mark.postgres_fresh_schema`（或由所在
+模块的 `pytestmark` 标），走原来的建 schema、迁移、删除路径；不标的话会直接报
+`PostgreSQL migration ledger is newer than requested target`。
+`tests/postgres/test_schema_reuse_pg.py` 钉住复位行为和每一种删除条件。每个 worker 使用
+各自的数据库，避免固定迁移 advisory lock 互相竞争。锁观察查询必须限定当前数据库，服务端
+全局活动视图不会因 schema 隔离而隔离。
 batch4 的只读计划矩阵共用一份规模不变的大语料；在线安装与迁移变异测试仍保留独立 schema。
 batch2 的 payload 计划矩阵只创建一次 10 万行笔记本：先检查稀有词的自然计划，再加入
 其他笔记本的 2 万行命中数据并重新 ANALYZE，检查位图访问被限定在当前笔记本且本地
@@ -893,7 +904,7 @@ KG findings、store-evidence、id-binding 和已认证 KG 枚举的计划检查�
 只读矩阵运行，每份矩阵只准备一次执行过真实迁移的语料，保留全部原有结果、SQL、
 计划断言和数据规模。store-evidence、id-binding 与已认证枚举的各场景使用新连接池，
 避免预编译语句对照预热后续场景的缓存；录制补丁在场景之间还原。未认证反向索引世界
-仍使用独立 schema。这不引入共享可变的模块级 fixture 或 PostgreSQL 迁移模板。
+仍使用独立 schema。矩阵语料不跨测试共享：每份矩阵都写入本条测试自己复位过的 schema。
 id-binding 的重复执行缓存测试也保留独立 schema：它会切换反向索引认证标记，不能改变
 行序检查所用的已认证世界。
 

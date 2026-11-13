@@ -22,6 +22,8 @@ from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 pytestmark = [
     pytest.mark.postgres_integration,
     pytest.mark.xdist_group(name="postgres_board_partition_migration"),
+    # Migrates to explicit target versions: needs an empty, unmigrated schema.
+    pytest.mark.postgres_fresh_schema,
 ]
 
 MIGRATION = (

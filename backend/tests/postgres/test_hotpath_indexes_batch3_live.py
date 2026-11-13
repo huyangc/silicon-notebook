@@ -36,7 +36,11 @@ from app.repositories.postgres.knowledge_store import KnowledgeStore
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
-pytestmark = pytest.mark.postgres_integration
+pytestmark = [
+    pytest.mark.postgres_integration,
+    # Migrates to explicit target versions: needs an empty, unmigrated schema.
+    pytest.mark.postgres_fresh_schema,
+]
 
 _BATCH3_NAME = "idx_clusters_nb_canonical_member"
 

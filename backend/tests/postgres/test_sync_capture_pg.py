@@ -336,6 +336,7 @@ def test_a_keyless_table_logs_its_registered_composite_key(migrated):
 # -------------------------------------------------------------- 去重迁移
 
 
+@pytest.mark.postgres_fresh_schema
 def test_the_migration_collapses_duplicate_rows_before_taking_the_key(
     postgres_database,
 ):

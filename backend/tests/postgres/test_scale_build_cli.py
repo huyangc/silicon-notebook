@@ -89,6 +89,7 @@ def _relation_exists(url: str, name: str) -> bool:
 
 # ─────────────────────────────────────────── the schema-ownership seam ──
 
+@pytest.mark.postgres_fresh_schema
 def test_a_composition_with_migrate_off_never_touches_a_fresh_schema(
     postgres_scope, postgres_settings
 ):
@@ -159,6 +160,7 @@ def test_a_composition_with_seed_off_never_writes_the_admin_credential(
 
 # ───────────────────────────────────────────── the migration ledger gate ──
 
+@pytest.mark.postgres_fresh_schema
 def test_the_ledger_preflight_refuses_an_unmigrated_database(postgres_scope):
     with pytest.raises(cli.ScaleBuildCliError, match="没有迁移账本"):
         cli.verify_migration_ledger(postgres_scope.url)
