@@ -380,7 +380,12 @@ SELECT item FROM (
          || '|' || a.attnotnull || '|' || a.attidentity::text || '|' || a.attgenerated::text
          || '|' || coalesce(a.attcollation::regcollation::text, '')
          || '|' || a.attstorage::text || '|' || coalesce(a.attstattarget::text, '')
-         || '|' || coalesce(a.attoptions::text, '')
+         -- Options prefixed pg_ are internal and cannot be set by DDL; pg_attver
+         -- (minor releases from Nov 2026, e.g. 16.16; CVE-2026-6460) carries a
+         -- per-migration version that differs between otherwise identical schemas.
+         || '|' || coalesce(array_to_string(ARRAY(
+              SELECT o FROM unnest(a.attoptions) o WHERE left(o, 3) <> 'pg_' ORDER BY o
+            ), ','), '')
          || '|' || coalesce(replace(pg_get_expr(d.adbin, d.adrelid), ns.nspname || '.', ''), '')
     FROM pg_attribute a
     JOIN pg_class c ON c.oid = a.attrelid
