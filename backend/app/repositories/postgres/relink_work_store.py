@@ -250,22 +250,24 @@ def prepare(db, notebook_id: str, algorithm_version: int, full: bool = False) ->
             (notebook_id,),
         ).fetchone()
         seq = int(seq_row["kg_mutation_seq"]) if seq_row else 0
-        db.execute(
-            "UPDATE kg_relink_work SET revision=revision+1,algorithm_version=%s,"
-            "status='pending',isolated_before=0,isolated_after=0,edges_added=0 "
-            "WHERE notebook_id=%s", (algorithm_version, notebook_id),
-        )
         # This scan occurs only at first use, algorithm upgrade or explicit full maintenance.
         # It covers empty and deleted-source partitions without materialising all objects.
+        # One sorted upsert reserves existing and new keys in the same order as
+        # graph writers. A separate bulk UPDATE would lock old rows in heap/plan
+        # order and could deadlock with a source replacement holding an earlier key.
         db.execute(
             "INSERT INTO kg_relink_work (notebook_id,source_id,algorithm_version) "
             "SELECT %s,part.source_id,%s FROM ("
-            "SELECT id AS source_id FROM sources WHERE notebook_id=%s "
+            "SELECT source_id FROM kg_relink_work WHERE notebook_id=%s "
+            "UNION SELECT id AS source_id FROM sources WHERE notebook_id=%s "
             "UNION SELECT DISTINCT COALESCE(ko.source_id,'') AS source_id "
             "FROM knowledge_objects ko WHERE ko.notebook_id=%s AND NOT EXISTS ("
             "SELECT 1 FROM sources s WHERE s.notebook_id=ko.notebook_id AND s.id=ko.source_id)"
-            ") part WHERE TRUE ON CONFLICT (notebook_id,source_id) DO NOTHING",
-            (notebook_id, algorithm_version, notebook_id, notebook_id),
+            ') part WHERE TRUE ORDER BY part.source_id COLLATE "C" '
+            "ON CONFLICT (notebook_id,source_id) DO UPDATE SET "
+            "revision=kg_relink_work.revision+1,algorithm_version=excluded.algorithm_version,"
+            "status='pending',isolated_before=0,isolated_after=0,edges_added=0",
+            (notebook_id, algorithm_version, notebook_id, notebook_id, notebook_id),
         )
         db.execute(
             "UPDATE kg_relink_state SET algorithm_version=%s,full_pending=1,"
