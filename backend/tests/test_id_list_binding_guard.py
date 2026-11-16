@@ -141,8 +141,12 @@ EXEMPT: dict[tuple[str, str], tuple[tuple[str, str, str], ...]] = {
     ("postgres/governance_store.py", "GovernanceStore.strip_sources_evidence_on"): (
         s("ALL(%s)", BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source (not owned by a purged source)"),
         s("ALL(%s)", BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source (unbackfilled lock leg)"),
+        s("ALL(%s)", BOUNDED, "same purge page, rechecked under object locks after receipt reservation"),
         s(ANY, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source (reverse-index lookup)"),
         s(ANY, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source (reverse-index rows removed)"),),
+    ("postgres/governance_store.py", "_reserve_base_dedup_receipts"): (
+        s(ANY, BOUNDED, "one promotion type or the four supported Memory promotion types"),
+        s(ANY, BOUNDED, "the fixed USABLE_STATUSES contract"),),
     ("postgres/knowledge_store.py", "KnowledgeStore.clear_sources_graph_state"): tuple(
         s(ANY, BOUNDED, "one purge page: <= 200 source ids (_PURGE_PAGE), or one source") for _ in range(6)),
     ("postgres/knowledge_store.py", "KnowledgeStore.clear_sources_extraction_state"): tuple(

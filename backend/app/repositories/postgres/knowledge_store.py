@@ -3768,6 +3768,7 @@ class KnowledgeStore:
         if not ids:
             return
         from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
+        self.relink_work.reserve_for_sources(db, notebook_id, ids)
         self.relink_work.enqueue_for_source_relations(db, notebook_id, ids, RELINK_ALGORITHM_VERSION)
         db.execute(
             "DELETE FROM kg_relation_completion_state WHERE source_id = ANY(%s)",

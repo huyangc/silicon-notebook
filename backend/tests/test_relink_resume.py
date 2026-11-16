@@ -60,10 +60,10 @@ def test_receipt_invalidation_seeks_changed_ids_instead_of_scanning_notebook(rep
         work.enqueue_for_objects(ObservePlans(), nb, [oid], RELINK_ALGORITHM_VERSION, adjacent=True)
         work.enqueue_for_source_relations(ObservePlans(), nb, ["a"], RELINK_ALGORITHM_VERSION)
     assert plans
-    assert not any("SCAN o" in step or "SCAN r" in step for step in plans), plans
+    assert not any("SCAN o" in step or "SCAN r" in step for step in plans), "\n".join(plans)
     relation_seeks = [step for step in plans if "SEARCH r " in step]
     assert relation_seeks and all(any(key in step for key in (
-        "source_id=?", "source_object_id=?", "target_object_id=?",
+        "source_id=?", "source_id>? AND source_id<?", "source_object_id=?", "target_object_id=?",
     )) for step in relation_seeks), plans
 
 

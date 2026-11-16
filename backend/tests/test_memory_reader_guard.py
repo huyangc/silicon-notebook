@@ -306,6 +306,7 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "GovernanceStore.detach_promotion_sources_on": MAINTENANCE,
         "GovernanceStore.sweep_orphan_clusters_page": MAINTENANCE,
         "_base_dedup_rows_for_update": MAINTENANCE,
+        "_reserve_base_dedup_receipts": MAINTENANCE,
     },
     "sqlite/unified_kg_store.py": {
         # 每个预计算 canonical 的相关 LIMIT 1，只读首个可见可用代表对象 id。
@@ -482,6 +483,8 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "SqliteMigrator._migration_102": MAINTENANCE,
     },
     "*/relink_work_store.py": {
+        "reserve_for_objects": MAINTENANCE,
+        "reserve_for_sources": MAINTENANCE,
         "prepare": MAINTENANCE,
         "enqueue_for_objects": MAINTENANCE,
         "enqueue_for_source_relations": MAINTENANCE,

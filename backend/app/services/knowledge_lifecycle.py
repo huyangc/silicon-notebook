@@ -1617,6 +1617,8 @@ class KnowledgeLifecycleService:
                 )
             # Same lock order as relink publication: receipt before graph rows.
             from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
+            if replace_source and source_id:
+                self.knowledge.relink_work.reserve_for_sources(db, notebook_id, [source_id])
             if objects or db_relations or replace_source:
                 self.knowledge.relink_work.enqueue(
                     db, notebook_id, source_id or "", RELINK_ALGORITHM_VERSION,
