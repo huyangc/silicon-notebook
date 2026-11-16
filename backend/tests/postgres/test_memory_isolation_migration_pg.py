@@ -40,6 +40,8 @@ MIGRATION = (
 
 def _roll_back_to_66(database) -> None:
     with database.write() as db:
+        db.execute("DROP TABLE kg_relink_work")
+        db.execute("DROP TABLE kg_relink_state")
         db.execute("DROP TABLE kg_concept_ranks")
         db.execute("DROP FUNCTION sync_capture_kg_concept_ranks()")
         db.execute("DROP TABLE public_share_evidence")
