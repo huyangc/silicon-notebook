@@ -431,6 +431,11 @@ class KgBuildJobStore:
 
     @staticmethod
     def _delete_source_kg(connection, notebook_id: str, source_id: str) -> None:
+        from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
+        from app.repositories.postgres.relink_work_store import enqueue_for_objects, enqueue_for_source_relations
+
+        enqueue_for_source_relations(connection, notebook_id, [source_id], RELINK_ALGORITHM_VERSION)
+
         connection.execute(
             "DELETE FROM kg_relation_completion_state WHERE source_id=%s",
             (source_id,),
@@ -452,17 +457,9 @@ class KgBuildJobStore:
         # the cascade empty and states the dependency where the relation
         # deletion shapes are, so a staged relation that reuses the stable id
         # can never meet a leftover vector.
-        connection.execute(
-            "DELETE FROM relation_embeddings WHERE relation_id IN "
-            "(SELECT id FROM knowledge_relations WHERE source_id=%s)",
-            (source_id,),
-        )
-        connection.execute(
-            "DELETE FROM knowledge_relations WHERE source_id=%s", (source_id,)
-        )
         while True:
             rows = connection.execute(
-                "SELECT DISTINCT ko.id FROM knowledge_objects ko "
+                'SELECT DISTINCT ko.id COLLATE "C" AS id FROM knowledge_objects ko '
                 "LEFT JOIN knowledge_object_sources kos ON kos.object_id=ko.id "
                 "WHERE ko.notebook_id=%s AND (ko.source_id=%s OR kos.source_id=%s "
                 "OR ko.evidence @> jsonb_build_array("
@@ -479,6 +476,9 @@ class KgBuildJobStore:
             object_ids = [str(row["id"]) for row in rows]
             if not object_ids:
                 break
+            # Preserve adjacency until both deleted owners and surviving
+            # neighbours have been requeued in this publication transaction.
+            enqueue_for_objects(connection, notebook_id, object_ids, RELINK_ALGORITHM_VERSION, adjacent=True)
             connection.execute(
                 "DELETE FROM relation_embeddings WHERE relation_id IN "
                 "(SELECT id FROM knowledge_relations WHERE "
@@ -505,6 +505,14 @@ class KgBuildJobStore:
             connection.execute(
                 "DELETE FROM knowledge_objects WHERE id=ANY(%s)", (object_ids,)
             )
+        connection.execute(
+            "DELETE FROM relation_embeddings WHERE relation_id IN "
+            "(SELECT id FROM knowledge_relations WHERE source_id=%s)",
+            (source_id,),
+        )
+        connection.execute(
+            "DELETE FROM knowledge_relations WHERE source_id=%s", (source_id,)
+        )
 
     @staticmethod
     def _clear_notebook_derived_kg(connection, notebook_id: str) -> None:

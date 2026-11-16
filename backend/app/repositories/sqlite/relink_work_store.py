@@ -2,7 +2,39 @@
 from __future__ import annotations
 
 from app.repositories.sqlite.database import SqliteDatabase
-from app.repositories.sqlite.id_binding import bind_ids, member_of
+from app.repositories.sqlite.id_binding import bind_ids, drive_by
+
+
+def enqueue_for_source_relations(db, notebook_id: str, source_ids, algorithm_version: int) -> None:
+    """Requeue endpoint owners before deleting relations by provenance source.
+
+    Endpoint objects can both survive source replacement. Keep the source-bound
+    union in SQL so a high-degree source never hydrates all endpoints in Python.
+    Source IDs drive indexed seeks; CROSS JOIN and filter-only notebook checks
+    prevent SQLite from starting with every object/relation in the notebook.
+    """
+    ids = list(source_ids)
+    if not ids:
+        return
+    bound = bind_ids(ids)
+    legs = [
+        "SELECT COALESCE(o.source_id,'') AS source_id FROM knowledge_relations r "
+        "INDEXED BY idx_knowledge_relations_source "
+        f"CROSS JOIN knowledge_objects o ON o.id=r.{endpoint} AND +o.notebook_id=r.notebook_id "
+        f"WHERE +r.notebook_id=? AND {drive_by('r.source_id', bound)}"
+        for endpoint in ("source_object_id", "target_object_id")
+    ]
+    statement = (
+        "INSERT INTO kg_relink_work (notebook_id,source_id,algorithm_version) "
+        "SELECT ?,affected.source_id,? FROM (" + " UNION ".join(legs) + ") affected "
+        "WHERE TRUE ORDER BY affected.source_id COLLATE BINARY "
+        "ON CONFLICT (notebook_id,source_id) DO UPDATE SET "
+        "revision=kg_relink_work.revision+1,algorithm_version=excluded.algorithm_version,"
+        "status='pending',isolated_before=0,isolated_after=0,edges_added=0"
+    )
+    db.execute(statement, (
+        notebook_id, algorithm_version, notebook_id, bound.param, notebook_id, bound.param,
+    ))
 
 
 def enqueue_for_objects(
@@ -13,6 +45,7 @@ def enqueue_for_objects(
     The caller supplies a bounded object batch. Endpoint-specific indexed legs
     avoid a notebook-wide relation scan. No source lock is taken here: mutation
     owners may already hold object locks, and receipts have no source foreign key.
+    Object IDs drive the primary-key leg; adjacency uses notebook/endpoint indexes.
     """
     ids = list(object_ids)
     if not ids:
@@ -20,17 +53,19 @@ def enqueue_for_objects(
     bound = bind_ids(ids)
     sql = (
         "SELECT COALESCE(o.source_id,'') AS source_id FROM knowledge_objects o "
-        f"WHERE o.notebook_id=? AND {member_of('o.id', bound)}"
+        f"WHERE +o.notebook_id=? AND {drive_by('o.id', bound)}"
     )
     params = [notebook_id, bound.param]
     if adjacent:
-        for endpoint, other in (("source_object_id", "target_object_id"),
-                                ("target_object_id", "source_object_id")):
+        for endpoint, other, index in (
+            ("source_object_id", "target_object_id", "idx_knowledge_relations_nb_source"),
+            ("target_object_id", "source_object_id", "idx_knowledge_relations_nb_target"),
+        ):
             sql += (
                 " UNION SELECT COALESCE(o.source_id,'') AS source_id "
-                "FROM knowledge_relations r JOIN knowledge_objects o "
-                f"ON o.id=r.{other} AND o.notebook_id=r.notebook_id "
-                f"WHERE r.notebook_id=? AND {member_of('r.' + endpoint, bound)}"
+                f"FROM knowledge_relations r INDEXED BY {index} CROSS JOIN knowledge_objects o "
+                f"ON o.id=r.{other} AND +o.notebook_id=r.notebook_id "
+                f"WHERE r.notebook_id=? AND {drive_by('r.' + endpoint, bound)}"
             )
             params.extend((notebook_id, bound.param))
     rows = db.execute(sql, tuple(params)).fetchall()

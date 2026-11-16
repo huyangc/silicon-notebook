@@ -3767,6 +3767,8 @@ class KnowledgeStore:
         ids = sorted({str(source_id) for source_id in source_ids if source_id})
         if not ids:
             return
+        from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
+        self.relink_work.enqueue_for_source_relations(db, notebook_id, ids, RELINK_ALGORITHM_VERSION)
         db.execute(
             "DELETE FROM kg_relation_completion_state WHERE source_id = ANY(%s)",
             (ids,),

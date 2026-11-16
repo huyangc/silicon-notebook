@@ -13,6 +13,19 @@ from tests.test_relink_work_receipts import receipt_contract, seed_tables
 pytestmark = pytest.mark.postgres_integration
 
 
+@pytest.mark.parametrize("rollback", [False, True])
+@pytest.mark.parametrize("staged", [False, True])
+def test_replacement_requeues_surviving_partitions_atomically(postgres_settings, rollback, staged):
+    from app.services.postgres_repository import PostgresRepository
+    from tests.relink_staged_cleanup_cases import assert_staged_cleanup_receipts
+
+    repo = PostgresRepository(postgres_settings)
+    try:
+        assert_staged_cleanup_receipts(repo, postgres=True, rollback=rollback, staged=staged)
+    finally:
+        repo.close()
+
+
 def test_receipts_resume_and_reject_stale_results(postgres_database):
     with postgres_database.write() as db:
         seed_tables(db, postgres=True)

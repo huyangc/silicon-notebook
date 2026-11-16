@@ -484,6 +484,7 @@ _REGISTRY: dict[str, dict[str, str]] = {
     "*/relink_work_store.py": {
         "prepare": MAINTENANCE,
         "enqueue_for_objects": MAINTENANCE,
+        "enqueue_for_source_relations": MAINTENANCE,
     },
     "postgres/maintenance.py": {
         name: MAINTENANCE for name in (

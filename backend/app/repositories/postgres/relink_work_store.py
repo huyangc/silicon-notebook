@@ -4,6 +4,35 @@ from __future__ import annotations
 from app.repositories.postgres.id_binding import bind_ids, execute_ids, member_of
 
 
+def enqueue_for_source_relations(db, notebook_id: str, source_ids, algorithm_version: int) -> None:
+    """Requeue endpoint owners before deleting relations by provenance source.
+
+    Endpoint objects can both survive source replacement. Keep the source-bound
+    union in SQL so a high-degree source never hydrates all endpoints in Python.
+    """
+    ids = list(source_ids)
+    if not ids:
+        return
+    bound = bind_ids(ids)
+    legs = [
+        "SELECT COALESCE(o.source_id,'') AS source_id FROM knowledge_relations r "
+        f"JOIN knowledge_objects o ON o.id=r.{endpoint} AND o.notebook_id=r.notebook_id "
+        f"WHERE r.notebook_id=%s AND {member_of('r.source_id', bound)}"
+        for endpoint in ("source_object_id", "target_object_id")
+    ]
+    statement = (
+        "INSERT INTO kg_relink_work (notebook_id,source_id,algorithm_version) "
+        "SELECT %s,affected.source_id,%s FROM (" + " UNION ".join(legs) + ") affected "
+        "WHERE TRUE ORDER BY affected.source_id COLLATE \"C\" "
+        "ON CONFLICT (notebook_id,source_id) DO UPDATE SET "
+        "revision=kg_relink_work.revision+1,algorithm_version=excluded.algorithm_version,"
+        "status='pending',isolated_before=0,isolated_after=0,edges_added=0"
+    )
+    execute_ids(db, statement, (
+        notebook_id, algorithm_version, notebook_id, bound.param, notebook_id, bound.param,
+    ))
+
+
 def enqueue_for_objects(
     db, notebook_id: str, object_ids, algorithm_version: int, *, adjacent: bool = False,
 ) -> None:
