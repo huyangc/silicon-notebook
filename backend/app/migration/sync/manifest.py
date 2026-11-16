@@ -625,6 +625,8 @@ _SYNCED_WITH_MAPPING: tuple[TableSyncSpec, ...] = (
 # --- 3.3 不同步层 (LOCAL) ------------------------------------------------
 
 _LOCAL: tuple[TableSyncSpec, ...] = (
+    TableSyncSpec("kg_relink_state", SyncClass.LOCAL, notes="本环境的补连断点，不跨环境"),
+    TableSyncSpec("kg_relink_work", SyncClass.LOCAL, notes="本环境的逐来源补连回执，不跨环境"),
     # 用户交互
     TableSyncSpec("conversations", SyncClass.LOCAL),
     TableSyncSpec("answers", SyncClass.LOCAL),

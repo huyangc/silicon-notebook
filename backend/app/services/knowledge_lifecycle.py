@@ -172,13 +172,6 @@ _KG_BACKFILL_MAX_ROUNDS = 3
 _GRAPH_RESET_ATTEMPTS = 3
 _GRAPH_DRAIN_STALL_LIMIT = 3
 
-# relink 的两个有界化常数。页大小只影响「一次问数据库要多少个来源 id」,与
-# `_SOURCE_BUILD_PAGE_SIZE` 取同一个值:两者是同一张表、同一条 `(created_at, id)`
-# keyset、同一条 `idx_sources_notebook_created`。刻意不取更小值——SQLite 把行值
-# 比较当残余过滤(EXPLAIN:`SEARCH sources USING INDEX idx_sources_notebook_created
-# (notebook_id=?)`,游标不是索引下界),所以每页都从该 notebook 的索引段头重扫一遍,
-# 页数越多重扫越多。来源数是千级而不是对象的百万级,这点代价可忽略,但没有理由白付。
-_RELINK_SOURCE_PAGE_SIZE = _SOURCE_BUILD_PAGE_SIZE
 # 每条 IN 语句的对象 id 上限。relink 的关系读取按端点方向拆成两条语句,每条各带一份
 # id 列表,故单条语句的参数数就是这个值 +1,离 SQLite 的变量上限还很远。
 _RELINK_ID_BATCH_SIZE = 500
@@ -802,8 +795,8 @@ class KnowledgeLifecycleService:
             event_log=event_log,
             get_notebook=get_notebook,
             new_id=new_id,
-            relink_notebook_kg=lambda notebook_id: self.relink_notebook_kg(
-                notebook_id
+            relink_notebook_kg=lambda notebook_id, **kw: self.relink_notebook_kg(
+                notebook_id, **kw
             ),
             rebuild_unified_kg=lambda notebook_id, **kw: self.rebuild_unified_kg(
                 notebook_id, force=False, **kw
@@ -1622,6 +1615,12 @@ class KnowledgeLifecycleService:
                     source_generation,
                     all_fact_element_ids,
                 )
+            # Same lock order as relink publication: receipt before graph rows.
+            from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
+            if objects or db_relations or replace_source:
+                self.knowledge.relink_work.enqueue(
+                    db, notebook_id, source_id or "", RELINK_ALGORITHM_VERSION,
+                )
             if replace_source:
                 if not source_id:
                     raise ValueError("replace_source requires source_id")
@@ -2202,7 +2201,7 @@ class KnowledgeLifecycleService:
                 COMPLETION_SCHEMA_VERSION, self._now(),
             )
 
-    def relink_notebook_kg(self, notebook_id: str) -> dict:
+    def relink_notebook_kg(self, notebook_id: str, *, incremental: bool = False) -> dict:
         """Backfill: reconnect degree-0 KG nodes in an EXISTING notebook.
 
         For legacy / pre-relink graphs (the inline path handles new extractions).
@@ -2245,56 +2244,8 @@ class KnowledgeLifecycleService:
         fixture pins exactly that.
 
         Returns {"isolated_before", "edges_added", "isolated_after"}."""
-        self.get_notebook(notebook_id)  # KeyError if missing
-        # The generation the run starts on — the relink mark falls back to it
-        # when something other than this run moved the KG (`_mark_relink_attempted`).
-        with self._connect() as db:
-            state = self.unified_kg.state_row(db, notebook_id)
-        started_at_seq = int(state["kg_mutation_seq"]) if state else 0
-        isolated_before = isolated_after = 0
-        # 「至今写过任何边」的账目,刻意是可变的、写完一个来源就立刻记账,供下面
-        # `finally` 判断要不要驱逐进程内缓存。**持久**的变更信号
-        # (`kg_mutation_seq`)不在这里推——`finally` 兜不住 kill -9:进程可能在某
-        # 来源的写事务提交后、`finally` 语句真正执行前就被 SIGKILL,那样已经落
-        # 库的边会永久躲开 `kg_mutation_seq`(`_cluster_input_version` 的兜底
-        # COUNT 不数 relations,漏推这一下让「刷新图谱」对这本库永久短路)。因此
-        # 持久信号改在 `_relink_one_source` 里、与该来源的边插入同一个写事务原子
-        # 提交(镜像 `write_clusters` 的 `_bump_cluster_mutation_seq(db, ...)`)。
-        # 这里的 `finally` 只负责进程内缓存驱逐——那是廉价、幂等的,晚一点/多做
-        # 一次都无所谓,不需要事务级原子性。`seq_bumps` 记本次自己推进了几次
-        # `kg_mutation_seq`(每个写了边的来源一次),供结尾的标记分辨「世代只被
-        # 本次推进过」与「期间还有别的写入」。
-        written = {"edges": 0, "seq_bumps": 0}
-        try:
-            for source_id in self._relink_source_partitions(notebook_id):
-                # 批 3·W1 PR-3 §4.2 选项 A 的检查点(relinkkg-,逐来源边界)。
-                # 相位 2 quiesce 闸的腿 B 依赖这个检查点存在(design doc §T-3.3
-                # 时序步骤 3)——没有它,quiesce 会永远等不到这个 pass 自己停下,
-                # 删除只能靠超时收场(安全但永远删不掉)。一次 notebooks 主键
-                # 点查,噪声级成本。
-                if self._notebook_deleting(notebook_id):
-                    raise NotebookDeletingAbortsMaintenanceError(notebook_id)
-                before, after = self._relink_one_source(
-                    notebook_id, source_id, written
-                )
-                isolated_before += before
-                isolated_after += after
-        finally:
-            if written["edges"]:
-                # Match store_kg / delete_notebook_kg so the in-memory rustworkx
-                # graph (and PPR/federated caches) pick up the new edges. Once for
-                # the run — the per-source writes are additive and no reader can
-                # observe a partially relinked graph as anything other than a graph
-                # with fewer relink edges. The kg_mutation_seq bump already
-                # happened per-source (durably, in-transaction) — this is
-                # process-local cache eviction only.
-                self._invalidate_unified_cache(notebook_id)
-        self._mark_relink_attempted(notebook_id, started_at_seq, written["seq_bumps"])
-        return {
-            "isolated_before": isolated_before,
-            "edges_added": written["edges"],
-            "isolated_after": isolated_after,
-        }
+        from app.services.kg.relink_work import run_relink
+        return run_relink(self, notebook_id, incremental=incremental)
 
     def _mark_relink_attempted(
         self, notebook_id: str, started_at_seq: int, own_bumps: int,
@@ -2338,58 +2289,11 @@ class KnowledgeLifecycleService:
                 "error_class": type(exc).__name__,
             })
 
-    def _relink_source_partitions(self, notebook_id: str) -> Iterator[str]:
-        """Every partition key of the notebook's objects, each yielded exactly once.
-
-        Two readers, because objects have no foreign key to ``sources``:
-
-        · the notebook's own sources, walked with the repository's ordinary
-          ``(created_at, id)`` keyset — bounded, notebook-local, index-backed;
-        · the orphan keys (``''`` and ids of deleted sources), discovered by ONE
-          query at the start of the run.
-
-        Their union is exactly the set of distinct ``source_id`` values in
-        ``knowledge_objects``, and they cannot overlap (a key either names a source
-        of this notebook or it does not). Sources with no objects yield empty
-        partitions, which ``_relink_one_source`` short-circuits.
-
-        Why not the obvious ``SELECT DISTINCT source_id FROM knowledge_objects``
-        keyset: no index leads with ``(notebook_id, source_id)``, so on PostgreSQL
-        every page walked and discarded a neighbouring notebook's objects (measured
-        on the shared base: ~1.2M rows removed on the tail page, per page). The
-        orphan scan pays a notebook-local pass ONCE per run instead — see the store
-        docstrings for the full cost note.
-
-        Orphans are discovered first but processed LAST, so the enumeration reflects
-        the state at the start of the run while the common case (real sources) starts
-        immediately.
-        """
-        with self._connect() as db:
-            orphans = [
-                str(row["source_id"] or "")
-                for row in self.knowledge.relink_orphan_source_ids(db, notebook_id)
-            ]
-        after_created_at = None
-        after_id = ""
-        while True:
-            with self._connect() as db:
-                page = self.knowledge.relink_source_page(
-                    db, notebook_id, after_created_at, after_id,
-                    _RELINK_SOURCE_PAGE_SIZE,
-                )
-            if not page:
-                break
-            for row in page:
-                yield str(row["id"])
-            after_created_at = page[-1]["created_at"]
-            after_id = str(page[-1]["id"])
-            if len(page) < _RELINK_SOURCE_PAGE_SIZE:
-                break
-        yield from orphans
 
     def _relink_one_source(
-        self, notebook_id: str, source_id: str, written: dict
-    ) -> Tuple[int, int]:
+        self, notebook_id: str, source_id: str, written: dict,
+        *, revision: int | None = None,
+    ) -> Tuple[int, int] | None:
         """One bounded relink work unit: read this source, write its new edges.
 
         Returns ``(isolated_before, isolated_after)`` for THIS source; the caller
@@ -2402,35 +2306,11 @@ class KnowledgeLifecycleService:
         from app.services.kg.relink import complete_isolated_edges
 
         with self._connect() as db:
-            obj_rows = self.knowledge.relink_object_rows_for_source(
+            nodes = self.knowledge.relink_node_rows_for_source(
                 db, notebook_id, source_id
             )
-        if not obj_rows:
-            return (0, 0)
-
-        nodes = []
-        for r in obj_rows:
-            payload = json.loads(r["payload"] or "{}")
-            evidence = json.loads(r["evidence"] or "[]")
-            element_ids = {
-                ev.get("element_id")
-                for ev in evidence
-                if isinstance(ev, dict) and ev.get("element_id")
-            }
-            nodes.append({
-                "id": r["id"],
-                "object_type": r["object_type"],
-                "name": payload.get("name", ""),
-                "source_id": source_id,
-                "element_ids": element_ids,
-            })
-        # The raw rows still hold this source's payload+evidence TEXT documents;
-        # `nodes` kept only the parsed name and element ids. Dropping the last
-        # reference here releases those documents before the relation reads and the
-        # relink core run, so the work unit's peak is the derived structures rather
-        # than derived + raw. (Only the largest source matters; the whole point of
-        # paging is that this is the peak.)
-        del obj_rows
+        for node in nodes:
+            node["source_id"] = source_id
 
         edges: List[Tuple[str, str]] = []
         existing_triples: Set[Tuple[str, str, str]] = set()
@@ -2460,46 +2340,44 @@ class KnowledgeLifecycleService:
 
         new_rows = []
         if pending:
-            # Only now ask whether the partition key still names a live source. It
-            # decides one column of the rows about to be written, so in the steady
-            # state (nothing left to relink) this query never runs at all.
-            with self._connect() as db:
-                source_is_live = self.knowledge.relink_source_is_live(
-                    db, notebook_id, source_id
-                )
             now = self._now()
             new_rows = [
                 (
                     self._new_id("rel"), notebook_id,
                     # NULL if the source row is gone or objects carry '' (FK-safe).
-                    source_id if source_is_live else None,
+                    None,
                     src, tgt, edge_type,
                     json.dumps([{"basis": basis, "quote": ""}], ensure_ascii=False),
                     now,
                 )
                 for (src, tgt, edge_type), basis in pending
             ]
-            with self._write() as db:
-                self.knowledge.insert_relation_chunk(db, new_rows)
-                # Durable change signal, atomically with THIS source's edges —
-                # not deferred to the run's finally. A kill -9 landing right
-                # after this transaction's commit (before the run even reaches
-                # its finally) must not leave these edges invisible to
-                # kg_mutation_seq (see relink_notebook_kg's comment on the same
-                # hazard). Only reached when `pending` is non-empty, so a
-                # source with zero new edges never advances the seq — mirrors
-                # append_clusters' "no-op call manufactures no signal" rule.
-                self._mark_unified_kg_dirty_in_tx(db, notebook_id)
-            # Committed — record it BEFORE anything else can raise, so the run's
-            # cache-invalidation `finally` sees it even on a later failure. The
-            # one seq bump it carried is the run's own, for the relink mark.
-            written["edges"] += len(new_rows)
-            written["seq_bumps"] += 1
-
         now_connected = connected | {
             oid for r in new_rows for oid in (r[3], r[4])
         }
         isolated_after = sum(1 for n in nodes if n["id"] not in now_connected)
+        with self._write() as db:
+            # Publication and the receipt are one transaction. A source changed
+            # during the read stays pending; never publish edges from stale input.
+            if revision is not None and not self.knowledge.relink_work.current_for_write(
+                db, notebook_id, source_id, revision,
+            ):
+                return None
+            if new_rows:
+                # The receipt check has locked the notebook/source parents on
+                # PostgreSQL. Resolve the optional FK in that same transaction.
+                source_is_live = self.knowledge.relink_source_is_live(db, notebook_id, source_id)
+                new_rows = [row[:2] + (source_id if source_is_live else None,) + row[3:]
+                            for row in new_rows]
+                self.knowledge.insert_relation_chunk(db, new_rows)
+                self._mark_unified_kg_dirty_in_tx(db, notebook_id)
+            if revision is not None:
+                self.knowledge.relink_work.finish(
+                    db, notebook_id, source_id, revision,
+                    isolated_before, isolated_after, len(new_rows),
+                )
+        written["edges"] += len(new_rows)
+        written["seq_bumps"] += bool(new_rows)
         return (isolated_before, isolated_after)
 
     # --- zero-model KG maintenance compatibility delegates -------------------
@@ -2517,9 +2395,11 @@ class KnowledgeLifecycleService:
     def notebook_relink_status(self, notebook_id: str) -> dict:
         return self.kg_maintenance.notebook_relink_status(notebook_id)
 
-    def run_notebook_relink_job(self, notebook_id: str, job_id: str) -> dict:
+    def run_notebook_relink_job(
+        self, notebook_id: str, job_id: str, *, incremental: bool = False,
+    ) -> dict:
         return self.kg_maintenance.run_notebook_relink_job(
-            notebook_id, job_id
+            notebook_id, job_id, **({"incremental": True} if incremental else {}),
         )
 
     def fail_notebook_relink_submission(
@@ -4188,7 +4068,7 @@ class KnowledgeLifecycleService:
             return
         try:
             result["relink"] = self.run_notebook_relink_job(
-                notebook_id, job["job_id"]
+                notebook_id, job["job_id"], incremental=True,
             )
         except Exception:  # noqa: BLE001 - relink is fail-open here
             # `run_notebook_relink_job` already released the claim, logged the
@@ -4538,10 +4418,12 @@ class KnowledgeLifecycleService:
             if indexing_pipeline_identity is not None and result["failed"]:
                 raise IndexingPipelineKgExtractionFailedError()
             if indexing_pipeline_identity is None:
+                self.kg_build_jobs.set_stage(job_id, "relinking")
                 self._run_success_side_effects(
                     notebook_id, result, enqueue_fold=finalize is None
                 )
             if finalize is not None:
+                self.kg_build_jobs.set_stage(job_id, "finalizing")
                 finalized = finalize(result)
                 if finalized:
                     result.update(finalized)
@@ -6822,9 +6704,9 @@ class KnowledgeLifecycleService:
             self._unified_rebuild_cleanup(run)
         import time as _time
         self._unified_rebuild_stage(
-            run, f"DONE {run.ready('cluster_count')} canonicals, "
+            run, f"聚类完成 {run.ready('cluster_count')} canonicals, "
                  f"total {_time.perf_counter() - run.ready('t_total'):.1f}s")
-        self._unified_rebuild_derived_tail(notebook_id)
+        self._unified_rebuild_derived_tail(notebook_id, progress=progress)
         return run.ready("cluster_count")
 
     def _unchanged_cluster_state(self, notebook_id: str, ver: str) -> Optional[Any]:
@@ -7292,34 +7174,48 @@ class KnowledgeLifecycleService:
                 "rebuild 代际认领释放失败 for %s generation=%s(TTL 兜底)",
                 notebook_id, generation, exc_info=True)
 
-    def _unified_rebuild_derived_tail(self, notebook_id: str) -> None:
+    def _unified_rebuild_derived_tail(self, notebook_id: str, *, progress=None) -> None:
         """Everything after a published rebuild: the derived layers (forced,
         each fail-open), the viz refresh and the retrieval-index trigger."""
+        import time
+
+        def step(label, action):
+            def report(message):
+                if progress is not None:
+                    try:
+                        progress(message, 0, 0)
+                    except Exception:
+                        pass
+            report(f"{label}…")
+            started = time.monotonic()
+            action()
+            report(f"{label}完成 ({time.monotonic() - started:.1f}s)")
+
         # canonical 关系层(派生):聚类刚重算 → force=True(闸可能误跳)。fail-open。
         try:
-            self.rebuild_canonical_relations(notebook_id, force=True)
+            step("聚合关联", lambda: self.rebuild_canonical_relations(notebook_id, force=True))
         except Exception as exc:  # noqa: BLE001
             self.event_log.emit({"kind": "canonical_relations_rebuild_failed",
                                  "notebook_id": notebook_id, "error": str(exc)[:200]})
         # 共提桥接层(派生):聚类刚重算 → force=True(闸可能误跳)。fail-open。
         try:
-            self.rebuild_mention_bridge(notebook_id, force=True)
+            step("扫描共同提及", lambda: self.rebuild_mention_bridge(notebook_id, force=True))
         except Exception as exc:  # noqa: BLE001
             self.event_log.emit({"kind": "mention_bridge_rebuild_failed",
                                  "notebook_id": notebook_id, "error": str(exc)[:200]})
         # viz 刷新尾块抽出为 helper(codex #676 R2 P1:热函数天花板只降不升,
         # 与 #671 同型正解是抽取而不是上调基线);语义逐字未动,见其 docstring。
-        self._refresh_viz_after_rebuild(notebook_id)
+        step("更新图谱预览", lambda: self._refresh_viz_after_rebuild(notebook_id))
         # rebuild 后检索索引必然 stale(clusters/objects 已变)—— 大库自动重建/入队。
         # maybe_auto_index 自身 fail-open,这里再包一层只是双保险。
         try:
-            self.scale_artifacts.maybe_auto_index(notebook_id)
+            step("检查检索索引", lambda: self.scale_artifacts.maybe_auto_index(notebook_id))
         except Exception:
             self.event_log.logger.exception("maybe_auto_index failed after rebuild for %s", notebook_id)
         # 社区层:聚类刚重算 → force=True 强制重建社区(clustering 未必 bump
         # kg_mutation_seq,版本闸可能误跳)。纯图、无 LLM、fail-open——绝不拖垮 KG 重建。
         try:
-            self.rebuild_communities(notebook_id, level=0, force=True)
+            step("划分主题板块与分析", lambda: self.rebuild_communities(notebook_id, level=0, force=True))
         except Exception as exc:  # noqa: BLE001
             self.event_log.emit({"kind": "communities_rebuild_failed",
                                  "notebook_id": notebook_id, "error": str(exc)[:200]})

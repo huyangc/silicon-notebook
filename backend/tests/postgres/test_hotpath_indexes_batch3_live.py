@@ -186,7 +186,7 @@ def test_concept_cluster_detail_page_plan_uses_the_new_index_without_a_sort(
     ``idx_clusters_nb_canonical`` prefix index this batch deliberately keeps,
     vs. this migration's three-column one) onto the scale-free question "can
     the ordered index serve this query", matching
-    ``test_relink_source_page_plan_stays_inside_the_notebook``'s rationale in
+    ``test_relink_pending_page_plan_stays_inside_the_notebook``'s rationale in
     ``test_knowledge_store_conformance.py``.
     """
     assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version

@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
+from app.repositories.postgres.relink_work_store import enqueue, enqueue_for_objects
 from app.core.json_safety import validate_finite_json
 from app.core.text_whitespace import PY_STRIP_WHITESPACE
 from app.repositories.postgres._store_utils import (
@@ -1997,6 +1999,7 @@ class GovernanceStore:
                 object_type, payload, base_objs,
                 concept_seed_version=seed_version, override=override)
             if base_match_id:
+                enqueue_for_objects(connection, base_nb_id, [base_match_id], RELINK_ALGORITHM_VERSION)
                 merged_evidence = merge_evidence_lists(
                     base_dedup_evidence(connection, base_match_id), evidence
                 )
@@ -2020,6 +2023,7 @@ class GovernanceStore:
                 merged_object_ids.append(base_object_id)
             else:
                 base_object_id = self.seams.new_id("ko")
+                enqueue(connection, base_nb_id, "", RELINK_ALGORITHM_VERSION)
                 connection.execute(
                     "INSERT INTO knowledge_objects "
                     "(id,notebook_id,object_type,status,owner,payload,evidence,"
@@ -2158,6 +2162,7 @@ class GovernanceStore:
 
         if base_match_id:
             # Merge: combine evidence into the matched base object; keep its id.
+            enqueue_for_objects(connection, base_nb_id, [base_match_id], RELINK_ALGORITHM_VERSION)
             merged_evidence = merge_evidence_lists(
                 base_dedup_evidence(connection, base_match_id), src_evidence
             )
@@ -2180,6 +2185,7 @@ class GovernanceStore:
         else:
             # No match: insert a fresh base object at status='approved'.
             base_object_id = self.seams.new_id("ko")
+            enqueue(connection, base_nb_id, "", RELINK_ALGORITHM_VERSION)
             connection.execute(
                 """
                 INSERT INTO knowledge_objects
@@ -2462,6 +2468,7 @@ class GovernanceStore:
         wanted = set(ids)
         stripped: List[str] = []
         for row in rows:
+            enqueue_for_objects(connection, notebook_id, [row["id"]], RELINK_ALGORITHM_VERSION)
             kept = [
                 item
                 for item in json_value(row["evidence"], [])
@@ -2696,6 +2703,9 @@ class GovernanceStore:
                     payload.get(MERGED_INTO_PAYLOAD_KEY) != action.expected_target
                 ):
                     continue
+                enqueue_for_objects(
+                    connection, notebook_id, [action.object_id], RELINK_ALGORITHM_VERSION,
+                )
                 connection.execute(
                     "UPDATE knowledge_objects SET payload = %s, status = %s, "
                     "updated_at = %s WHERE id = %s AND notebook_id = %s",
@@ -2999,6 +3009,8 @@ class GovernanceStore:
                 _json_document(row["payload"], expected=dict, field="knowledge payload"),
             )
         new_payload = jsonb(document)
+        if payload.status is not None or payload.payload is not None:
+            enqueue_for_objects(connection, notebook_id, [object_id], RELINK_ALGORITHM_VERSION)
         new_status = payload.status if payload.status is not None else row["status"]
         new_owner = payload.owner if payload.owner is not None else row["owner"]
         # Stamp last_reviewed whenever a curator changes status.
@@ -3308,6 +3320,7 @@ class GovernanceStore:
             if key not in seen:
                 merged.append(item)
                 seen.add(key)
+        enqueue_for_objects(connection, notebook_id, [source_id, into_id], RELINK_ALGORITHM_VERSION)
         merged_json = json.dumps(merged, ensure_ascii=False)
         connection.execute(
             "UPDATE knowledge_objects SET evidence = %s, updated_at = %s WHERE id = %s",

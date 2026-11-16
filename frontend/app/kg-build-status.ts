@@ -70,6 +70,16 @@ export function kgBuildPresentation(
   }
 
   if (job.status === "running") {
+    if (job.stage === "relinking" || job.stage === "finalizing") {
+      return {
+        label: job.stage === "relinking" ? "正在补上关联…" : "正在完成图谱整理…",
+        detail: job.failed_sources > 0
+          ? `来源分析已结束，${job.failed_sources} 项内容未完成；正在处理收尾工作`
+          : "来源分析已结束，正在处理收尾工作",
+        tone: "neutral",
+        actionLabel: null,
+      };
+    }
     if (job.stage === "probing") {
       return {
         label: "正在连接模型服务…",

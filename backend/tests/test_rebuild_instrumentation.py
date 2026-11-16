@@ -82,8 +82,9 @@ def test_banner_sequence_contains_key_stages(repo):
     assert "concept: descriptions skipped" in joined      # desc disabled
     assert "claim: streamed+clustered+wrote" in joined
     assert "pending refresh" in joined
-    # final DONE banner with a total time
-    assert any(m.startswith("DONE ") and "total" in m for m in msgs), msgs
+    # Clustering completion precedes the visible derived-tail stages.
+    assert any(m.startswith("聚类完成 ") and "total" in m for m in msgs), msgs
+    assert msgs.index(next(m for m in msgs if m.startswith("聚类完成 "))) < msgs.index("聚合关联…")
 
 
 def test_info_lines_emitted(repo, caplog):
@@ -94,7 +95,7 @@ def test_info_lines_emitted(repo, caplog):
              if "kg-rebuild[" in r.getMessage()]
     assert lines, "expected kg-rebuild[...] INFO lines"
     assert any("concept: streamed" in m for m in lines)
-    assert any("DONE" in m and "total" in m for m in lines)
+    assert any("聚类完成" in m and "total" in m for m in lines)
 
 
 def test_instrumentation_is_side_effect_free_on_data(repo):

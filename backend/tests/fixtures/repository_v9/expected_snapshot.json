@@ -1557,6 +1557,11 @@
         "type": "index"
       },
       {
+        "name": "idx_kg_relink_work_pending",
+        "sql_sha256": "7a37901fbac7f251cf5c5ab90d7a2724e727fe54f09e243ad8a01a6cf8c37b3c",
+        "type": "index"
+      },
+      {
         "name": "idx_kg_source_profiles_nb_mainstream",
         "sql_sha256": "763b739c36d1375a31dbccc46580ae29d157c850f0a7b76256f78b0a28d28a8a",
         "type": "index"
@@ -2384,6 +2389,16 @@
       {
         "name": "kg_relation_completion_state",
         "sql_sha256": "942068821933bb8fdcc4fe1e60c2ef90fc715668dccd156975daa701bc429604",
+        "type": "table"
+      },
+      {
+        "name": "kg_relink_state",
+        "sql_sha256": "c7eb9ef78d1f1c0ebe5da3e8553624a5ea27dc392c086452cfcdd181335625ea",
+        "type": "table"
+      },
+      {
+        "name": "kg_relink_work",
+        "sql_sha256": "d47bd713f09fa0e4a132b58e738394323745e5f3dddfcebb9a16bdb0e8ab644a",
         "type": "table"
       },
       {
@@ -3462,6 +3477,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 109
+    "user_version": 110
   }
 }

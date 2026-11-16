@@ -37,6 +37,8 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 # shadow preflight use this reverse-totality list to reject unrelated/live
 # targets and any newly added business table that lacks a reviewed mapping.
 POSTGRES_BUSINESS_TABLES = (
+    "kg_relink_state",
+    "kg_relink_work",
     "public_share_evidence",
     "notebook_activity",
     "agent_access_tokens",
@@ -570,6 +572,6 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # SQLite v109 / PostgreSQL 0090: independent synced concept-rank derived
 # rows, with rank=0 recording freshness even when there are no ranked concepts.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=109,
-    postgres_version=90,
+    sqlite_version=110,
+    postgres_version=91,
 )

@@ -733,6 +733,38 @@ def test_blob_columns_survive_the_round_trip(source, target, package, first_impo
 # ------------------------------------------------------------- idempotence
 
 
+def test_resync_resets_only_imported_notebooks_local_relink_receipts(
+    source, target, package, tmp_path,
+):
+    from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
+    from app.repositories.sqlite import relink_work_store
+
+    _import(target, package)
+    target_repo = target["repo"]
+    local_id = target_repo.create_notebook(NotebookCreate(name="local-kept")).id
+    imported_id = source["exported"]
+    with target_repo._write() as db:
+        for notebook_id in (local_id, imported_id):
+            relink_work_store.prepare(db, notebook_id, RELINK_ALGORITHM_VERSION)
+            relink_work_store.enqueue(db, notebook_id, "", RELINK_ALGORITHM_VERSION)
+            for row in relink_work_store.page(db, notebook_id, None, 100):
+                assert relink_work_store.finish(db, notebook_id, row["source_id"], row["revision"], 0, 0, 0)
+            assert relink_work_store.finish_full(db, notebook_id)
+    with source["repo"]._write() as db:
+        db.execute("UPDATE knowledge_objects SET payload=? WHERE notebook_id=?",
+                   ('{"name":"changed by import"}', imported_id))
+    new_package = _export(source, tmp_path / "updated-export")
+    _import(target, new_package)
+    with target_repo._write() as db:
+        assert db.execute("SELECT 1 FROM kg_relink_state WHERE notebook_id=?", (imported_id,)).fetchone() is None
+        assert relink_work_store.summary(db, imported_id)["total"] == 0
+        assert relink_work_store.summary(db, local_id)["done"] == 1
+        # Later local maintenance must start from the imported graph, even if
+        # all partitions were done in this environment before the re-sync.
+        assert relink_work_store.prepare(db, imported_id, RELINK_ALGORITHM_VERSION)["full_pending"]
+        assert relink_work_store.count_pending(db, imported_id) > 0
+
+
 def test_a_second_import_of_the_same_package_is_a_no_op(source, target, package):
     first = _import(target, package)
     before = {

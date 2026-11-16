@@ -386,7 +386,7 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # v108 / PostgreSQL 0089 add local public-share evidence snapshots.
 # v109 / PostgreSQL 0090 add independent concept-rank rows and their synced
 # capture triggers; rank=0 carries generation stamps even for an empty ranking.
-SCHEMA_VERSION = 109
+SCHEMA_VERSION = 110
 
 # Frozen copy of ``element_reading_order.INDEX_DIGITS_SQL`` as v105 built it (a
 # migration must not change meaning when the live module changes). The readers
@@ -6559,6 +6559,31 @@ class SqliteMigrator:
             for name, (_table, sql) in sqlite_trigger_sql(added_at=109).items():
                 db.execute(f'DROP TRIGGER IF EXISTS "{name}"')
                 db.execute(sql)
+
+    def _migration_110(self) -> None:
+        """Local relink receipts, paired with PostgreSQL 0091; lazily seeded."""
+        with self._connect() as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS kg_relink_state (
+                  notebook_id TEXT PRIMARY KEY REFERENCES notebooks(id) ON DELETE CASCADE,
+                  algorithm_version INTEGER NOT NULL,
+                  full_pending INTEGER NOT NULL DEFAULT 0 CHECK (full_pending IN (0, 1)),
+                  started_at_seq BIGINT NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS kg_relink_work (
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL,
+                  revision BIGINT NOT NULL DEFAULT 1,
+                  algorithm_version INTEGER NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done')),
+                  isolated_before BIGINT NOT NULL DEFAULT 0,
+                  isolated_after BIGINT NOT NULL DEFAULT 0,
+                  edges_added BIGINT NOT NULL DEFAULT 0,
+                  PRIMARY KEY (notebook_id, source_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_kg_relink_work_pending
+                  ON kg_relink_work (notebook_id, source_id COLLATE BINARY) WHERE status = 'pending';
+            """)
 
     def migrate(self) -> list[int]:
         with self._connect() as db:

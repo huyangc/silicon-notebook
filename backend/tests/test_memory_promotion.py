@@ -275,6 +275,12 @@ def test_edit_and_approval_race_has_only_a_fully_approved_or_superseded_outcome(
 
 def test_admin_approval_is_idempotent_and_keeps_memory_private(repo, promotion_setup):
     owner, other, notebook, base, memory = promotion_setup
+    from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
+    from app.repositories.sqlite import relink_work_store
+
+    with repo._write() as db:
+        relink_work_store.prepare(db, base.id, RELINK_ALGORITHM_VERSION)
+        assert relink_work_store.finish_full(db, base.id)
     proposal = repo.propose_memory_promotion(memory.id, owner.id)
 
     first = repo._runtime.knowledge_governance.approve_promotion(proposal["id"])
@@ -282,6 +288,7 @@ def test_admin_approval_is_idempotent_and_keeps_memory_private(repo, promotion_s
     assert first["base_object_ids"] == second["base_object_ids"]
     assert len(first["base_object_ids"]) == 4
     with repo._connect() as db:
+        assert [row["source_id"] for row in relink_work_store.page(db, base.id, None, 10)] == [""]
         base_rows = db.execute(
             "SELECT id,object_type,payload,evidence,status FROM knowledge_objects "
             "WHERE notebook_id=? ORDER BY object_type,id", (base.id,),

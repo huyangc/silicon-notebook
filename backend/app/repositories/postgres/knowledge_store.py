@@ -86,6 +86,8 @@ _GRAPH_RESET_TABLES = frozenset({
     "knowledge_embeddings",
     "extraction_runs",
     "kg_relation_completion_state",
+    "kg_relink_work",
+    "kg_relink_state",
     # kg_analysis_artifacts: the KG-quality-analysis product LEDGER (batch-3-W1
     # PR-2, design doc Sec 3.2 table #15). Blanket-deleted here, same as
     # concept_clusters/concept_merge_candidates/kg_relation_completion_state —
@@ -894,6 +896,8 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int, bool], ...] = (
     ("kg_community_edges", "notebook_id = %s", 1, True),
     ("kg_concept_ranks", "notebook_id = %s", 1, True),
     ("kg_relation_completion_state", "notebook_id = %s", 1, True),
+    ("kg_relink_state", "notebook_id = %s", 1, True),
+    ("kg_relink_work", "notebook_id = %s", 1, True),
     ("kg_source_profiles", "notebook_id = %s", 1, True),
     # SQLite v97 / PostgreSQL 0077: a relink-attempt mark records the
     # kg_mutation_seq "补上关联" last finished at; the delete takes that seq
@@ -926,6 +930,7 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int, bool], ...] = (
 
 
 class KnowledgeStore:
+    from app.repositories.postgres import relink_work_store as relink_work
     # 能力声明(镜像 SQLite 侧的 False):这个适配器的 fts_search 能兑现 KNN
     # 访问路径提示,所以服务层的规模判定值得跑。
     lexical_knn_capable = True
@@ -1344,8 +1349,7 @@ class KnowledgeStore:
 
         See the SQLite twin: three unbounded ``fetchall``s (objects with their
         payload+evidence documents, all relations, all source ids). Production
-        relink pages by source (``relink_source_page`` +
-        ``relink_orphan_source_ids``); this survives as the differential test's
+        relink pages through durable source receipts; this survives as the differential test's
         oracle for the historical whole-graph answer.
         """
         objects = db.execute(
@@ -1367,78 +1371,7 @@ class KnowledgeStore:
             valid_sources,
         )
 
-    @staticmethod
-    def relink_source_page(
-        db: Any,
-        notebook_id: str,
-        after_created_at: Any,
-        after_id: str,
-        limit: int,
-    ):
-        """One ``(created_at, id)`` keyset page of the notebook's OWN sources.
 
-        This is where the shape had to change. The obvious driver —
-        ``SELECT DISTINCT source_id FROM knowledge_objects WHERE notebook_id=%s
-        ORDER BY source_id`` — has no notebook-prefixed index to stand on here: the
-        only index leading with ``source_id`` is
-        ``idx_knowledge_objects_source_id``, which is ordered ACROSS notebooks, so
-        each page walks a stretch of other notebooks' objects and filters them out.
-        Measured on the shared base: the tail page removed ~1.2M neighbour rows,
-        183 ms warm — and every page pays it again, on a cold instance long enough
-        to trip the statement timeout. ``sources`` already has
-        ``idx_sources_notebook_created``, so this is the repository's ordinary
-        bounded source keyset (``s.id COLLATE "C"`` tie-break, exactly like
-        ``source_build_state_page``) and every page stays notebook-local.
-
-        Hidden synthetic sources (``memory`` / ``knowhow`` projections) are
-        deliberately NOT excluded, unlike the build-target page — their rows own
-        knowledge objects, and skipping them would drop those partitions.
-
-        Pair with ``relink_orphan_source_ids``: objects have no foreign key to
-        ``sources``, so partitions keyed by ``''`` or by a deleted source have no
-        row here and must be discovered separately.
-        """
-        return db.execute(
-            "SELECT id, created_at FROM sources WHERE notebook_id = %s "
-            "AND (%s::timestamptz IS NULL "
-            " OR (created_at, id COLLATE \"C\") > (%s, %s)) "
-            "ORDER BY created_at, id COLLATE \"C\" LIMIT %s",
-            (
-                notebook_id,
-                after_created_at,
-                after_created_at,
-                after_id,
-                max(1, int(limit)),
-            ),
-        ).fetchall()
-
-    @staticmethod
-    def relink_orphan_source_ids(db: Any, notebook_id: str):
-        """The object ``source_id`` values that name NO source of this notebook.
-
-        ``''`` plus every id left behind by a deleted source. Run ONCE per relink
-        pass, so that together with the ``sources`` keyset the two cover exactly the
-        distinct ``source_id`` values present in ``knowledge_objects`` — nothing
-        dropped, nothing visited twice.
-
-        **Cost, stated plainly:** one bounded pass over THIS notebook's objects
-        (``notebook_id`` equality, then an anti-join / correlated ``NOT EXISTS``
-        against ``sources``). One scan per relink RUN, not per page — which is the
-        whole point of moving the per-page work onto ``sources``. Acceptable for a
-        background pass.
-
-        The RESULT is bounded by deletions rather than by object count (one row per
-        distinct orphan id), so no limit is imposed: a cap here could only silently
-        drop partitions.
-        """
-        return db.execute(
-            "SELECT DISTINCT ko.source_id AS source_id FROM knowledge_objects ko "
-            "WHERE ko.notebook_id = %s AND (ko.source_id = '' OR NOT EXISTS("
-            " SELECT 1 FROM sources s "
-            " WHERE s.id = ko.source_id AND s.notebook_id = ko.notebook_id)) "
-            "ORDER BY ko.source_id",
-            (notebook_id,),
-        ).fetchall()
 
     @staticmethod
     def relink_object_rows_for_source(
@@ -1509,10 +1442,38 @@ class KnowledgeStore:
                 "WHERE notebook_id = %s AND source_id = %s AND status != 'deprecated' "
                 "ORDER BY ordinal",
                 (notebook_id, source_id),
+                # A generic plan can BitmapAnd the source lookup with the
+                # notebook-wide trigram GIN leg (millions of matches per source).
+                # Keep this parameter-sensitive maintenance read custom.
+                prepare=False,
             ).fetchall(),
             payload=True,
             evidence=True,
         )
+
+    @staticmethod
+    def relink_node_rows_for_source(db: Any, notebook_id: str, source_id: str):
+        """Only the inputs used by relink, in stable insertion order.
+
+        Project before transmission: quoted evidence and the remaining payload
+        are never hydrated or JSON-round-tripped by this maintenance pass.
+        """
+        rows = db.execute(
+            "SELECT o.id, o.object_type, COALESCE(o.payload->'name', '\"\"'::jsonb) AS name, "
+            "COALESCE((SELECT jsonb_agg(e.value->'element_id') "
+            "FROM jsonb_array_elements(o.evidence) AS e(value) "
+            "WHERE jsonb_typeof(e.value)='object' AND e.value ? 'element_id'), "
+            "'[]'::jsonb) AS element_ids "
+            "FROM knowledge_objects o WHERE o.notebook_id=%s AND o.source_id=%s "
+            "AND o.status!='deprecated' ORDER BY o.ordinal",
+            (notebook_id, source_id),
+            prepare=False,
+        ).fetchall()
+        return [
+            {"id": row["id"], "object_type": row["object_type"], "name": row["name"],
+             "element_ids": {eid for eid in row["element_ids"] if eid}}
+            for row in rows
+        ]
 
     @staticmethod
     def relink_relation_rows_for_objects(db: Any, notebook_id: str, object_ids):
@@ -3755,6 +3716,10 @@ class KnowledgeStore:
         batch = list(object_ids[:_DELETE_OBJECT_BATCH_SIZE])
         if not batch:
             return
+        from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
+        cls.relink_work.enqueue_for_objects(
+            db, notebook_id, batch, RELINK_ALGORITHM_VERSION, adjacent=True,
+        )
         db.execute(
             "DELETE FROM knowledge_embeddings WHERE object_id = ANY(%s)",
             (batch,),
@@ -3843,9 +3808,6 @@ class KnowledgeStore:
                         break
                     stale_after_id = stale_batch[-1]
                     self._delete_object_id_batch(db, notebook_id, stale_batch)
-        db.execute(
-            "DELETE FROM knowledge_relations WHERE source_id = ANY(%s)", (ids,)
-        )
         while True:
             direct_batch = [
                 row["id"]
@@ -3857,6 +3819,11 @@ class KnowledgeStore:
             if not direct_batch:
                 break
             self._delete_object_id_batch(db, notebook_id, direct_batch)
+        # Keep adjacency readable until every deleted endpoint has invalidated
+        # the receipts of surviving neighbouring sources.
+        db.execute(
+            "DELETE FROM knowledge_relations WHERE source_id = ANY(%s)", (ids,)
+        )
 
     def clear_source_extraction_state(
         self,

@@ -485,8 +485,8 @@ def test_relink_mark_falls_back_to_its_start_when_an_ingest_lands_mid_run(
     original = lifecycle._relink_one_source
     landed: list = []
 
-    def one_source_then_an_ingest(notebook_id, source_id, written):
-        counts = original(notebook_id, source_id, written)
+    def one_source_then_an_ingest(notebook_id, source_id, written, **kwargs):
+        counts = original(notebook_id, source_id, written, **kwargs)
         if not landed:                  # an ordinary ingest commits mid-run
             with repo._runtime.database.write() as db:
                 repo._runtime.unified_kg.mark_dirty(db, notebook_id, T0)

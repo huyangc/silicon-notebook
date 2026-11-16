@@ -43,8 +43,15 @@ V78_AUTH_TABLES = {
 }
 
 
+def rollback_v110(db: sqlite3.Connection) -> None:
+    """Remove local relink receipts, without touching knowledge graph rows."""
+    db.execute("DROP TABLE kg_relink_work")
+    db.execute("DROP TABLE kg_relink_state")
+
+
 def rollback_v109(db: sqlite3.Connection) -> None:
     """Undo concept ranks and their table-owned capture triggers."""
+    rollback_v110(db)
     db.execute("DROP TABLE kg_concept_ranks")
 
 

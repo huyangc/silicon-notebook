@@ -60,6 +60,23 @@ test("probing/extracting/stopping labels are explicit", () => {
   );
 });
 
+test("completed extraction remains running through relink and finalization", () => {
+  for (const [stage, label] of [
+    ["relinking", "正在补上关联…"],
+    ["finalizing", "正在完成图谱整理…"],
+  ]) {
+    const active = job("running", stage, { completed_sources: 80 });
+    const view = kgBuildPresentation(active, 0, true);
+    assert.equal(view.label, label);
+    assert.equal(view.tone, "neutral");
+    assert.equal(view.actionLabel, null);
+    assert.match(view.detail, /收尾/);
+    assert.equal(kgBuildTerminalToast(active), null);
+    const partial = kgBuildPresentation({ ...active, failed_sources: 2 }, 2, true);
+    assert.match(partial.detail, /2 项内容未完成/);
+  }
+});
+
 test("an operator interrupt while stopping is not reported as a model failure", () => {
   // 离线批量分析被 Ctrl-C / 终止信号结束时也会经过「正在停止」,不能沿用模型
   // 故障文案冤枉模型服务。

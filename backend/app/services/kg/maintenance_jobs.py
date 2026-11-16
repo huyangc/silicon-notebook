@@ -276,10 +276,13 @@ class KgMaintenanceJobs:
     def notebook_relink_status(self, notebook_id: str) -> dict:
         return self.status(notebook_id, "relink", dict(self.RELINK_COUNTERS))
 
-    def run_notebook_relink_job(self, notebook_id: str, job_id: str) -> dict:
+    def run_notebook_relink_job(
+        self, notebook_id: str, job_id: str, *, incremental: bool = False,
+    ) -> dict:
         """Run relink and settle on every exit, including ``BaseException``."""
         try:
-            stats = self._relink_notebook_kg(notebook_id)
+            stats = (self._relink_notebook_kg(notebook_id, incremental=True)
+                     if incremental else self._relink_notebook_kg(notebook_id))
         except Exception:
             self.settle(notebook_id, job_id, "failed")
             self.event_log.logger.exception(

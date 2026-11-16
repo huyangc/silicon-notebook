@@ -6401,5 +6401,26 @@ MIGRATION_MANIFEST[(108, 109)] = {
 }
 
 
+# SQLite v110: local relink receipts. Existing graph data is unchanged.
+RELINK_WORK_TABLES = {
+    "kg_relink_state": "CREATE TABLE kg_relink_state (\n                  notebook_id TEXT PRIMARY KEY REFERENCES notebooks(id) ON DELETE CASCADE,\n                  algorithm_version INTEGER NOT NULL,\n                  full_pending INTEGER NOT NULL DEFAULT 0 CHECK (full_pending IN (0, 1)),\n                  started_at_seq BIGINT NOT NULL DEFAULT 0\n                )",
+    "kg_relink_work": "CREATE TABLE kg_relink_work (\n                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,\n                  source_id TEXT NOT NULL,\n                  revision BIGINT NOT NULL DEFAULT 1,\n                  algorithm_version INTEGER NOT NULL,\n                  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done')),\n                  isolated_before BIGINT NOT NULL DEFAULT 0,\n                  isolated_after BIGINT NOT NULL DEFAULT 0,\n                  edges_added BIGINT NOT NULL DEFAULT 0,\n                  PRIMARY KEY (notebook_id, source_id)\n                )"
+}
+RELINK_WORK_INDEXES = {
+    "idx_kg_relink_work_pending": "CREATE INDEX idx_kg_relink_work_pending\n                  ON kg_relink_work (notebook_id, source_id COLLATE BINARY) WHERE status = 'pending'"
+}
+MIGRATION_MANIFEST = {
+    (key[0], 110, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **RELINK_WORK_TABLES},
+        "indexes": {**manifest["indexes"], **RELINK_WORK_INDEXES},
+    } for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(109, 110)] = {
+    "tables": RELINK_WORK_TABLES, "indexes": RELINK_WORK_INDEXES,
+    "columns": {}, "triggers": {}, "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -4621,6 +4621,29 @@ _SQLITE_FTS_REBUILD: dict[str, tuple[str, str]] = {
 }
 
 
+def _reset_local_relink_receipts(
+    backend: _Backend, conn: Any, table: str, context: _Context,
+    *, include_deleted: bool = False,
+) -> None:
+    """Imported graph rows invalidate this environment's maintenance receipts.
+
+    Receipts are deliberately not carried in packages. Clear only the imported
+    notebooks in the graph-write transaction; a later local relink bootstraps
+    its backlog lazily from the graph that actually landed here.
+    """
+    if table not in {"knowledge_objects", "knowledge_relations"}:
+        return
+    notebooks = list(context.manifest.notebooks)
+    if include_deleted:
+        notebooks.extend(sorted(context.deleted_notebooks))
+    for batch in _batched(notebooks):
+        placeholders = ",".join("?" for _ in batch)
+        for receipt_table in ("kg_relink_work", "kg_relink_state"):
+            conn.execute(backend.sql(
+                f"DELETE FROM {receipt_table} WHERE notebook_id IN ({placeholders})"
+            ), tuple(batch))
+
+
 def _rebuild_sqlite_fts(
     backend: _Backend,
     conn: Any,
@@ -5431,6 +5454,7 @@ def _apply_table(
             f"package manifest declares {entry.rows}"
         )
     _rebuild_sqlite_fts(backend, conn, table, context)
+    _reset_local_relink_receipts(backend, conn, table, context)
     return TableOutcome(inserted=inserted, updated=updated, skipped=skipped)
 
 
@@ -5698,6 +5722,7 @@ def _prune_table(
             stale[start : start + _ROW_BATCH],
         )
     _rebuild_sqlite_fts(backend, conn, table, context)
+    _reset_local_relink_receipts(backend, conn, table, context)
     return len(stale)
 
 
@@ -6182,6 +6207,7 @@ def _replay_delete_table(
         # ``include_deleted`` because a window's deletes reach notebooks that
         # are NOT in manifest.notebooks -- the deleted ones.
         _rebuild_sqlite_fts(backend, conn, table, context, include_deleted=True)
+        _reset_local_relink_receipts(backend, conn, table, context, include_deleted=True)
     return outcome
 
 
