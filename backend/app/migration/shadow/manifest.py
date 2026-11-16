@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=109, postgres_version=90, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=110, postgres_version=91, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -901,6 +901,8 @@ _TABLES = (
     # the two backends, so a copied card would never match. LOCAL_EPHEMERAL,
     # no replication key.
     TableSpec("source_paper_cards", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 113),
+    TableSpec("kg_relink_state", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 121),
+    TableSpec("kg_relink_work", TableClass.LOCAL_EPHEMERAL, (), ReplicationKeyKind.DECLARED_PK, 122),
     # SQLite v106 / PostgreSQL 0087: auto user-memory suggestions. The new
     # nullable memory_items.suggested_signal and the two partial memory_items
     # indexes need no entry here (columns and indexes are parsed from the .sql

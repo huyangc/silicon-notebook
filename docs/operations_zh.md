@@ -2565,6 +2565,22 @@ python scripts/mineru_batch_parse.py --only-failed  # 只重跑上次失败的�
 
 ### 离线批量摄取(目录 → KG)
 
+**升级后的补连恢复。** 来源分析之后还会执行确定性的同源补连，再补齐向量、重新合并图谱，并按条件重建索引。模型／来源任务池计数归零，不表示这些阶段没有工作。`kg` 命令用 `[relink]` 输出已处理数量、待处理数量、新增关联、耗时及是否恢复任务；持久任务阶段以 `relinking`、`finalizing` 区分补连、后续收尾与 `extracting`。
+聚类后的关联聚合、共同提及扫描、预览更新、索引检查以及主题板块与分析阶段，分别输出开始／结束提示和耗时。聚类结束只提示「聚类完成」，不再暗示这些派生阶段已经结束。来源总数尚未确定时，待办准备阶段显示「正在准备补连队列」。
+
+逐来源完成回执与新增关联在同一事务提交。来源图谱再次发布会以新修订重新登记该来源；之后的自动收尾只处理待办。升级后首次使用（或算法版本变化）时，惰性登记一次全量历史来源，包括空／已删来源分区。旧版本中断的任务没有可复用回执，因此首次升级重跑仍需完成这一轮；产生回执后的中断会复用已完成工作。显式手动补连保留整库范围，并恢复尚未完成的全量任务。增量完成不表示整库都已补连。编辑或合并知识对象也会重新登记所属来源；删除对象时，在删除关联前登记仍存活的邻接来源。
+
+晋升会重新登记目标分区；同步导入改变图数据时，只清除所导入库的本地回执，让下次补连检查导入后的图谱。
+
+生产重跑前，停止旧批量进程、API 和全部其他写入者，等待它们退出，再升级代码。备份数据库、安装新版本后，使用该部署原有的环境执行显式迁移与原来的 KG 阶段（下例使用已选定／默认部署环境）：
+
+```bash
+bash scripts/cli.sh database migrate --confirm-service-stopped
+PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id <notebook-id> --confirm-service-stopped
+```
+
+已成功分析的来源会复用；尚未完成的失败目标可能重试。本次恢复不要加 `--fresh`，它会清除重建阶段的模型检查点；也不要换成 `--rebuild-only`，它绕过分析后的补连待办处理。正在运行的旧进程不会热加载这些改动。本地维护表 `kg_relink_state`、`kg_relink_work` 不参与同步或笔记本归档；迁移只更新结构，不预先执行补连。
+
 可移植 phase 还包括 `question-index`；它与下列 phase 一样按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。
 
 `ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、`backfill-source-index`、`backfill-chunk-elements`、`backfill-images` 会按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。PostgreSQL 直连维护严格属于离线操作：先停止 API 和全部后台 writer，再给命令追加 `--confirm-service-stopped`。该参数只声明运维人员已经停服，不会自行停止服务。所有 phase 都是 [schema guest](#schema-归属只有服务和-database-migrate-迁移)：从不迁移、从不 seed；库不是本构建的 schema（包括服务从未建过的 SQLite 库）时，在打开任何东西之前以退出码 3 拒绝——请先启动一次服务（或停服时运行 `database migrate`）。数据库级 advisory lock 会 fail-fast 阻止两个维护 CLI 重叠；来源、完整/限量 KG 目标、metadata、reextract、向量、关系和反向索引驱动均使用有界 keyset 分页——包括 `index` 阶段的整库向量矩阵加载，现在按页有界读取而不是一条无界 `SELECT`。大库离线维护仍可能在这些流程里**其余**的长语句上撞到在线默认的 `POSTGRES_STATEMENT_TIMEOUT_SECONDS`（`30`，按交互式请求定的——这是仓库默认值，生产实际值以部署配置为准）；给维护 CLI 进程本身的环境变量调大该值（例如 `86400`）——矩阵加载已不再是流水线里最大的单条语句，但离线流水线的其余部分（以及慢盘上的分页矩阵读取本身）仍受同一条逐语句超时约束。在线维护仍应走应用/API，`--dry-run` 不打开 repository——**除 `backfill-images` 外**：它的 dry-run 是一次只读的**数据库**演练（要读每个来源的元素与 chunk 才报得出能补多少张），所以在 PostgreSQL 上同样需要 `--confirm-service-stopped`。`vectors-to-blob` 刻意只支持 SQLite，因为 PostgreSQL 向量已经是 `bytea`；PostgreSQL 会在打开 repository 前明确拒绝。

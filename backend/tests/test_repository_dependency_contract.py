@@ -61,11 +61,9 @@ LIFECYCLE_STORE_CALLS = {
         # `relink_rows` (whole-notebook) is deliberately ABSENT: the lifecycle
         # service pages relink by source now, and this exact-set assertion is what
         # makes a regression to the unbounded read fail closed.
-        "relink_object_rows_for_source",
-        "relink_orphan_source_ids",
+        "relink_node_rows_for_source",
         "relink_relation_rows_for_objects",
         "relink_source_is_live",
-        "relink_source_page",
         "source_build_state_page",
         # Notebook graph clears preserve (but never invent) the source-index
         # completeness certificate around the store-owned state-row deletion.

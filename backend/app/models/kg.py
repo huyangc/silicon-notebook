@@ -7,7 +7,7 @@ class KgBuildJobStatus(BaseModel):
     job_id: str
     mode: Literal["incremental", "rebuild"]
     status: Literal["running", "succeeded", "failed"]
-    stage: Literal["probing", "extracting", "stopping", "finished"]
+    stage: Literal["probing", "extracting", "relinking", "finalizing", "stopping", "finished"]
     total_sources: int = 0
     completed_sources: int = 0
     failed_sources: int = 0

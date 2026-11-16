@@ -783,7 +783,12 @@ def expect_first_rebuild(obs: Observation) -> None:
         "procedure: streamed+clustered+wrote",
         "pending refresh",
         "flipped cluster generation 0 → 1",
-        "DONE 7 canonicals, total <dur>s",
+        "聚类完成 7 canonicals, total <dur>s",
+        "聚合关联…", "聚合关联完成",
+        "扫描共同提及…", "扫描共同提及完成",
+        "更新图谱预览…", "更新图谱预览完成",
+        "检查检索索引…", "检查检索索引完成",
+        "划分主题板块与分析…", "划分主题板块与分析完成",
     ], _stages(obs)
     assert {row["stage"] for row in obs.after["checkpoints"]} == {"concept_desc", "merge_review"}
 

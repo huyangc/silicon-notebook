@@ -22,7 +22,7 @@ export type KgBuildJobStatus = {
   job_id: string;
   mode: "incremental" | "rebuild";
   status: "running" | "succeeded" | "failed";
-  stage: "probing" | "extracting" | "stopping" | "finished";
+  stage: "probing" | "extracting" | "relinking" | "finalizing" | "stopping" | "finished";
   total_sources: number;
   completed_sources: number;
   failed_sources: number;

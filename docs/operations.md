@@ -3335,6 +3335,47 @@ The script imports no backend code — only the standard library plus `requests`
 
 ### Offline batch ingestion (directory → KG)
 
+**Relink recovery after upgrading.** Source extraction is followed by deterministic
+source-local relinking, then vector completion, unified-graph rebuilding and, when
+applicable, index rebuilding. Empty producer/source pool counters do not mean these
+stages are idle. The `kg` command prints `[relink]` counts, pending work, new relations,
+elapsed time and whether it is resuming; durable job stages distinguish `relinking`
+and `finalizing` from `extracting`.
+After clustering, separate start/end banners time relation aggregation, mention
+scanning, preview refresh, index checks and community/analysis work. The clustering
+banner says `聚类完成`; it no longer implies that these derived stages have finished.
+Receipt preparation reports `正在准备补连队列`, before source totals are known.
+
+Relink receipts commit with each source's new relations. A new graph publication
+requeues that source with a new revision; later automatic passes process pending
+sources only. On first use after this upgrade (or an algorithm-version change), one
+full historical pass is registered lazily, including empty/missing-source partitions.
+An old-version interrupted run has no receipts to reuse, so its first upgraded run
+does this pass once; interruptions after receipts exist reuse completed work.
+Explicit manual relinking retains full-library scope and resumes an unfinished full
+pass. Incremental completion does not claim the whole library was relinked.
+Object edits and merges also requeue their owning sources; object deletion requeues
+surviving adjacent sources before removing the relations used to identify them.
+Promotion requeues the destination partition. Importing changed graph data resets
+the imported notebooks' local receipts, so their next pass checks the imported graph.
+
+For a production rerun, stop the old batch process, API and every other writer and
+wait for them to exit before updating code. Back up the database, install the new
+build, then run the explicit migration and original KG phase with the deployment's
+usual environment (the following uses the selected/default deployment environment):
+
+```bash
+bash scripts/cli.sh database migrate --confirm-service-stopped
+PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id <notebook-id> --confirm-service-stopped
+```
+
+Successfully extracted sources are reused; remaining failed targets may be retried.
+Do not add `--fresh` for this recovery: it clears rebuild model checkpoints.
+Do not substitute `--rebuild-only`: it bypasses the post-extraction relink drain.
+A running old process does not hot-reload these changes. The local maintenance tables
+`kg_relink_state` and `kg_relink_work` are not synchronized or included in notebook
+archives. Migration changes the schema only; it does not precompute relinking.
+
 The portable phases `ingest`, `kg`, `index`, `all`, `embed`, `metadata`, `question-index`, `reparse`,
 `backfill-source-index`, `backfill-chunk-elements`, and `backfill-images` select SQLite or PostgreSQL from `DATABASE_URL`. Direct PostgreSQL
 maintenance is strictly offline: stop the API and every background writer, then append

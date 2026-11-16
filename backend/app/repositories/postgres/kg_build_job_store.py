@@ -838,6 +838,12 @@ class KgBuildJobStore:
             self._validate_stage_payloads(connection, payloads)
             self._refuse_memory_source(connection, notebook_id, snapshot)
 
+            from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
+            from app.repositories.postgres.relink_work_store import enqueue
+            for source_id, payload in payloads:
+                if payload["kg"]["mode"] == "replace":
+                    enqueue(connection, notebook_id, source_id, RELINK_ALGORITHM_VERSION)
+
             flagged_before: dict = {}
             if snapshot:
                 for row in connection.execute(

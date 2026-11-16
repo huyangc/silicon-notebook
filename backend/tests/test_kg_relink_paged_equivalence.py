@@ -293,8 +293,8 @@ def test_paged_relink_is_idempotent_and_stays_equivalent(repo):
 
 def test_paged_relink_matches_oracle_across_a_page_boundary(repo, monkeypatch):
     """Force many keyset pages so the resume cursor itself is exercised."""
-    import app.services.knowledge_lifecycle as lifecycle
-    monkeypatch.setattr(lifecycle, "_RELINK_SOURCE_PAGE_SIZE", 1)
+    import app.services.kg.relink_work as relink_work
+    monkeypatch.setattr(relink_work, "RELINK_WORK_PAGE_SIZE", 1)
 
     nb, _ids = _build_multi_source_notebook(repo)
     expected = _oracle(repo, nb)
@@ -358,10 +358,10 @@ def test_a_partial_run_still_publishes_the_change_signal(repo, monkeypatch):
     original = lifecycle._relink_one_source
     calls = {"n": 0}
 
-    def _boom_after_the_first_source(notebook_id, source_id, written):
+    def _boom_after_the_first_source(notebook_id, source_id, written, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
-            return original(notebook_id, source_id, written)
+            return original(notebook_id, source_id, written, **kwargs)
         raise RuntimeError("this source's read blew up mid-notebook")
 
     monkeypatch.setattr(
@@ -421,7 +421,7 @@ def test_a_run_that_writes_nothing_publishes_no_signal(repo, monkeypatch):
     nb, _ids = _build_multi_source_notebook(repo)
     lifecycle = repo._runtime.knowledge_lifecycle
 
-    def _boom(_notebook_id, _source_id, _written):
+    def _boom(_notebook_id, _source_id, _written, **_kwargs):
         raise RuntimeError("failed before writing anything")
 
     monkeypatch.setattr(lifecycle, "_relink_one_source", _boom)
@@ -486,10 +486,10 @@ def test_partial_failure_leaves_the_first_sources_signal_durable_before_the_run_
     calls = {"n": 0}
     observed_at_second_call: dict = {}
 
-    def _boom_after_the_first_source(notebook_id, source_id, written):
+    def _boom_after_the_first_source(notebook_id, source_id, written, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
-            return original(notebook_id, source_id, written)
+            return original(notebook_id, source_id, written, **kwargs)
         # About to process the SECOND (failing) partition. Snapshot right
         # here, before doing anything else — this is what the first source's
         # own transaction left behind, observed from strictly inside the

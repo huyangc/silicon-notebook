@@ -868,6 +868,12 @@ class KgBuildJobStore:
             self._validate_stage_payloads(db, payloads)
             self._refuse_memory_source(db, notebook_id, snapshot)
 
+            from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
+            from app.repositories.sqlite.relink_work_store import enqueue
+            for source_id, payload in payloads:
+                if payload["kg"]["mode"] == "replace":
+                    enqueue(db, notebook_id, source_id, RELINK_ALGORITHM_VERSION)
+
             # All validation precedes the first live mutation.
             flagged_before = {
                 source_id: db.execute(

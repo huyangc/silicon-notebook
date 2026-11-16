@@ -30,6 +30,7 @@ from typing import (
 )
 
 from app.repositories.public_share_ports import AnswerLinkStorePort as AnswerLinkStorePort
+from app.repositories.relink_work_ports import RelinkWorkStorePort
 
 if TYPE_CHECKING:
     import numpy as np
@@ -2570,6 +2571,7 @@ class EmbeddingStorePort(Protocol):
 
 @runtime_checkable
 class KnowledgeStorePort(Protocol):
+    relink_work: RelinkWorkStorePort
     # ``viewer_id`` (M1, E4-4) on the KG read side below, one meaning
     # everywhere (``memory_sql.memory_viewer_filter``): ``None`` = every row;
     # ``""`` = no Memory-derived row at all (the ``memory:read`` channel is
@@ -2811,18 +2813,6 @@ class KnowledgeStorePort(Protocol):
     @staticmethod
     def object_meta_rows_for_notebook(db: object, notebook_id: str, object_ids: object, *, viewer_id: str | None = None) -> list[Any]: ...
     @staticmethod
-    def relink_rows(db: object, notebook_id: str) -> list[Any]: ...
-    @staticmethod
-    def relink_source_page(
-        db: object,
-        notebook_id: str,
-        after_created_at: object,
-        after_id: str,
-        limit: int,
-    ) -> list[Any]: ...
-    @staticmethod
-    def relink_orphan_source_ids(db: object, notebook_id: str) -> list[Any]: ...
-    @staticmethod
     def relink_object_rows_for_source(
         db: object, notebook_id: str, source_id: str = "",
         *, source_ids: Sequence[str] | None = None, with_citing: bool = False,
@@ -2831,6 +2821,12 @@ class KnowledgeStorePort(Protocol):
     def relink_relation_rows_for_objects(
         db: object, notebook_id: str, object_ids: object
     ) -> list[Any]: ...
+    @staticmethod
+    def relink_node_rows_for_source(
+        db: object, notebook_id: str, source_id: str,
+    ) -> list[dict]:
+        """Insertion-ordered id/object_type/name/element_ids (a set) projection."""
+        ...
     @staticmethod
     def relink_source_is_live(
         db: object, notebook_id: str, source_id: str

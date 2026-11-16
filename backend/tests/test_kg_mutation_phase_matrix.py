@@ -349,10 +349,7 @@ def test_store_kg_chunks_thousand_rows_before_embeds_and_hooks(repo, monkeypatch
 
 
 def test_relink_zero_added_edges_has_no_side_effects(repo, monkeypatch):
-    """No KG mutation, no dirty bump, no cache eviction. The ONE write is the
-    durable "relink ran" mark (KG findings design 2026-10-19 §4.5): its own
-    small transaction, written also when nothing was linked — "ran and linked
-    nothing" is exactly the state F5 needs to know."""
+    """Receipt bookkeeping and the completion mark never dirty an empty graph."""
     notebook = repo.create_notebook(NotebookCreate(name="relink empty"))
     events = []
     _trace_transactions(repo, monkeypatch, events)
@@ -361,7 +358,8 @@ def test_relink_zero_added_edges_has_no_side_effects(repo, monkeypatch):
     out = repo.relink_notebook_kg(notebook.id)
 
     assert out["edges_added"] == 0
-    assert events == ["write.begin", "write.commit"]
+    assert events and set(events) == {"write.begin", "write.commit"}
+    assert events.count("write.begin") == events.count("write.commit")
     runtime = object.__getattribute__(repo, "_runtime")
     with runtime.unified_kg.read_snapshot() as db:
         marks = runtime.unified_kg.kg_analysis_mark_rows(db, notebook.id)
@@ -994,9 +992,7 @@ def test_relink_store_spies_observe_read_projection_and_caller_write_connection(
     )
     events = []
     for reader in (
-        "relink_orphan_source_ids",
-        "relink_source_page",
-        "relink_object_rows_for_source",
+        "relink_node_rows_for_source",
         "relink_relation_rows_for_objects",
         "relink_source_is_live",
     ):
@@ -1006,6 +1002,7 @@ def test_relink_store_spies_observe_read_projection_and_caller_write_connection(
     _delegating_store_spy(monkeypatch, runtime.knowledge, "relink_rows", events)
     _trace_transaction_connections(repo, monkeypatch, events)
     _delegating_store_spy(monkeypatch, runtime.knowledge, "insert_relation_chunk", events)
+    _delegating_store_spy(monkeypatch, runtime.knowledge.relink_work, "finish", events)
     monkeypatch.setattr(
         runtime.kg_mutations, "mark_unified_kg_dirty_in_tx",
         lambda connection, notebook_id: events.append(("dirty", id(connection))),
@@ -1017,28 +1014,22 @@ def test_relink_store_spies_observe_read_projection_and_caller_write_connection(
 
     out = getattr(repo, "relink_notebook_kg")(notebook_id)
 
-    # _seed_kg stores with source_id None and creates no `sources` rows, so the
-    # notebook has exactly one partition — the orphan '' one. Orphans are
-    # discovered first (one query) and processed after the — here empty — source
-    # keyset page, giving one work unit and one write. `relink_source_is_live` is
-    # lazy: it only runs because this run actually has an edge to write. Reads all
-    # happen OUTSIDE the write transaction. The dirty bump now rides the SAME
-    # write transaction as the edge insert (P1 fix: a `finally`-keyed bump
-    # cannot survive a kill -9 landing right after this source's commit), so it
-    # lands BEFORE write.commit; invalidate stays the run-level `finally` call,
-    # after the commit. Last, on success only, the durable "relink ran" mark
-    # (KG findings §4.5) in its own small write transaction.
-    assert [event[0] for event in events] == [
-        "relink_orphan_source_ids",
-        "relink_source_page",
-        "relink_object_rows_for_source",
-        "relink_relation_rows_for_objects",
-        "relink_source_is_live",
-        "write.begin", "insert_relation_chunk", "dirty", "write.commit",
-        "invalidate",
-        "write.begin", "write.commit",
+    # Graph input is projected outside the write; source liveness, edge insert,
+    # dirty bump and receipt completion share one transaction. This prevents a
+    # restart from observing a completed receipt without its edges (or vice versa).
+    names = [event[0] for event in events]
+    assert "relink_rows" not in names
+    insert = names.index("insert_relation_chunk")
+    begin = max(i for i in range(insert) if names[i] == "write.begin")
+    commit = names.index("write.commit", insert)
+    assert names.index("relink_node_rows_for_source") < begin
+    assert names.index("relink_relation_rows_for_objects") < begin
+    assert names[begin:commit + 1] == [
+        "write.begin", "relink_source_is_live", "insert_relation_chunk",
+        "dirty", "finish", "write.commit",
     ]
-    assert events[5][1] == events[6][1] == events[7][1] == events[8][1]
+    assert len({event[1] for event in events[begin:commit + 1]}) == 1
+    assert names.index("invalidate") > commit
     assert out["edges_added"] == 1
 
 

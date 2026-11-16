@@ -43,6 +43,7 @@ from app.services.image_backfill_phase import (
 )
 from app.services.knowhow.api import fill_missing_knowhow_chunk_vectors
 from app.services.knowledge_lifecycle import ModelSkipPolicy
+from app.services.kg.relink_progress import observe_relink_progress
 from app.services.offline_batch import (
     OfflineBatchPolicy,
     current_offline_batch_policy,
@@ -258,6 +259,37 @@ def _rebuild_progress(phase: str, i: int, n: int) -> None:
         return
     end = "\n" if i >= n else "\r"
     print(f"  {phase}: {i}/{n}", end=end, flush=True)
+
+
+def _relink_progress_printer(report_interval: float, log: LogFn):
+    """Print start/end and bounded intermediate updates, never source content."""
+    last_elapsed: float | None = None
+    last_total: int | None = None
+
+    def report(payload: dict) -> None:
+        nonlocal last_elapsed, last_total
+        if payload.get("preparing"):
+            print("[relink] 正在准备补连队列…", flush=True)
+            log({"phase": "relink", **payload})
+            return
+        elapsed = float(payload["elapsed_seconds"])
+        done, total = payload["processed_sources"], payload["total_sources"]
+        first = last_elapsed is None or elapsed < last_elapsed or total != last_total
+        if not first and done < total and elapsed - last_elapsed < report_interval:
+            return
+        last_elapsed = elapsed
+        last_total = total
+        resumed = " · 继续未完成任务" if payload["resumed"] else ""
+        print(
+            f"[relink] 补上关联: {done}/{total} 来源"
+            f" · 待处理 {payload['pending_sources']}"
+            f" · 新增关联 {payload['edges_added']}"
+            f" · 耗时 {elapsed:.1f}s{resumed}",
+            flush=True,
+        )
+        log({"phase": "relink", **payload})
+
+    return report
 
 
 def _index_stage_progress(stage: str, latency_ms: int) -> None:
@@ -894,14 +926,15 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
             # no_rebuild 传空收尾回调，仅用于抑制过早的 scale-index fold 排队。
             saved_signals = _install_termination_signals()
             try:
-                out = repo.build_notebook_kg(
-                    notebook_id,
-                    progress=_kg_progress,
-                    target_limit=limit,
-                    retry_partial=retry_partial,
-                    finalize=(lambda _out: None) if no_rebuild else _finalize,
-                    skip_policy=skip_policy,
-                )
+                with observe_relink_progress(_relink_progress_printer(report_interval, log)):
+                    out = repo.build_notebook_kg(
+                        notebook_id,
+                        progress=_kg_progress,
+                        target_limit=limit,
+                        retry_partial=retry_partial,
+                        finalize=(lambda _out: None) if no_rebuild else _finalize,
+                        skip_policy=skip_policy,
+                    )
             except BaseException:
                 # 升级熔断/中断也要把已跳过的账目报出来:否则一次 20 分钟的批量
                 # 只剩一个 traceback,用户看不出"跑到哪、丢了几个"。

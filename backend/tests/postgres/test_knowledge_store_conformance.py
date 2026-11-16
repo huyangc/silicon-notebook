@@ -2696,7 +2696,7 @@ def test_postgres_promotion_dedup_does_not_overwrite_concurrent_merge_evidence(
         def __getattr__(self, name):
             return getattr(self.connection, name)
 
-        def execute(self, query, params=None):
+        def execute(self, query, params=None, **kwargs):
             sql = " ".join(str(query).split())
             # The merge's locking read (it also classifies both rows for the
             # M1 Memory refusal in the same statement, hence the alias).
@@ -2705,7 +2705,7 @@ def test_postgres_promotion_dedup_does_not_overwrite_concurrent_merge_evidence(
                 and "FOR UPDATE" in sql
             ):
                 merge_lock_attempted.set()
-            return self.connection.execute(query, params)
+            return self.connection.execute(query, params, **kwargs)
 
     def approve():
         with postgres_database.write() as connection:
@@ -2820,11 +2820,11 @@ def test_postgres_concurrent_merges_preserve_all_target_evidence(postgres_databa
         def __getattr__(self, name):
             return getattr(self.connection, name)
 
-        def execute(self, query, params=None):
+        def execute(self, query, params=None, **kwargs):
             sql = " ".join(str(query).split())
             if "FROM knowledge_objects" in sql and "FOR UPDATE" in sql:
                 self.locking_read_seen = True
-            cursor = self.connection.execute(query, params)
+            cursor = self.connection.execute(query, params, **kwargs)
             if (
                 sql.startswith("SELECT * FROM knowledge_objects WHERE id = %s")
                 and params
@@ -2903,11 +2903,11 @@ def test_postgres_concurrent_partial_updates_do_not_lose_fields(postgres_databas
             self.gated = False
             self.locking_read_seen = False
 
-        def execute(self, query, params=None):
+        def execute(self, query, params=None, **kwargs):
             sql = " ".join(str(query).split())
             if "FROM knowledge_objects" in sql and "FOR UPDATE" in sql:
                 self.locking_read_seen = True
-            cursor = self.connection.execute(query, params)
+            cursor = self.connection.execute(query, params, **kwargs)
             if (
                 sql.startswith("SELECT * FROM knowledge_objects WHERE id = %s")
                 and params
@@ -5683,153 +5683,70 @@ def _seed_relink_fixture(knowledge_harness) -> None:
         ])
 
 
-def test_relink_source_page_keysets_the_notebooks_own_sources(knowledge_harness):
+def test_relink_pending_pages_cover_live_empty_and_deleted_sources_once(knowledge_harness):
     _seed_relink_fixture(knowledge_harness)
-    store = knowledge_harness.knowledge
-    with knowledge_harness.database.connect() as connection:
-        first = store.relink_source_page(connection, "nb-personal", None, "", 1)
-        assert [row["id"] for row in first] == ["source-golden"]
-        # Same created_at for both rows, so the id COLLATE "C" tie-break is what
-        # makes the cursor advance instead of looping on the first row forever.
-        second = store.relink_source_page(
-            connection, "nb-personal", first[-1]["created_at"], first[-1]["id"], 1
-        )
-        assert [row["id"] for row in second] == ["source-second"]
-        assert store.relink_source_page(
-            connection, "nb-personal", second[-1]["created_at"], second[-1]["id"], 5
-        ) == []
-        # Another notebook's sources never leak into the enumeration.
-        assert store.relink_source_page(connection, "nb-base", None, "", 10) == []
-
-
-def test_relink_orphan_source_ids_covers_blank_and_deleted_partitions(
-    knowledge_harness,
-):
-    """The half the `sources` keyset structurally cannot see."""
-    _seed_relink_fixture(knowledge_harness)
-    store = knowledge_harness.knowledge
-    with knowledge_harness.database.connect() as connection:
-        rows = store.relink_orphan_source_ids(connection, "nb-personal")
-        empty = store.relink_orphan_source_ids(connection, "nb-base")
-    assert [row["source_id"] for row in rows] == ["", "source-gone"]
-    # A notebook with no objects has no orphan partitions.
-    assert empty == []
-
-
-def test_relink_partition_readers_cover_every_object_partition_exactly_once(
-    knowledge_harness,
-):
-    """The exactness claim the two readers make together: their union is the set of
-    distinct ``source_id`` values in ``knowledge_objects``, and they never overlap.
-
-    This is the property that lets the driver leave ``SELECT DISTINCT source_id``
-    behind. Break either half — drop the orphan query, or let a live source also
-    come back as an orphan — and this fails.
-    """
-    _seed_relink_fixture(knowledge_harness)
-    store = knowledge_harness.knowledge
-    with knowledge_harness.database.connect() as connection:
-        sources: list[str] = []
-        after_created_at, after_id = None, ""
+    work = knowledge_harness.knowledge.relink_work
+    with knowledge_harness.database.write() as connection:
+        work.prepare(connection, "nb-personal", 1)
+        work.prepare(connection, "nb-base", 1)
+        sources = []
+        after = None
         while True:
-            page = store.relink_source_page(
-                connection, "nb-personal", after_created_at, after_id, 1
-            )
+            page = work.page(connection, "nb-personal", after, 1)
             if not page:
                 break
-            sources.extend(str(row["id"]) for row in page)
-            after_created_at, after_id = page[-1]["created_at"], str(page[-1]["id"])
-        orphans = [
-            str(row["source_id"])
-            for row in store.relink_orphan_source_ids(connection, "nb-personal")
+            sources.extend(row["source_id"] for row in page)
+            after = page[-1]["source_id"]
+        assert sources == ["", "source-golden", "source-gone", "source-second"]
+        assert work.page(connection, "nb-base", None, 10) == []
+        # Completed receipts disappear from pending enumeration; resuming must
+        # not reset them, and another notebook never shares the work queue.
+        first = work.page(connection, "nb-personal", None, 1)[0]
+        assert work.finish(connection, "nb-personal", "", first["revision"], 1, 1, 0)
+        assert work.prepare(connection, "nb-personal", 1)["resumed"]
+        assert [row["source_id"] for row in work.page(connection, "nb-personal", None, 10)] == [
+            "source-golden", "source-gone", "source-second",
         ]
-        actual = {
-            str(row["source_id"])
-            for row in connection.execute(
-                "SELECT DISTINCT source_id FROM knowledge_objects "
-                "WHERE notebook_id=%s", ("nb-personal",),
-            ).fetchall()
-        }
-
-    assert set(sources) & set(orphans) == set(), "a partition would be visited twice"
-    # `sources` may legitimately contain sources that own no objects (empty, no-op
-    # partitions); what must never happen is an object partition with no visitor.
-    assert actual <= set(sources) | set(orphans)
-    assert actual == {"", "source-golden", "source-gone", "source-second"}
 
 
-def test_relink_source_page_plan_stays_inside_the_notebook(knowledge_harness):
-    """The reason the driver moved off ``knowledge_objects``: this page has to be
-    notebook-local, not a cross-notebook scan that filters.
-
-    ``idx_knowledge_objects_source_id`` leads with ``source_id`` and is ordered
-    across notebooks, so the ``SELECT DISTINCT source_id`` keyset it would have
-    needed walks a neighbouring notebook's rows on every page and discards them
-    (~1.2M rows removed on the shared base's tail page, per page).
-    ``idx_sources_notebook_created`` leads with ``notebook_id``, so here the
-    notebook predicate is an INDEX CONDITION and nothing is filtered away.
-
-    The EXPLAIN is run on the statement the adapter actually issued — captured with
-    the same spy the ``relation_support_rows`` plan test uses — so a hand-copied SQL
-    string cannot drift out of sync with the real one. ``enable_seqscan=off`` makes
-    the question "can the planner use this index for this shape", which is the
-    scale-free part; on a two-row table it would otherwise always seq-scan.
-    """
+def test_relink_pending_page_plan_stays_inside_the_notebook(knowledge_harness):
+    """The queue page must use its notebook/source pending index, not graph scans."""
     _seed_relink_fixture(knowledge_harness)
-    store = knowledge_harness.knowledge
-    with knowledge_harness.database.connect() as connection:
+    work = knowledge_harness.knowledge.relink_work
+    with knowledge_harness.database.write() as connection:
+        work.prepare(connection, "nb-personal", 1)
         connection.execute("SET LOCAL enable_seqscan=off")
-        captured: list[tuple[str, object]] = []
+        captured = []
         original_execute = connection.execute
 
         def spying_execute(sql, params=None, **kwargs):
-            if "FROM sources" in str(sql):
+            if "SELECT source_id,revision FROM kg_relink_work" in str(sql):
                 captured.append((str(sql), params))
             return original_execute(sql, params, **kwargs)
 
         connection.execute = spying_execute
         try:
-            store.relink_source_page(connection, "nb-personal", NOW, "source-golden", 5)
+            work.page(connection, "nb-personal", "", 1)
         finally:
             del connection.execute
-
-        assert captured, "relink_source_page must issue a SELECT against sources"
-        captured_sql, captured_params = captured[0]
-        assert "knowledge_objects" not in captured_sql, (
-            "the relink page driver must not read knowledge_objects at all — that "
-            "is the whole point of the shape change")
-        plan_text = "\n".join(
-            str(row["QUERY PLAN"]) for row in connection.execute(
-                f"EXPLAIN (COSTS OFF) {captured_sql}", captured_params
-            ).fetchall()
-        )
-
-    assert "idx_sources_notebook_created" in plan_text, (
-        f"expected the notebook-prefixed source index in the plan, got:\n{plan_text}")
-    assert "Seq Scan" not in plan_text, (
-        f"expected an index scan, not a full table scan:\n{plan_text}")
-    # The notebook predicate must bind the index, not be re-checked per row — a
-    # `Filter: (notebook_id = ...)` here IS the cross-notebook scan this replaced.
-    index_conditions = [
-        line for line in plan_text.splitlines() if "Index Cond" in line
-    ]
-    assert any("notebook_id" in line for line in index_conditions), (
-        f"notebook_id must be an index condition, got:\n{plan_text}")
-    assert not any(
-        "Filter" in line and "notebook_id" in line
-        for line in plan_text.splitlines()
-    ), f"notebook_id must not be a post-scan filter:\n{plan_text}"
+        assert len(captured) == 1
+        statement, params = captured[0]
+        plan = "\n".join(row["QUERY PLAN"] for row in connection.execute(
+            "EXPLAIN (COSTS OFF) " + statement, params,
+        ).fetchall())
+    assert "idx_kg_relink_work_pending" in plan
+    assert "Seq Scan" not in plan
+    assert any("Index Cond" in line and "notebook_id" in line for line in plan.splitlines())
+    assert "knowledge_objects" not in plan
 
 
-def test_relink_orphan_scan_is_bounded_to_this_notebook(knowledge_harness):
-    """The one-shot orphan query pays a notebook-local pass, ONCE per run. It must
-    not turn into a cross-notebook scan: the notebook predicate has to bind an
-    index, exactly like the page above."""
+def test_relink_initial_discovery_is_notebook_local_and_not_repeated(knowledge_harness):
+    """Historical discovery runs once and binds the notebook in the object index."""
     _seed_relink_fixture(knowledge_harness)
-    store = knowledge_harness.knowledge
-    with knowledge_harness.database.connect() as connection:
+    work = knowledge_harness.knowledge.relink_work
+    with knowledge_harness.database.write() as connection:
         connection.execute("SET LOCAL enable_seqscan=off")
-        captured: list[tuple[str, object]] = []
+        captured = []
         original_execute = connection.execute
 
         def spying_execute(sql, params=None, **kwargs):
@@ -5839,33 +5756,19 @@ def test_relink_orphan_scan_is_bounded_to_this_notebook(knowledge_harness):
 
         connection.execute = spying_execute
         try:
-            store.relink_orphan_source_ids(connection, "nb-personal")
+            work.prepare(connection, "nb-personal", 1)
+            work.prepare(connection, "nb-personal", 1)
         finally:
             del connection.execute
-
-        assert captured, "relink_orphan_source_ids must issue one SELECT"
-        assert len(captured) == 1, "orphan discovery is ONE query per run"
-        captured_sql, captured_params = captured[0]
-        plan_text = "\n".join(
-            str(row["QUERY PLAN"]) for row in connection.execute(
-                f"EXPLAIN (COSTS OFF) {captured_sql}", captured_params
-            ).fetchall()
-        )
-
-    lines = plan_text.splitlines()
-    scan_line = next(
-        (i for i, line in enumerate(lines) if "on knowledge_objects" in line), None
-    )
-    assert scan_line is not None, f"expected a knowledge_objects scan:\n{plan_text}"
-    assert "Index Scan" in lines[scan_line], (
-        f"expected an index-bounded scan of this notebook's objects:\n{plan_text}")
-    # The notebook predicate binds the index; the orphan test is the residual
-    # filter. What must never appear is a scan whose only notebook bound is a
-    # post-scan `Filter: (notebook_id = ...)`.
-    assert any(
-        "Index Cond" in line and "notebook_id" in line
-        for line in lines[scan_line: scan_line + 3]
-    ), f"notebook_id must be an index condition, got:\n{plan_text}"
+        assert len(captured) == 1
+        statement, params = captured[0]
+        plan = "\n".join(row["QUERY PLAN"] for row in connection.execute(
+            "EXPLAIN (COSTS OFF) " + statement, params,
+        ).fetchall())
+    lines = plan.splitlines()
+    scan = next(i for i, line in enumerate(lines) if "on knowledge_objects" in line)
+    assert "Index Scan" in lines[scan]
+    assert any("Index Cond" in line and "notebook_id" in line for line in lines[scan:scan + 3])
 
 
 def test_relink_object_rows_for_source_matches_the_golden_shape(knowledge_harness):

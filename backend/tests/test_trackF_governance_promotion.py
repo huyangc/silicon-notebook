@@ -241,6 +241,12 @@ class TestPromotionStateMachine:
 
     def test_approve_promotion_copies_object_to_base_corpus(self, repo):
         nb, base = _make_personal_with_base(repo)
+        from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
+        from app.repositories.sqlite import relink_work_store
+
+        with repo._write() as db:
+            relink_work_store.prepare(db, base.id, RELINK_ALGORITHM_VERSION)
+            assert relink_work_store.finish_full(db, base.id)
         oid = _insert_claim(repo, nb.id, "approved claim copies to base")
         cand = repo.propose_promotion(nb.id, oid)
         result = repo._runtime.knowledge_governance.approve_promotion(cand["id"])
@@ -248,6 +254,8 @@ class TestPromotionStateMachine:
         base_rows = _objects_in(repo, base.id, "claim")
         assert len(base_rows) == 1
         assert json.loads(base_rows[0]["payload"])["name"] == "approved claim copies to base"
+        with repo._connect() as db:
+            assert [row["source_id"] for row in relink_work_store.page(db, base.id, None, 10)] == [""]
 
     def test_approve_promotion_sets_base_object_status_approved(self, repo):
         nb, base = _make_personal_with_base(repo)

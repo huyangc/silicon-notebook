@@ -7107,6 +7107,8 @@
               "enum": [
                 "probing",
                 "extracting",
+                "relinking",
+                "finalizing",
                 "stopping",
                 "finished"
               ],

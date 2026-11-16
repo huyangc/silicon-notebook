@@ -205,6 +205,8 @@ EXTERNAL_FTS_TABLES = ["memory_items_fts"]
 #   (a) 属于 primary 部署/本次运行的状态 —— 导入副库那份会把两个部署的身份搅在一起;
 #   (b) 派生产物 —— 合并后本来就该由重建重新产出, 拷过来只会带着**源库的版本戳**落地。
 SKIP_SECONDARY_TABLES = [
+    # Local relink receipts cannot certify work in another deployment.
+    "kg_relink_state", "kg_relink_work",
     "auth_sessions",
     # In-flight external-auth browser transactions and the identity audit
     # trail are deployment security state; preserve the primary deployment's
@@ -304,6 +306,7 @@ SKIP_SECONDARY_TABLES = [
 
 # 导入后清空(引用可再生的 kg_index 产物, 逼部署侧干净重建)
 KG_STATE_TABLES = [
+    "kg_relink_state", "kg_relink_work",
     "kg_rebuild_checkpoint", "kg_relation_completion_state",
     "unified_kg_state", "kg_cluster_scratch",
 ]

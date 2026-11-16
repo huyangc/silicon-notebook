@@ -176,7 +176,7 @@ def test_auto_relink_success_emits_no_failure_event(repo, monkeypatch):
     monkeypatch.setattr(lifecycle.event_log, "emit", lambda payload: emitted.append(payload))
     monkeypatch.setattr(
         lifecycle, "relink_notebook_kg",
-        lambda _nb: {"isolated_before": 0, "edges_added": 0, "isolated_after": 0},
+        lambda _nb, **_kwargs: {"isolated_before": 0, "edges_added": 0, "isolated_after": 0},
     )
     result: dict = {}
     lifecycle._run_success_side_effects(nb, result, enqueue_fold=False)
@@ -194,7 +194,7 @@ def test_post_build_relink_claims_the_same_slot_and_releases_it(repo, monkeypatc
     seen_claims = []
     monkeypatch.setattr(
         lifecycle, "relink_notebook_kg",
-        lambda _nb: seen_claims.append(repo.notebook_relink_status(_nb)["status"])
+        lambda _nb, **_kwargs: seen_claims.append(repo.notebook_relink_status(_nb)["status"])
         or {"isolated_before": 0, "edges_added": 0, "isolated_after": 0},
     )
     result: dict = {}

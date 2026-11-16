@@ -224,8 +224,8 @@ _REGISTRY: dict[str, dict[str, str]] = {
         "KnowledgeStore.prune_cluster_rows_for_source": MAINTENANCE,
         "KnowledgeStore.relation_endpoint_rows": MAINTENANCE,
         "KnowledgeStore.relink_rows": MAINTENANCE,
-        "KnowledgeStore.relink_orphan_source_ids": MAINTENANCE,
         "KnowledgeStore.relink_object_rows_for_source": MAINTENANCE,
+        "KnowledgeStore.relink_node_rows_for_source": MAINTENANCE,
         "KnowledgeStore.relink_relation_rows_for_objects": MAINTENANCE,
         "KnowledgeStore.source_build_state_page": MAINTENANCE,
     },
@@ -480,6 +480,10 @@ _REGISTRY: dict[str, dict[str, str]] = {
         # S1: inserts a seed-space state row for a notebook whose concept
         # clusters exist (an EXISTS probe); returns no row to anyone
         "SqliteMigrator._migration_102": MAINTENANCE,
+    },
+    "*/relink_work_store.py": {
+        "prepare": MAINTENANCE,
+        "enqueue_for_objects": MAINTENANCE,
     },
     "postgres/maintenance.py": {
         name: MAINTENANCE for name in (
