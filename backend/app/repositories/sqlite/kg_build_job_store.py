@@ -431,6 +431,11 @@ class KgBuildJobStore:
     def _delete_source_kg(
         db: sqlite3.Connection, notebook_id: str, source_id: str
     ) -> None:
+        from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
+        from app.repositories.sqlite.relink_work_store import enqueue_for_objects, enqueue_for_source_relations
+
+        enqueue_for_source_relations(db, notebook_id, [source_id], RELINK_ALGORITHM_VERSION)
+
         db.execute(
             "DELETE FROM kg_relation_completion_state WHERE source_id=?",
             (source_id,),
@@ -444,7 +449,6 @@ class KgBuildJobStore:
             "WHERE notebook_id=? AND source_id=?", (notebook_id, source_id),
         )
         db.execute("DELETE FROM extraction_runs WHERE source_id=?", (source_id,))
-        db.execute("DELETE FROM knowledge_relations WHERE source_id=?", (source_id,))
         # Fresh extraction rows carry source_id directly.  The reverse/evidence
         # clauses retain compatibility with older fused rows, while the hidden
         # source exclusion keeps Memory/Knowhow products core-owned.
@@ -469,6 +473,9 @@ class KgBuildJobStore:
             object_ids = [str(row["id"]) for row in rows]
             if not object_ids:
                 break
+            # Preserve adjacency until both deleted owners and surviving
+            # neighbours have been requeued in this publication transaction.
+            enqueue_for_objects(db, notebook_id, object_ids, RELINK_ALGORITHM_VERSION, adjacent=True)
             placeholders = ",".join("?" for _ in object_ids)
             db.execute(
                 f"DELETE FROM relation_embeddings WHERE relation_id IN "
@@ -504,6 +511,7 @@ class KgBuildJobStore:
                 f"DELETE FROM knowledge_objects WHERE id IN ({placeholders})",
                 object_ids,
             )
+        db.execute("DELETE FROM knowledge_relations WHERE source_id=?", (source_id,))
 
     @staticmethod
     def _clear_notebook_derived_kg(

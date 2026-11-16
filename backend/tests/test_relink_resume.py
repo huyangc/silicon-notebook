@@ -5,8 +5,15 @@ import pytest
 
 from app.models.schemas import KnowledgeUpdate, NotebookCreate
 from app.services.kg.relink_work import RELINK_ALGORITHM_VERSION
+from tests.relink_staged_cleanup_cases import assert_staged_cleanup_receipts
 from tests.test_kg_relink_repository import _insert_object, _insert_source
 from tests.test_kg_relink_repository import repo as repo
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+@pytest.mark.parametrize("staged", [False, True])
+def test_replacement_requeues_surviving_partitions_atomically(repo, rollback, staged):
+    assert_staged_cleanup_receipts(repo, postgres=False, rollback=rollback, staged=staged)
 
 
 def _seed(repo):
@@ -16,6 +23,48 @@ def _seed(repo):
         _insert_object(repo, nb, sid, "concept", "Engram", [sid])
         _insert_object(repo, nb, sid, "claim", "Engram improves memory", [sid])
     return nb, repo._runtime.knowledge_lifecycle
+
+
+@pytest.mark.parametrize("analyzed", [False, True])
+def test_receipt_invalidation_seeks_changed_ids_instead_of_scanning_notebook(repo, analyzed):
+    nb, service = _seed(repo)
+    plans = []
+    with repo._write() as db:
+        now = "2026-01-01T00:00:00+00:00"
+        # A wide same-notebook bystander population makes an accidental
+        # notebook scan materially different from the handful of changed IDs.
+        db.executemany(
+            "INSERT INTO knowledge_objects (id,notebook_id,source_id,object_type,status,"
+            "payload,evidence,created_at,updated_at) VALUES (?,?,'b','concept','approved','{}','[]',?,?)",
+            [(f"bystander-{i}", nb, now, now) for i in range(2000)],
+        )
+        db.executemany(
+            "INSERT INTO knowledge_relations (id,notebook_id,source_id,source_object_id,"
+            "target_object_id,edge_type,evidence,created_at) VALUES (?,?,'b',?,?,'about','[]',?)",
+            [(f"bystander-edge-{i}", nb, f"bystander-{i}", f"bystander-{i + 1}", now)
+             for i in range(1999)],
+        )
+        if analyzed:
+            db.execute("ANALYZE")
+        oid = db.execute("SELECT id FROM knowledge_objects WHERE source_id='a'").fetchone()["id"]
+
+        class ObservePlans:
+            def execute(self, statement, params=()):
+                if "knowledge_objects" in statement:
+                    plans.extend(row["detail"] for row in db.execute(
+                        "EXPLAIN QUERY PLAN " + statement, params,
+                    ))
+                return db.execute(statement, params)
+
+        work = service.knowledge.relink_work
+        work.enqueue_for_objects(ObservePlans(), nb, [oid], RELINK_ALGORITHM_VERSION, adjacent=True)
+        work.enqueue_for_source_relations(ObservePlans(), nb, ["a"], RELINK_ALGORITHM_VERSION)
+    assert plans
+    assert not any("SCAN o" in step or "SCAN r" in step for step in plans), plans
+    relation_seeks = [step for step in plans if "SEARCH r " in step]
+    assert relation_seeks and all(any(key in step for key in (
+        "source_id=?", "source_object_id=?", "target_object_id=?",
+    )) for step in relation_seeks), plans
 
 
 def _observe_reads(monkeypatch, service):

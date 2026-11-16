@@ -179,7 +179,7 @@ def test_postgres_stage_publisher_deletes_orphanable_relation_vectors_first():
             self.calls = []
             self.object_page = True
 
-        def execute(self, sql, params=()):
+        def execute(self, sql, params=(), **kwargs):
             self.calls.append((" ".join(sql.split()), params))
             if sql.lstrip().startswith("SELECT DISTINCT ko.id"):
                 if self.object_page:
