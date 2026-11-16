@@ -2698,12 +2698,14 @@ def test_postgres_promotion_dedup_does_not_overwrite_concurrent_merge_evidence(
 
         def execute(self, query, params=None, **kwargs):
             sql = " ".join(str(query).split())
-            # The merge's locking read (it also classifies both rows for the
-            # M1 Memory refusal in the same statement, hence the alias).
+            # The merge may queue at the parent, receipt or object lock. All
+            # fence the same evidence reread; promotion is paused until this
+            # competing mutation has reached its first conflicting lock.
             if (
                 ("FROM knowledge_objects ko WHERE ko.notebook_id = %s" in sql
                  and "FOR UPDATE" in sql)
                 or "INSERT INTO kg_relink_work" in sql
+                or ("FROM notebooks" in sql and "FOR KEY SHARE" in sql)
             ):
                 merge_lock_attempted.set()
             return self.connection.execute(query, params, **kwargs)
