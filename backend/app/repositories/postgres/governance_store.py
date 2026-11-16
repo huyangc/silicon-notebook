@@ -14,7 +14,9 @@ import json
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
-from app.repositories.postgres.relink_work_store import enqueue, enqueue_for_objects
+from app.repositories.postgres.relink_work_store import (
+    enqueue, enqueue_for_objects, receipt_lock_scope, reserve_for_objects, reserve_for_sources,
+)
 from app.core.json_safety import validate_finite_json
 from app.core.text_whitespace import PY_STRIP_WHITESPACE
 from app.repositories.postgres._store_utils import (
@@ -191,10 +193,21 @@ def _lock_promotion_object(connection, object_id: str) -> None:
     )
 
 
+def _reserve_base_dedup_receipts(connection, notebook_id, object_types):
+    rows = connection.execute(
+        "SELECT id FROM knowledge_objects WHERE notebook_id=%s "
+        "AND object_type=ANY(%s) AND status=ANY(%s)",
+        (notebook_id, sorted(set(object_types)), list(USABLE_STATUSES)),
+    ).fetchall()
+    reserve_for_objects(connection, notebook_id, [row["id"] for row in rows], source_ids=[""])
+    return [row["id"] for row in rows]
+
+
 def _base_dedup_rows_for_update(
     connection: Any,
     base_notebook_id: str,
     object_type: str,
+    reserved_ids,
 ):
     """Read the live dedup corpus while holding every row in stable id order.
 
@@ -206,16 +219,19 @@ def _base_dedup_rows_for_update(
     ``evidence`` is intentionally NOT selected: seed matching reads only
     ``payload``, and at most one row is merged into, whose evidence
     ``base_dedup_evidence`` re-reads by primary key while this transaction still
-    holds its FOR UPDATE lock.  The lock set, the ORDER BY and the WHERE clause
-    are unchanged — only the projection got thinner.
+    holds its FOR UPDATE lock. Candidate IDs are fixed by the pre-reservation
+    probe, then status and payload are re-read under these locks; newly inserted
+    rows cannot introduce an unreserved partition after object locks begin.
     """
-    return connection.execute(
+    found = id_bind_ids(reserved_ids)
+    return id_execute_ids(connection,
         "SELECT id,payload FROM knowledge_objects "
         "WHERE notebook_id=%s AND object_type=%s AND status IN ({}) "
+        f"AND {id_member_of('id', found)} "
         "ORDER BY id COLLATE \"C\" FOR UPDATE".format(
             ",".join("%s" for _ in USABLE_STATUSES)
         ),
-        (base_notebook_id, object_type, *USABLE_STATUSES),
+        (base_notebook_id, object_type, *USABLE_STATUSES, found.param),
     ).fetchall()
 
 
@@ -1924,6 +1940,7 @@ class GovernanceStore:
         base_notebook_id = str(rows[0]["notebook_id"]) if rows else ""
         return ids, base_notebook_id
 
+    @receipt_lock_scope
     def approve_memory_promotion_in_transaction(
         self,
         connection: Any,
@@ -1982,6 +1999,10 @@ class GovernanceStore:
         created_object_ids: list[str] = []
         merged_object_ids: list[str] = []
         base_space = None       # the base library's published seed space, read once
+        reserved_ids = _reserve_base_dedup_receipts(connection, base_nb_id, [
+            str(candidate.get("object_type") or "") for candidate in candidates
+            if candidate.get("object_type") in {"concept", "claim", "formula", "procedure"}
+        ])
         for extracted in candidates:
             object_type = str(extracted.get("object_type") or "")
             payload = extracted.get("payload")
@@ -1990,7 +2011,7 @@ class GovernanceStore:
             if not isinstance(payload, dict) or not payload:
                 continue
             base_objs = _base_dedup_rows_for_update(
-                connection, base_nb_id, object_type
+                connection, base_nb_id, object_type, reserved_ids
             )
             if base_space is None:
                 base_space = published_concept_seed_space_on(connection, base_nb_id)
@@ -2051,6 +2072,7 @@ class GovernanceStore:
                     json.dumps(evidence, ensure_ascii=False),
                 )
                 created_object_ids.append(base_object_id)
+                reserved_ids.append(base_object_id)
             base_object_ids.append(base_object_id)
 
         if not base_object_ids:
@@ -2072,6 +2094,7 @@ class GovernanceStore:
             "merged_object_ids": merged_object_ids,
         }
 
+    @receipt_lock_scope
     def approve_promotion_in_transaction(
         self,
         connection: Any,
@@ -2151,8 +2174,9 @@ class GovernanceStore:
         )
 
         # Cross-corpus dedup against existing base objects of the same type.
+        reserved_ids = _reserve_base_dedup_receipts(connection, base_nb_id, [object_type])
         base_objs = _base_dedup_rows_for_update(
-            connection, base_nb_id, object_type
+            connection, base_nb_id, object_type, reserved_ids
         )
         seed_version, override = published_concept_seed_space_on(
             connection, base_nb_id)
@@ -2390,6 +2414,7 @@ class GovernanceStore:
         return int(removed or 0)
 
     @staticmethod
+    @receipt_lock_scope
     def strip_sources_evidence_on(
         connection: Any,
         notebook_id: str,
@@ -2435,7 +2460,7 @@ class GovernanceStore:
                 "AND (ko.source_id IS NULL OR ko.source_id <> ALL(%s)) "
                 "AND ko.id IN (SELECT kos.object_id FROM knowledge_object_sources kos "
                 "WHERE kos.source_id = ANY(%s) AND kos.notebook_id = %s) "
-                "ORDER BY ko.id COLLATE \"C\" FOR UPDATE OF ko",
+                "ORDER BY ko.id COLLATE \"C\"",
                 (notebook_id, ids, ids, notebook_id),
             ).fetchall()
         else:
@@ -2462,9 +2487,19 @@ class GovernanceStore:
                 "SELECT id, evidence FROM knowledge_objects "
                 f"WHERE notebook_id = %s AND {id_member_of('id', found)} "
                 "AND (source_id IS NULL OR source_id <> ALL(%s)) "
-                "ORDER BY id COLLATE \"C\" FOR UPDATE",
+                "ORDER BY id COLLATE \"C\"",
                 (notebook_id, found.param, ids),
             ).fetchall() if candidates else []
+        if rows:
+            found = id_bind_ids([row["id"] for row in rows])
+            reserve_for_objects(connection, notebook_id, [row["id"] for row in rows])
+            rows = id_execute_ids(
+                connection, "SELECT id,evidence FROM knowledge_objects "
+                f"WHERE notebook_id=%s AND {id_member_of('id', found)} "
+                "AND (source_id IS NULL OR source_id <> ALL(%s)) "
+                'ORDER BY id COLLATE "C" FOR UPDATE',
+                (notebook_id, found.param, ids),
+            ).fetchall()
         wanted = set(ids)
         stripped: List[str] = []
         for row in rows:
@@ -2498,6 +2533,7 @@ class GovernanceStore:
         return stripped
 
     @staticmethod
+    @receipt_lock_scope
     def lock_memory_teardown_objects_on(
         connection: Any, notebook_id: str, source_ids: List[str]
     ) -> tuple[List[dict], bool, Optional[set]]:
@@ -2523,6 +2559,7 @@ class GovernanceStore:
         ids = sorted(set(source_ids))
         if not ids:
             return [], False, None
+        reserve_for_sources(connection, notebook_id, ids)
         owners = id_bind_ids(ids)
         key = MERGED_INTO_PAYLOAD_KEY
         backfilled = KnowledgeStore.source_index_backfilled(connection, notebook_id)
@@ -2538,7 +2575,7 @@ class GovernanceStore:
                 f"WHERE ko.notebook_id = %s AND ({id_member_of('ko.source_id', owners)} "
                 "OR ko.id IN (SELECT kos.object_id FROM knowledge_object_sources kos "
                 f"WHERE {id_member_of('kos.source_id', owners)} AND kos.notebook_id = %s)) "
-                "ORDER BY ko.id COLLATE \"C\" FOR UPDATE OF ko",
+                "ORDER BY ko.id COLLATE \"C\"",
                 (notebook_id, owners.param, owners.param, notebook_id),
             ).fetchall()
         else:
@@ -2568,9 +2605,19 @@ class GovernanceStore:
                 connection,
                 f"SELECT {columns} FROM knowledge_objects ko "
                 f"WHERE ko.notebook_id = %s AND {id_member_of('ko.id', found)} "
-                "ORDER BY ko.id COLLATE \"C\" FOR UPDATE OF ko",
+                "ORDER BY ko.id COLLATE \"C\"",
                 (notebook_id, found.param),
             ).fetchall() if candidates else []
+        reserve_for_objects(connection, notebook_id, [row["id"] for row in rows],
+                            adjacent=True, source_ids=ids)
+        if rows:
+            found = id_bind_ids([row["id"] for row in rows])
+            rows = id_execute_ids(
+                connection, f"SELECT {columns} FROM knowledge_objects ko "
+                f"WHERE ko.notebook_id=%s AND {id_member_of('ko.id', found)} "
+                'ORDER BY ko.id COLLATE "C" FOR UPDATE OF ko',
+                (notebook_id, found.param),
+            ).fetchall()
         wanted = set(ids)
         own = [dict(row) for row in rows if row["source_id"] in wanted]
         return own, backfilled, cited
@@ -2605,6 +2652,7 @@ class GovernanceStore:
         return [(str(row["id"]), str(row["marker"])) for row in rows]
 
     @staticmethod
+    @receipt_lock_scope
     def apply_merge_follow_actions_on(
         connection: Any,
         actions: Sequence[MergeFollowAction],
@@ -2645,6 +2693,13 @@ class GovernanceStore:
         stamp = normalize_timestamp(now)
         for notebook_id in sorted(by_notebook):
             wanted = by_notebook[notebook_id]
+            parent = connection.execute(
+                "SELECT id FROM notebooks WHERE id=%s FOR KEY SHARE" + skip,
+                (notebook_id,),
+            ).fetchone()
+            if parent is None:
+                skipped.extend(wanted.values())
+                continue
             found = id_bind_ids(sorted(wanted))
             live = sorted({
                 str(row["id"])
@@ -2668,6 +2723,9 @@ class GovernanceStore:
             }
             locked = []
             if live:
+                if not reserve_for_objects(connection, notebook_id, sorted(set(live) | targets), wait=wait):
+                    skipped.extend(wanted.values())
+                    continue
                 bound = id_bind_ids(sorted(set(live) | targets))
                 locked = id_execute_ids(
                     connection,
@@ -2942,6 +3000,7 @@ class GovernanceStore:
 
     # -------------------------------------------------- knowledge mutation
     @staticmethod
+    @receipt_lock_scope
     def update_object_in_transaction(
         connection: Any,
         notebook_id: str,
@@ -2982,6 +3041,15 @@ class GovernanceStore:
                 (object_id, notebook_id, actor_id, notebook_id, actor_id),
             ).fetchone() is None:
                 raise NeedsKnowledgeWrite()
+        visible = connection.execute(
+            "SELECT ko.id FROM knowledge_objects ko WHERE ko.id=%s AND ko.notebook_id=%s "
+            f"AND {foreign_memory_object_excluded('ko')}",
+            (object_id, notebook_id, actor_id),
+        ).fetchone()
+        if visible is None:
+            raise KeyError(object_id)
+        if payload.status is not None or payload.payload is not None:
+            reserve_for_objects(connection, notebook_id, [object_id])
         row = connection.execute(
             "SELECT ko.* FROM knowledge_objects ko WHERE ko.id = %s "
             f"AND ko.notebook_id = %s AND {foreign_memory_object_excluded('ko')} "
@@ -3187,6 +3255,7 @@ class GovernanceStore:
         return True
 
     @staticmethod
+    @receipt_lock_scope
     def merge_objects_in_transaction(
         connection: Any,
         notebook_id: str,
@@ -3260,6 +3329,7 @@ class GovernanceStore:
             ).fetchall()
             if len(own_rows) < 2:
                 raise NeedsKnowledgeWrite()
+        connection.execute("SELECT id FROM notebooks WHERE id=%s FOR KEY SHARE", (notebook_id,)).fetchone()
         pinned = frozenset(
             row["id"]
             for row in connection.execute(
@@ -3277,6 +3347,15 @@ class GovernanceStore:
                 (source_id, notebook_id, source_id, notebook_id),
             ).fetchall()
         )
+        visible = connection.execute(
+            "SELECT ko.id FROM knowledge_objects ko WHERE ko.notebook_id=%s "
+            f"AND ko.id IN (%s,%s) AND {foreign_memory_object_excluded('ko')}",
+            (notebook_id, source_id, into_id, actor_id),
+        ).fetchall()
+        visible_ids = {row["id"] for row in visible}
+        if source_id not in visible_ids or into_id not in visible_ids:
+            raise KeyError(source_id if source_id not in visible_ids else into_id)
+        reserve_for_objects(connection, notebook_id, [source_id, into_id])
         locked = connection.execute(
             "SELECT ko.*, "
             f"{memory_derived_object('ko')} AS memory_derived "

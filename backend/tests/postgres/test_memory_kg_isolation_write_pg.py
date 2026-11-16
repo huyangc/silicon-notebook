@@ -258,7 +258,7 @@ def test_pg_merge_refuses_when_the_source_gained_a_memory_after_the_pre_lock(see
     with pytest.raises(MemoryKnowledgeMergeRefused) as refused:
         with database.write() as db:
             store.merge_objects_in_transaction(
-                _CommitsBetween(db, "FOR KEY SHARE", concurrent_merge_commits),
+                _CommitsBetween(db, "ORDER BY s.id FOR KEY SHARE", concurrent_merge_commits),
                 "nb", "ko-ma1", "ko-ma2", NOW, actor_id="u-a",
             )
     assert refused.value.user_message == MEMORY_MERGE_RETRY_MESSAGE
@@ -1056,7 +1056,7 @@ def test_pg_cross_merged_memories_removed_at_once_do_not_deadlock(pg_repository)
         GovernanceStore.detach_memory_merges_on(t_tx, "nb", ["src-ma2"], NOW)
         worker = threading.Thread(target=remove_s)
         worker.start()
-        _wait_for_lock_wait(probe, "%knowledge_objects%", worker, outcome)
+        _wait_for_lock_wait(probe, "%kg_relink_work%", worker, outcome)
         try:
             finish(t_tx, "src-ma2")
             outcome["t"] = "ok"
@@ -1329,7 +1329,8 @@ def test_pg_new_statements_keep_index_paths(seeded, monkeypatch):
         store.merge_objects_in_transaction(
             merge_capture, "nb", "ko-s", "ko-s2", NOW, actor_id="u-a"
         )
-    (locking,) = [s for s in merge_capture.statements if "FOR UPDATE" in s[0]]
+    (locking,) = [s for s in merge_capture.statements
+                  if "FOR UPDATE" in s[0] and "FROM knowledge_objects" in s[0]]
     # An own-Memory pair in the bulk notebook (kox-0 / kox-2: u-a's Memory
     # sources srcx-0 / srcx-2) exercises the pre-lock's evidence arm and the
     # own-evidence check.
@@ -1346,12 +1347,12 @@ def test_pg_new_statements_keep_index_paths(seeded, monkeypatch):
         store.merge_objects_in_transaction(
             own_capture, "nbx", "kox-0", "kox-2", NOW, actor_id="u-a"
         )
-    (pre_lock,) = [s for s in own_capture.statements if "FOR KEY SHARE" in s[0]]
+    (pre_lock,) = [s for s in own_capture.statements if "FOR KEY SHARE OF s" in s[0]]
     (own_check,) = [
         s for s in own_capture.statements
         if "FROM sources s WHERE" in s[0] and "rm.created_by" in s[0]
     ]
-    (shared_pre_lock,) = [s for s in merge_capture.statements if "FOR KEY SHARE" in s[0]]
+    (shared_pre_lock,) = [s for s in merge_capture.statements if "FOR KEY SHARE OF s" in s[0]]
 
     with database.connect() as db:
         plans = [_plan(db, sql, params) for sql, params in detection]
@@ -1381,7 +1382,8 @@ def test_pg_new_statements_keep_index_paths(seeded, monkeypatch):
     assert [a.object_id for a in detached.applied] == ["kox-0"]
     assert detached.skipped == ()
     (up_front,) = [s for s in merge_half.statements if "FOR UPDATE OF ko" in s[0]]
-    (followers,) = [s for s in merge_half.statements if "JOIN knowledge_objects ko ON" in s[0]]
+    (followers,) = [s for s in merge_half.statements
+                    if "JOIN knowledge_objects ko ON" in s[0] and "FROM sources s" in s[0]]
     follow_ups = [
         s for s in merge_half.statements
         if "FOR KEY SHARE OF s SKIP LOCKED" in s[0] or "FOR UPDATE SKIP LOCKED" in s[0]
@@ -1412,12 +1414,9 @@ def test_pg_new_statements_keep_index_paths(seeded, monkeypatch):
             or "using idx_knowledge_objects_nb_status" in plan
         ), plan
 
-    # A plain Memory removal (no merge anywhere near it: none of its objects
-    # has ABSORBS_PAYLOAD_KEY, so no follower read) pays, over the strip it
-    # always ran: with a certified reverse index (production's normal state)
-    # exactly one indexed statement — the up-front lock; without one, also
-    # the read of the sources' own object ids (the containment scan itself is
-    # read once and handed to the strip).
+    # Count the merge feature's candidate/lock work separately from receipt
+    # reservations. Containment must still run only once, and every added
+    # reservation graph probe must retain an indexed access path.
     def statement_delta() -> int:
         with database.write() as db:
             plain = _CapturingConnection(db)
@@ -1430,7 +1429,23 @@ def test_pg_new_statements_keep_index_paths(seeded, monkeypatch):
             strip_only = _CapturingConnection(db)
             GovernanceStore.strip_sources_evidence_on(strip_only, "nbx", ["srcx-4"], NOW)
             db.execute("ROLLBACK")
-        return len(plain.statements) - len(strip_only.statements)
+        containment = [s for s in plain.statements if s[0].startswith("SELECT") and "evidence @>" in s[0]]
+        stripped_scans = [s for s in strip_only.statements if s[0].startswith("SELECT") and "evidence @>" in s[0]]
+        assert len(containment) == len(stripped_scans)
+        assert [(params[0], params[-1]) for _sql, params in containment] == [
+            (params[0], params[-1]) for _sql, params in stripped_scans
+        ]
+        assert len(containment) <= 1
+        assert not any("FOR KEY SHARE OF s SKIP LOCKED" in s[0] for s in plain.statements)
+        graph_reads = [s for s in plain.statements if s[0].startswith(("SELECT", "WITH"))
+                       and ("FROM knowledge_objects" in s[0] or "FROM knowledge_relations" in s[0])]
+        with database.connect() as db:
+            for statement in graph_reads:
+                plan = _plan(db, *statement)
+                assert "Seq Scan" not in plan, plan
+        return sum("FOR UPDATE OF ko" in sql or
+                   "SELECT id FROM knowledge_objects WHERE notebook_id = %s AND source_id" in sql
+                   for sql, _params in plain.statements)
 
     assert statement_delta() == 2
     from app.repositories.postgres.knowledge_store import KnowledgeStore as _Knowledge
@@ -1747,7 +1762,8 @@ def test_pg_owner_scoped_writes_and_fusion_reads_keep_index_paths(seeded):
     captured: dict[str, tuple[str, tuple]] = {}
 
     def last(conn: _CapturingConnection, needle: str) -> tuple[str, tuple]:
-        (hit,) = [s for s in conn.statements if needle in s[0]]
+        (hit,) = [s for s in conn.statements if needle in s[0]
+                  and (needle != "FOR UPDATE" or "FROM knowledge_objects" in s[0])]
         return hit
 
     with database.write() as db:

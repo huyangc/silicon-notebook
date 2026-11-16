@@ -174,6 +174,9 @@ def test_postgres_stage_publisher_deletes_orphanable_relation_vectors_first():
         def fetchall(self):
             return self._rows
 
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
     class _Connection:
         def __init__(self):
             self.calls = []
@@ -181,6 +184,8 @@ def test_postgres_stage_publisher_deletes_orphanable_relation_vectors_first():
 
         def execute(self, sql, params=(), **kwargs):
             self.calls.append((" ".join(sql.split()), params))
+            if sql.lstrip().startswith("SELECT revision FROM kg_relink_work"):
+                return _Rows([{"revision": 1}])
             if sql.lstrip().startswith("SELECT DISTINCT ko.id"):
                 if self.object_page:
                     self.object_page = False

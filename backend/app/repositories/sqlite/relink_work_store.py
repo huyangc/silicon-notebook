@@ -1,27 +1,63 @@
 """Durable source-partition receipts for relink, owned by the caller's transaction."""
 from __future__ import annotations
 
+from functools import wraps
+
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.id_binding import bind_ids, drive_by
 
+
+def receipt_lock_scope(method):
+    """Mirror PostgreSQL refusal atomicity inside the caller's write transaction."""
+    @wraps(method)
+    def wrapped(*args, **kwargs):
+        db = args[0] if hasattr(args[0], "execute") else args[1]
+        # SqliteDatabase.write() starts lazily. An outermost SAVEPOINT would
+        # otherwise commit at RELEASE, before the caller's later dirty writes.
+        if not db.in_transaction:
+            SqliteDatabase.begin_guarded_write(db)
+        db.execute("SAVEPOINT governance_receipt_scope")
+        try:
+            result = method(*args, **kwargs)
+            db.execute("RELEASE SAVEPOINT governance_receipt_scope")
+            return result
+        except BaseException:
+            db.execute("ROLLBACK TO SAVEPOINT governance_receipt_scope")
+            db.execute("RELEASE SAVEPOINT governance_receipt_scope")
+            raise
+    return wrapped
+
+
+def reserve_for_objects(db, notebook_id, object_ids, *, adjacent=False, source_ids=(), wait=True):
+    """SQLite's caller-owned write transaction already serializes graph writers."""
+    return True
+
+
+def reserve_for_sources(db, notebook_id, source_ids, *, staged=False):
+    """Establish SQLite's writer fence before replacement starts reading candidates."""
+    if not db.in_transaction:
+        SqliteDatabase.begin_guarded_write(db)
 
 def enqueue_for_source_relations(db, notebook_id: str, source_ids, algorithm_version: int) -> None:
     """Requeue endpoint owners before deleting relations by provenance source.
 
     Endpoint objects can both survive source replacement. Keep the source-bound
     union in SQL so a high-degree source never hydrates all endpoints in Python.
-    Source IDs drive indexed seeks; CROSS JOIN and filter-only notebook checks
-    prevent SQLite from starting with every object/relation in the notebook.
+    Bind the changed IDs as the outer loop. Older SQLite versions can scan an
+    entire source index for equality after ANALYZE when one source owns most
+    edges. Equal inclusive bounds express the same text-key match while keeping
+    the access path a bounded index range even under those skewed statistics.
     """
     ids = list(source_ids)
     if not ids:
         return
     bound = bind_ids(ids)
     legs = [
-        "SELECT COALESCE(o.source_id,'') AS source_id FROM knowledge_relations r "
-        "INDEXED BY idx_knowledge_relations_source "
+        f"SELECT COALESCE(o.source_id,'') AS source_id FROM {bound.sql} changed "
+        "CROSS JOIN knowledge_relations r INDEXED BY idx_knowledge_relations_source "
+        "ON r.source_id>=changed.value AND r.source_id<=changed.value "
         f"CROSS JOIN knowledge_objects o ON o.id=r.{endpoint} AND +o.notebook_id=r.notebook_id "
-        f"WHERE +r.notebook_id=? AND {drive_by('r.source_id', bound)}"
+        "WHERE +r.notebook_id=?"
         for endpoint in ("source_object_id", "target_object_id")
     ]
     statement = (
@@ -33,7 +69,7 @@ def enqueue_for_source_relations(db, notebook_id: str, source_ids, algorithm_ver
         "status='pending',isolated_before=0,isolated_after=0,edges_added=0"
     )
     db.execute(statement, (
-        notebook_id, algorithm_version, notebook_id, bound.param, notebook_id, bound.param,
+        notebook_id, algorithm_version, bound.param, notebook_id, bound.param, notebook_id,
     ))
 
 
@@ -63,11 +99,12 @@ def enqueue_for_objects(
         ):
             sql += (
                 " UNION SELECT COALESCE(o.source_id,'') AS source_id "
-                f"FROM knowledge_relations r INDEXED BY {index} CROSS JOIN knowledge_objects o "
+                f"FROM {bound.sql} changed CROSS JOIN knowledge_relations r INDEXED BY {index} "
+                f"ON r.{endpoint}=changed.value CROSS JOIN knowledge_objects o "
                 f"ON o.id=r.{other} AND +o.notebook_id=r.notebook_id "
-                f"WHERE r.notebook_id=? AND {drive_by('r.' + endpoint, bound)}"
+                "WHERE r.notebook_id=?"
             )
-            params.extend((notebook_id, bound.param))
+            params.extend((bound.param, notebook_id))
     rows = db.execute(sql, tuple(params)).fetchall()
     for source_id in sorted({str(row["source_id"]) for row in rows}):
         enqueue(db, notebook_id, source_id, algorithm_version)

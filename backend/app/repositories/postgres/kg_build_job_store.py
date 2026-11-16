@@ -432,8 +432,13 @@ class KgBuildJobStore:
     @staticmethod
     def _delete_source_kg(connection, notebook_id: str, source_id: str) -> None:
         from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
-        from app.repositories.postgres.relink_work_store import enqueue_for_objects, enqueue_for_source_relations
+        from app.repositories.postgres.relink_work_store import (
+            enqueue_for_objects,
+            enqueue_for_source_relations,
+            reserve_for_sources,
+        )
 
+        reserve_for_sources(connection, notebook_id, [source_id], staged=True)
         enqueue_for_source_relations(connection, notebook_id, [source_id], RELINK_ALGORITHM_VERSION)
 
         connection.execute(
@@ -847,7 +852,9 @@ class KgBuildJobStore:
             self._refuse_memory_source(connection, notebook_id, snapshot)
 
             from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
-            from app.repositories.postgres.relink_work_store import enqueue
+            from app.repositories.postgres.relink_work_store import enqueue, reserve_for_sources
+            if kg_modes == {"replace"}:
+                reserve_for_sources(connection, notebook_id, snapshot, staged=True)
             for source_id, payload in payloads:
                 if payload["kg"]["mode"] == "replace":
                     enqueue(connection, notebook_id, source_id, RELINK_ALGORITHM_VERSION)

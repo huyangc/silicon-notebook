@@ -432,8 +432,13 @@ class KgBuildJobStore:
         db: sqlite3.Connection, notebook_id: str, source_id: str
     ) -> None:
         from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
-        from app.repositories.sqlite.relink_work_store import enqueue_for_objects, enqueue_for_source_relations
+        from app.repositories.sqlite.relink_work_store import (
+            enqueue_for_objects,
+            enqueue_for_source_relations,
+            reserve_for_sources,
+        )
 
+        reserve_for_sources(db, notebook_id, [source_id], staged=True)
         enqueue_for_source_relations(db, notebook_id, [source_id], RELINK_ALGORITHM_VERSION)
 
         db.execute(
@@ -877,7 +882,9 @@ class KgBuildJobStore:
             self._refuse_memory_source(db, notebook_id, snapshot)
 
             from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
-            from app.repositories.sqlite.relink_work_store import enqueue
+            from app.repositories.sqlite.relink_work_store import enqueue, reserve_for_sources
+            if kg_modes == {"replace"}:
+                reserve_for_sources(db, notebook_id, snapshot, staged=True)
             for source_id, payload in payloads:
                 if payload["kg"]["mode"] == "replace":
                     enqueue(db, notebook_id, source_id, RELINK_ALGORITHM_VERSION)

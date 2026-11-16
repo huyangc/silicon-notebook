@@ -1,7 +1,161 @@
 """Durable source-partition receipts for relink, owned by the caller's transaction."""
 from __future__ import annotations
 
+from contextvars import ContextVar
+from functools import wraps
+
+from psycopg.errors import LockNotAvailable
+
 from app.repositories.postgres.id_binding import bind_ids, execute_ids, member_of
+
+_reserved_receipts: ContextVar[list | None] = ContextVar("reserved_relink_receipts", default=None)
+
+
+def receipt_lock_scope(method):
+    """Roll back speculative reservations on refusal; never publish placeholders."""
+    @wraps(method)
+    def wrapped(*args, **kwargs):
+        db = args[0] if hasattr(args[0], "execute") else args[1]
+        reserved = []
+        token = _reserved_receipts.set(reserved)
+        db.execute("SAVEPOINT governance_receipt_scope")
+        try:
+            result = method(*args, **kwargs)
+            for notebook_id, source_id in reserved:
+                db.execute("DELETE FROM kg_relink_work WHERE notebook_id=%s AND source_id=%s "
+                           "AND revision=0", (notebook_id, source_id))
+            db.execute("RELEASE SAVEPOINT governance_receipt_scope")
+            return result
+        except BaseException:
+            db.execute("ROLLBACK TO SAVEPOINT governance_receipt_scope")
+            db.execute("RELEASE SAVEPOINT governance_receipt_scope")
+            raise
+        finally:
+            _reserved_receipts.reset(token)
+    return wrapped
+
+
+def reserve_for_objects(db, notebook_id, object_ids, *, adjacent=False, source_ids=(), wait=True):
+    """Reserve partitions before object locks, without invalidating completed work.
+
+    A revision-zero row reserves an absent key and is removed by the scope if
+    no mutation enqueues it. Nonwaiting follow-up work only reserves existing
+    rows: a missing key is deferred, since its insertion could wait on another
+    publisher's uncommitted unique key.
+    """
+    ids = list(object_ids)
+    sources = set(source_ids)
+    if source_ids:
+        owners = bind_ids(list(source_ids))
+        for endpoint in ("source_object_id", "target_object_id"):
+            sources.update(row["source_id"] for row in execute_ids(
+                db, "SELECT COALESCE(o.source_id,'') AS source_id "
+                "FROM knowledge_relations r JOIN knowledge_objects o "
+                f"ON o.id=r.{endpoint} AND o.notebook_id=r.notebook_id "
+                f"WHERE r.notebook_id=%s AND {member_of('r.source_id', owners)}",
+                (notebook_id, owners.param),
+            ).fetchall())
+    if ids:
+        bound = bind_ids(ids)
+        query = ("SELECT COALESCE(source_id,'') AS source_id FROM knowledge_objects "
+                 f"WHERE notebook_id=%s AND {member_of('id', bound)}")
+        params = [notebook_id, bound.param]
+        if adjacent:
+            for endpoint, other in (("source_object_id", "target_object_id"),
+                                    ("target_object_id", "source_object_id")):
+                query += (" UNION SELECT COALESCE(o.source_id,'') AS source_id "
+                          "FROM knowledge_relations r JOIN knowledge_objects o "
+                          f"ON o.id=r.{other} AND o.notebook_id=r.notebook_id "
+                          f"WHERE r.notebook_id=%s AND {member_of('r.' + endpoint, bound)}")
+                params.extend((notebook_id, bound.param))
+        sources.update(row["source_id"] for row in execute_ids(db, query, tuple(params)).fetchall())
+    return _reserve_source_ids(db, notebook_id, sources, wait=wait)
+
+
+def _reserve_source_ids(db, notebook_id, sources, *, wait=True):
+    reserved = _reserved_receipts.get()
+    if reserved is None:
+        raise RuntimeError("receipt reservation requires receipt_lock_scope")
+    db.execute("SAVEPOINT governance_receipt_reserve")
+    created = []
+    try:
+        for source_id in sorted(sources):
+            if wait:
+                db.execute("INSERT INTO kg_relink_work "
+                           "(notebook_id,source_id,algorithm_version,revision,status) "
+                           "VALUES (%s,%s,0,0,'done') ON CONFLICT DO NOTHING",
+                           (notebook_id, source_id))
+            row = db.execute("SELECT revision FROM kg_relink_work "
+                             "WHERE notebook_id=%s AND source_id=%s FOR UPDATE" +
+                             ("" if wait else " NOWAIT"), (notebook_id, source_id)).fetchone()
+            if row is None:
+                db.execute("ROLLBACK TO SAVEPOINT governance_receipt_reserve")
+                db.execute("RELEASE SAVEPOINT governance_receipt_reserve")
+                return False
+            if row["revision"] == 0:
+                created.append((notebook_id, source_id))
+        db.execute("RELEASE SAVEPOINT governance_receipt_reserve")
+        reserved.extend(created)
+        return True
+    except LockNotAvailable:
+        db.execute("ROLLBACK TO SAVEPOINT governance_receipt_reserve")
+        db.execute("RELEASE SAVEPOINT governance_receipt_reserve")
+        if wait:
+            raise
+        return False
+
+
+@receipt_lock_scope
+def reserve_for_sources(db, notebook_id, source_ids, *, staged=False):
+    """Reserve the entire replacement partition set before its first receipt.
+
+    Candidate objects and adjacency stay in SQL. Only distinct owner partitions
+    reach Python, so source size does not turn this into an object hydration pass.
+    Staged replacement also checks uncertified evidence, matching its delete path.
+    """
+    ids = sorted(set(source_ids))
+    if not ids:
+        return
+    bound = bind_ids(ids)
+    state = db.execute("SELECT source_index_backfilled FROM unified_kg_state WHERE notebook_id=%s",
+                       (notebook_id,)).fetchone()
+    certified = bool(state and state["source_index_backfilled"])
+    doomed = (
+        "SELECT id FROM knowledge_objects WHERE notebook_id=%s "
+        f"AND {member_of('source_id', bound)} "
+        "UNION SELECT object_id AS id FROM knowledge_object_sources "
+        f"WHERE notebook_id=%s AND {member_of('source_id', bound)}"
+    )
+    params = [notebook_id, bound.param, notebook_id, bound.param]
+    if staged or not certified:
+        # A staged snapshot can cover the entire library. One array binding
+        # keeps parameter count fixed while each source drives a containment probe.
+        doomed += (f" UNION SELECT ko.id FROM unnest({bound.sql}) changed(source_id) "
+                   "JOIN knowledge_objects ko ON ko.notebook_id=%s "
+                   "AND ko.evidence @> jsonb_build_array("
+                   "jsonb_build_object('source_id',changed.source_id))")
+        params.extend((bound.param, notebook_id))
+    query = (
+        "WITH doomed AS MATERIALIZED (" + doomed + ") "
+        "SELECT COALESCE(o.source_id,'') AS source_id FROM doomed d "
+        "JOIN knowledge_objects o ON o.id=d.id WHERE o.notebook_id=%s"
+    )
+    params.append(notebook_id)
+    for endpoint, other in (("source_object_id", "target_object_id"),
+                            ("target_object_id", "source_object_id")):
+        query += (" UNION SELECT COALESCE(o.source_id,'') AS source_id "
+                  f"FROM doomed d JOIN knowledge_relations r ON r.{endpoint}=d.id "
+                  f"JOIN knowledge_objects o ON o.id=r.{other} AND o.notebook_id=r.notebook_id "
+                  "WHERE r.notebook_id=%s")
+        params.append(notebook_id)
+    for endpoint in ("source_object_id", "target_object_id"):
+        query += (" UNION SELECT COALESCE(o.source_id,'') AS source_id "
+                  "FROM knowledge_relations r JOIN knowledge_objects o "
+                  f"ON o.id=r.{endpoint} AND o.notebook_id=r.notebook_id "
+                  f"WHERE r.notebook_id=%s AND {member_of('r.source_id', bound)}")
+        params.extend((notebook_id, bound.param))
+    affected = {row["source_id"] for row in execute_ids(db, query, tuple(params)).fetchall()}
+    _reserve_source_ids(db, notebook_id, affected | set(ids))
 
 
 def enqueue_for_source_relations(db, notebook_id: str, source_ids, algorithm_version: int) -> None:
@@ -39,8 +193,8 @@ def enqueue_for_objects(
     """Invalidate owners before an object mutation; deletion also affects neighbours.
 
     The caller supplies a bounded object batch. Endpoint-specific indexed legs
-    avoid a notebook-wide relation scan. No source lock is taken here: mutation
-    owners may already hold object locks, and receipts have no source foreign key.
+    avoid a notebook-wide relation scan. Callers that lock objects must reserve
+    their affected receipts first; receipt-before-object is the publication order.
     """
     ids = list(object_ids)
     if not ids:

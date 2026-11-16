@@ -16,7 +16,9 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.domain.kg.relink import RELINK_ALGORITHM_VERSION
-from app.repositories.sqlite.relink_work_store import enqueue, enqueue_for_objects
+from app.repositories.sqlite.relink_work_store import (
+    enqueue, enqueue_for_objects, receipt_lock_scope,
+)
 from app.core.text_whitespace import PY_STRIP_WHITESPACE
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
@@ -1794,6 +1796,7 @@ class GovernanceStore:
         base_notebook_id = str(rows[0]["notebook_id"]) if rows else ""
         return ids, base_notebook_id
 
+    @receipt_lock_scope
     def approve_memory_promotion_in_transaction(
         self,
         connection: sqlite3.Connection,
@@ -1929,6 +1932,7 @@ class GovernanceStore:
             "merged_object_ids": merged_object_ids,
         }
 
+    @receipt_lock_scope
     def approve_promotion_in_transaction(
         self,
         connection: sqlite3.Connection,
@@ -2199,6 +2203,7 @@ class GovernanceStore:
         return int(removed or 0)
 
     @staticmethod
+    @receipt_lock_scope
     def strip_sources_evidence_on(
         connection: sqlite3.Connection,
         notebook_id: str,
@@ -2296,6 +2301,7 @@ class GovernanceStore:
         return [(str(row["id"]), str(row["marker"])) for row in rows]
 
     @staticmethod
+    @receipt_lock_scope
     def apply_merge_follow_actions_on(
         connection: sqlite3.Connection,
         actions: Sequence[MergeFollowAction],
@@ -2395,6 +2401,7 @@ class GovernanceStore:
             )
 
     @staticmethod
+    @receipt_lock_scope
     def lock_memory_teardown_objects_on(
         connection: sqlite3.Connection, notebook_id: str, source_ids: List[str]
     ) -> tuple:
@@ -2596,6 +2603,7 @@ class GovernanceStore:
 
     # -------------------------------------------------- knowledge mutation
     @staticmethod
+    @receipt_lock_scope
     def update_object_in_transaction(
         connection: sqlite3.Connection,
         notebook_id: str,
@@ -2797,6 +2805,7 @@ class GovernanceStore:
         return len(own) == len(cited)
 
     @staticmethod
+    @receipt_lock_scope
     def merge_objects_in_transaction(
         connection: sqlite3.Connection,
         notebook_id: str,

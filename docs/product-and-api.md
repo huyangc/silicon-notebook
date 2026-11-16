@@ -3723,9 +3723,12 @@ in-request re-run either is handled by the background pass as a restore. If a re
 deleted while the step waits for its lock, the step is left as it was and the pass re-reads it: with
 no other eligible holder left, the object is restored. The merge also marks its target (a hidden `_absorbs` key, kept across hand edits; a
 stale mark only costs one more read): a Memory removal or edit whose objects carry no such mark
-skips the follower read entirely, so with a certified reverse index a plain Memory removal pays one
-statement more than before this feature. On PostgreSQL a merge locks the Memory sources it
-makes the target cite before the object rows (the order of every Memory removal and re-ingest), so
+skips the follower read entirely. With a certified reverse index, a plain Memory removal adds one
+object pre-lock step; without one, it also reads candidate object IDs by source, reusing those
+candidates during evidence stripping instead of repeating that phase's containment scan. This candidate/object-lock cost excludes relink receipt reservations
+and transaction savepoints. PostgreSQL first pins the notebook with a shared key lock, then locks the Memory sources a merge makes the target cite,
+then reserves affected source-partition relink receipts, then locks object rows (the order of every
+Memory removal and re-ingest), so
 a concurrent delete, member exit or edit of one of them waits for the merge and then strips what it
 wrote; in the rare case that another merge put a new Memory's evidence on the source object between
 those two steps, the merge answers 409 「要合并的知识对象刚被修改，请稍后重试」 and writes nothing.

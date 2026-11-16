@@ -2176,16 +2176,12 @@ class SourceIngestionService:
             #      before (never fewer) while this delete is in flight, so
             #      the worst case is an over-cautious rejection, never an
             #      admitted overshoot.
-            #   2. No new deadlock — conditional on one invariant: the tail
-            #      ``mark_unified_kg_dirty_in_tx`` only avoids taking the FK
-            #      parent lock (notebooks KEY SHARE, AFTER the sources row)
-            #      because every notebook is born with its
-            #      ``unified_kg_state`` row, so the upsert always takes the
-            #      DO UPDATE branch (no FK re-check). If that seeding ever
-            #      stops holding, this transaction becomes "hold sources FOR
-            #      UPDATE, then wait on notebooks" — the opposite order to
-            #      notebook deletion's finalize (notebooks FOR UPDATE, then
-            #      sources FOR UPDATE) and a real deadlock shape.
+            #   2. Relink receipts can now insert an FK child on first use.
+            #      ``lock_sources_for_teardown_tx`` pins the notebooks with
+            #      KEY SHARE BEFORE locking the sources, matching notebook
+            #      deletion's parent-before-source order. KEY SHARE remains
+            #      compatible with the FOR NO KEY UPDATE capacity lock, so
+            #      this does not serialize teardown behind source admission.
             #   3. The notebook->source write-order invariant that closes the
             #      phantom-source/element-swap race (see the fixed-writer-
             #      order comment in the postgres source store's

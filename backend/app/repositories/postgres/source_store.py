@@ -2269,13 +2269,23 @@ class SourceStore:
         for each (``is_memory`` is ``memory_sql``'s Memory-source predicate).
 
         The batch form of ``source_exists_for_update_tx`` (without its
-        capacity lock): the teardown takes the aggregate lock before any
-        derived row, and taking every lock of a batch in one id-ordered
+        capacity lock): pin each notebook with KEY SHARE before source locks,
+        since first-use relink receipts insert a notebook FK child. This is
+        compatible with the FOR NO KEY UPDATE capacity lock, while preserving
+        notebook-finalize's parent-before-source order. Taking every lock of a batch in one id-ordered
         statement gives two concurrent teardowns one global order. A missing
         id is simply absent (already removed)."""
         ids = sorted({str(source_id) for source_id in source_ids if source_id})
         if not ids:
             return []
+        bound = bind_ids(ids)
+        execute_ids(
+            connection,
+            "SELECT n.id FROM notebooks n WHERE n.id IN ("
+            f"SELECT notebook_id FROM sources WHERE {member_of('id', bound)}) "
+            'ORDER BY n.id COLLATE "C" FOR KEY SHARE OF n',
+            (bound.param,),
+        ).fetchall()
         rows = connection.execute(
             "SELECT id,notebook_id,source_type,file_path,uploaded_by,"
             f"({memory_source_type_predicate()}) AS is_memory FROM sources "

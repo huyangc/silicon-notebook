@@ -2701,8 +2701,9 @@ def test_postgres_promotion_dedup_does_not_overwrite_concurrent_merge_evidence(
             # The merge's locking read (it also classifies both rows for the
             # M1 Memory refusal in the same statement, hence the alias).
             if (
-                "FROM knowledge_objects ko WHERE ko.notebook_id = %s" in sql
-                and "FOR UPDATE" in sql
+                ("FROM knowledge_objects ko WHERE ko.notebook_id = %s" in sql
+                 and "FOR UPDATE" in sql)
+                or "INSERT INTO kg_relink_work" in sql
             ):
                 merge_lock_attempted.set()
             return self.connection.execute(query, params, **kwargs)
