@@ -117,7 +117,7 @@ function ElementBody({ element, notebookId }: { element: SourceElement; notebook
   const refs = importedShareReferences(element.metadata?.share_references);
   if (refs.length && element.element_type === "paragraph") {
     const markdown = typeof element.metadata?.preview_markdown === "string" ? element.metadata.preview_markdown : element.text;
-    return <ImportedShareText text={markdown} references={element.metadata.share_references} />;
+    return <ImportedShareText text={markdown} markdown={typeof element.metadata?.preview_markdown === "string"} references={element.metadata.share_references} />;
   }
   return <>
     <SourceElementBody element={element} notebookId={notebookId} />
@@ -132,7 +132,8 @@ function SourceElementBody({ element, notebookId }: { element: SourceElement; no
     if (markdown) {
       return <SourceMarkdown answer={markdown} headingLevel={elementHeadingLevel(element)} />;
     }
-    return <SourceMarkdown answer={`${"#".repeat(elementHeadingLevel(element))} ${element.text}`} />;
+    const HeadingTag = `h${elementHeadingLevel(element)}` as "h3" | "h4" | "h5";
+    return <HeadingTag className="element-heading">{element.text}</HeadingTag>;
   }
   if (element.element_type === "code_block") {
     return <pre className="answer-code"><code>{element.text}</code></pre>;
@@ -142,7 +143,7 @@ function SourceElementBody({ element, notebookId }: { element: SourceElement; no
       const ordinal = element.metadata?.ordered_list_ordinal;
       return <SourceMarkdown answer={markdown} orderedStart={typeof ordinal === "number" ? ordinal : undefined} />;
     }
-    return <SourceMarkdown answer={/^\s*(?:[-*+] |\d+[.)] )/.test(element.text) ? element.text : `- ${element.text}`} />;
+    return <p>{element.text}</p>;
   }
   if (element.element_type === "formula") {
     return <FormulaView latex={element.text} />;
@@ -203,9 +204,9 @@ function SourceElementBody({ element, notebookId }: { element: SourceElement; no
     }
     // 无可渲染图片资源(如 MINERU_RETURN_IMAGES=0 关闭图片)且既无 caption 也无
     // 图片描述时，回退到与其余元素类型一致的纯文本展示，避免空的占位边框。
-    return <SourceMarkdown answer={element.text} />;
+    return <p>{element.text}</p>;
   }
-  return <SourceMarkdown answer={markdown || element.text} />;
+  return markdown ? <SourceMarkdown answer={markdown} /> : <p>{element.text}</p>;
 }
 
 

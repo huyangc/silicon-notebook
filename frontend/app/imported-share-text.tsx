@@ -49,14 +49,18 @@ function ImportedCitationLink({ href, children }: { href?: string; children?: Re
 }
 const IMPORTED_COMPONENTS = { a: ImportedCitationLink };
 
-export function ImportedShareText({ text, references }: { text: string; references: unknown }) {
+export function ImportedShareText({ text, references, markdown = false }: { text: string; references: unknown; markdown?: boolean }) {
   const byKey = useMemo(() => new Map(importedShareReferences(references).map((ref) => [ref.key, ref])), [references]);
   const plugins = useMemo<PluggableList>(() => [[remarkImportedCitations, byKey]], [byKey]);
   const [selected, setSelected] = useState<Selection | null>(null);
   return <>
     <ImportedCitationContext.Provider value={{ byKey, selected, select: setSelected }}>
-      <AnswerMarkdown answer={text} allowImages={false} extraRemarkPlugins={plugins}
-        components={IMPORTED_COMPONENTS} onReferenceClick={() => undefined} />
+      {markdown ? <AnswerMarkdown answer={text} allowImages={false} extraRemarkPlugins={plugins}
+        components={IMPORTED_COMPONENTS} onReferenceClick={() => undefined} /> : (
+        <p>{text.split(/(\[t\d+-k?\d+\])/g).map((part, index) => byKey.has(part.slice(1, -1))
+          ? <ImportedCitationLink key={index} href={`cite:imported:${part.slice(1, -1)}`}>{part}</ImportedCitationLink>
+          : part)}</p>
+      )}
     </ImportedCitationContext.Provider>
     {selected && <PublicCitationPopover key={selected.reference.key} reference={selected.reference}
       displayLabel={`[${selected.reference.key}]`} anchorRect={selected.rect} onClose={() => setSelected(null)} />}

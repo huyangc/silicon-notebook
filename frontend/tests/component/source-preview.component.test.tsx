@@ -4,7 +4,7 @@ import { SourcePreview } from "../../app/source-preview";
 import { SourcePreviewLink } from "../../app/source-preview-link";
 import type { SourceElement } from "../../app/workspace-model";
 
-const element = (id: string, text: string, element_type = "paragraph", metadata = {}): SourceElement => ({
+const element = (id: string, text: string, element_type = "paragraph", metadata: Record<string, unknown> = { preview_markdown: text }): SourceElement => ({
   id, text, element_type, metadata, source_id: "s", location_label: "PDF p.1 block 3",
 });
 
@@ -118,4 +118,17 @@ test("ordered source lists can start at zero", () => {
     element("zero", "Zero", "list_item", { preview_markdown: "0. Zero", ordered_list_ordinal: 0 }),
   ]} />);
   expect((screen.getByRole("list") as HTMLOListElement).start).toBe(0);
+});
+
+test("legacy normalized text remains literal until reparsed", () => {
+  const literal = "![alt](https://example.com/image.png) **literal** $x$";
+  const { container } = render(<SourcePreview notebookId="n" elements={[
+    element("old", literal, "paragraph", {}),
+    element("old-share", literal + " [t1-k1]", "paragraph", {
+      share_references: [{ key: "t1-k1", title: "参考来源" }],
+    }),
+  ]} />);
+  expect(container.querySelector("#source-element-old")?.textContent).toBe(literal);
+  expect(container.querySelector("strong, .katex, img")).toBeNull();
+  expect(screen.getByRole("button", { name: "查看引用 t1-k1" })).toBeInTheDocument();
 });
