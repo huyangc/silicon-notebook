@@ -100,3 +100,15 @@ test("imported citation syntax inside code stays literal", () => {
   expect(container.querySelector("code")).toHaveTextContent("[t1-k1]");
   expect(screen.getAllByRole("button", { name: "查看引用 t1-k1" })).toHaveLength(1);
 });
+
+test("quoted source headings and list ordinals retain their containers", () => {
+  const { container } = render(<SourcePreview notebookId="n" elements={[
+    element("heading", "Quoted heading", "heading", { heading_level: 2, preview_markdown: "> ## Quoted heading" }),
+    element("one", "First", "list_item", { preview_markdown: "> 3. First", ordered_list_ordinal: 3 }),
+    element("two", "Second", "list_item", { preview_markdown: "> 1. Second", ordered_list_ordinal: 4 }),
+  ]} />);
+  const heading = screen.getByRole("heading", { level: 4, name: "Quoted heading" });
+  expect(heading.closest("blockquote")).not.toBeNull();
+  expect(container.textContent).not.toContain("> ##");
+  expect(screen.getAllByRole("list").map((list) => (list as HTMLOListElement).start)).toEqual([3, 4]);
+});

@@ -1,6 +1,9 @@
 "use client";
 
 import { Fragment, useEffect, useMemo } from "react";
+import { visit } from "unist-util-visit";
+import type { Root } from "mdast";
+import type { PluggableList } from "unified";
 import { AnswerMarkdown } from "./answer-markdown";
 import { FormulaView } from "./formula-view";
 import { AuthedImage } from "./authed-image";
@@ -13,8 +16,20 @@ import { composeTablePartsHtml, groupTableParts, sanitizeTableHtml } from "./tab
 import { sourceImageAssetUrl } from "./source-image";
 import type { SourceElement } from "./workspace-model";
 
-function SourceMarkdown({ answer }: { answer: string }) {
-  return <AnswerMarkdown answer={answer} allowImages={false} onReferenceClick={() => undefined} />;
+type SourceMarkdownShape = { headingLevel?: 3 | 4 | 5; orderedStart?: number };
+function remarkSourceShape({ headingLevel, orderedStart }: SourceMarkdownShape) {
+  return (tree: Root) => {
+    if (headingLevel !== undefined) visit(tree, "heading", (node) => { node.depth = headingLevel; });
+    let numbered = false;
+    if (orderedStart !== undefined) visit(tree, "list", (node) => {
+      if (node.ordered && !numbered) { node.start = orderedStart; numbered = true; }
+    });
+  };
+}
+
+function SourceMarkdown({ answer, headingLevel, orderedStart }: { answer: string } & SourceMarkdownShape) {
+  const plugins = useMemo<PluggableList>(() => [[remarkSourceShape, { headingLevel, orderedStart }]], [headingLevel, orderedStart]);
+  return <AnswerMarkdown answer={answer} allowImages={false} extraRemarkPlugins={plugins} onReferenceClick={() => undefined} />;
 }
 
 export function SourcePreview({ elements, notebookId, highlightedElementId = "" }: {
@@ -115,9 +130,7 @@ function SourceElementBody({ element, notebookId }: { element: SourceElement; no
     ? element.metadata.preview_markdown : "";
   if (element.element_type === "heading") {
     if (markdown) {
-      // Preserve inline syntax, while keeping source headings below the page title.
-      const title = markdown.replace(/^\s*#{1,6}\s+/u, "").replace(/\n[ \t]*[=-]+[ \t]*(?=\n|$)/u, "").trim();
-      return <SourceMarkdown answer={`${"#".repeat(elementHeadingLevel(element))} ${title}`} />;
+      return <SourceMarkdown answer={markdown} headingLevel={elementHeadingLevel(element)} />;
     }
     return <SourceMarkdown answer={`${"#".repeat(elementHeadingLevel(element))} ${element.text}`} />;
   }
@@ -127,7 +140,7 @@ function SourceElementBody({ element, notebookId }: { element: SourceElement; no
   if (element.element_type === "list_item") {
     if (markdown) {
       const ordinal = element.metadata?.ordered_list_ordinal;
-      return <SourceMarkdown answer={typeof ordinal === "number" ? markdown.replace(/^(\s*)\d+([.)]\s+)/u, `$1${ordinal}$2`) : markdown} />;
+      return <SourceMarkdown answer={markdown} orderedStart={typeof ordinal === "number" ? ordinal : undefined} />;
     }
     return <SourceMarkdown answer={/^\s*(?:[-*+] |\d+[.)] )/.test(element.text) ? element.text : `- ${element.text}`} />;
   }
