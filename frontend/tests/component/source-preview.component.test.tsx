@@ -112,3 +112,10 @@ test("quoted source headings and list ordinals retain their containers", () => {
   expect(container.textContent).not.toContain("> ##");
   expect(screen.getAllByRole("list").map((list) => (list as HTMLOListElement).start)).toEqual([3, 4]);
 });
+
+test("ordered source lists can start at zero", () => {
+  render(<SourcePreview notebookId="n" elements={[
+    element("zero", "Zero", "list_item", { preview_markdown: "0. Zero", ordered_list_ordinal: 0 }),
+  ]} />);
+  expect((screen.getByRole("list") as HTMLOListElement).start).toBe(0);
+});

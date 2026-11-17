@@ -40,6 +40,15 @@ def test_html_blocks_use_readable_text_instead_of_raw_preview():
     assert "正文" in elements[0].text
     assert all("preview_markdown" not in element.metadata for element in elements)
 
+
+def test_preview_keeps_metadata_labels_and_zero_or_empty_list_items():
+    table = parse_markdown_text("preview", "| Metadata: | Value |\n| --- | --- |\n| **Name** | Demo |")[0]
+    assert "| Metadata:" in table.metadata["preview_markdown"]
+    zero = parse_markdown_text("preview", "0. Zero\n1. One")
+    assert [element.metadata["ordered_list_ordinal"] for element in zero] == [0, 1]
+    empty = parse_markdown_text("preview", "1.\n2. Second\n3. Third")
+    assert [element.metadata["ordered_list_ordinal"] for element in empty] == [2, 3]
+
 # 1x1 transparent PNG, valid base64.
 PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
