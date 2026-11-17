@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { AlertTriangle, ArrowLeft, BarChart3, Cpu, Database, ExternalLink, GitMerge, LayoutDashboard, LayoutGrid, Link2, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, ScrollText, Settings, Share2, Sparkles, Table2, Trash2, Users, X } from "lucide-react";
 import "katex/dist/katex.min.css";
@@ -10,7 +10,6 @@ import { KG_BUSY_NOTICE_HOLD_MS, type KgRebuildStartResult } from "./use-kg-grap
 import { fetchKgAnalysis } from "./kg-analysis-api";
 import { AuthedImage } from "./authed-image";
 import { GlobalAskLauncher, type GlobalConversationRequest } from "./ask/global-ask-launcher";
-import { FormulaView } from "./formula-view";
 import {
   currentPreviewImage,
   type AnswerImagePreviewRequest,
@@ -207,8 +206,6 @@ import { compactSourceTitle, SUPPORTED_SOURCE_EXT_GROUP } from "./source-title.t
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, checkupNotices, checkupHasRepairableIssue, hasRepairAction, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { askQuestionLimitHint, fetchAnswerMemoryLinks } from "./ask-api";
 import { buildPublicReportLink } from "./public-report";
-import { ImportedShareText } from "./imported-share-text";
-import { importedShareReferences } from "./imported-share-references";
 import { cancelScaleIndex, fetchIndexStatus, fetchScaleIndexStatus, fetchRebuildModelCalls, rebuildScaleIndex, type IndexStatus } from "../features/kg-maintenance/kg-api";
 import {
   type ModelServiceStatusItem,
@@ -306,15 +303,8 @@ import { SourceSidebarHint } from "./source-sidebar-hint";
 import { createOwnedWorkspaceExtensionActions } from "../features/extension-sdk/actions";
 import { WorkspaceExtensionOutlet } from "../features/extension-sdk/host";
 import { WORKSPACE_UI_CONTRIBUTIONS } from "../features/extension-sdk/workspace-registry";
-import { sourceElementDomId } from "./source-detail-state";
-import {
-  descriptionBlocks,
-  elementHeadingLevel,
-  elementLocationNote,
-  elementTypeTag,
-  withSectionDividers,
-} from "./source-element-display";
-import { composeTablePartsHtml, groupTableParts, sanitizeTableHtml } from "./table-part-groups";
+import { SourcePreview } from "./source-preview";
+import { SourcePreviewLink } from "./source-preview-link";
 import { SchemaManager } from "./schema-manager";
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
 import { canSeeAdminUsage } from "./admin/usage/format.ts";
@@ -377,7 +367,6 @@ import {
   type NotebookContentOverview,
   type NotebookSummary,
   type PendingMerge,
-  type SourceElement,
   type SourceSummary,
   type UnifiedConceptNode,
 } from "./workspace-model";
@@ -7268,6 +7257,10 @@ export default function Home() {
                   }}
                 />
               )}
+              <div className="source-preview-toolbar">
+                <span className="source-preview-label">预览</span>
+                <SourcePreviewLink notebookId={currentNotebookId ?? ""} sourceId={sourceDetail.id} />
+              </div>
               <div className="source-element-stack">
                 {sourceElementStartOffset > 0 && (
                   <button
@@ -7277,22 +7270,9 @@ export default function Home() {
                     onClick={() => loadSourceElementPage("previous").catch(reportError)}
                   >{sourceElementsLoading ? "加载中…" : `加载前面的元素（已显示 ${sourceElements.length}/${sourceElementsTotal}）`}</button>
                 )}
-                {sourceElements.length > 0 ? groupTableParts(withSectionDividers(sourceElements)).map((group) => (
-                  <Fragment key={group.kind === "single" ? group.element.id : group.elements[0].id}>
-                    {group.divider && (
-                      <div className="source-element-divider"><span>{group.divider}</span></div>
-                    )}
-                    {group.kind === "single" ? (
-                      <SourceElementCard
-                        element={group.element}
-                        highlighted={group.element.id === highlightedElementId}
-                        notebookId={currentNotebookId ?? ""}
-                      />
-                    ) : (
-                      <TablePartGroupCard elements={group.elements} highlightedElementId={highlightedElementId} />
-                    )}
-                  </Fragment>
-                )) : (
+                {sourceElements.length > 0 ? (
+                  <SourcePreview elements={sourceElements} notebookId={currentNotebookId ?? ""} highlightedElementId={highlightedElementId} />
+                ) : (
                   <article className="item">
                     <h3>等待解析</h3>
                     {/* 只按「有没有失败」二选一给稳定文案,绝不直出后端的原始异常串。
@@ -8067,151 +8047,6 @@ export default function Home() {
 // 来源详情里的一个元素。呈现规则(分隔线/标题级别/哪些类型贴标签/行号)全在
 // source-element-display.ts,这里只负责把规则落成 DOM。location_label 刻意不渲染:
 // 它是引用坐标,不是给读者看的(见该模块顶部说明)。
-function SourceElementCard({ element, highlighted, notebookId }: {
-  element: SourceElement;
-  highlighted: boolean;
-  notebookId: string;
-}) {
-  const note = elementLocationNote(element);
-  const tag = elementTypeTag(element.element_type);
-  return (
-    <article
-      className={`item source-element-card${highlighted ? " source-element-card--highlighted" : ""}`}
-      id={sourceElementDomId(element.id)}
-    >
-      {(note || tag) && (
-        <div className="element-head">
-          {note && <span className="element-location-note">{note}</span>}
-          {tag && <span className="tag element-type-tag">{tag}</span>}
-        </div>
-      )}
-      <ElementBody element={element} notebookId={notebookId} />
-    </article>
-  );
-}
-
-// 同一张表被解析层切成的多个 table_part 元素,合并成一张卡片、一张 <table>——
-// 每段一个 tbody,domId 与单元素卡片一致,引用跳转(getElementById)与逐段高亮不用
-// 区分「这元素是不是被合并过」。
-function TablePartGroupCard({ elements, highlightedElementId }: {
-  elements: SourceElement[];
-  highlightedElementId: string;
-}) {
-  // 拼好的表格 HTML 只依赖元素序列本身(id + table_html),不掺高亮态:引用跳转的
-  // 高亮进/出各触发一次 highlightedElementId 变化(2.6s 后自动清空),若高亮态混进
-  // 这段字符串,每次翻转都要把整张合并表格重新拼一遍再整段丢进
-  // dangerouslySetInnerHTML,几十上百行的表格因此整体重排、还会打断用户在表格里的
-  // 文本选区。依赖数组用 id 串这个稳定量,不直接用 elements——JSX 里
-  // groupTableParts(...) 每次渲染都会产出新数组。
-  const partsKey = elements.map((element) => element.id).join(",");
-  const html = useMemo(
-    () => composeTablePartsHtml(
-      elements.map((element) => ({
-        domId: sourceElementDomId(element.id),
-        html: typeof element.metadata?.table_html === "string" ? element.metadata.table_html : "",
-      })),
-      sanitizeTableHtml,
-    ),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 按 partsKey 而不是 elements 重算,见上注释
-    [partsKey],
-  );
-  // 高亮只是给已经渲染好的 <tbody> 切 class,不重建 innerHTML;被引用的那一段仍然
-  // 可见高亮、可被 sourceElementDomId 定位滚动(scrollIntoView 走 use-source-library.ts
-  // 里同一个 getElementById)。
-  useEffect(() => {
-    for (const element of elements) {
-      document
-        .getElementById(sourceElementDomId(element.id))
-        ?.classList.toggle("table-part--highlighted", element.id === highlightedElementId);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 同上,用 partsKey 代表 elements
-  }, [partsKey, highlightedElementId]);
-  return (
-    <article className="item source-element-card">
-      <div className="element-table" dangerouslySetInnerHTML={{ __html: html }} />
-    </article>
-  );
-}
-
-function ElementBody({ element, notebookId }: { element: SourceElement; notebookId: string }) {
-  const refs = importedShareReferences(element.metadata?.share_references);
-  if (refs.length && element.element_type === "paragraph") {
-    return <ImportedShareText text={element.text} references={refs} />;
-  }
-  return <>
-    <SourceElementBody element={element} notebookId={notebookId} />
-    {refs.length > 0 && <ImportedShareText text={refs.map((ref) => `[${ref.key}]`).join(" ")} references={refs} />}
-  </>;
-}
-
-function SourceElementBody({ element, notebookId }: { element: SourceElement; notebookId: string }) {
-  if (element.element_type === "heading") {
-    const HeadingTag = `h${elementHeadingLevel(element)}` as "h3" | "h4" | "h5";
-    return <HeadingTag className="element-heading">{element.text}</HeadingTag>;
-  }
-  if (element.element_type === "formula") {
-    return <FormulaView latex={element.text} />;
-  }
-  if (element.element_type === "table") {
-    const html = typeof element.metadata?.table_html === "string" ? element.metadata.table_html : "";
-    if (html) {
-      return (
-        <div
-          className="element-table"
-          dangerouslySetInnerHTML={{ __html: sanitizeTableHtml(html) }}
-        />
-      );
-    }
-  }
-  if (element.element_type === "image") {
-    const assetId = typeof element.metadata?.asset_id === "string" ? element.metadata.asset_id : "";
-    const caption = typeof element.metadata?.caption === "string" ? element.metadata.caption : "";
-    // markdown 的 `> **图片描述**` 引用块。与图注并列渲染而不是二选一：图注是
-    // 一行标签，描述是对图的展开说明，两者都写了就都显示。
-    const description = typeof element.metadata?.description === "string"
-      ? element.metadata.description
-      : "";
-    const descriptionBlockList = descriptionBlocks(description);
-    const descriptionNode = descriptionBlockList.length > 0 ? (
-      <div className="element-image-description">
-        {descriptionBlockList.map((block, index) =>
-          block.kind === "code" ? (
-            <pre key={index} className="element-image-code" data-language={block.lang || undefined}>
-              <code>{block.text}</code>
-            </pre>
-          ) : (
-            <p key={index}>{block.text}</p>
-          )
-        )}
-      </div>
-    ) : null;
-    // 无 caption 时的图片 alt 只取描述里的第一段正文(paragraph),不把围栏代码块
-    // (如电路网表)原样念给屏幕阅读器。
-    const descriptionAlt = descriptionBlockList.find((block) => block.kind === "paragraph")?.text ?? "";
-    const url = sourceImageAssetUrl(API_BASE, notebookId, assetId);
-    if (url) {
-      return (
-        <figure className="element-image-figure">
-          <AuthedImage url={url} alt={caption || descriptionAlt || "figure"} />
-          {caption ? <figcaption>{caption}</figcaption> : null}
-          {descriptionNode}
-        </figure>
-      );
-    }
-    if (caption || descriptionNode) {
-      return (
-        <figure className="element-image-figure">
-          {caption ? <figcaption>{caption}</figcaption> : null}
-          {descriptionNode}
-        </figure>
-      );
-    }
-    // 无可渲染图片资源(如 MINERU_RETURN_IMAGES=0 关闭图片)且既无 caption 也无
-    // 图片描述时，回退到与其余元素类型一致的纯文本展示，避免空的占位边框。
-    return <p>{element.text}</p>;
-  }
-  return <p>{element.text}</p>;
-}
 
 function EvidenceLine({ evidence }: { evidence: Evidence[] }) {
   if (!evidence.length) return null;

@@ -10591,6 +10591,72 @@ button.tag:hover {
   margin: 8px 0;
 }
 
+.source-preview-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0 10px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 12px;
+}
+
+.source-preview-label { font-size: 14px; font-weight: 600; color: var(--muted); }
+.source-preview-link { gap: 7px; font-size: 13px; }
+.source-preview-link:active { filter: brightness(0.92); }
+.source-preview-link:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.source-element-card .answer-markdown { min-width: 0; }
+.source-element-card .answer-markdown p { white-space: normal; }
+.source-element-card .answer-markdown ul,
+.source-element-card .answer-markdown ol { font-size: 16px; line-height: 1.65; }
+.source-element-card h3 { font-size: 21px; }
+.source-element-card h4 { font-size: 18px; }
+.source-element-card h5 { font-size: 16px; }
+
+.source-reader {
+  width: min(100%, 1040px);
+  margin: 0 auto;
+  padding: 24px 40px 64px;
+}
+
+.source-reader-bar, .source-reader-bar > span, .source-reader-footer, .source-reader-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.source-reader-bar { justify-content: space-between; padding-bottom: 28px; }
+.source-reader-bar > span, .source-reader-meta, .source-reader-footer, .source-reader-end {
+  color: var(--muted);
+  font-size: 13px;
+}
+.source-reader-heading { padding: 8px 12px 24px; }
+.source-reader-heading h1 { margin: 12px 0; font-size: clamp(24px, 3vw, 34px); line-height: 1.4; overflow-wrap: anywhere; }
+.source-reader-paper {
+  padding: 32px 40px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  min-width: 0;
+}
+.source-reader-paper .source-element-card { padding: 6px 0; }
+.source-reader-paper .answer-markdown { line-height: 1.85; }
+.source-reader-paper .answer-markdown p,
+.source-reader-paper .answer-markdown ul,
+.source-reader-paper .answer-markdown ol { line-height: 1.85; }
+.source-reader-status { color: var(--muted); justify-content: center; padding: 24px 0; }
+.source-reader-footer { justify-content: center; border-top: 1px solid var(--line); padding-top: 24px; margin-top: 24px; }
+.source-reader-end { text-align: center; margin: 32px 0 0; }
+
+@media (max-width: 760px) {
+  .source-reader { padding: 16px 12px 32px; }
+  .source-reader-heading { padding: 0 6px 18px; }
+  .source-reader-bar { padding-bottom: 20px; }
+  .source-reader-paper { padding: 20px 16px; border-radius: 12px; }
+}
+
 .source-element-card {
   min-width: 0;
   border: none;

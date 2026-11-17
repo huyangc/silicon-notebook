@@ -2,6 +2,31 @@ import json
 from pathlib import Path
 from app.services.parsers import parse_markdown, parse_markdown_text, parse_source_file
 
+
+def test_preview_retains_markdown_separately_from_search_text():
+    elements = parse_markdown_text("preview", "# **标题**\n\n**重点** 与 [链接](https://example.com)\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n- **列表**\n")
+    heading, paragraph, table, item = elements
+    assert heading.text == "标题"
+    assert heading.metadata["preview_markdown"].strip() == "# **标题**"
+    assert "**重点**" in paragraph.metadata["preview_markdown"]
+    assert "| --- | --- |" in table.metadata["preview_markdown"]
+    assert "- **列表**" in item.metadata["preview_markdown"]
+
+
+def test_preview_metadata_never_keeps_inline_image_payload():
+    elements = parse_markdown_text("preview", "**正文** ![图](data:image/png;base64,AAAA)")
+    assert elements
+    assert all("base64" not in str(element.metadata.get("preview_markdown", "")) for element in elements)
+    html_elements = parse_markdown_text("preview", '**正文** <img src="data:image/png;base64,AAAA">')
+    assert all("base64" not in str(element.metadata.get("preview_markdown", "")) for element in html_elements)
+
+
+def test_preview_retains_used_reference_link_definitions():
+    elements = parse_markdown_text("preview", '[链接][ref]\n\n[ref]: https://example.com "说明"\n[unused]: https://unused.example.com')
+    preview = elements[0].metadata["preview_markdown"]
+    assert '[REF]: <https://example.com> "说明"' in preview
+    assert "unused.example.com" not in preview
+
 # 1x1 transparent PNG, valid base64.
 PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"

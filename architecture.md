@@ -419,6 +419,7 @@ Legacy 的 `prompts.reflect_prompt` 在原 user 消息内先输出固定指令�
   模板并隔离用户/笔记本/工作区代次；`useSourceLibrary.contentRevision` 提供与
   搜索、分页无关的内容刷新信号。生成建议不拥有 Ask 草稿或会话状态。
 - `answer-panel.tsx` 保存答案、引用与 reasoning trace UI。
+- `source-preview.tsx` 是来源详情与独立阅读页共用的只读元素渲染器，复用 Markdown 管线并保留资产图片、表格合并和元素锚点。`source-reader.tsx` 只拥有独立页面的按需分页读取状态，通过当前笔记本参与集代理接口取数，不接管工作区的来源状态或写操作；解析器的 `preview_markdown` 仅供显示，检索仍消费规范化元素文本。
 - `frontend/app/admin/usage/` 拥有用户总览及其只读「提问分析」（问答 / 深度报告）「解析问题」页签；它只消费管理员 GET projection，不拥有解析、重试或隔离文件 mutation。解析问题列表可按 7 类模型功能筛选，模型正文只在展开一行时经单案例 GET 读取，不随列表批量下发。`page.tsx` 的 workspace hash 可带一个来源 id，只负责打开仍获授权的笔记本和来源详情。
 - `kg-type-model.ts` 保存内置知识类型文案/样式；`kg-type-mark.tsx` 消费并 re-export 该模型，保存答案与图谱共用的类型标记渲染。
 - `ask-stream.ts`、`ask-reconnect.ts` 等 helper 保存流式问答和恢复行为。
