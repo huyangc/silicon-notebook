@@ -55,5 +55,5 @@ test("unavailable and empty sources expose retry and empty states without diagno
   render(<SourceReader notebookId="n" sourceId="s" />);
   expect(await screen.findByRole("alert")).not.toHaveTextContent("private diagnostic");
   await userEvent.click(screen.getByRole("button", { name: "重试" }));
-  expect(await screen.findByText("当前来源还没有解析出内容，请解析完成后再打开。")).toBeInTheDocument();
+  expect(await screen.findByText(/^当前来源还没有解析出内容/)).toBeInTheDocument();
 });

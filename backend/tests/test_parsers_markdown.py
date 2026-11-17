@@ -58,6 +58,17 @@ def test_preview_distinguishes_autolinks_from_actual_html_blocks():
     assert quoted_html.text == "正文"
     assert "preview_markdown" not in quoted_html.metadata
 
+
+def test_preview_preserves_multiline_and_escaped_reference_labels():
+    cases = [
+        "[caption][foo\nbar]\n\n[foo bar]: https://example.com",
+        "[caption][foo\\]bar]\n\n[foo\\]bar]: https://example.com",
+        "> [caption][foo\n> bar]\n\n[foo bar]: https://example.com",
+    ]
+    for text in cases:
+        paragraph = parse_markdown_text("preview", text)[0]
+        assert "https://example.com" in paragraph.metadata["preview_markdown"]
+
 # 1x1 transparent PNG, valid base64.
 PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"

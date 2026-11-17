@@ -309,6 +309,7 @@ def _html_to_text(html: str) -> str:
 
 def parse_blocks(text: str, *, reference_env: Optional[Dict[str, Any]] = None) -> List[Block]:
     md = _make_md()
+    md.options["store_labels"] = reference_env is not None
     tokens = md.parse(text, reference_env)
     offs = _line_char_offsets(text)
     blocks: List[Block] = []
@@ -325,6 +326,17 @@ def parse_blocks(text: str, *, reference_env: Optional[Dict[str, Any]] = None) -
         if pending_anchor and blk.anchor_id is None:
             blk.anchor_id = pending_anchor
         pending_anchor = None
+        if reference_env is not None and blk.type in {"paragraph", "heading", "list_item", "table"} and not blk.metadata.get("html_block"):
+            # Reparse each display block with the document's resolved definitions.
+            # The total input stays linear; block parsing removes quote/list
+            # containers before resolving multiline and escaped reference labels.
+            labels = (
+                child.meta["label"]
+                for token in md.parse(blk.raw, reference_env)
+                for child in (token.children or [])
+                if "label" in child.meta
+            )
+            blk.metadata["reference_labels"] = list(dict.fromkeys(labels))
         blocks.append(blk)
 
     i = 0
