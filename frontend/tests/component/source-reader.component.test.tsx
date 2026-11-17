@@ -12,7 +12,7 @@ vi.mock("../../app/source-api", () => ({
   getNotebookSourceElementsPage: vi.fn(),
   fetchInternalAssetBlob: vi.fn(),
 }));
-const row = (id: string, text: string) => ({ id, text, element_type: "paragraph", metadata: {}, source_id: "s", location_label: "" });
+const row = (id: string, text: string) => ({ id, text, element_type: "paragraph", metadata: { preview_markdown: text }, source_id: "s", location_label: "" });
 beforeEach(() => {
   localStorage.clear();
   setToken("test-token");
