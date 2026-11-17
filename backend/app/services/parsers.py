@@ -538,7 +538,7 @@ def parse_markdown_text(
             metadata["ordered_list_ordinal"] = block.metadata["ordered_list_ordinal"]
         # Keep display syntax apart from retrieval text. Never persist inline
         # image payloads in metadata; images retain their asset-backed path.
-        if block.type in {"paragraph", "heading", "list_item", "table"} and not block.raw.lstrip().startswith("<"):
+        if block.type in {"paragraph", "heading", "list_item", "table"} and not block.metadata.get("html_block"):
             preview = strip_data_uri_image_literals(block.raw)
             # Reference definitions are not blocks. Carry only definitions used
             # by this block so paginated rendering can resolve document links.

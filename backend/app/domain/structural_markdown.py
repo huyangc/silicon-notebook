@@ -384,13 +384,13 @@ def parse_blocks(text: str, *, reference_env: Optional[Dict[str, Any]] = None) -
             if low.startswith("<table") or low.startswith("<details"):
                 emit(Block(type="table", text=_html_to_text(content), raw=text[cs:ce],
                            char_start=cs, char_end=ce, line_start=ls, line_end=le,
-                           section_path=section_path()))
+                           section_path=section_path(), metadata={"html_block": True}))
             else:
                 stripped = _html_to_text(content)
                 if stripped:
                     emit(Block(type="paragraph", text=stripped, raw=text[cs:ce],
                                char_start=cs, char_end=ce, line_start=ls, line_end=le,
-                               section_path=section_path()))
+                               section_path=section_path(), metadata={"html_block": True}))
             i += 1
             continue
 
