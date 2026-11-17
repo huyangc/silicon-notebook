@@ -49,6 +49,15 @@ def test_preview_keeps_metadata_labels_and_zero_or_empty_list_items():
     empty = parse_markdown_text("preview", "1.\n2. Second\n3. Third")
     assert [element.metadata["ordered_list_ordinal"] for element in empty] == [2, 3]
 
+
+def test_preview_distinguishes_autolinks_from_actual_html_blocks():
+    paragraph = parse_markdown_text("preview", "<https://example.com> with **important** and `code`")[0]
+    assert "**important**" in paragraph.metadata["preview_markdown"]
+    assert "`code`" in paragraph.metadata["preview_markdown"]
+    quoted_html = parse_markdown_text("preview", "> <div>正文</div>")[0]
+    assert quoted_html.text == "正文"
+    assert "preview_markdown" not in quoted_html.metadata
+
 # 1x1 transparent PNG, valid base64.
 PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
