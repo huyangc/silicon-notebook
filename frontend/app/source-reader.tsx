@@ -55,7 +55,7 @@ export function SourceReader({ notebookId, sourceId }: { notebookId: string; sou
       setElements(page.items);
       setTotal(page.total_count);
     }).catch(() => {
-      if (alive && owner === generation.current) setError("来源暂时无法读取，请重试或返回笔记本确认访问权限。");
+      if (alive && owner === generation.current) setError("来源暂时无法读取。");
     }).finally(() => {
       if (alive && owner === generation.current) { setBusy(false); inFlight.current = false; }
     });
@@ -75,7 +75,7 @@ export function SourceReader({ notebookId, sourceId }: { notebookId: string; sou
       setElements((previous) => [...previous, ...page.items]);
       setTotal(page.total_count);
     } catch {
-      if (owner === generation.current) setError("后续内容加载失败，请重试。");
+      if (owner === generation.current) setError("后续内容加载失败。");
     } finally {
       if (owner === generation.current) { setBusy(false); inFlight.current = false; }
     }
@@ -101,7 +101,8 @@ export function SourceReader({ notebookId, sourceId }: { notebookId: string; sou
               onClick={() => source ? void loadMore() : setRevision((value) => value + 1)}>重试</button>
           </div>}
           {source && !busy && !error && elements.length === 0 && <p className="source-reader-status">
-            {source.parse_failed || source.parse_status === "failed" ? "这个来源没能解析成功，请返回笔记本查看。" : "当前来源还没有解析出内容，请解析完成后再打开。"}
+            {source.parse_failed || source.parse_status === "failed" ? "这个来源没能解析成功。" : "当前来源还没有解析出内容。"}
+            可<a className="link-button inline-action" href={backUrl}>返回笔记本</a>查看详情。
           </p>}
           {source && elements.length < total && !error && <div className="source-reader-footer">
             <button type="button" className="button secondary" disabled={busy} onClick={() => void loadMore()}>

@@ -543,11 +543,7 @@ def parse_markdown_text(
             # Reference definitions are not blocks. Carry only definitions used
             # by this block so paginated rendering can resolve document links.
             definitions = reference_env.get("references", {})
-            used_labels = dict.fromkeys(
-                " ".join(label.split()).upper()
-                for label in re.findall(r"\[([^\]\n]+)\]", preview)
-            )
-            for label in used_labels:
+            for label in block.metadata.get("reference_labels", []):
                 definition = definitions.get(label)
                 if definition:
                     href = str(definition["href"]).replace("<", "%3C").replace(">", "%3E")
