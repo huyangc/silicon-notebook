@@ -1094,7 +1094,9 @@ class UnifiedKgStore:
           ``c.seed = s.seed`` 落成 Join Filter,代价 = 成员数 × 种子数
           (本机副本 claim 29k×28k:8.1 亿行过滤、67 s;生产推算数十小时)。
           ANALYZE 救不了:跑时 scratch 是空的。LATERAL 让 c 只能按外行参数
-          化探查三键索引,与统计状态无关。``OFFSET 0`` 是优化屏障(阻止
+          化探查三键索引,与统计状态无关。第三键为 md5(seed)，再比较完整
+          seed 排除摘要碰撞，避免长 seed 超过 btree 索引项限制。
+          ``OFFSET 0`` 是优化屏障(阻止
           子查询上拉回普通 JOIN),且不截断结果——同一 (notebook_id, run_id,
           seed) 若有多行,产出与旧 JOIN 逐行相同(多行照样撞
           uq_clusters_nb_type_member_generation 响亮失败,不会像
@@ -1131,7 +1133,8 @@ class UnifiedKgStore:
             "CROSS JOIN LATERAL ("
             "SELECT c.canonical_id,c.canonical_name,c.canonical_description,"
             "c.canonical_desc_sig FROM kg_canonical_scratch c "
-            "WHERE c.notebook_id=s.notebook_id AND c.run_id=s.run_id AND c.seed=s.seed "
+            "WHERE c.notebook_id=s.notebook_id AND c.run_id=s.run_id "
+            "AND md5(c.seed)=md5(s.seed) AND c.seed=s.seed "
             "OFFSET 0) c "
             "JOIN knowledge_objects k ON k.id=s.object_id "
             "WHERE s.notebook_id=%s AND s.run_id=%s "
@@ -2209,10 +2212,11 @@ class UnifiedKgStore:
         with self.database.connect() as db:
             row = db.execute(
                 f"SELECT canonical_id FROM concept_clusters WHERE notebook_id=%s "
+                f"AND md5(lower(canonical_name))=md5(%s) "
                 f"AND lower(canonical_name)=%s AND generation = {_PUBLISHED_CLUSTER_GEN} "
                 f"GROUP BY canonical_id ORDER BY COUNT(*) DESC, "
                 f"canonical_id COLLATE \"C\" ASC LIMIT 1",
-                (notebook_id, focal_key, notebook_id)).fetchone()
+                (notebook_id, focal_key, focal_key, notebook_id)).fetchone()
         return row["canonical_id"] if row else None
 
     def top_community_for(self, notebook_id: str, canonical_id: str) -> Optional[str]:

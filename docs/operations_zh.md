@@ -2581,6 +2581,20 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id <notebook-id>
 
 已成功分析的来源会复用；尚未完成的失败目标可能重试。本次恢复不要加 `--fresh`，它会清除重建阶段的模型检查点；也不要换成 `--rebuild-only`，它绕过分析后的补连待办处理。正在运行的旧进程不会热加载这些改动。本地维护表 `kg_relink_state`、`kg_relink_work` 不参与同步或笔记本归档；迁移只更新结构，不预先执行补连。
 
+**长种子导致重建失败的恢复。** PostgreSQL 0092 迁移将 canonical scratch 的全文种子索引和簇名称索引改为摘要索引，查询仍校验完整种子或名称相等，保留来源原文和聚类身份。迁移还会重建持久簇表的名称索引，耗时取决于已有簇表大小，完成前保持停写。大库迁移时用仅对本命令生效的维护超时，避免默认 30 秒限制：
+
+```bash
+POSTGRES_STATEMENT_TIMEOUT_SECONDS=86400 bash scripts/cli.sh database migrate --confirm-service-stopped
+```
+
+如果已确认补连完成、仅在写 canonical scratch 时失败，停掉全部写入者，升级并迁移后，可运行：
+
+```bash
+PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id <notebook-id> --rebuild-only --confirm-service-stopped
+```
+
+此命令跳过抽取和补连，复用已有节点向量（仅补缺），不要加 `--fresh`，以保留模型检查点。聚类会从头重跑：`concept: wrote clusters` 写的是尚未发布的代，全部类型成功并翻转代指针后才发布，并非按类型续跑的断点。命中的合并审查与描述检查点可以复用，但概念扫描、聚类及写簇会再次执行。直接重建也不会把此前失败的持久抽取任务标成完成。若尚未确认补连完成，仍采用前述普通 `kg` 恢复路径。
+
 可移植 phase 还包括 `question-index`；它与下列 phase 一样按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。
 
 `ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、`backfill-source-index`、`backfill-chunk-elements`、`backfill-images` 会按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。PostgreSQL 直连维护严格属于离线操作：先停止 API 和全部后台 writer，再给命令追加 `--confirm-service-stopped`。该参数只声明运维人员已经停服，不会自行停止服务。所有 phase 都是 [schema guest](#schema-归属只有服务和-database-migrate-迁移)：从不迁移、从不 seed；库不是本构建的 schema（包括服务从未建过的 SQLite 库）时，在打开任何东西之前以退出码 3 拒绝——请先启动一次服务（或停服时运行 `database migrate`）。数据库级 advisory lock 会 fail-fast 阻止两个维护 CLI 重叠；来源、完整/限量 KG 目标、metadata、reextract、向量、关系和反向索引驱动均使用有界 keyset 分页——包括 `index` 阶段的整库向量矩阵加载，现在按页有界读取而不是一条无界 `SELECT`。大库离线维护仍可能在这些流程里**其余**的长语句上撞到在线默认的 `POSTGRES_STATEMENT_TIMEOUT_SECONDS`（`30`，按交互式请求定的——这是仓库默认值，生产实际值以部署配置为准）；给维护 CLI 进程本身的环境变量调大该值（例如 `86400`）——矩阵加载已不再是流水线里最大的单条语句，但离线流水线的其余部分（以及慢盘上的分页矩阵读取本身）仍受同一条逐语句超时约束。在线维护仍应走应用/API，`--dry-run` 不打开 repository——**除 `backfill-images` 外**：它的 dry-run 是一次只读的**数据库**演练（要读每个来源的元素与 chunk 才报得出能补多少张），所以在 PostgreSQL 上同样需要 `--confirm-service-stopped`。`vectors-to-blob` 刻意只支持 SQLite，因为 PostgreSQL 向量已经是 `bytea`；PostgreSQL 会在打开 repository 前明确拒绝。

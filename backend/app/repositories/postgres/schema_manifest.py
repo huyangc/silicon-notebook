@@ -571,7 +571,9 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # and raw conversation predecessors, preserving the same exact UTC ordering.
 # SQLite v109 / PostgreSQL 0090: independent synced concept-rank derived
 # rows, with rank=0 recording freshness even when there are no ranked concepts.
+# PostgreSQL-only v92: fixed-width seed/name digest indexes avoid btree entry
+# size limits; full text remains authoritative for both equality lookups.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
     sqlite_version=110,
-    postgres_version=91,
+    postgres_version=92,
 )

@@ -3376,6 +3376,33 @@ A running old process does not hot-reload these changes. The local maintenance t
 `kg_relink_state` and `kg_relink_work` are not synchronized or included in notebook
 archives. Migration changes the schema only; it does not precompute relinking.
 
+**Recovery from a long-seed rebuild failure.** PostgreSQL migration 0092 replaces
+the canonical scratch full-seed index and the cluster-name index with digest
+indexes; queries still check the full seed/name for equality. Source text and
+clustering identities are preserved. The migration also rebuilds the persistent
+cluster-name index, so its duration depends on the existing cluster table size;
+keep writers stopped until it finishes. For a large library, run the migration
+with a process-local maintenance timeout instead of the default 30-second limit:
+
+```bash
+POSTGRES_STATEMENT_TIMEOUT_SECONDS=86400 bash scripts/cli.sh database migrate --confirm-service-stopped
+```
+For a run confirmed to have completed relinking but failed while writing canonical
+scratch, stop all writers, upgrade and migrate as above, then use:
+
+```bash
+PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id <notebook-id> --rebuild-only --confirm-service-stopped
+```
+
+This bypasses extraction and relinking and reuses existing node vectors (only missing
+vectors are filled). Keep model checkpoints by omitting `--fresh`. It restarts the
+clustering pass: `concept: wrote clusters` is an unpublished generation until all
+types succeed and the generation pointer flips; it is not a per-type resume point.
+Matching merge-review/description checkpoints may be reused, but concept scanning,
+clustering and cluster writes run again. This direct rebuild does not mark the
+previous failed durable extraction job completed. Use the ordinary `kg` recovery
+above if relinking was not confirmed complete.
+
 The portable phases `ingest`, `kg`, `index`, `all`, `embed`, `metadata`, `question-index`, `reparse`,
 `backfill-source-index`, `backfill-chunk-elements`, and `backfill-images` select SQLite or PostgreSQL from `DATABASE_URL`. Direct PostgreSQL
 maintenance is strictly offline: stop the API and every background writer, then append

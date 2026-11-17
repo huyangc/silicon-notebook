@@ -18,7 +18,8 @@ planner left alone (no ``enable_seqscan=off``) -- in three statistics states:
 none, stale (analyzed while the table held another run) and fresh:
 
 * the paged write's INSERT probes ``idx_kg_canonical_scratch_nb_run_seed`` with
-  ``seed = s.seed`` in the Index Cond (``CROSS JOIN LATERAL ... OFFSET 0``),
+  ``md5(seed) = md5(s.seed)`` in the Index Cond and exact seed equality as
+  a filter (``CROSS JOIN LATERAL ... OFFSET 0``),
   and drives the scratch side by the page's ordinal range on
   ``idx_kg_cluster_scratch_nb_run_ordinal``; its bound read is a range read of
   that same index;
@@ -281,7 +282,7 @@ def _assert_no_unparameterized_inner_scratch(name, plan: dict) -> None:
                 assert relation != "kg_cluster_scratch", (name, _conditions(scan))
                 if relation == "kg_canonical_scratch":
                     cond = str(scan.get("Index Cond", ""))
-                    assert re.search(r"seed = [a-z_]+\.seed", cond), (name, cond)
+                    assert re.search(r"md5\(seed\) = md5\([a-z_]+\.seed\)", cond), (name, cond)
 
 
 @pytest.mark.parametrize("statistics", ["none", "stale", "fresh"])
@@ -318,8 +319,9 @@ def test_scratch_statements_plan_by_key_in_every_statistics_state(
             assert canonical["Index Name"] == "idx_kg_canonical_scratch_nb_run_seed", label
             cond = canonical["Index Cond"]
             for key in ("notebook_id = s.notebook_id", "run_id = s.run_id",
-                        "seed = s.seed"):
+                        "md5(seed) = md5(s.seed)"):
                 assert key in cond, (label, cond)
+            assert "seed = s.seed" in canonical.get("Filter", ""), (label, canonical)
             # The scratch side reads the page's ordinal range off the keyset
             # index -- a plain or a bitmap index range (fresh statistics on a
             # small test table pick the bitmap) -- never the whole run.

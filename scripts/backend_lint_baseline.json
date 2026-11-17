@@ -491,9 +491,6 @@
   "backend/app/repositories/postgres/governance_store.py": {
     "I001": 1
   },
-  "backend/app/repositories/postgres/hotpath_indexes.py": {
-    "I001": 1
-  },
   "backend/app/repositories/postgres/id_binding.py": {
     "I001": 1
   },

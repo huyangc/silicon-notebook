@@ -68,9 +68,9 @@ for its whole duration.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
 import time
+from dataclasses import dataclass, replace
 from typing import Callable
 
 import psycopg
@@ -79,7 +79,6 @@ from psycopg.rows import dict_row
 
 from app.repositories.element_reading_order import INDEX_DIGITS_SQL  # 读者 ORDER BY 与索引表达式的唯一真源
 from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,H5 谓词字面量的唯一真源
-
 
 HOTPATH_INDEX_LOCK_NAME = "silicon-notebook:postgres-hotpath-indexes:v1"
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -194,7 +193,7 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
     HotpathIndexSpec(
         name="idx_clusters_nb_canonical_name_lower",
         table="concept_clusters",
-        columns=("notebook_id", "lower(canonical_name)"),
+        columns=("notebook_id", "md5(lower(canonical_name))"),
         predicate="",
         predicate_shape="",
         serves="unified_kg_store.py:resolve_focal",
@@ -820,7 +819,19 @@ def _state(connection, schema: str, spec: HotpathIndexSpec) -> dict[str, object]
     if str(row["table_schema"]) != schema or str(row["table_name"]) != spec.table:
         raise HotpathIndexError(f"unexpected_index_owner:{spec.name}")
     if not _matches_shape(row, spec):
-        return {"name": spec.name, "serves": spec.serves, "state": "UNEXPECTED"}
+        # The online builder is also run against pre-upgrade schemas. Only
+        # v39's exact legacy definition is admissible before v92; replacing it
+        # belongs to that migration, never to this non-destructive builder.
+        legacy = spec.name == "idx_clusters_nb_canonical_name_lower" and _matches_shape(
+            row, replace(spec, columns=("notebook_id", "lower(canonical_name)")),
+        )
+        upgraded = True
+        if legacy:
+            upgraded = connection.execute(sql.SQL(
+                "SELECT 1 FROM {}.silicon_schema_migrations WHERE version>=92 LIMIT 1"
+            ).format(sql.Identifier(schema))).fetchone() is not None
+        if not legacy or upgraded:
+            return {"name": spec.name, "serves": spec.serves, "state": "UNEXPECTED"}
     if not bool(row["indisvalid"]) or not bool(row["indisready"]):
         return {"name": spec.name, "serves": spec.serves, "state": "INVALID"}
     return {"name": spec.name, "serves": spec.serves, "state": "存在"}
