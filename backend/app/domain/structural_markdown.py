@@ -307,9 +307,9 @@ def _html_to_text(html: str) -> str:
     return strip_data_uri_image_literals(" ".join(s.split()).strip(" |;"))
 
 
-def parse_blocks(text: str) -> List[Block]:
+def parse_blocks(text: str, *, reference_env: Optional[Dict[str, Any]] = None) -> List[Block]:
     md = _make_md()
-    tokens = md.parse(text)
+    tokens = md.parse(text, reference_env)
     offs = _line_char_offsets(text)
     blocks: List[Block] = []
 

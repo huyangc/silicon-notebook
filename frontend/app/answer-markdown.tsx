@@ -44,6 +44,8 @@ export type { AnswerReference };
 export interface AnswerMarkdownProps {
   /** 原始答案文本（含 markdown 和 [k\d+] 引用标记） */
   answer: string;
+  /** Source previews show images only through their authenticated element assets. */
+  allowImages?: boolean;
   /** 答案中引用的 anchor 列表 */
   anchors?: AnswerAnchorLike[];
   /** 答案中引用的 citation 列表 */
@@ -157,6 +159,9 @@ const ANSWER_MARKDOWN_COMPONENTS = {
   aside: AnswerMarkdownAside,
 } satisfies NonNullable<Parameters<typeof ReactMarkdown>[0]["components"]>;
 
+function MarkdownImageAlt({ alt }: { alt?: string }) { return <span>{alt}</span>; }
+const TEXT_ONLY_IMAGE_COMPONENTS = { ...ANSWER_MARKDOWN_COMPONENTS, img: MarkdownImageAlt };
+
 // 默认参数必须是模块级常量：写成 `anchors = []` 会让省略这两个 prop 的调用方
 // （Memory 等纯 Markdown 消费面）每次渲染拿到一个新数组，下面按引用比较的
 // useMemo 永远失效，等于整层白做。
@@ -165,6 +170,7 @@ const NO_CITATIONS: CitationLike[] = [];
 
 export function AnswerMarkdown({
   answer,
+  allowImages = true,
   anchors = NO_ANCHORS,
   citations = NO_CITATIONS,
   selectedReferenceId = null,
@@ -214,11 +220,11 @@ export function AnswerMarkdown({
       // 默认 urlTransform 会清掉非常规协议（含我们的 cite:），导致引用徽章 href 丢失。
       // 放行 cite:，其余 URL 仍走默认清洗（防 javascript: 等不安全协议）。
       urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
-      components={ANSWER_MARKDOWN_COMPONENTS}
+      components={allowImages ? ANSWER_MARKDOWN_COMPONENTS : TEXT_ONLY_IMAGE_COMPONENTS}
     >
       {normalizeInferenceListMarkers(normalizeMathMarkdown(answer))}
     </ReactMarkdown>
-  ), [answer, refsByCitationKey, imageIdsByCitationKey, citationImageOrder]);
+  ), [answer, allowImages, refsByCitationKey, imageIdsByCitationKey, citationImageOrder]);
 
   return (
     <div className="answer-markdown">

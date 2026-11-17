@@ -233,7 +233,8 @@ test("source detail uses the dedicated draggable window shell", () => {
 // 任一处被删除或被"移动"(换成不调用 sourceElementDomId 的等价写法)都会报红。
 test("来源详情的元素卡片 DOM id 与滚动 effect 消费同一个 sourceElementDomId(...)", async () => {
   const hook = await parseModule("use-source-library.ts");
-  const sourceCards = jsxElements(page, "article").filter(
+  const preview = await parseModule("source-preview.tsx");
+  const sourceCards = jsxElements(preview, "article").filter(
     (element) => element.bindings?.id === "sourceElementDomId(element.id)",
   );
   assert.equal(

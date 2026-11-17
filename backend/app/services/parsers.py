@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import html as html_module
+import json
 import math
 import os
 import re
@@ -505,14 +506,15 @@ def parse_markdown_text(
     离而不入库（图片不可用，但文本解析不受影响）。
     """
     from app.domain.share_import import references_for_text, split_manifest
-    from app.services.structural_markdown import parse_blocks
+    from app.services.structural_markdown import parse_blocks, strip_data_uri_image_literals
 
     share_manifest, body = split_manifest(text)
     if share_manifest is not None:
         # Preserve original source character offsets when hiding the manifest.
         prefix_size = len(text) - len(body)
         text = " " * (prefix_size - 1) + "\n" + body
-    blocks = parse_blocks(text)
+    reference_env: Dict[str, Any] = {}
+    blocks = parse_blocks(text, reference_env=reference_env)
     elements: List[SourceElement] = []
     counters: Dict[str, int] = {}
     for block in blocks:
@@ -532,6 +534,25 @@ def parse_markdown_text(
             "line_start": block.line_start,
             "line_end": block.line_end,
         }
+        # Keep display syntax apart from retrieval text. Never persist inline
+        # image payloads in metadata; images retain their asset-backed path.
+        if block.type in {"paragraph", "heading", "list_item", "table"}:
+            preview = strip_data_uri_image_literals(block.raw)
+            # Reference definitions are not blocks. Carry only definitions used
+            # by this block so paginated rendering can resolve document links.
+            definitions = reference_env.get("references", {})
+            used_labels = dict.fromkeys(
+                " ".join(label.split()).upper()
+                for label in re.findall(r"\[([^\]\n]+)\]", preview)
+            )
+            for label in used_labels:
+                definition = definitions.get(label)
+                if definition:
+                    href = str(definition["href"]).replace("<", "%3C").replace(">", "%3E")
+                    title = json.dumps(definition.get("title", ""), ensure_ascii=False)
+                    preview += f"\n\n[{label}]: <{href}> {title}\n"
+            if not re.search(r"data\s*:", preview, flags=re.IGNORECASE):
+                metadata["preview_markdown"] = preview
         if share_manifest is not None:
             references = references_for_text(share_manifest, block.text)
             if references:

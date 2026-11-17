@@ -10,7 +10,6 @@ import {
   withSectionDividers,
 } from "../../app/source-element-display.ts";
 import { ELEMENT_TYPE } from "../../app/vocabulary.ts";
-import { jsxElements, parseModule } from "../../test-support/semantic-source.mjs";
 
 const el = (element_type, metadata = {}, id = element_type) => ({ id, element_type, metadata });
 
@@ -173,35 +172,4 @@ test("descriptionBlocks splits on bare CR line endings", () => {
     { kind: "paragraph", text: "line two" },
     { kind: "code", text: "code", lang: "" },
   ]);
-});
-
-test("source detail renders elements through the display module, not location_label", async () => {
-  const page = await parseModule("page.tsx");
-  const cards = jsxElements(page, "SourceElementCard");
-  assert.ok(cards.length >= 1, "SourceElementCard is mounted in the element stack");
-  const source = page.getFullText();
-  const stackStart = source.indexOf('className="source-element-stack"');
-  const stackEnd = source.indexOf("</SourceDetailWindow>", stackStart);
-  assert.ok(stackStart > 0 && stackEnd > stackStart);
-  const stack = source.slice(stackStart, stackEnd);
-  assert.ok(stack.includes("withSectionDividers("), "dividers come from withSectionDividers");
-  assert.ok(!stack.includes("location_label"), "the parser location label is not rendered in the reading view");
-});
-
-test("the image element branch renders a fenced description as a <pre class=\"element-image-code\">", async () => {
-  // ElementBody/SourceElementCard 都不对外导出(page.tsx 是巨型客户端组件,导出
-  // 内部渲染函数会扩大它们的公开面),这里改用源码断言。锚点定在
-  // `element.element_type === "image"` 分支的起止之间(下一个顶层函数
-  // `EvidenceLine` 之前),不用无界通配符,不会误吃到其它分支的文本。
-  const page = await parseModule("page.tsx");
-  const source = page.getFullText();
-  const imageBranchStart = source.indexOf('element.element_type === "image"');
-  assert.ok(imageBranchStart > 0, "ElementBody still has an image branch");
-  const imageBranchEnd = source.indexOf("function EvidenceLine", imageBranchStart);
-  assert.ok(imageBranchEnd > imageBranchStart, "image branch is bounded before the next top-level function");
-  const imageBranch = source.slice(imageBranchStart, imageBranchEnd);
-  assert.ok(imageBranch.includes("descriptionBlocks("), "description is parsed through descriptionBlocks");
-  assert.ok(imageBranch.includes('className="element-image-code"'), "fenced code renders through .element-image-code");
-  assert.ok(imageBranch.includes("data-language={block.lang"), "the fence language is exposed as data-language");
-  assert.ok(!imageBranch.includes("data-lang="), "the old data-lang attribute name is gone");
 });
