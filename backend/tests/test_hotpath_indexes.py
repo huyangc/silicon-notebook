@@ -62,14 +62,14 @@ _MIGRATION = (
 )
 
 _STATEMENT_PATTERN = re.compile(
-    r"CREATE INDEX IF NOT EXISTS\s+(?P<name>\w+)\s+ON\s+(?P<table>\w+)\(\s*"
+    r"CREATE INDEX(?: IF NOT EXISTS)?\s+(?P<name>\w+)\s+ON\s+(?P<table>\w+)\(\s*"
     r"(?P<columns>[\s\S]*?)\s*\)(?:\s*WHERE\s+(?P<predicate>[\s\S]*?))?;",
     re.MULTILINE,
 )
 
 
-def _parse_migration_specs() -> list[dict[str, object]]:
-    text = _MIGRATION.read_text(encoding="utf-8")
+def _parse_migration_specs(path: Path = _MIGRATION) -> list[dict[str, object]]:
+    text = path.read_text(encoding="utf-8")
     out = []
     for match in _STATEMENT_PATTERN.finditer(text):
         columns = tuple(c.strip() for c in match.group("columns").split(","))
@@ -119,6 +119,15 @@ _BATCH1_NAMES = frozenset(
 
 def test_all_eight_migration_statements_match_a_spec_verbatim():
     parsed = _parse_migration_specs()
+    # The sealed v39 declaration remains the old text-key shape; v92 replaces
+    # that same name with a digest expression and owns the current spec.
+    replaced_name = "idx_clusters_nb_canonical_name_lower"
+    historical = next(entry for entry in parsed if entry["name"] == replaced_name)
+    assert historical["columns"] == ("notebook_id", "lower(canonical_name)")
+    replacements = _parse_migration_specs(_MIGRATION.with_name("0092_canonical_scratch_seed_digest.sql"))
+    replacement = next(entry for entry in replacements if entry["name"] == replaced_name)
+    assert replacement["columns"] == ("notebook_id", "md5(lower(canonical_name))")
+    assert replacement["table"] == historical["table"]
     by_name = {spec.name: spec for spec in HOTPATH_INDEX_SPECS}
     assert {entry["name"] for entry in parsed} == _BATCH1_NAMES, (
         "migration 0039 must declare exactly the eight batch-1 names, no more, "
@@ -126,7 +135,7 @@ def test_all_eight_migration_statements_match_a_spec_verbatim():
     )
     # 批 6(0051)取代并 DROP 了 idx_clusters_nb_canonical(接替覆盖索引的
     # 严格前缀,实测劫计划)——历史迁移 0039 原文不动,但注册表(=现在应当
-    # 存在的索引)不再登记它;其余七条照旧逐字对账。
+    # 存在的索引)不再登记它；其余按历史声明或显式替换它的0092逐字对账。
     superseded = {"idx_clusters_nb_canonical"}
     assert superseded <= _BATCH1_NAMES and not superseded & set(by_name)
     seen = set(superseded)
@@ -134,6 +143,8 @@ def test_all_eight_migration_statements_match_a_spec_verbatim():
         name = entry["name"]
         if name in superseded:
             continue
+        if name == replaced_name:
+            entry = replacement
         assert name in by_name, f"{name} is in the migration but not in HOTPATH_INDEX_SPECS"
         spec = by_name[name]
         seen.add(name)

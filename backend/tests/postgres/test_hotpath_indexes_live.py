@@ -55,6 +55,30 @@ def _schema_of(database) -> str:
         ).fetchone()["name"]
 
 
+@pytest.mark.parametrize("version", [91, 92])
+def test_legacy_canonical_name_index_is_accepted_only_before_digest_upgrade(postgres_database, version):
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate(target_version=version) == version
+    schema = _schema_of(postgres_database)
+    name = "idx_clusters_nb_canonical_name_lower"
+    if version == 92:
+        with postgres_database.write() as db:
+            db.execute(f"DROP INDEX {name}")
+            db.execute(f"CREATE INDEX {name} ON concept_clusters(notebook_id,lower(canonical_name))")
+        with pytest.raises(HotpathIndexError, match="unexpected_index_definition"):
+            install_hotpath_indexes(postgres_database.settings.database_url, schema=schema)
+    else:
+        result = install_hotpath_indexes(postgres_database.settings.database_url, schema=schema)
+        assert all(row["state"] == "存在" for row in result["indexes"])
+        assert migrator.migrate(target_version=91) == 91
+        with postgres_database.connect() as db:
+            old = db.execute("SELECT indexdef FROM pg_indexes WHERE schemaname=%s AND indexname=%s", (schema, name)).fetchone()["indexdef"]
+            assert "md5" not in old
+        assert migrator.migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
+        result = inspect_hotpath_indexes(postgres_database.settings.database_url, schema=schema)
+        assert all(row["state"] == "存在" for row in result["indexes"])
+
+
 @pytest.mark.xdist_group(name="postgres_hotpath_indexes")
 def test_install_builds_all_eight_concurrently_and_is_idempotent(postgres_database):
     # One hop before migration 39 introduces the eight indexes itself, so
