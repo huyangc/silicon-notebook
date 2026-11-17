@@ -332,7 +332,8 @@ def parse_blocks(text: str, *, reference_env: Optional[Dict[str, Any]] = None) -
     while i < n:
         t = tokens[i]
         if t.type == "ordered_list_open":
-            ordered_list_ordinal = int(t.attrGet("start") or 1)
+            start = t.attrGet("start")
+            ordered_list_ordinal = 1 if start is None else int(start)
         elif t.type in {"ordered_list_close", "bullet_list_open", "bullet_list_close"}:
             ordered_list_ordinal = None
 
@@ -419,7 +420,8 @@ def parse_blocks(text: str, *, reference_env: Optional[Dict[str, Any]] = None) -
                            section_path=section_path()))
                 if ordered_list_ordinal is not None:
                     blocks[-1].metadata["ordered_list_ordinal"] = ordered_list_ordinal
-                    ordered_list_ordinal += 1
+            if ordered_list_ordinal is not None:
+                ordered_list_ordinal += 1
             i = j
             continue
 

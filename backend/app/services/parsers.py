@@ -553,7 +553,7 @@ def parse_markdown_text(
                     href = str(definition["href"]).replace("<", "%3C").replace(">", "%3E")
                     title = json.dumps(definition.get("title", ""), ensure_ascii=False)
                     preview += f"\n\n[{label}]: <{href}> {title}\n"
-            if not re.search(r"data\s*:", preview, flags=re.IGNORECASE):
+            if not re.search(r"\bdata:[^,\s\"'<>]*,", preview, flags=re.IGNORECASE):
                 metadata["preview_markdown"] = preview
         if share_manifest is not None:
             references = references_for_text(share_manifest, block.text)
