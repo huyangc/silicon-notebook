@@ -100,6 +100,10 @@ function TablePartGroupCard({ elements, highlightedElementId }: {
 
 function ElementBody({ element, notebookId }: { element: SourceElement; notebookId: string }) {
   const refs = importedShareReferences(element.metadata?.share_references);
+  if (refs.length && element.element_type === "paragraph") {
+    const markdown = typeof element.metadata?.preview_markdown === "string" ? element.metadata.preview_markdown : element.text;
+    return <ImportedShareText text={markdown} references={element.metadata.share_references} />;
+  }
   return <>
     <SourceElementBody element={element} notebookId={notebookId} />
     {refs.length > 0 && <ImportedShareText text={refs.map((ref) => `[${ref.key}]`).join(" ")} references={refs} />}
@@ -121,7 +125,10 @@ function SourceElementBody({ element, notebookId }: { element: SourceElement; no
     return <pre className="answer-code"><code>{element.text}</code></pre>;
   }
   if (element.element_type === "list_item") {
-    if (markdown) return <SourceMarkdown answer={markdown} />;
+    if (markdown) {
+      const ordinal = element.metadata?.ordered_list_ordinal;
+      return <SourceMarkdown answer={typeof ordinal === "number" ? markdown.replace(/^(\s*)\d+([.)]\s+)/u, `$1${ordinal}$2`) : markdown} />;
+    }
     return <SourceMarkdown answer={/^\s*(?:[-*+] |\d+[.)] )/.test(element.text) ? element.text : `- ${element.text}`} />;
   }
   if (element.element_type === "formula") {
