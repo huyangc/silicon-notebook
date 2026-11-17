@@ -7,7 +7,8 @@
 "use client";
 
 import { createContext, useContext, useMemo, type MouseEvent, type ReactNode } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
+import type { PluggableList } from "unified";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
@@ -46,6 +47,8 @@ export interface AnswerMarkdownProps {
   answer: string;
   /** Source previews show images only through their authenticated element assets. */
   allowImages?: boolean;
+  extraRemarkPlugins?: PluggableList;
+  components?: Components;
   /** 答案中引用的 anchor 列表 */
   anchors?: AnswerAnchorLike[];
   /** 答案中引用的 citation 列表 */
@@ -167,10 +170,13 @@ const TEXT_ONLY_IMAGE_COMPONENTS = { ...ANSWER_MARKDOWN_COMPONENTS, img: Markdow
 // useMemo 永远失效，等于整层白做。
 const NO_ANCHORS: AnswerAnchorLike[] = [];
 const NO_CITATIONS: CitationLike[] = [];
+const NO_EXTRA_PLUGINS: PluggableList = [];
 
 export function AnswerMarkdown({
   answer,
   allowImages = true,
+  extraRemarkPlugins = NO_EXTRA_PLUGINS,
+  components,
   anchors = NO_ANCHORS,
   citations = NO_CITATIONS,
   selectedReferenceId = null,
@@ -210,6 +216,7 @@ export function AnswerMarkdown({
         remarkMath,
         [remarkCitations, refsByCitationKey] as [typeof remarkCitations, Record<string, AnswerReference>],
         remarkAnswerInference,
+        ...extraRemarkPlugins,
       ]}
       rehypePlugins={[
         rehypeKatex,
@@ -220,11 +227,11 @@ export function AnswerMarkdown({
       // 默认 urlTransform 会清掉非常规协议（含我们的 cite:），导致引用徽章 href 丢失。
       // 放行 cite:，其余 URL 仍走默认清洗（防 javascript: 等不安全协议）。
       urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
-      components={allowImages ? ANSWER_MARKDOWN_COMPONENTS : TEXT_ONLY_IMAGE_COMPONENTS}
+      components={{ ...(allowImages ? ANSWER_MARKDOWN_COMPONENTS : TEXT_ONLY_IMAGE_COMPONENTS), ...components }}
     >
       {normalizeInferenceListMarkers(normalizeMathMarkdown(answer))}
     </ReactMarkdown>
-  ), [answer, allowImages, refsByCitationKey, imageIdsByCitationKey, citationImageOrder]);
+  ), [answer, allowImages, extraRemarkPlugins, components, refsByCitationKey, imageIdsByCitationKey, citationImageOrder]);
 
   return (
     <div className="answer-markdown">

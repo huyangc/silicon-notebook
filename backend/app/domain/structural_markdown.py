@@ -314,6 +314,7 @@ def parse_blocks(text: str, *, reference_env: Optional[Dict[str, Any]] = None) -
     blocks: List[Block] = []
 
     heading_stack: List[tuple[int, str]] = []
+    ordered_list_ordinal: Optional[int] = None
     pending_anchor: Optional[str] = None
 
     def section_path() -> str:
@@ -330,6 +331,10 @@ def parse_blocks(text: str, *, reference_env: Optional[Dict[str, Any]] = None) -
     n = len(tokens)
     while i < n:
         t = tokens[i]
+        if t.type == "ordered_list_open":
+            ordered_list_ordinal = int(t.attrGet("start") or 1)
+        elif t.type in {"ordered_list_close", "bullet_list_open", "bullet_list_close"}:
+            ordered_list_ordinal = None
 
         if t.type == "heading_open":
             level = int(t.tag[1])
@@ -412,6 +417,9 @@ def parse_blocks(text: str, *, reference_env: Optional[Dict[str, Any]] = None) -
                 emit(Block(type="list_item", text=txt, raw=text[cs:ce],
                            char_start=cs, char_end=ce, line_start=ls, line_end=le,
                            section_path=section_path()))
+                if ordered_list_ordinal is not None:
+                    blocks[-1].metadata["ordered_list_ordinal"] = ordered_list_ordinal
+                    ordered_list_ordinal += 1
             i = j
             continue
 

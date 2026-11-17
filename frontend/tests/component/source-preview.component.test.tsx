@@ -78,5 +78,25 @@ test("imported share paragraphs keep formatting and their citation control", () 
     }),
   ]} />);
   expect(screen.getByText("重点").tagName).toBe("STRONG");
-  expect(screen.getByRole("button", { name: "查看引用 t1-k1" })).toBeInTheDocument();
+  const citation = screen.getByRole("button", { name: "查看引用 t1-k1" });
+  expect(citation.closest("p")).toContainElement(screen.getByText("重点"));
+  expect(screen.getAllByText("[t1-k1]")).toHaveLength(1);
+});
+
+test("separately paginated list items retain their effective numbering", () => {
+  render(<SourcePreview notebookId="n" elements={[
+    element("one", "First", "list_item", { preview_markdown: "1. First", ordered_list_ordinal: 1 }),
+    element("two", "Second", "list_item", { preview_markdown: "1. Second", ordered_list_ordinal: 2 }),
+    element("three", "Third", "list_item", { preview_markdown: "1. Third", ordered_list_ordinal: 3 }),
+  ]} />);
+  expect(screen.getAllByRole("list").map((list) => (list as HTMLOListElement).start)).toEqual([1, 2, 3]);
+});
+
+test("imported citation syntax inside code stays literal", () => {
+  const { container } = render(<SourcePreview notebookId="n" elements={[
+    element("shared", "", "paragraph", { preview_markdown: "`[t1-k1]` 与正文 [t1-k1]",
+      share_references: [{ key: "t1-k1", title: "参考来源" }] }),
+  ]} />);
+  expect(container.querySelector("code")).toHaveTextContent("[t1-k1]");
+  expect(screen.getAllByRole("button", { name: "查看引用 t1-k1" })).toHaveLength(1);
 });

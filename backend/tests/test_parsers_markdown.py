@@ -27,6 +27,19 @@ def test_preview_retains_used_reference_link_definitions():
     assert '[REF]: <https://example.com> "说明"' in preview
     assert "unused.example.com" not in preview
 
+
+def test_preview_preserves_effective_ordered_list_ordinals():
+    elements = parse_markdown_text("preview", "3. First\n1. Second\n1. Third\n\nText\n\n1. Restart\n")
+    items = [element for element in elements if element.element_type == "list_item"]
+    assert [element.metadata["ordered_list_ordinal"] for element in items] == [3, 4, 5, 1]
+
+
+def test_html_blocks_use_readable_text_instead_of_raw_preview():
+    elements = parse_markdown_text("preview", "<div>正文</div>\n\n<details><summary>展开</summary>详情</details>")
+    assert elements
+    assert "正文" in elements[0].text
+    assert all("preview_markdown" not in element.metadata for element in elements)
+
 # 1x1 transparent PNG, valid base64.
 PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
