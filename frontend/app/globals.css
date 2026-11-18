@@ -10403,6 +10403,13 @@ button.tag:hover {
   font-weight: 560;
 }
 
+.source-detail-window-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
 .subtle-icon {
   border-color: transparent;
   background: transparent;
@@ -10602,7 +10609,7 @@ button.tag:hover {
 }
 
 .source-preview-label { font-size: 14px; font-weight: 600; color: var(--muted); }
-.source-preview-link { gap: 7px; font-size: 13px; }
+.source-preview-link { text-decoration: none; }
 .source-preview-link:active { filter: brightness(0.92); }
 .source-preview-link:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
 .source-element-card .answer-markdown { min-width: 0; }

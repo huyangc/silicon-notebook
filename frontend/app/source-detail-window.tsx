@@ -9,6 +9,7 @@ import { useFloatingWindow } from "./use-floating-window";
 type SourceDetailWindowProps = {
   children: ReactNode;
   onClose: () => void;
+  headerActions?: ReactNode;
   interactive?: boolean;
   zIndex?: number;
 };
@@ -17,6 +18,7 @@ type SourceDetailWindowProps = {
 export function SourceDetailWindow({
   children,
   onClose,
+  headerActions,
   interactive = true,
   zIndex,
 }: SourceDetailWindowProps) {
@@ -42,15 +44,18 @@ export function SourceDetailWindow({
       >
         <div className="source-detail-shell-header" {...floating.dragHandleProps}>
           <h2 id="source-detail-window-title">来源</h2>
-          <button
-            type="button"
-            className="icon-button subtle-icon"
-            onClick={onClose}
-            title="关闭"
-            aria-label="关闭来源详情"
-          >
-            <X size={22} />
-          </button>
+          <div className="source-detail-window-actions">
+            {headerActions}
+            <button
+              type="button"
+              className="icon-button subtle-icon"
+              onClick={onClose}
+              title="关闭"
+              aria-label="关闭来源详情"
+            >
+              <X size={22} />
+            </button>
+          </div>
         </div>
         <div className="source-detail-body">{children}</div>
       </div>

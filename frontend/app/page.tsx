@@ -7056,6 +7056,7 @@ export default function Home() {
 
       {rootModals.view("source-detail").open && sourceDetail && (
         <SourceDetailWindow
+          headerActions={<SourcePreviewLink notebookId={currentNotebookId ?? ""} sourceId={sourceDetail.id} />}
           onClose={() => rootModals.requestClose("source-detail", "button")}
           interactive={rootModals.view("source-detail").topmost}
           zIndex={rootModals.view("source-detail").zIndex}
@@ -7259,7 +7260,6 @@ export default function Home() {
               )}
               <div className="source-preview-toolbar">
                 <span className="source-preview-label">预览</span>
-                <SourcePreviewLink notebookId={currentNotebookId ?? ""} sourceId={sourceDetail.id} />
               </div>
               <div className="source-element-stack">
                 {sourceElementStartOffset > 0 && (

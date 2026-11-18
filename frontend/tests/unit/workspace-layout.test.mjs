@@ -211,6 +211,7 @@ test("source detail uses the dedicated draggable window shell", () => {
   const windows = jsxElements(page, "SourceDetailWindow");
   assert.equal(windows.length, 1);
   assert.deepEqual(windows[0].bindings, {
+    headerActions: '<SourcePreviewLink notebookId={currentNotebookId ?? ""} sourceId={sourceDetail.id}/>',
     // 关闭经 root coordinator 的 source-detail close sink 回到 source owner，仍由
     // sourceLibrary.closeSourceDetail 清 highlightedElementId；同时 topmost 决定
     // aria-modal/inert，防止上层确认框出现时后台详情继续接收键盘输入。

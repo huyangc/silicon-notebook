@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { SourceDetailWindow } from "../../app/source-detail-window";
+import { SourcePreviewLink } from "../../app/source-preview-link";
 
 
 class TestPointerEvent extends MouseEvent {
@@ -38,6 +39,23 @@ test("uses a conventional accessible close control", async () => {
   expect(close).toHaveAttribute("title", "关闭");
   await user.click(close);
   expect(onClose).toHaveBeenCalledTimes(1);
+});
+
+test("keeps the fullscreen icon next to close and outside the scrollable content", () => {
+  render(<SourceDetailWindow onClose={() => undefined}
+    headerActions={<SourcePreviewLink notebookId="active" sourceId="source" />}>
+    <p>详情正文</p>
+  </SourceDetailWindow>);
+  const fullscreen = screen.getByRole("link", { name: "全屏阅读" });
+  const close = screen.getByRole("button", { name: "关闭来源详情" });
+  expect(fullscreen.parentElement).toBe(close.parentElement);
+  expect(fullscreen.nextElementSibling).toBe(close);
+  expect(fullscreen.closest(".source-detail-body")).toBeNull();
+  expect(fullscreen).toHaveAttribute("href", "/notebooks/active/sources/source");
+  expect(fullscreen).toHaveAttribute("target", "_blank");
+  expect(fullscreen).toHaveAttribute("title", "全屏阅读（在新标签页打开）");
+  expect(fullscreen.textContent).toBe("");
+  expect(fullscreen.querySelector("svg")).not.toBeNull();
 });
 
 
