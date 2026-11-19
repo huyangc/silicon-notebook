@@ -10621,47 +10621,50 @@ button.tag:hover {
 .source-element-card h5 { font-size: 16px; }
 
 .source-reader {
-  width: min(100%, 1040px);
+  max-width: 960px;
   margin: 0 auto;
-  padding: 24px 40px 64px;
+  padding: 30px 24px 56px;
 }
 
-.source-reader-bar, .source-reader-bar > span, .source-reader-footer, .source-reader-status {
+.source-reader-footer {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
 }
 
-.source-reader-bar { justify-content: space-between; padding-bottom: 28px; }
-.source-reader-bar > span, .source-reader-meta, .source-reader-footer, .source-reader-end {
+.source-reader-meta, .source-reader-footer, .source-reader-end, .source-reader-status {
   color: var(--muted);
   font-size: 13px;
 }
-.source-reader-heading { padding: 8px 12px 24px; }
-.source-reader-heading h1 { margin: 12px 0; font-size: clamp(24px, 3vw, 34px); line-height: 1.4; overflow-wrap: anywhere; }
+.source-reader-heading { margin-bottom: 18px; }
+.source-reader-heading h1 {
+  margin: 0;
+  font-size: 26px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.source-reader-meta { margin: 6px 0 0; }
 .source-reader-paper {
-  padding: 32px 40px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  box-shadow: var(--shadow);
+  padding: 22px 26px;
   min-width: 0;
 }
+.source-reader-paper :where([id]) { scroll-margin-top: 72px; }
 .source-reader-paper .source-element-card { padding: 6px 0; }
 .source-reader-paper .answer-markdown { line-height: 1.85; }
 .source-reader-paper .answer-markdown p,
 .source-reader-paper .answer-markdown ul,
 .source-reader-paper .answer-markdown ol { line-height: 1.85; }
-.source-reader-status { color: var(--muted); justify-content: center; padding: 24px 0; }
-.source-reader-footer { justify-content: center; border-top: 1px solid var(--line); padding-top: 24px; margin-top: 24px; }
-.source-reader-end { text-align: center; margin: 32px 0 0; }
+.source-reader-status { margin: 0; padding: 20px 0; text-align: center; line-height: 1.6; }
+.source-reader-status svg { margin-right: 6px; vertical-align: middle; }
+.source-reader-error { color: var(--red); }
+.source-reader-footer { justify-content: center; border-top: 1px solid var(--line); padding-top: 18px; margin-top: 18px; }
+.source-reader-end { text-align: center; margin: 24px 0 0; }
 
 @media (max-width: 760px) {
-  .source-reader { padding: 16px 12px 32px; }
-  .source-reader-heading { padding: 0 6px 18px; }
-  .source-reader-bar { padding-bottom: 20px; }
-  .source-reader-paper { padding: 20px 16px; border-radius: 12px; }
+  .source-reader { padding: 20px 16px 32px; }
+  .source-reader-heading h1 { font-size: 22px; }
+  .source-reader-paper { padding: 16px; }
 }
 
 .source-element-card {

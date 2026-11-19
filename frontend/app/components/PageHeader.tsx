@@ -7,7 +7,11 @@ import "./page-header.css";
  * `.back-home-button` 药丸——此前这里是白底 + 蓝色文字链,和主界面像两个产品。
  * 独立页没有账户菜单,右侧那一格就留给返回按钮。
  */
-export function PageHeader({ title }: { title: string }) {
+export function PageHeader({ title, backHref = "/", backLabel = "返回主页" }: {
+  title: string;
+  backHref?: string;
+  backLabel?: string;
+}) {
   return (
     <header className="topbar page-header">
       <div className="brand">
@@ -17,9 +21,9 @@ export function PageHeader({ title }: { title: string }) {
           <div className="brand-subtitle page-header-title">{title}</div>
         </div>
       </div>
-      <a className="back-home-button" href="/">
-        <ArrowLeft size={16} />
-        <span>返回主页</span>
+      <a className="back-home-button" href={backHref}>
+        <ArrowLeft size={16} aria-hidden="true" />
+        <span>{backLabel}</span>
       </a>
     </header>
   );

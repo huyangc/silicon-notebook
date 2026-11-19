@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, BookOpen, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { getToken, subscribeTokenChanges } from "./auth-session";
+import { PageHeader } from "./components/PageHeader";
 import { reloadPage } from "./page-reload";
 import { getNotebookSource, getNotebookSourceElementsPage } from "./source-api";
 import { notebookHash } from "./memory-model";
@@ -82,37 +83,37 @@ export function SourceReader({ notebookId, sourceId }: { notebookId: string; sou
   }
 
   return (
-    <main className="source-reader">
-      <nav className="source-reader-bar" aria-label="阅读导航">
-        <a className="button secondary" href={backUrl}><ArrowLeft size={16} aria-hidden="true" />返回笔记本</a>
-        <span><BookOpen size={16} aria-hidden="true" />全屏阅读</span>
-      </nav>
-      <header className="source-reader-heading">
-        <p className="public-report-eyebrow">来源 · 阅读预览</p>
-        <h1>{source?.title || "来源预览"}</h1>
-        {source && <p className="source-reader-meta">已显示 {elements.length} / {total} 个元素</p>}
-      </header>
-      <section className="source-reader-paper" aria-label="来源正文" aria-busy={busy}>
-        {signedOut ? <p>请先<a className="link-button inline-action" href={backUrl}>登录并返回笔记本</a>查看此来源。</p> : <>
-          <div className="source-element-stack"><SourcePreview elements={elements} notebookId={notebookId} /></div>
-          {busy && <p className="source-reader-status" role="status"><Loader2 className="busy-spin" size={18} aria-hidden="true" />正在加载内容…</p>}
-          {error && <div className="source-reader-status" role="alert">{error}
-            <button type="button" className="button secondary" disabled={busy}
-              onClick={() => source ? void loadMore() : setRevision((value) => value + 1)}>重试</button>
-          </div>}
-          {source && !busy && !error && elements.length === 0 && <p className="source-reader-status">
-            {source.parse_failed || source.parse_status === "failed" ? "这个来源没能解析成功。" : "当前来源还没有解析出内容。"}
-            可<a className="link-button inline-action" href={backUrl}>返回笔记本</a>查看详情。
-          </p>}
-          {source && elements.length < total && !error && <div className="source-reader-footer">
-            <button type="button" className="button secondary" disabled={busy} onClick={() => void loadMore()}>
-              {busy ? "加载中…" : "继续加载"}
-            </button>
-            <span>已显示 {elements.length} / {total} 个元素</span>
-          </div>}
-          {source && total > 0 && elements.length >= total && <p className="source-reader-end">已显示全部内容</p>}
-        </>}
-      </section>
-    </main>
+    <>
+      <PageHeader title="全屏阅读" backHref={backUrl} backLabel="返回笔记本" />
+      <main className="source-reader">
+        <div className="source-reader-heading">
+          <h1>{source?.title || "来源预览"}</h1>
+          {source && <p className="source-reader-meta">已显示 {elements.length} / {total} 个元素</p>}
+        </div>
+        <section className="panel source-reader-paper" aria-label="来源正文" aria-busy={busy}>
+          {signedOut ? (
+            <p className="source-reader-status">请先<a className="link-button inline-action" href={backUrl}>登录并返回笔记本</a>查看此来源。</p>
+          ) : <>
+            <div className="source-element-stack"><SourcePreview elements={elements} notebookId={notebookId} /></div>
+            {busy && <p className="source-reader-status" role="status"><Loader2 className="busy-spin" size={16} aria-hidden="true" />正在加载内容…</p>}
+            {error && <p className="source-reader-status source-reader-error" role="alert">{error}
+              <button type="button" className="link-button inline-action" disabled={busy}
+                onClick={() => source ? void loadMore() : setRevision((value) => value + 1)}>重试</button>
+            </p>}
+            {source && !busy && !error && elements.length === 0 && <p className="source-reader-status">
+              {source.parse_failed || source.parse_status === "failed" ? "这个来源没能解析成功。" : "当前来源还没有解析出内容。"}
+              可<a className="link-button inline-action" href={backUrl}>返回笔记本</a>查看详情。
+            </p>}
+            {source && elements.length < total && !error && <div className="source-reader-footer">
+              <button type="button" className="button secondary" disabled={busy} onClick={() => void loadMore()}>
+                {busy ? "加载中…" : "继续加载"}
+              </button>
+              <span>已显示 {elements.length} / {total} 个元素</span>
+            </div>}
+            {source && total > 0 && elements.length >= total && <p className="source-reader-end">已显示全部内容</p>}
+          </>}
+        </section>
+      </main>
+    </>
   );
 }

@@ -41,7 +41,7 @@
   },
   "app/components/PageHeader.tsx": {
     "@next/next/no-html-link-for-pages": {
-      "count": 2
+      "count": 1
     }
   },
   "app/conversation-share-modal.tsx": {

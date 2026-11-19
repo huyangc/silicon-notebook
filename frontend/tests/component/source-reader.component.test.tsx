@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import { SourceReader } from "../../app/source-reader";
@@ -27,6 +27,9 @@ test("reader uses bounded participant-proxy pages and retries continuation witho
     .mockRejectedValueOnce(new Error("unavailable"))
     .mockResolvedValueOnce({ items: [row("b", "第二页")], offset: 1, limit: 40, total_count: 2 });
   render(<SourceReader notebookId="active" sourceId="s" />);
+  const header = within(screen.getByRole("banner"));
+  expect(header.getByRole("link", { name: "返回笔记本" })).toHaveAttribute("href", "/#notebook=active&source=s");
+  expect(header.getByRole("link", { name: "返回主页" })).toHaveAttribute("href", "/");
   expect(screen.getByRole("status")).toHaveTextContent("正在加载内容");
   await screen.findByRole("heading", { name: "技术手册" });
   expect(api.getNotebookSource).toHaveBeenCalledWith("active", "s");
