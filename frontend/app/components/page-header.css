@@ -13,3 +13,17 @@
   height: 36px;
   text-decoration: none;
 }
+
+.page-header .back-home-button:active {
+  filter: brightness(0.84);
+}
+
+@media (max-width: 360px) {
+  .page-header {
+    padding-inline: 12px;
+  }
+
+  .page-header .brand {
+    gap: 8px;
+  }
+}
