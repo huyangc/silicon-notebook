@@ -185,6 +185,44 @@ The backend can stay on `127.0.0.1:8000` (the proxy reaches it locally); only th
 port needs to be network-reachable. Set `BACKEND_PROXY_TARGET` if the backend isn't on
 `127.0.0.1:8000`.
 
+**Optional — an auto-canvas companion under `/canvas`:** `CANVAS_PROXY_TARGET` is unset by
+default. Unset or empty, it adds no rewrite rule: the frontend proxies only `/api/*` and
+`/mcp`, exactly as described above, and nothing else in this section applies. When set,
+Next.js also proxies `/canvas` and `/canvas/*` on the same origin to an auto-canvas server
+running in its silicon-notebook integration mode on the same host.
+
+- The value must be `http://` or `https://` with the host written as `127.0.0.1` or
+  `localhost` and an optional port, for example `http://127.0.0.1:4310`. A single trailing
+  `/` is dropped; a path, query string, fragment or credentials are not accepted, and neither
+  is the IPv6 form `http://[::1]:4310`. Any other value is an error instead of being
+  ignored: it fails the frontend build, the development server's startup and `next start`
+  (which `npm run start` uses, with or without `SKIP_BUILD=1`). The target has to be a
+  loopback companion because it serves page code to this origin and receives the signed-in
+  user's bearer token.
+- Like `BACKEND_PROXY_TARGET`, the value is baked into the frontend build. Changing it to
+  another valid value at runtime has no effect; rebuild the frontend after changing it. An
+  offline package never reads it on the target host.
+- Requests go to the private upstream mount `<target>/@notebook/canvas/…`, which only an
+  integration-mode auto-canvas answers; neither the mount nor the `/canvas` prefix is
+  configurable. A request whose path contains a `.` or `..` segment, a backslash, or an
+  encoded `%2e`, `%2f` or `%5c` is not proxied. Neither is one whose path contains a
+  control or space character, raw or as an escape (`%00`–`%20`, `%7f`): a URL parser drops
+  or trims some of those, and auto-canvas paths never contain them (free text travels only
+  in the query string), so the rule refuses all of them.
+- The public entry address is `/canvas` without a trailing slash; `/canvas/` redirects to it.
+- With the rule enabled and the companion down, only requests under `/canvas` fail. Notebook
+  pages, `/api/*` and `/mcp` are unaffected.
+- The two rules depend on how Next.js matches paths and redirects trailing slashes. After
+  any Next.js dependency upgrade, patch releases included, rerun the auto-canvas integration
+  check (its "stage T", maintained in the auto-canvas repository).
+- auto-canvas relies on two notebook contracts, so a change to either needs a matching
+  change there: the browser `localStorage` key `silicon_notebook_token`
+  (`frontend/app/auth-session.ts`), and the `id`, `display_name` and `role` fields of
+  `GET /api/me`.
+- The path restriction in turn relies on one contract of the upstream: it parses the request
+  target as a URL before any percent-decoding, and decodes a path at most once. An upstream
+  that decodes first, or twice, could read a forwarded path as one outside its mount.
+
 **Serving the app at `http://<IP>:3000` is a supported deployment, but it is not a browser Secure Context:**
 browsers expose `crypto.randomUUID`, `navigator.clipboard`, Service Workers and similar APIs only under HTTPS
 or on `localhost`. Product code carries a fallback for each (`newClientRequestId()` for ids, `copyTextSafely()`
