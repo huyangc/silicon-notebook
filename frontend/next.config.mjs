@@ -43,6 +43,9 @@ const CANVAS_SEGMENT =
 function canvasRewrites(target) {
   if (target === undefined) return [];
   // `/@notebook` 是只有整合模式的 auto-canvas 才应答的私有上游挂载点，不可配置。
+  // 已知取舍：上游不可达时，Next 内置的转发代码会把失败的上游地址连同查询串写进前端
+  // 日志（/api 的转发同样如此）。rewrite 规则改不了这一点；要避免只能改用自写的代理
+  // 处理器，那不在这两条规则的范围内。部署文档已写明。
   return [
     // 根路径单独一条并显式带斜杠（与 /mcp 同一手法）：只靠通配规则时空尾段展开成
     // 不带斜杠的地址，上游重定向后会与 Next 自己的去斜杠重定向循环。

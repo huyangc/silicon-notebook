@@ -211,7 +211,10 @@ running in its silicon-notebook integration mode on the same host.
   in the query string), so the rule refuses all of them.
 - The public entry address is `/canvas` without a trailing slash; `/canvas/` redirects to it.
 - With the rule enabled and the companion down, only requests under `/canvas` fail. Notebook
-  pages, `/api/*` and `/mcp` are unaffected.
+  pages, `/api/*` and `/mcp` are unaffected. For each failed request Next.js writes the
+  upstream URL, query string included, to the frontend log; this is built into its rewrite
+  proxy and applies to `/api/*` in the same way. Canvas query strings can carry text the
+  user entered, so treat the frontend log as a file that may contain it.
 - The two rules depend on how Next.js matches paths and redirects trailing slashes. After
   any Next.js dependency upgrade, patch releases included, rerun the auto-canvas integration
   check (its "stage T", maintained in the auto-canvas repository).
