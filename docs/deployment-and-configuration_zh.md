@@ -151,6 +151,36 @@ NEXT_PUBLIC_API_BASE_URL=/api
 后端可留在 `127.0.0.1:8000`(反代在本机转发),只需前端端口对外可达。后端不在
 `127.0.0.1:8000` 时用 `BACKEND_PROXY_TARGET` 覆盖。
 
+**可选——把 auto-canvas 配套服务挂在 `/canvas` 下:** `CANVAS_PROXY_TARGET` 默认不设。
+不设或设为空时不增加任何转发规则:前端只转发 `/api/*` 和 `/mcp`,与上文完全一致,本段
+其余内容都不适用。设置后,Next.js 还会把 `/canvas` 和 `/canvas/*` 同源转发给同一台机器上
+以 silicon-notebook 整合模式运行的 auto-canvas 服务。
+
+- 取值必须是 `http://` 或 `https://`,主机写成 `127.0.0.1` 或 `localhost`,端口可选,例如
+  `http://127.0.0.1:4310`。末尾的单个 `/` 会被去掉;不接受路径、查询串、片段和凭据,也不
+  接受 IPv6 写法 `http://[::1]:4310`。其他取值是错误,不会被忽略:前端构建、开发服务器启动
+  和 `next start`(`npm run start` 使用它,无论是否设置 `SKIP_BUILD=1`)都会直接失败。目标
+  只能是回环地址上的配套服务,因为它向本站来源提供页面代码,并会收到已登录用户的
+  bearer token。
+- 与 `BACKEND_PROXY_TARGET` 一样,该值在前端构建时写入。运行时改成另一个合法取值无效;
+  修改后必须重新构建前端。离线包在目标机上不会读取它。
+- 请求转发到私有的上游挂载点 `<目标>/@notebook/canvas/…`,只有整合模式的 auto-canvas 应答;
+  挂载点和 `/canvas` 前缀都不可配置。路径中含有 `.` 或 `..` 路径段、反斜杠,或编码形式的
+  `%2e`、`%2f`、`%5c` 的请求不会被转发。路径中含有控制字符或空格的请求同样不转发,无论是
+  原始字符还是转义(`%00`–`%20`、`%7f`):URL 解析器会删掉或裁掉其中一部分,而 auto-canvas
+  的路径从不含这些字符(自由文本只走查询串),所以规则把它们全部拒绝。
+- 对外入口地址是不带末尾斜杠的 `/canvas`;`/canvas/` 会重定向到它。
+- 启用规则而配套服务未运行时,只有 `/canvas` 下的请求失败。笔记本页面、`/api/*` 和 `/mcp`
+  不受影响。
+- 这两条规则依赖 Next.js 的路径匹配和末尾斜杠重定向行为。Next.js 依赖升级(含补丁版本)
+  之后,都要重跑 auto-canvas 的整合联调(它的「阶段 T」,在 auto-canvas 仓库维护)。
+- auto-canvas 依赖 notebook 的两项合同,改动其中任何一项都需要那边同步修改:浏览器
+  `localStorage` 键 `silicon_notebook_token`(`frontend/app/auth-session.ts`),以及
+  `GET /api/me` 的 `id`、`display_name`、`role` 字段。
+- 路径限制反过来依赖上游的一项合同:上游先把请求目标按 URL 解析,之后才做百分号解码,
+  并且对路径最多解码一次。先解码再解析、或解码两次的上游,可能把被转发的路径读成挂载点
+  之外的路径。
+
 **用 `http://<IP>:3000` 访问是受支持的部署,但它不是浏览器的 Secure Context:** 浏览器只在 HTTPS 或
 `localhost` 下暴露 `crypto.randomUUID`、`navigator.clipboard`、Service Worker 等 API。产品代码对这些一律
 带退路(id 走 `newClientRequestId()`、复制走 `copyTextSafely()`,见 `docs/development_zh.md`),所以功能

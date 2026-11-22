@@ -171,6 +171,10 @@ TOML 与新的密钥槽位。推算出的并发容量仅是迁移初值，应用
 | `ALLOW_NO_ENV_FILE` | `0` | 设 `1` 则允许无 `.env`、仅用系统环境变量启动 |
 | `START_CLEANUP_GRACE_SECONDS` | `10` | 主应用启动失败时等待本次子进程优雅退出的秒数，须为正整数 |
 
+默认离线包不含 `/canvas` 转发规则。要打出带 auto-canvas 配套服务转发规则的包，需在打包机上
+先导出 `CANVAS_PROXY_TARGET`（例如 `http://127.0.0.1:4310`）再运行 `scripts/pack.sh`；该值在
+前端构建时写入，目标机的 `.env` 里再设置或修改它都不生效。
+
 ## SQLite / PostgreSQL 直接选择与生产切换
 
 `DATABASE_URL` 是唯一 active repository 后端选择器；一次只会构造 SQLite
