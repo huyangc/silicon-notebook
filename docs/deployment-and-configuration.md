@@ -185,6 +185,21 @@ The backend can stay on `127.0.0.1:8000` (the proxy reaches it locally); only th
 port needs to be network-reachable. Set `BACKEND_PROXY_TARGET` if the backend isn't on
 `127.0.0.1:8000`.
 
+When a proxied request cannot reach its upstream, or the connection breaks or times out, the
+frontend process logs a `Failed to proxy <upstream address>` line with a summary of the
+error, followed by the same summary once more on its own. The address is limited to the
+upstream scheme, host and port (`http://127.0.0.1:8000`), which tells you which upstream
+failed. The path, the query string and fragment, and any credentials in the proxy target are
+not written: query strings carry what users typed (search text, for example), paths carry
+share and invite tokens, which are credentials, and a path prefix in the proxy target is
+deployment configuration. The error summary is limited to the error's name and code, the
+failed system call, and the peer address and port (`{ name: 'Error', code: 'ECONNREFUSED',
+syscall: 'connect', address: '127.0.0.1', port: 8000 }`); the error's message, stack and
+any other data are not written, because an upstream's malformed response can ride on the
+error. Use the upstream's own log to see which request it was. The frontend applies
+this when its server process starts (`frontend/instrumentation.ts`), in development, under
+`npm run start` and in an offline package alike.
+
 **Optional — an auto-canvas companion under `/canvas`:** `CANVAS_PROXY_TARGET` is unset by
 default. Unset or empty, it adds no rewrite rule: the frontend proxies only `/api/*` and
 `/mcp`, exactly as described above, and nothing else in this section applies. When set,
@@ -211,10 +226,9 @@ running in its silicon-notebook integration mode on the same host.
   in the query string), so the rule refuses all of them.
 - The public entry address is `/canvas` without a trailing slash; `/canvas/` redirects to it.
 - With the rule enabled and the companion down, only requests under `/canvas` fail. Notebook
-  pages, `/api/*` and `/mcp` are unaffected. For each failed request Next.js writes the
-  upstream URL, query string included, to the frontend log; this is built into its rewrite
-  proxy and applies to `/api/*` in the same way. Canvas query strings can carry text the
-  user entered, so treat the frontend log as a file that may contain it.
+  pages, `/api/*` and `/mcp` are unaffected. Each failed request is logged as described
+  above: the companion's scheme, host and port and an error summary, without the request's
+  path or query string.
 - The two rules depend on how Next.js matches paths and redirects trailing slashes. After
   any Next.js dependency upgrade, patch releases included, rerun the auto-canvas integration
   check (its "stage T", maintained in the auto-canvas repository).
