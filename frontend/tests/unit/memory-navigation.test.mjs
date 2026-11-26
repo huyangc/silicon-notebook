@@ -9,7 +9,7 @@ import {
 } from "../../app/memory-model.ts";
 import { deleteConfirmText } from "../../app/notebook-deletion-copy.ts";
 import { openMemoryDeepLink } from "../../app/workspace-transitions.ts";
-import { CHAT_MODES } from "../../app/workspace-model.ts";
+import { CHAT_MODES, supportsCanvasCircuitLibraries } from "../../app/workspace-model.ts";
 import {
   callSitesIn,
   declarations,
@@ -134,6 +134,34 @@ test("workspace tabs keep the product order", () => {
     ["reports", "深度报告"],
     ["circuits", "电路库"],
   ]);
+});
+
+test("circuit library entries require auto_canvas.integration >= 0.3.0", () => {
+  assert.equal(supportsCanvasCircuitLibraries(null), false);
+  assert.equal(
+    supportsCanvasCircuitLibraries([
+      { pluginId: "auto_canvas.integration", version: "0.2.0", available: true },
+    ]),
+    false,
+  );
+  assert.equal(
+    supportsCanvasCircuitLibraries([
+      { pluginId: "auto_canvas.integration", version: "0.3.0", available: false },
+    ]),
+    false,
+  );
+  assert.equal(
+    supportsCanvasCircuitLibraries([
+      { pluginId: "auto_canvas.integration", version: "0.3.0", available: true },
+    ]),
+    true,
+  );
+  assert.equal(
+    supportsCanvasCircuitLibraries([
+      { pluginId: "auto_canvas.integration", version: "1.0.0", available: true },
+    ]),
+    true,
+  );
 });
 
 
