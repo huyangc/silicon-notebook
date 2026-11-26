@@ -147,6 +147,7 @@ export function NotebookCircuitsPanel({
   const [pendingProjectCount, setPendingProjectCount] = useState(0);
   const [pendingComponentCount, setPendingComponentCount] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [reloadTick, setReloadTick] = useState(0);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -206,19 +207,25 @@ export function NotebookCircuitsPanel({
 
   useEffect(() => {
     void loadLibrary();
-  }, [loadLibrary]);
+  }, [loadLibrary, reloadTick]);
 
   useEffect(() => {
     if (!canAdmin && filter === "pending") setFilter("approved");
   }, [canAdmin, filter]);
 
   useEffect(() => {
-    if (!importOpen) return;
+    if (!importOpen) {
+      setImportLoadingMore(false);
+      return;
+    }
     const seq = ++importSeqRef.current;
     setImportLoading(true);
+    setImportLoadingMore(false);
     setComponentNextCursor(null);
+    setPickedSourceId("");
     setError("");
     if (kind === "projects") {
+      setPersonalProjects([]);
       canvasJson<{ projects: PersonalProjectOption[] }>("projects")
         .then((res) => {
           if (importSeqRef.current !== seq) return;
@@ -234,6 +241,7 @@ export function NotebookCircuitsPanel({
           if (importSeqRef.current === seq) setImportLoading(false);
         });
     } else {
+      setPersonalComponents([]);
       const qs = new URLSearchParams({ view: "summary", limit: "30" });
       if (componentQuery.trim()) qs.set("q", componentQuery.trim());
       canvasJson<{ entries: PersonalComponentOption[]; nextCursor?: string | null }>(
@@ -243,11 +251,7 @@ export function NotebookCircuitsPanel({
           if (importSeqRef.current !== seq) return;
           setPersonalComponents(res.entries);
           setComponentNextCursor(res.nextCursor ?? null);
-          setPickedSourceId((current) =>
-            res.entries.some((entry) => entry.id === current)
-              ? current
-              : (res.entries[0]?.id ?? ""),
-          );
+          setPickedSourceId(res.entries[0]?.id ?? "");
         })
         .catch((err) => {
           if (importSeqRef.current === seq) {
@@ -333,7 +337,7 @@ export function NotebookCircuitsPanel({
       }
       setImportOpen(false);
       setImportDesc("");
-      await loadLibrary();
+      setReloadTick((v) => v + 1);
     } catch (err) {
       setError(toUserMessage(err, "提交失败"));
     } finally {
@@ -360,7 +364,7 @@ export function NotebookCircuitsPanel({
         },
       );
       setNotice(decision === "approve" ? `已审核通过「${name}」并入库。` : `已驳回「${name}」。`);
-      await loadLibrary();
+      setReloadTick((v) => v + 1);
     } catch (err) {
       setError(toUserMessage(err, "审核操作失败"));
     } finally {
@@ -378,7 +382,7 @@ export function NotebookCircuitsPanel({
         { method: "DELETE" },
       );
       setNotice(status === "approved" ? `已移除「${name}」。` : `已撤回「${name}」。`);
-      await loadLibrary();
+      setReloadTick((v) => v + 1);
     } catch (err) {
       setError(toUserMessage(err, "操作失败"));
     } finally {

@@ -958,6 +958,36 @@ export const CHAT_MODES: Array<[ChatMode, string]> = [
   ["circuits", "电路库"],
 ];
 
+/**
+ * Group & per-notebook circuit library routes and deep-links were introduced
+ * in `auto_canvas.integration` 0.3.0. Earlier 0.2.0 deployments only provide
+ * the workspace side-panel launcher and return 404 for library endpoints.
+ */
+export const MIN_CANVAS_LIBRARY_VERSION: readonly [number, number, number] = [0, 3, 0];
+
+function parseSemverTriple(version: string | null | undefined): [number, number, number] | null {
+  if (!version) return null;
+  const match = /^\s*(\d+)\.(\d+)(?:\.(\d+))?(?:[-+].*)?\s*$/.exec(version);
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3] ?? "0")];
+}
+
+export function supportsCanvasCircuitLibraries(
+  extensions: ReadonlyArray<{ pluginId: string; version?: string; available: boolean }> | null | undefined,
+): boolean {
+  if (!extensions) return false;
+  return extensions.some((ext) => {
+    if (ext.pluginId !== "auto_canvas.integration" || !ext.available) return false;
+    const parsed = parseSemverTriple(ext.version);
+    if (!parsed) return false;
+    const [maj, min, patch] = parsed;
+    const [reqMaj, reqMin, reqPatch] = MIN_CANVAS_LIBRARY_VERSION;
+    if (maj !== reqMaj) return maj > reqMaj;
+    if (min !== reqMin) return min > reqMin;
+    return patch >= reqPatch;
+  });
+}
+
 export type KnowledgeKind = string;
 export type KnowledgeFieldValue = { key: string; value: string };
 export type KnowledgeTypeCount = { object_type: string; label: string; count: number };

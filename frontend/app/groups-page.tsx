@@ -66,7 +66,7 @@ import { GroupLeaveDialog, useLeaveExports } from "./group-leave-dialog.tsx";
 import { Pagination } from "./Pagination";
 import { anchorOf, type ExitAnchor } from "./use-notebook-exit.ts";
 import { useClientPagination } from "./use-client-pagination.ts";
-import type { NotebookSummary } from "./workspace-model.ts";
+import { supportsCanvasCircuitLibraries, type NotebookSummary } from "./workspace-model.ts";
 
 type GroupsPageProps = {
   currentUserId: string;
@@ -148,9 +148,7 @@ export function GroupsPage({
       .then((projection) => {
         if (!alive) return;
         setCanvasAvailable(
-          projection.extensions.some(
-            (ext) => ext.pluginId === "auto_canvas.integration" && ext.available,
-          ),
+          supportsCanvasCircuitLibraries(projection.extensions),
         );
       })
       .catch(() => {

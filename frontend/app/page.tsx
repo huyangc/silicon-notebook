@@ -347,6 +347,7 @@ import {
   KNOWLEDGE_STATUS_OPTIONS,
   SOURCES_PAGE_SIZE,
   showPaperMetaBackfill,
+  supportsCanvasCircuitLibraries,
   type ChatMode,
   type ConversationSummary,
   type DuplicateGroup,
@@ -5932,13 +5933,7 @@ export default function Home() {
                 <div className="chat-tabs">
                   {CHAT_MODES.filter(([mode]) =>
                     mode !== "circuits" ||
-                    Boolean(
-                      workspaceExtensions.projection?.extensions.some(
-                        (ext) =>
-                          ext.pluginId === "auto_canvas.integration" &&
-                          ext.available,
-                      ),
-                    ),
+                    supportsCanvasCircuitLibraries(workspaceExtensions.projection?.extensions),
                   ).map(([mode, label]) => (
                     <button
                       key={mode}
