@@ -178,7 +178,12 @@ def test_install_creates_model_service_config_once_and_preserves_it(tmp_path):
     fake_python.chmod(0o755)
     fake_node.chmod(0o755)
 
-    env = {**os.environ, "PYTHON_BIN": str(fake_python)}
+    env = {
+        **os.environ,
+        "PYTHON_BIN": str(fake_python),
+        "VENV_DIR": str(bundle / ".venv"),
+        "OFFLINE": "0",
+    }
 
     first = subprocess.run(
         ["bash", str(bundle / "install.sh")],
@@ -216,13 +221,20 @@ def test_concurrent_installers_report_only_their_own_venv_failures(tmp_path):
         '#!/usr/bin/env bash\n'
         'if [[ "${1:-} ${2:-}" == "-m venv" ]]; then\n'
         '  echo "$RUN $3" >&2\n'
+        '  if [[ "$3" != --without-pip ]]; then\n'
+        '    touch ready\n'
+        '    until [[ -f "$PEER_READY" ]]; do\n'
+        '      (( SECONDS < 10 )) || { echo "peer timed out" >&2; exit 1; }\n'
+        '      sleep 0.05\n'
+        '    done\n'
+        '  fi\n'
         '  exit 1\n'
         'fi\n',
         encoding="utf-8",
     )
     creator.chmod(0o755)
     processes = {}
-    for run in ("one", "two"):
+    for run, peer in (("one", "two"), ("two", "one")):
         bundle = tmp_path / run
         bundle.mkdir()
         shutil.copy2(PACKAGING / "install.sh", bundle / "install.sh")
@@ -235,6 +247,7 @@ def test_concurrent_installers_report_only_their_own_venv_failures(tmp_path):
             env={
                 **os.environ,
                 "RUN": run,
+                "PEER_READY": str(tmp_path / peer / "ready"),
                 "PYTHON_BIN": str(creator),
                 "VENV_DIR": str(bundle / "venv"),
                 "TMPDIR": str(tmp_path),
