@@ -163,12 +163,17 @@ def test_install_creates_model_service_config_once_and_preserves_it(tmp_path):
     (bundle / "frontend").mkdir()
     (bundle / "frontend" / "server.js").write_text("", encoding="utf-8")
     (bundle / "node" / "bin").mkdir(parents=True)
-    (bundle / ".venv" / "bin").mkdir(parents=True)
-
     fake_runtime = "#!/usr/bin/env bash\n[[ ${1:-} == -V ]] && echo fake-runtime\nexit 0\n"
-    fake_python = bundle / ".venv" / "bin" / "python"
+    fake_python = bundle / "python"
     fake_node = bundle / "node" / "bin" / "node"
-    fake_python.write_text(fake_runtime, encoding="utf-8")
+    fake_python.write_text(
+        '#!/usr/bin/env bash\n'
+        'if [[ "${1:-} ${2:-}" == "-m venv" ]]; then\n'
+        '  mkdir -p "$3/bin" && ln -s "$0" "$3/bin/python" || exit 1\n'
+        '  echo "venv diagnostic" >&2\n'
+        'fi\n',
+        encoding="utf-8",
+    )
     fake_node.write_text(fake_runtime, encoding="utf-8")
     fake_python.chmod(0o755)
     fake_node.chmod(0o755)
@@ -184,6 +189,7 @@ def test_install_creates_model_service_config_once_and_preserves_it(tmp_path):
         check=False,
     )
     assert first.returncode == 0, first.stdout + first.stderr
+    assert "venv diagnostic" in first.stderr
 
     generated = bundle / ".local" / "model-services.toml"
     assert generated.read_bytes() == (bundle / "model-services.example.toml").read_bytes()
@@ -199,4 +205,46 @@ def test_install_creates_model_service_config_once_and_preserves_it(tmp_path):
         check=False,
     )
     assert second.returncode == 0, second.stdout + second.stderr
+    assert "venv diagnostic" not in second.stderr
     assert generated.read_text(encoding="utf-8") == operator_config
+
+
+@pytest.mark.process_contract
+def test_concurrent_installers_report_only_their_own_venv_failures(tmp_path):
+    creator = tmp_path / "python"
+    creator.write_text(
+        '#!/usr/bin/env bash\n'
+        'if [[ "${1:-} ${2:-}" == "-m venv" ]]; then\n'
+        '  echo "$RUN $3" >&2\n'
+        '  exit 1\n'
+        'fi\n',
+        encoding="utf-8",
+    )
+    creator.chmod(0o755)
+    processes = {}
+    for run in ("one", "two"):
+        bundle = tmp_path / run
+        bundle.mkdir()
+        shutil.copy2(PACKAGING / "install.sh", bundle / "install.sh")
+        processes[run] = subprocess.Popen(
+            ["bash", "install.sh"],
+            cwd=bundle,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={
+                **os.environ,
+                "RUN": run,
+                "PYTHON_BIN": str(creator),
+                "VENV_DIR": str(bundle / "venv"),
+                "TMPDIR": str(tmp_path),
+            },
+        )
+    for run, process in processes.items():
+        stdout, stderr = process.communicate(timeout=20)
+        assert process.returncode == 1, stdout
+        assert stderr.splitlines()[:2] == [
+            f"{run} {tmp_path / run / 'venv'}",
+            f"{run} --without-pip",
+        ]
+    assert {entry.name for entry in tmp_path.iterdir()} == {"one", "two", "python"}
