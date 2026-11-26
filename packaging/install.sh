@@ -32,13 +32,10 @@ if [[ -x "$VENV_DIR/bin/python" ]]; then
   log ".venv 已存在,复用。"
 else
   log "创建 venv…"
-  if "$PYTHON_BIN" -m venv "$VENV_DIR" 2>/tmp/sn_venv_err; then
-    :
-  else
+  if ! "$PYTHON_BIN" -m venv "$VENV_DIR"; then
     log "python -m venv 失败(通常缺 ensurepip/python3-venv,装它需 root)。尝试 --without-pip 兜底…"
     rm -rf "$VENV_DIR"
-    "$PYTHON_BIN" -m venv --without-pip "$VENV_DIR" 2>>/tmp/sn_venv_err || {
-      cat /tmp/sn_venv_err >&2 || true
+    "$PYTHON_BIN" -m venv --without-pip "$VENV_DIR" || {
       die "venv 创建失败。三选一:(a) 让管理员安装 python3-venv;(b) 设 PYTHON_BIN 指向自带 venv/pip 的 python(如 conda/pyenv);(c) 手动建好 venv 后重跑。"
     }
     pipwhl="$(ls "$SCRIPT_DIR"/wheelhouse/pip-*.whl 2>/dev/null | head -1 || true)"
