@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import re
 import shutil
@@ -233,17 +234,17 @@ def test_concurrent_installers_report_only_their_own_venv_failures(tmp_path):
         encoding="utf-8",
     )
     creator.chmod(0o755)
-    processes = {}
-    for run, peer in (("one", "two"), ("two", "one")):
+    def install(run, peer):
         bundle = tmp_path / run
         bundle.mkdir()
         shutil.copy2(PACKAGING / "install.sh", bundle / "install.sh")
-        processes[run] = subprocess.Popen(
+        return subprocess.run(
             ["bash", "install.sh"],
             cwd=bundle,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
+            timeout=20,
+            check=False,
             env={
                 **os.environ,
                 "RUN": run,
@@ -253,11 +254,12 @@ def test_concurrent_installers_report_only_their_own_venv_failures(tmp_path):
                 "TMPDIR": str(tmp_path),
             },
         )
-    for run, process in processes.items():
-        stdout, stderr = process.communicate(timeout=20)
-        assert process.returncode == 1, stdout
-        assert stderr.splitlines()[:2] == [
-            f"{run} {tmp_path / run / 'venv'}",
-            f"{run} --without-pip",
-        ]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = pool.map(install, ("one", "two"), ("two", "one"))
+        for run, result in zip(("one", "two"), results, strict=True):
+            assert result.returncode == 1, result.stdout
+            assert result.stderr.splitlines()[:2] == [
+                f"{run} {tmp_path / run / 'venv'}",
+                f"{run} --without-pip",
+            ]
     assert {entry.name for entry in tmp_path.iterdir()} == {"one", "two", "python"}
