@@ -132,6 +132,7 @@ test("workspace tabs keep the product order", () => {
     ["rules", "知识库"],
     ["memory", "记忆"],
     ["reports", "深度报告"],
+    ["circuits", "电路库"],
   ]);
 });
 
