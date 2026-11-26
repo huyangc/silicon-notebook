@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   BookOpen,
   ChevronRight,
+  CircuitBoard,
   Inbox,
   Library,
   Link,
@@ -15,6 +16,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
+import { fetchSystemExtensions } from "./system-api.ts";
 import { toUserMessage } from "./errors.ts";
 import { copyTextSafely } from "./copy-text.ts";
 import { useCopyResult } from "./copy-result.ts";
@@ -138,7 +140,26 @@ export function GroupsPage({
   const [requests, setRequests] = useState<ShareRequest[] | null>(null);
   const [invite, setInvite] = useState<GroupInviteState | null>(null);
   const [myRequests, setMyRequests] = useState<ShareRequest[]>([]);
+  const [canvasAvailable, setCanvasAvailable] = useState(false);
   const [tab, setTab] = useState<GroupPageTab>(initialTab);
+  useEffect(() => {
+    let alive = true;
+    void fetchSystemExtensions()
+      .then((projection) => {
+        if (!alive) return;
+        setCanvasAvailable(
+          projection.extensions.some(
+            (ext) => ext.pluginId === "auto_canvas.integration" && ext.available,
+          ),
+        );
+      })
+      .catch(() => {
+        if (alive) setCanvasAvailable(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -569,6 +590,26 @@ export function GroupsPage({
                   </div>
                   <p>{detail.description || "这个群组还没有填写说明。"}</p>
                   <span>Owner {ownerMember ? memberLabel(ownerMember) : "—"}</span>
+                  {canvasAvailable && (
+                    <div className="group-page-actions">
+                      <button
+                        type="button"
+                        className="button secondary workspace-extension-entry"
+                        onClick={() => window.location.assign(`/canvas/?group=${encodeURIComponent(detail.id)}&view=projects`)}
+                      >
+                        <CircuitBoard size={15} aria-hidden="true" />
+                        <span>群组电路工程</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="button secondary workspace-extension-entry"
+                        onClick={() => window.location.assign(`/canvas/?group=${encodeURIComponent(detail.id)}&view=components`)}
+                      >
+                        <CircuitBoard size={15} aria-hidden="true" />
+                        <span>群组器件库</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
               {/* 三个计数全部来自本页已经取回的数据（共享清单 / 群组详情 / 审批队列），

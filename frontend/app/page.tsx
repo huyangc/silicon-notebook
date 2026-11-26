@@ -244,6 +244,7 @@ import { LoginEntrance } from "./auth-book";
 import { consumeLoginEntrance } from "./login-entrance";
 import { AccountMenu } from "./account-menu";
 import { GroupsPage } from "./groups-page";
+import { NotebookCircuitsPanel } from "./notebook-circuits-panel";
 import { NotebookGroupShare, BORROWED_BASE_SHARE_WARNING } from "./notebook-group-share";
 import { NotebookCollaboratorsShare } from "./notebook-collaborators-share";
 import { ShareOverviewCollaborators, ShareOverviewCollaboratorsChip } from "./share-overview-collaborators";
@@ -5929,7 +5930,16 @@ export default function Home() {
             <section className="workspace-panel chat-panel">
               <div className="workspace-panel-header">
                 <div className="chat-tabs">
-                  {CHAT_MODES.map(([mode, label]) => (
+                  {CHAT_MODES.filter(([mode]) =>
+                    mode !== "circuits" ||
+                    Boolean(
+                      workspaceExtensions.projection?.extensions.some(
+                        (ext) =>
+                          ext.pluginId === "auto_canvas.integration" &&
+                          ext.available,
+                      ),
+                    ),
+                  ).map(([mode, label]) => (
                     <button
                       key={mode}
                       className={`chat-tab ${chatMode === mode ? "active" : ""}${mode === "reports" && sourceScopeBlocked ? " scope-disabled" : ""}`}
@@ -6228,6 +6238,13 @@ export default function Home() {
                     onPreviewImage={openAnswerImagePreview}
                     imagePreviewOpen={rootModals.view("answer-image-preview").open}
                     onFollowUp={followUpReport}
+                  />
+                )}
+
+                {chatMode === "circuits" && currentNotebookId && currentNotebook && (
+                  <NotebookCircuitsPanel
+                    notebookId={currentNotebookId}
+                    notebookName={currentNotebook.name}
                   />
                 )}
 

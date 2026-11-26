@@ -219,3 +219,76 @@ export async function requestVoid(path: string, options: ApiRequestOptions): Pro
 export async function requestBlob(path: string, options: ApiRequestOptions): Promise<Blob> {
   return (await checked(path, options)).blob();
 }
+
+function resolveCanvasApiUrl(path: string): string {
+  const normalized = path.replace(/^\/+/, "");
+  try {
+    const origin =
+      typeof window !== "undefined" && window.location.origin
+        ? window.location.origin
+        : "http://localhost";
+    const base = new URL("/canvas/api/", origin);
+    const candidate = new URL(normalized, base);
+    if (candidate.origin === base.origin && candidate.pathname.startsWith("/canvas/api/")) {
+      return `${candidate.pathname}${candidate.search}`;
+    }
+  } catch {
+    // Confined by the TypeError below.
+  }
+  throw new TypeError("canvas API requests must stay under /canvas/api/");
+}
+
+async function performCanvasApiRequest(
+  path: string,
+  options: ApiRequestOptions,
+): Promise<Response> {
+  const {
+    auth = "required",
+    tag,
+    unauthorized = "preserve",
+    headers: inputHeaders,
+    logPath,
+    ...init
+  } = options;
+  const headers = new Headers(inputHeaders);
+  const sentToken = auth === "required" ? getToken() : null;
+  if (auth === "required") {
+    for (const [name, value] of Object.entries(authHeaders())) headers.set(name, value);
+  }
+  const isFormData = typeof FormData !== "undefined" && init.body instanceof FormData;
+  if (init.body !== undefined && !isFormData && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  const resolved = resolveCanvasApiUrl(path);
+  const started = globalThis.performance.now();
+  const response = await fetch(resolved, { cache: "no-store", ...init, headers });
+  settleResponse(response, {
+    method: init.method || "GET",
+    pathOrUrl: resolved,
+    logPath,
+    started,
+    auth,
+    unauthorized,
+    sentToken,
+  });
+  void tag;
+  return response;
+}
+
+export async function requestCanvasJson<T>(
+  path: string,
+  options: ApiRequestOptions,
+): Promise<T> {
+  const response = await performCanvasApiRequest(path, options);
+  if (!response.ok) await throwHumanizedHttpError(response, options.tag);
+  return response.json() as Promise<T>;
+}
+
+export async function requestCanvasBlob(
+  path: string,
+  options: ApiRequestOptions,
+): Promise<Blob> {
+  const response = await performCanvasApiRequest(path, options);
+  if (!response.ok) await throwHumanizedHttpError(response, options.tag);
+  return response.blob();
+}
