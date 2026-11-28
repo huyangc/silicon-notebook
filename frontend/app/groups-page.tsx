@@ -224,8 +224,9 @@ export function GroupsPage({
       setRenameDraft(group.name);
       setDescriptionDraft(group.description);
       const manageable = isGroupAdmin(group) || isSystemAdmin;
+      const canListSharedNotebooks = Boolean(group.my_role) || isSystemAdmin;
       const [inventory, queue, invitation] = await Promise.all([
-        listGroupSharedNotebooks(groupId),
+        canListSharedNotebooks ? listGroupSharedNotebooks(groupId) : Promise.resolve([]),
         manageable ? listGroupShareRequests(groupId) : Promise.resolve([]),
         manageable ? getGroupInvite(groupId) : Promise.resolve(null),
       ]);

@@ -965,6 +965,9 @@ export const CHAT_MODES: Array<[ChatMode, string]> = [
  */
 export const MIN_CANVAS_LIBRARY_VERSION: readonly [number, number, number] = [0, 3, 0];
 
+/** Home `我的电路库` tab and direct `?project=` / `?groupProject=` deep links require 0.4.0+. */
+export const MIN_CANVAS_HOME_CIRCUITS_VERSION: readonly [number, number, number] = [0, 4, 0];
+
 function parseSemverTriple(version: string | null | undefined): [number, number, number] | null {
   if (!version) return null;
   const match = /^\s*(\d+)\.(\d+)(?:\.(\d+))?(?:[-+].*)?\s*$/.exec(version);
@@ -972,8 +975,9 @@ function parseSemverTriple(version: string | null | undefined): [number, number,
   return [Number(match[1]), Number(match[2]), Number(match[3] ?? "0")];
 }
 
-export function supportsCanvasCircuitLibraries(
+function hasCanvasIntegrationAtLeast(
   extensions: ReadonlyArray<{ pluginId: string; version?: string; available: boolean }> | null | undefined,
+  minimum: readonly [number, number, number],
 ): boolean {
   if (!extensions) return false;
   return extensions.some((ext) => {
@@ -981,11 +985,23 @@ export function supportsCanvasCircuitLibraries(
     const parsed = parseSemverTriple(ext.version);
     if (!parsed) return false;
     const [maj, min, patch] = parsed;
-    const [reqMaj, reqMin, reqPatch] = MIN_CANVAS_LIBRARY_VERSION;
+    const [reqMaj, reqMin, reqPatch] = minimum;
     if (maj !== reqMaj) return maj > reqMaj;
     if (min !== reqMin) return min > reqMin;
     return patch >= reqPatch;
   });
+}
+
+export function supportsCanvasCircuitLibraries(
+  extensions: ReadonlyArray<{ pluginId: string; version?: string; available: boolean }> | null | undefined,
+): boolean {
+  return hasCanvasIntegrationAtLeast(extensions, MIN_CANVAS_LIBRARY_VERSION);
+}
+
+export function supportsCanvasHomeCircuits(
+  extensions: ReadonlyArray<{ pluginId: string; version?: string; available: boolean }> | null | undefined,
+): boolean {
+  return hasCanvasIntegrationAtLeast(extensions, MIN_CANVAS_HOME_CIRCUITS_VERSION);
 }
 
 export type KnowledgeKind = string;

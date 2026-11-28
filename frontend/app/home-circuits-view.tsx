@@ -101,9 +101,11 @@ export function HomeCircuitsView({
   const [selectedPrivateGroupId, setSelectedPrivateGroupId] = useState("");
   const [selectedPublicGroupId, setSelectedPublicGroupId] = useState("");
   const [groupProjects, setGroupProjects] = useState<GroupCircuitSummary[]>([]);
-  const [loadingBase, setLoadingBase] = useState(true);
+  const [loadingPersonal, setLoadingPersonal] = useState(true);
+  const [loadingGroups, setLoadingGroups] = useState(true);
   const [loadingGroupItems, setLoadingGroupItems] = useState(false);
-  const [error, setError] = useState("");
+  const [personalError, setPersonalError] = useState("");
+  const [groupsError, setGroupsError] = useState("");
   const [groupError, setGroupError] = useState("");
   const [reloadTick, setReloadTick] = useState(0);
   const baseSeqRef = useRef(0);
@@ -130,21 +132,37 @@ export function HomeCircuitsView({
 
   const loadBase = useCallback(async () => {
     const seq = ++baseSeqRef.current;
-    setLoadingBase(true);
-    setError("");
-    try {
-      const [projRes, groupsRes] = await Promise.all([
-        requestCanvasJson<{ projects: PersonalCircuitSummary[] }>("projects", {
-          tag: "home-circuits-personal",
-        }),
-        requestCanvasJson<{ groups: CanvasGroupSummary[] }>("notebook/groups", {
-          tag: "home-circuits-groups",
-        }),
-      ]);
-      if (baseSeqRef.current !== seq) return;
-      const nextProjects = Array.isArray(projRes.projects) ? projRes.projects : [];
-      const nextGroups = Array.isArray(groupsRes.groups) ? groupsRes.groups : [];
-      setPersonalProjects(nextProjects);
+    setLoadingPersonal(true);
+    setLoadingGroups(true);
+    setPersonalError("");
+    setGroupsError("");
+    const [projOutcome, groupsOutcome] = await Promise.allSettled([
+      requestCanvasJson<{ projects: PersonalCircuitSummary[] }>("projects", {
+        tag: "home-circuits-personal",
+      }),
+      requestCanvasJson<{ groups: CanvasGroupSummary[] }>("notebook/groups", {
+        tag: "home-circuits-groups",
+      }),
+    ]);
+    if (baseSeqRef.current !== seq) return;
+    if (projOutcome.status === "fulfilled") {
+      setPersonalProjects(
+        Array.isArray(projOutcome.value.projects) ? projOutcome.value.projects : [],
+      );
+    } else {
+      setPersonalError(
+        toUserMessage(
+          projOutcome.reason,
+          "无法加载个人云端电路，请确认电路画布服务已启动。",
+        ),
+      );
+    }
+    setLoadingPersonal(false);
+
+    if (groupsOutcome.status === "fulfilled") {
+      const nextGroups = Array.isArray(groupsOutcome.value.groups)
+        ? groupsOutcome.value.groups
+        : [];
       setGroups(nextGroups);
       const nextPrivate = nextGroups.filter((group) => !group.isPublic);
       const nextPublic = nextGroups.filter((group) => group.isPublic === true);
@@ -158,12 +176,15 @@ export function HomeCircuitsView({
           ? prev
           : (nextPublic[0]?.id ?? ""),
       );
-    } catch (err) {
-      if (baseSeqRef.current !== seq) return;
-      setError(toUserMessage(err, "无法加载电路库，请确认电路画布服务已启动。"));
-    } finally {
-      if (baseSeqRef.current === seq) setLoadingBase(false);
+    } else {
+      setGroupsError(
+        toUserMessage(
+          groupsOutcome.reason,
+          "无法加载群组与公共电路库，请稍后重试。",
+        ),
+      );
     }
+    setLoadingGroups(false);
   }, []);
 
   useEffect(() => {
@@ -215,11 +236,13 @@ export function HomeCircuitsView({
           <button
             type="button"
             className="sort-button"
-            disabled={loadingBase || loadingGroupItems}
+            disabled={loadingPersonal || loadingGroups || loadingGroupItems}
             onClick={() => setReloadTick((value) => value + 1)}
           >
             <RefreshCw size={14} aria-hidden="true" />
-            <span>{loadingBase || loadingGroupItems ? "刷新中…" : "刷新"}</span>
+            <span>
+              {loadingPersonal || loadingGroups || loadingGroupItems ? "刷新中…" : "刷新"}
+            </span>
           </button>
         </div>
       </div>
@@ -259,10 +282,10 @@ export function HomeCircuitsView({
         </div>
       </div>
 
-      {error && <div className="circuit-lib-error" role="alert">{error}</div>}
-
       {scope === "personal" && (
-        loadingBase ? (
+        personalError ? (
+          <div className="circuit-lib-error" role="alert">{personalError}</div>
+        ) : loadingPersonal ? (
           <div className="circuit-lib-empty">
             <p>正在加载我的云端电路…</p>
           </div>
@@ -308,7 +331,9 @@ export function HomeCircuitsView({
       )}
 
       {(scope === "groups" || scope === "public") && (
-        loadingBase ? (
+        groupsError ? (
+          <div className="circuit-lib-error" role="alert">{groupsError}</div>
+        ) : loadingGroups ? (
           <div className="circuit-lib-empty">
             <p>正在加载{scope === "public" ? "公共电路库" : "群组电路库"}…</p>
           </div>

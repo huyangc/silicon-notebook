@@ -22,7 +22,8 @@ def test_index_upgrade_preserves_existing_scratch_rows(postgres_database):
         db.execute('CREATE INDEX idx_clusters_nb_canonical_name_lower ON concept_clusters(notebook_id,lower(canonical_name))')
         UnifiedKgStore.insert_canonical_scratch_rows(db, [('upgrade', 'run', 'seed', 'canonical', 'name', 'description', 'signature')])
         before = [dict(row) for row in db.execute("SELECT * FROM kg_canonical_scratch WHERE notebook_id='upgrade'")]
-        db.execute('DELETE FROM silicon_schema_migrations WHERE version=92')
+        db.execute('ALTER TABLE groups DROP COLUMN IF EXISTS is_public')
+        db.execute('DELETE FROM silicon_schema_migrations WHERE version >= 92')
     assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.connect() as db:
         assert [dict(row) for row in db.execute("SELECT * FROM kg_canonical_scratch WHERE notebook_id='upgrade'")] == before

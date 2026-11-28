@@ -786,7 +786,9 @@ def run_startup(lease: object | None) -> object | None:
         if not _record_repository_factory(lease, repository_factory):
             return None
         repo = repository_factory()  # construct + migrate + seed
-        default_public_group = get_settings().default_public_group_name.strip()
+        default_public_group = getattr(
+            get_settings(), "default_public_group_name", ""
+        ).strip()
         if default_public_group:
             from app.api.deps import group_repository as group_repository_factory
 

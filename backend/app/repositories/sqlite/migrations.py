@@ -6591,7 +6591,7 @@ class SqliteMigrator:
         """Public group visibility flag, paired with PostgreSQL 0093."""
         with self._connect() as db:
             columns = {
-                row["name"] for row in db.execute("PRAGMA table_info(groups)").fetchall()
+                row[1] for row in db.execute("PRAGMA table_info(groups)").fetchall()
             }
             if "is_public" not in columns:
                 db.execute(

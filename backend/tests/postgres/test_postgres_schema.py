@@ -621,6 +621,7 @@ def test_packaged_index_migration_phases_are_exact():
         (90, "kg_concept_ranks"),
         (91, "kg_relink_work"),
         (92, "canonical_scratch_seed_digest"),
+        (93, "public_groups"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
