@@ -193,7 +193,14 @@ def _require_group_owner(group_id: str, user: UserProfile) -> None:
     """Owner-only group actions, with the existing system-admin recovery bypass."""
     groups = group_repository()
     group = groups.get_group(group_id, user_id=user.id)
-    if group is None or (not group["my_role"] and not _is_system_admin(user)):
+    if (
+        group is None
+        or (
+            not group["my_role"]
+            and not group.get("is_public")
+            and not _is_system_admin(user)
+        )
+    ):
         raise _group_not_found()
     if group["owner_id"] == user.id or _is_system_admin(user):
         return
@@ -203,9 +210,16 @@ def _require_group_owner(group_id: str, user: UserProfile) -> None:
 
 
 def _require_group_visible(group_id: str, user: UserProfile) -> dict:
-    """Any member may read the group workspace; system admins retain recovery access."""
+    """Any member (or any signed-in user for a public group) may read the group workspace; system admins retain recovery access."""
     group = group_repository().get_group(group_id, user_id=user.id)
-    if group is None or (not group["my_role"] and not _is_system_admin(user)):
+    if (
+        group is None
+        or (
+            not group["my_role"]
+            and not group.get("is_public")
+            and not _is_system_admin(user)
+        )
+    ):
         raise _group_not_found()
     return group
 
@@ -242,11 +256,14 @@ def create_group_route(
         raise user_error(422, "群组类型只能是项目、部门或领域")
     if kind not in OPEN_GROUP_KINDS and user.role != "admin":
         raise user_error(403, "仅管理员可创建部门或领域群组")
+    if payload.is_public and not _is_system_admin(user):
+        raise user_error(403, "仅系统管理员可创建全员可见的公共群组")
     group = group_repository().create_group(
         name=_validated_name(payload.name),
         kind=kind,
         description=_validated_description(payload.description),
         created_by=user.id,
+        is_public=bool(payload.is_public),
     )
     # 创建者已在同一写事务里成为组管理员,所以这里的成员清单必定非空。
     return GroupDetail(
@@ -326,7 +343,14 @@ def get_group_route(
     """
     groups = group_repository()
     group = groups.get_group(group_id, user_id=user.id)
-    if group is None or (not group["my_role"] and not _is_system_admin(user)):
+    if (
+        group is None
+        or (
+            not group["my_role"]
+            and not group.get("is_public")
+            and not _is_system_admin(user)
+        )
+    ):
         raise _group_not_found()
     return GroupDetail(
         **group, members=[GroupMemberItem(**m) for m in groups.list_members(group_id)]

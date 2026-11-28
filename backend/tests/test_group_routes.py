@@ -2089,3 +2089,68 @@ def test_grantable_principal_types_stay_the_two_group_subjects(tmp_path, monkeyp
             headers=owner,
         )
         assert refused.status_code == 422, (principal_type, refused.status_code)
+
+
+def test_public_group_visible_to_all_signed_in_users_and_managed_by_system_admin(
+    tmp_path, monkeypatch, repo
+):
+    client = _client(tmp_path, monkeypatch)
+    admin_headers, admin_id, _ = _new_user(client)
+    member_headers, _member_id, _ = _new_user(client)
+
+    # Regular user cannot create a public group.
+    denied = client.post(
+        "/api/groups",
+        json={"name": "试图建公共组", "kind": "project", "is_public": True},
+        headers=member_headers,
+    )
+    assert denied.status_code == 403
+
+    _promote_to_admin(repo, admin_id)
+    created = client.post(
+        "/api/groups",
+        json={
+            "name": "公共电路库",
+            "kind": "domain",
+            "description": "公共参考电路",
+            "is_public": True,
+        },
+        headers=admin_headers,
+    )
+    assert created.status_code == 200
+    body = created.json()
+    assert body["is_public"] is True
+    group_id = body["id"]
+
+    # Non-member signed-in user sees the public group in GET /api/groups and can read detail.
+    listed = client.get("/api/groups", headers=member_headers)
+    assert listed.status_code == 200
+    assert [g["id"] for g in listed.json()] == [group_id]
+    assert listed.json()[0]["is_public"] is True
+    assert listed.json()[0]["my_role"] == ""
+
+    detail = client.get(f"/api/groups/{group_id}", headers=member_headers)
+    assert detail.status_code == 200
+    assert detail.json()["is_public"] is True
+
+    # Non-admin cannot mutate or delete the public group.
+    assert (
+        client.patch(
+            f"/api/groups/{group_id}",
+            json={"name": "篡改名"},
+            headers=member_headers,
+        ).status_code
+        == 404
+    )
+    assert client.delete(f"/api/groups/{group_id}", headers=member_headers).status_code == 403
+
+    # System admin can ensure_default_public_group idempotently.
+    from app.api.deps import group_repository
+
+    default_a = group_repository().ensure_default_public_group(name="默认公共电路库")
+    default_b = group_repository().ensure_default_public_group(name="默认公共电路库")
+    assert default_a["id"] == "grp-public-default"
+    assert default_b["id"] == "grp-public-default"
+    assert default_a["is_public"] is True
+    listed_ids = [g["id"] for g in client.get("/api/groups", headers=member_headers).json()]
+    assert "grp-public-default" in listed_ids

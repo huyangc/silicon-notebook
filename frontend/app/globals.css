@@ -16289,3 +16289,79 @@ button.transfer-toolbar-unsure {
   flex-wrap: wrap;
   margin-top: 8px;
 }
+
+.group-public-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink-soft, #475569);
+  cursor: pointer;
+}
+
+/* ---- Home page 我的电路库 tab & Canvas direct links ---- */
+.home-canvas-link,
+.home-canvas-cta {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.home-circuits-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-bottom: 32px;
+}
+
+.home-circuits-title-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.home-circuits-group-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.home-circuits-group-pills {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.home-circuits-count-muted {
+  opacity: 0.78;
+}
+
+.home-circuits-group-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 12px;
+  background: var(--surface, #fff);
+}
+
+.home-circuits-group-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.home-circuits-group-title-row h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}

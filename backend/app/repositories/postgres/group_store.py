@@ -205,6 +205,7 @@ class GroupStore:
             "name": row["name"],
             "kind": row["kind"],
             "description": row["description"],
+            "is_public": bool(row.get("is_public", 0)),
             "owner_id": row["owner_id"],
             "my_role": my_role,
             "member_count": member_count,
@@ -262,16 +263,33 @@ class GroupStore:
 
     # -------------------------------------------------------------- 群组
     def create_group(
-        self, *, name: str, kind: str, description: str, created_by: str
+        self,
+        *,
+        name: str,
+        kind: str,
+        description: str,
+        created_by: str,
+        is_public: bool = False,
     ) -> dict:
         group_id = self.new_id("grp")
         stamp = self.now()
+        public_flag = 1 if is_public else 0
         with self.database.write() as connection:
             connection.execute(
                 "INSERT INTO groups "
-                "(id,name,kind,description,created_by,owner_id,created_at,updated_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                (group_id, name, kind, description, created_by, created_by, stamp, stamp),
+                "(id,name,kind,description,is_public,created_by,owner_id,created_at,updated_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    group_id,
+                    name,
+                    kind,
+                    description,
+                    public_flag,
+                    created_by,
+                    created_by,
+                    stamp,
+                    stamp,
+                ),
             )
             connection.execute(
                 "INSERT INTO group_members (group_id,user_id,role,added_at,added_by) "
@@ -280,6 +298,27 @@ class GroupStore:
             )
         group = self.get_group(group_id, user_id=created_by)
         assert group is not None  # 同一进程刚提交
+        return group
+
+    def ensure_default_public_group(
+        self, *, name: str, description: str = ""
+    ) -> dict:
+        group_id = "grp-public-default"
+        stamp = self.now()
+        desc = (
+            description
+            or "全员可见的默认公共群组，由系统管理员维护，用于共享公共电路图与参考资料。"
+        )
+        with self.database.write() as connection:
+            connection.execute(
+                "INSERT INTO groups "
+                "(id,name,kind,description,is_public,created_by,owner_id,created_at,updated_at) "
+                "VALUES (%s,%s,'domain',%s,1,NULL,'',%s,%s) "
+                "ON CONFLICT (id) DO UPDATE SET is_public=1",
+                (group_id, name, desc, stamp, stamp),
+            )
+        group = self.get_group(group_id)
+        assert group is not None
         return group
 
     def get_group(self, group_id: str, *, user_id: str = "") -> "dict | None":
@@ -313,15 +352,19 @@ class GroupStore:
     def list_groups_for_user(self, user_id: str) -> list[dict]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT g.*, gm.role AS _my_role, "
+                "SELECT g.*, "
+                "(SELECT role FROM group_members m "
+                "WHERE m.group_id=g.id AND m.user_id=%s) AS _my_role, "
                 "(SELECT COUNT(*) FROM group_members c WHERE c.group_id=g.id) AS _members "
-                "FROM group_members gm JOIN groups g ON g.id=gm.group_id "
-                'WHERE gm.user_id=%s ORDER BY g.created_at ASC, g.id COLLATE "C" ASC',
-                (user_id,),
+                "FROM groups g "
+                "WHERE g.is_public = 1 OR EXISTS ("
+                "SELECT 1 FROM group_members gm WHERE gm.group_id=g.id AND gm.user_id=%s) "
+                'ORDER BY g.is_public DESC, g.created_at ASC, g.id COLLATE "C" ASC',
+                (user_id, user_id),
             ).fetchall()
         return [
             self._group_row(
-                row, my_role=row["_my_role"], member_count=int(row["_members"])
+                row, my_role=row["_my_role"] or "", member_count=int(row["_members"])
             )
             for row in rows
         ]
@@ -333,7 +376,7 @@ class GroupStore:
                 "(SELECT role FROM group_members m "
                 "WHERE m.group_id=g.id AND m.user_id=%s) AS _my_role, "
                 "(SELECT COUNT(*) FROM group_members c WHERE c.group_id=g.id) AS _members "
-                'FROM groups g ORDER BY g.created_at ASC, g.id COLLATE "C" ASC',
+                'FROM groups g ORDER BY g.is_public DESC, g.created_at ASC, g.id COLLATE "C" ASC',
                 (user_id,),
             ).fetchall()
         return [

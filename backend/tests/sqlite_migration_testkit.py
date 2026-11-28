@@ -43,8 +43,14 @@ V78_AUTH_TABLES = {
 }
 
 
+def rollback_v111(db: sqlite3.Connection) -> None:
+    """Undo SQLite migration 111: remove groups.is_public."""
+    db.execute("ALTER TABLE groups DROP COLUMN is_public")
+
+
 def rollback_v110(db: sqlite3.Connection) -> None:
     """Remove local relink receipts, without touching knowledge graph rows."""
+    rollback_v111(db)
     db.execute("DROP TABLE kg_relink_work")
     db.execute("DROP TABLE kg_relink_state")
 

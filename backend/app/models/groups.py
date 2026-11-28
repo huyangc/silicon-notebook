@@ -42,6 +42,7 @@ class GroupCreate(BaseModel):
     name: str
     kind: str = "project"
     description: str = ""
+    is_public: bool = False
 
 
 class GroupUpdate(BaseModel):
@@ -91,6 +92,7 @@ class GroupSummary(BaseModel):
     name: str
     kind: str = "project"
     description: str = ""
+    is_public: bool = False
     # Immutable creation audit remains in storage as created_by. owner_id is
     # the current, transferable authority and always names a group member.
     owner_id: str

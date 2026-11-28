@@ -35,6 +35,7 @@ export type GroupSummary = {
   name: string;
   kind: string;
   description: string;
+  is_public?: boolean;
   /** 当前唯一 owner；created_by 仅留在服务端作不可变创建审计。 */
   owner_id: string;
   /** 请求者本人在该组里的角色;不是成员时为空串(管理员的全部群组视图会出现)。 */
@@ -127,10 +128,16 @@ export const createGroup = (
   name: string,
   kind: string,
   description = "",
+  isPublic = false,
 ): Promise<GroupDetail> =>
   requestJson(`/groups`, {
     method: "POST",
-    body: JSON.stringify({ name, kind, description }),
+    body: JSON.stringify({
+      name,
+      kind,
+      description,
+      ...(isPublic ? { is_public: true } : {}),
+    }),
     tag: TAG,
   });
 

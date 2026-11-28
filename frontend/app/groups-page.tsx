@@ -165,6 +165,7 @@ export function GroupsPage({
   const [newName, setNewName] = useState("");
   const [newKind, setNewKind] = useState("project");
   const [newDescription, setNewDescription] = useState("");
+  const [newIsPublic, setNewIsPublic] = useState(false);
   const [memberName, setMemberName] = useState("");
   const [renameDraft, setRenameDraft] = useState("");
   const [descriptionDraft, setDescriptionDraft] = useState("");
@@ -523,12 +524,22 @@ export function GroupsPage({
               onChange={(event) => setNewDescription(event.target.value)}
             />
             <LengthHint value={newDescription} max={GROUP_INPUT_LIMITS.descriptionMaxChars} label="群组说明" />
+            {isSystemAdmin && (
+              <label className="group-public-toggle">
+                <input
+                  type="checkbox"
+                  checked={newIsPublic}
+                  onChange={(event) => setNewIsPublic(event.target.checked)}
+                />
+                <span>全员可见公共群组（所有登录用户可见，由系统管理员维护）</span>
+              </label>
+            )}
             <div className="group-page-create-actions">
               <button className="sort-button" onClick={() => setCreating(false)}>取消</button>
               <button className="new-pill" disabled={Boolean(busy) || !newName.trim()}
                 onClick={() => { void run("create", async () => {
-                  const created = await createGroup(newName.trim(), kinds.length > 1 ? newKind : "project", newDescription.trim());
-                  setNewName(""); setNewDescription(""); setCreating(false);
+                  const created = await createGroup(newName.trim(), kinds.length > 1 ? newKind : "project", newDescription.trim(), isSystemAdmin && newIsPublic);
+                  setNewName(""); setNewDescription(""); setNewIsPublic(false); setCreating(false);
                   await refreshGroups(scope);
                   await loadGroup(created.id, "notebooks");
                   onNavigate(created.id, "notebooks");
@@ -563,8 +574,8 @@ export function GroupsPage({
                 onClick={() => chooseGroup(group.id)}>
                 <span className="group-page-group-icon">{group.name.trim().slice(0, 1).toUpperCase() || "G"}</span>
                 <span className="group-page-group-copy">
-                  <strong>{group.name}</strong>
-                  <small>{groupKindLabel(group.kind)} · {group.member_count} 人 · {group.owner_id === currentUserId ? "Owner" : groupRoleLabel(group.my_role)}</small>
+                  <strong>{group.name}{group.is_public ? " · 公共" : ""}</strong>
+                  <small>{group.is_public ? "全员可见公共群组" : `${groupKindLabel(group.kind)} · ${group.member_count} 人 · ${group.owner_id === currentUserId ? "Owner" : groupRoleLabel(group.my_role)}`}</small>
                 </span>
                 <ChevronRight size={16} />
               </button>
@@ -583,11 +594,12 @@ export function GroupsPage({
                 <div className="group-page-detail-copy">
                   <div className="group-page-title-row">
                     <h2>{detail.name}</h2>
+                    {detail.is_public && <span className="group-chip">全员公共</span>}
                     <span className="group-chip">{groupKindLabel(detail.kind)}</span>
                     {detail.owner_id === currentUserId && <span className="group-owner-chip">Owner</span>}
                   </div>
                   <p>{detail.description || "这个群组还没有填写说明。"}</p>
-                  <span>Owner {ownerMember ? memberLabel(ownerMember) : "—"}</span>
+                  <span>{detail.is_public && !ownerMember ? "管理员：系统管理员" : `Owner ${ownerMember ? memberLabel(ownerMember) : "—"}`}</span>
                   {canvasAvailable && (
                     <div className="group-page-actions">
                       <button

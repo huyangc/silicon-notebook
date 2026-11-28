@@ -637,6 +637,7 @@ def test_deployed_v105_database_verifies_the_memory_suggest_schema(
     }
     assert manifest["columns"] == {
         "memory_items": {"suggested_signal": ("suggested_signal", "TEXT", 0, None, 0)},
+        "groups": {"is_public": ("is_public", "INTEGER", 1, "0", 0)},
     }
     original = dict(manifest)
     try:
