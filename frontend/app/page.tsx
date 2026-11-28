@@ -2,7 +2,7 @@
 
 import { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
-import { AlertTriangle, ArrowLeft, BarChart3, Cpu, Database, ExternalLink, GitMerge, LayoutDashboard, LayoutGrid, Link2, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, ScrollText, Settings, Share2, Sparkles, Table2, Trash2, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, BarChart3, CircuitBoard, Cpu, Database, ExternalLink, GitMerge, LayoutDashboard, LayoutGrid, Link2, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, ScrollText, Settings, Share2, Sparkles, Table2, Trash2, Users, X } from "lucide-react";
 import "katex/dist/katex.min.css";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
 import type { RankingRebuildPhase } from "./ranking-failure-notice";
@@ -164,7 +164,7 @@ import { copyTextSafely } from "./copy-text";
 import { useCopyResult } from "./copy-result";
 import { httpErrorStatus, humanizedError, toUserMessage } from "./errors.ts";
 
-import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ParserEngineCapability, type ReadySnapshot } from "./system-api";
+import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, fetchSystemExtensions, probeReady, type ParserEngineCapability, type ReadySnapshot } from "./system-api";
 import { AnalyticsAnswerQuality } from "./analytics-answer-quality";
 import { backfillPaperMetadata, fetchNotebookAnalytics, fetchNotebookContentOverview, fetchNotebookIndexingPipeline, getNotebook, listNotebooks } from "./notebook-api";
 import {
@@ -244,6 +244,7 @@ import { LoginEntrance } from "./auth-book";
 import { consumeLoginEntrance } from "./login-entrance";
 import { AccountMenu } from "./account-menu";
 import { GroupsPage } from "./groups-page";
+import { HomeCircuitsView } from "./home-circuits-view";
 import { NotebookCircuitsPanel } from "./notebook-circuits-panel";
 import { NotebookGroupShare, BORROWED_BASE_SHARE_WARNING } from "./notebook-group-share";
 import { NotebookCollaboratorsShare } from "./notebook-collaborators-share";
@@ -675,6 +676,32 @@ export default function Home() {
   const [readySnapshot, setReadySnapshot] = useState<ReadySnapshot | null>(null);
   const [readyRetry, setReadyRetry] = useState(0);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [homeCanvasAvailable, setHomeCanvasAvailable] = useState(false);
+  const [homeTab, setHomeTab] = useState<"notebooks" | "circuits">("notebooks");
+  useEffect(() => {
+    if (!currentUser) {
+      setHomeCanvasAvailable(false);
+      setHomeTab("notebooks");
+      return;
+    }
+    let alive = true;
+    void fetchSystemExtensions()
+      .then((projection) => {
+        if (!alive) return;
+        const available = supportsCanvasCircuitLibraries(projection.extensions);
+        setHomeCanvasAvailable(available);
+        if (!available) setHomeTab("notebooks");
+      })
+      .catch(() => {
+        if (alive) {
+          setHomeCanvasAvailable(false);
+          setHomeTab("notebooks");
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [currentUser]);
   const [loginOpening, setLoginOpening] = useState(false);
   const finishLoginOpening = useCallback(() => setLoginOpening(false), []);
   const workspaceActorIdRef = useRef<string | null>(currentUser?.id ?? null);
@@ -5221,48 +5248,84 @@ export default function Home() {
                 ["mine", "我的笔记本"],
                 ["featured", "精选笔记本"]
               ].map(([id, label]) => (
-                <button key={id} className={`tab ${notebookCollection.filter === id ? "active" : ""}`} onClick={() => notebookCollection.selectFilter(id)}>
+                <button
+                  key={id}
+                  className={`tab ${homeTab === "notebooks" && notebookCollection.filter === id ? "active" : ""}`}
+                  onClick={() => {
+                    setHomeTab("notebooks");
+                    notebookCollection.selectFilter(id);
+                  }}
+                >
                   {label}
                 </button>
               ))}
+              {homeCanvasAvailable && (
+                <button
+                  key="circuits"
+                  className={`tab ${homeTab === "circuits" ? "active" : ""}`}
+                  onClick={() => setHomeTab("circuits")}
+                >
+                  我的电路库
+                </button>
+              )}
             </div>
             <div className="library-actions">
-              <div className={`collection-search ${notebookCollection.searchQuery ? "search-open" : ""}`}>
-                <button className="icon-button" title="搜索">⌕</button>
-                <input value={notebookCollection.searchQuery} onChange={(event) => notebookCollection.updateSearchQuery(event.target.value)} type="search" placeholder="搜索笔记本、来源、元素" />
-              </div>
-              <div className="segmented" aria-label="显示方式">
-                {[
-                  { id: "grid", icon: <LayoutGrid size={16} />, title: "卡片视图" },
-                  { id: "list", icon: <ListIcon size={16} />, title: "列表视图" },
-                ].map(({ id, icon, title }) => (
-                  <button key={id} className={notebookCollection.viewMode === id ? "active" : ""} title={title} aria-label={title} onClick={() => notebookCollection.selectView(id)}>
-                    {icon}
+              {homeTab === "circuits" ? (
+                <a className="new-pill home-canvas-cta" href="/canvas">
+                  <CircuitBoard size={15} aria-hidden="true" /> 打开电路画布
+                </a>
+              ) : (
+                <>
+                  <div className={`collection-search ${notebookCollection.searchQuery ? "search-open" : ""}`}>
+                    <button className="icon-button" title="搜索">⌕</button>
+                    <input value={notebookCollection.searchQuery} onChange={(event) => notebookCollection.updateSearchQuery(event.target.value)} type="search" placeholder="搜索笔记本、来源、元素" />
+                  </div>
+                  <div className="segmented" aria-label="显示方式">
+                    {[
+                      { id: "grid", icon: <LayoutGrid size={16} />, title: "卡片视图" },
+                      { id: "list", icon: <ListIcon size={16} />, title: "列表视图" },
+                    ].map(({ id, icon, title }) => (
+                      <button key={id} className={notebookCollection.viewMode === id ? "active" : ""} title={title} aria-label={title} onClick={() => notebookCollection.selectView(id)}>
+                        {icon}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="sort-menu-wrap">
+                    <button className="sort-button" onClick={notebookCollection.toggleSort}>
+                      {notebookCollection.sortMode === "name" ? "名称 ▾" : notebookCollection.sortMode === "sources" ? "来源 ▾" : "最近 ▾"}
+                    </button>
+                    <div className={`popover sort-menu ${notebookCollection.sortOpen ? "" : "hidden"}`}>
+                      {[
+                        ["recent", "最近创建"],
+                        ["name", "名称"],
+                        ["sources", "来源数量"]
+                      ].map(([id, label]) => (
+                        <button key={id} onClick={() => notebookCollection.selectSort(id)}>{label}</button>
+                      ))}
+                    </div>
+                  </div>
+                  {homeCanvasAvailable && (
+                    <a className="sort-button home-canvas-link" href="/canvas" title="打开电路画布">
+                      <CircuitBoard size={15} aria-hidden="true" /> 电路画布
+                    </a>
+                  )}
+                  <button className="sort-button" title="查看我分享出去的笔记本及其只读成员" onClick={() => openSharedByMe().catch(reportError)}>
+                    <Share2 size={15} /> 已分享
                   </button>
-                ))}
-              </div>
-              <div className="sort-menu-wrap">
-                <button className="sort-button" onClick={notebookCollection.toggleSort}>
-                  {notebookCollection.sortMode === "name" ? "名称 ▾" : notebookCollection.sortMode === "sources" ? "来源 ▾" : "最近 ▾"}
-                </button>
-                <div className={`popover sort-menu ${notebookCollection.sortOpen ? "" : "hidden"}`}>
-                  {[
-                    ["recent", "最近创建"],
-                    ["name", "名称"],
-                    ["sources", "来源数量"]
-                  ].map(([id, label]) => (
-                    <button key={id} onClick={() => notebookCollection.selectSort(id)}>{label}</button>
-                  ))}
-                </div>
-              </div>
-              <button className="sort-button" title="查看我分享出去的笔记本及其只读成员" onClick={() => openSharedByMe().catch(reportError)}>
-                <Share2 size={15} /> 已分享
-              </button>
-              <ImportToolbarButton attention={notebookImport.view.uploadAttention} onOpen={openImportModal} />
-              <button className="new-pill" disabled={notebookCollection.creating} onClick={() => { void notebookCollection.createDefaultNotebook(); }}>＋ 新建</button>
+                  <ImportToolbarButton attention={notebookImport.view.uploadAttention} onOpen={openImportModal} />
+                  <button className="new-pill" disabled={notebookCollection.creating} onClick={() => { void notebookCollection.createDefaultNotebook(); }}>＋ 新建</button>
+                </>
+              )}
             </div>
           </section>
 
+          {homeTab === "circuits" && homeCanvasAvailable ? (
+            <HomeCircuitsView
+              isSystemAdmin={currentUser.role === "admin"}
+              onOpenGroups={() => showGroups({}, "push")}
+            />
+          ) : (
+            <>
           <NotebookDeletionReceipt
             deletions={notebookDeletions}
             introduced={deletionReceipts.introduced}
@@ -5318,6 +5381,8 @@ export default function Home() {
                 openMemory={(id) => openNotebookMemory(id).catch(reportError)}
                 openMenu={openNotebookMenu}
               />
+            </>
+          )}
             </>
           )}
         </main>

@@ -386,7 +386,9 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # v108 / PostgreSQL 0089 add local public-share evidence snapshots.
 # v109 / PostgreSQL 0090 add independent concept-rank rows and their synced
 # capture triggers; rank=0 carries generation stamps even for an empty ranking.
-SCHEMA_VERSION = 110
+# v111 / PostgreSQL 0093 add groups.is_public (0|1) for system-managed
+# public groups visible to every authenticated user.
+SCHEMA_VERSION = 111
 
 # Frozen copy of ``element_reading_order.INDEX_DIGITS_SQL`` as v105 built it (a
 # migration must not change meaning when the live module changes). The readers
@@ -6584,6 +6586,18 @@ class SqliteMigrator:
                 CREATE INDEX IF NOT EXISTS idx_kg_relink_work_pending
                   ON kg_relink_work (notebook_id, source_id COLLATE BINARY) WHERE status = 'pending';
             """)
+
+    def _migration_111(self) -> None:
+        """Public group visibility flag, paired with PostgreSQL 0093."""
+        with self._connect() as db:
+            columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(groups)").fetchall()
+            }
+            if "is_public" not in columns:
+                db.execute(
+                    "ALTER TABLE groups "
+                    "ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0 CHECK (is_public IN (0, 1))"
+                )
 
     def migrate(self) -> list[int]:
         with self._connect() as db:

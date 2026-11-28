@@ -1477,6 +1477,7 @@ SILICON_NOTEBOOK_ADMIN_PASSWORD   # admin 登录密码（本地默认 "admin"；
 SILICON_NOTEBOOK_AUTH_OPTIONAL    # true = 无 token 请求回退为 admin（仅本地/测试）；
                                   # false（默认）= 所有请求必须登录
 AUTH_SESSION_TOUCH_INTERVAL_SECONDS # session 滑动续期写库间隔（默认 300 秒）
+DEFAULT_PUBLIC_GROUP_NAME           # 可选：启动时自动确保存在的全员可见公共群组名称，由系统管理员维护（默认为空）
 ```
 
 **MinerU（PDF 解析）：**

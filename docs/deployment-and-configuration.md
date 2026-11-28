@@ -1891,6 +1891,8 @@ SILICON_NOTEBOOK_ADMIN_PASSWORD   # admin login password (local default "admin";
 SILICON_NOTEBOOK_AUTH_OPTIONAL    # true = no-token requests act as admin (local/testing only);
                                   # false (default) = login required for all requests
 AUTH_SESSION_TOUCH_INTERVAL_SECONDS # sliding-session DB write interval (default 300)
+DEFAULT_PUBLIC_GROUP_NAME           # optional name for a startup-seeded public group visible to all
+                                    # signed-in users and administered by system admins (default "")
 ```
 
 **MinerU (PDF parsing):**

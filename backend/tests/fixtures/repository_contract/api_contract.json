@@ -6518,6 +6518,11 @@
               "title": "Description",
               "type": "string"
             },
+            "is_public": {
+              "default": false,
+              "title": "Is Public",
+              "type": "boolean"
+            },
             "kind": {
               "default": "project",
               "title": "Kind",
@@ -6549,6 +6554,11 @@
             "id": {
               "title": "Id",
               "type": "string"
+            },
+            "is_public": {
+              "default": false,
+              "title": "Is Public",
+              "type": "boolean"
             },
             "kind": {
               "default": "project",
@@ -6789,6 +6799,11 @@
             "id": {
               "title": "Id",
               "type": "string"
+            },
+            "is_public": {
+              "default": false,
+              "title": "Is Public",
+              "type": "boolean"
             },
             "kind": {
               "default": "project",

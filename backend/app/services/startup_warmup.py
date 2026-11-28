@@ -786,6 +786,13 @@ def run_startup(lease: object | None) -> object | None:
         if not _record_repository_factory(lease, repository_factory):
             return None
         repo = repository_factory()  # construct + migrate + seed
+        default_public_group = get_settings().default_public_group_name.strip()
+        if default_public_group:
+            from app.api.deps import group_repository as group_repository_factory
+
+            group_repository_factory().ensure_default_public_group(
+                name=default_public_group
+            )
         # Server startup is the only owner allowed to settle rows left in an
         # in-progress state by the previous process. Offline CLIs must not make
         # this claim while a live backend may still own those jobs.

@@ -6422,5 +6422,46 @@ MIGRATION_MANIFEST[(109, 110)] = {
 }
 
 
+# SQLite v111 / PostgreSQL 0093: groups.is_public for deployment-wide public groups.
+GROUP_PUBLIC_COLUMNS = {
+    "groups": {
+        "is_public": ("is_public", "INTEGER", 1, "0", 0),
+    },
+}
+GROUPS_TABLE_V111 = GROUP_SHARING_TABLES["groups"].replace(
+    ", invite_created_by TEXT)",
+    ", invite_created_by TEXT, is_public INTEGER NOT NULL DEFAULT 0 CHECK (is_public IN (0, 1)))",
+)
+assert GROUPS_TABLE_V111 != GROUP_SHARING_TABLES["groups"]
+MIGRATION_MANIFEST = {
+    (key[0], 111, *key[2:]): {
+        **manifest,
+        "tables": {
+            **manifest["tables"],
+            **(
+                {"groups": GROUPS_TABLE_V111}
+                if "groups" in manifest["tables"]
+                else {}
+            ),
+        },
+        "columns": {
+            **manifest["columns"],
+            "groups": {
+                **manifest["columns"].get("groups", {}),
+                **GROUP_PUBLIC_COLUMNS["groups"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(110, 111)] = {
+    "tables": {},
+    "columns": GROUP_PUBLIC_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

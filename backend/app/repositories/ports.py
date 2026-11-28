@@ -5216,7 +5216,16 @@ class GroupStorePort(Protocol):
     """
 
     def create_group(
-        self, *, name: str, kind: str, description: str, created_by: str
+        self,
+        *,
+        name: str,
+        kind: str,
+        description: str,
+        created_by: str,
+        is_public: bool = False,
+    ) -> dict: ...
+    def ensure_default_public_group(
+        self, *, name: str, description: str = ""
     ) -> dict: ...
     def get_group(self, group_id: str, *, user_id: str = "") -> "dict | None": ...
     def user_group_role(self, group_id: str, user_id: str) -> "str | None": ...

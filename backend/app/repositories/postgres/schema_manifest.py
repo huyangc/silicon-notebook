@@ -573,7 +573,10 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # rows, with rank=0 recording freshness even when there are no ranked concepts.
 # PostgreSQL-only v92: fixed-width seed/name digest indexes avoid btree entry
 # size limits; full text remains authoritative for both equality lookups.
+# SQLite v111 / PostgreSQL 0093: add groups.is_public (integer NOT NULL DEFAULT 0
+# CHECK (is_public IN (0, 1))) for deployment-wide public groups visible to all
+# signed-in users and administered by system admins.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=110,
-    postgres_version=92,
+    sqlite_version=111,
+    postgres_version=93,
 )

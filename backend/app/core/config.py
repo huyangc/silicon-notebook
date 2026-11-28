@@ -145,6 +145,8 @@ class Settings(BaseSettings):
     )
     # MCP 回答链接：前端公开访问地址（可含子路径；生产前端是 http://<IP>:3000，故允许 http）。
     public_web_base_url: str = Field("", validation_alias="PUBLIC_WEB_BASE_URL")
+    # 可选：启动时自动确保存在一个全员可见的默认公共群组（如「公共电路库」），由系统管理员维护。
+    default_public_group_name: str = Field("", validation_alias="DEFAULT_PUBLIC_GROUP_NAME")
     public_share_evidence_max_chars: int = Field(
         12000, ge=1200, le=100000, validation_alias="PUBLIC_SHARE_EVIDENCE_MAX_CHARS"
     )

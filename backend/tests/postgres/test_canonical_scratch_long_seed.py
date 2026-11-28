@@ -6,6 +6,7 @@ import psycopg
 import pytest
 
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 from app.repositories.postgres.unified_kg_store import UnifiedKgStore
 
 pytestmark = pytest.mark.postgres_integration
@@ -22,7 +23,7 @@ def test_index_upgrade_preserves_existing_scratch_rows(postgres_database):
         UnifiedKgStore.insert_canonical_scratch_rows(db, [('upgrade', 'run', 'seed', 'canonical', 'name', 'description', 'signature')])
         before = [dict(row) for row in db.execute("SELECT * FROM kg_canonical_scratch WHERE notebook_id='upgrade'")]
         db.execute('DELETE FROM silicon_schema_migrations WHERE version=92')
-    assert PostgresMigrator(postgres_database).migrate() == 92
+    assert PostgresMigrator(postgres_database).migrate() == POSTGRES_SCHEMA_MANIFEST.postgres_version
     with postgres_database.connect() as db:
         assert [dict(row) for row in db.execute("SELECT * FROM kg_canonical_scratch WHERE notebook_id='upgrade'")] == before
         index = db.execute("SELECT indexdef FROM pg_indexes WHERE schemaname=current_schema() "
