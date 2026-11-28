@@ -2133,6 +2133,14 @@ def test_public_group_visible_to_all_signed_in_users_and_managed_by_system_admin
     assert detail.status_code == 200
     assert detail.json()["is_public"] is True
 
+    # Shared notebook inventory remains member-only even for public groups.
+    assert (
+        client.get(
+            f"/api/groups/{group_id}/shared-notebooks", headers=member_headers
+        ).status_code
+        == 404
+    )
+
     # Non-admin cannot mutate or delete the public group.
     assert (
         client.patch(
@@ -2144,13 +2152,23 @@ def test_public_group_visible_to_all_signed_in_users_and_managed_by_system_admin
     )
     assert client.delete(f"/api/groups/{group_id}", headers=member_headers).status_code == 403
 
-    # System admin can ensure_default_public_group idempotently.
+    # System admin can ensure_default_public_group idempotently; it gets an admin owner + membership
+    # and does not resurrect or reuse its ID after explicit deletion.
     from app.api.deps import group_repository
 
     default_a = group_repository().ensure_default_public_group(name="默认公共电路库")
     default_b = group_repository().ensure_default_public_group(name="默认公共电路库")
-    assert default_a["id"] == "grp-public-default"
-    assert default_b["id"] == "grp-public-default"
+    assert default_a is not None and default_b is not None
+    assert default_a["id"] == default_b["id"]
+    assert default_a["id"].startswith("grp-")
     assert default_a["is_public"] is True
+    assert default_a["owner_id"] != ""
+    assert group_repository().user_group_role(default_a["id"], default_a["owner_id"]) == "admin"
     listed_ids = [g["id"] for g in client.get("/api/groups", headers=member_headers).json()]
-    assert "grp-public-default" in listed_ids
+    assert default_a["id"] in listed_ids
+
+    assert (
+        client.delete(f"/api/groups/{default_a['id']}", headers=admin_headers).status_code
+        == 204
+    )
+    assert group_repository().ensure_default_public_group(name="默认公共电路库") is None

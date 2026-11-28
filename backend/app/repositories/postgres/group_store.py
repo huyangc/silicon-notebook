@@ -302,24 +302,64 @@ class GroupStore:
 
     def ensure_default_public_group(
         self, *, name: str, description: str = ""
-    ) -> dict:
-        group_id = "grp-public-default"
+    ) -> "dict | None":
         stamp = self.now()
         desc = (
             description
             or "全员可见的默认公共群组，由系统管理员维护，用于共享公共电路图与参考资料。"
         )
+        seeded_key = "default_public_group_seeded"
+        candidate_id = self.new_id("grp")
+        created_id: "str | None" = None
         with self.database.write() as connection:
-            connection.execute(
-                "INSERT INTO groups "
-                "(id,name,kind,description,is_public,created_by,owner_id,created_at,updated_at) "
-                "VALUES (%s,%s,'domain',%s,1,NULL,'',%s,%s) "
-                "ON CONFLICT (id) DO UPDATE SET is_public=1",
-                (group_id, name, desc, stamp, stamp),
-            )
-        group = self.get_group(group_id)
-        assert group is not None
-        return group
+            claimed = connection.execute(
+                "INSERT INTO app_settings (key,value,updated_at) VALUES (%s,%s,%s) "
+                "ON CONFLICT (key) DO NOTHING RETURNING value",
+                (seeded_key, candidate_id, stamp),
+            ).fetchone()
+            if claimed is not None:
+                admin_row = connection.execute(
+                    'SELECT id FROM users WHERE role=%s ORDER BY created_at ASC, id COLLATE "C" ASC LIMIT 1',
+                    ("admin",),
+                ).fetchone()
+                admin_id = str(admin_row["id"]) if admin_row is not None else ""
+                connection.execute(
+                    "INSERT INTO groups "
+                    "(id,name,kind,description,is_public,created_by,owner_id,created_at,updated_at) "
+                    "VALUES (%s,%s,'domain',%s,1,%s,%s,%s,%s)",
+                    (
+                        candidate_id,
+                        name,
+                        desc,
+                        admin_id or None,
+                        admin_id,
+                        stamp,
+                        stamp,
+                    ),
+                )
+                if admin_id:
+                    connection.execute(
+                        "INSERT INTO group_members (group_id,user_id,role,added_at,added_by) "
+                        "VALUES (%s,%s,'admin',%s,%s)",
+                        (candidate_id, admin_id, stamp, admin_id),
+                    )
+                created_id = candidate_id
+            else:
+                seeded = connection.execute(
+                    "SELECT value FROM app_settings WHERE key=%s",
+                    (seeded_key,),
+                ).fetchone()
+                seeded_id = str(seeded["value"]).strip() if seeded is not None else ""
+                existing = (
+                    connection.execute(
+                        "SELECT id FROM groups WHERE id=%s",
+                        (seeded_id,),
+                    ).fetchone()
+                    if seeded_id
+                    else None
+                )
+                created_id = str(existing["id"]) if existing is not None else None
+        return self.get_group(created_id) if created_id else None
 
     def get_group(self, group_id: str, *, user_id: str = "") -> "dict | None":
         with self.database.connect() as connection:

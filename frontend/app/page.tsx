@@ -349,6 +349,7 @@ import {
   SOURCES_PAGE_SIZE,
   showPaperMetaBackfill,
   supportsCanvasCircuitLibraries,
+  supportsCanvasHomeCircuits,
   type ChatMode,
   type ConversationSummary,
   type DuplicateGroup,
@@ -677,10 +678,12 @@ export default function Home() {
   const [readyRetry, setReadyRetry] = useState(0);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [homeCanvasAvailable, setHomeCanvasAvailable] = useState(false);
+  const [homeCircuitsAvailable, setHomeCircuitsAvailable] = useState(false);
   const [homeTab, setHomeTab] = useState<"notebooks" | "circuits">("notebooks");
   useEffect(() => {
     if (!currentUser) {
       setHomeCanvasAvailable(false);
+      setHomeCircuitsAvailable(false);
       setHomeTab("notebooks");
       return;
     }
@@ -688,13 +691,16 @@ export default function Home() {
     void fetchSystemExtensions()
       .then((projection) => {
         if (!alive) return;
-        const available = supportsCanvasCircuitLibraries(projection.extensions);
-        setHomeCanvasAvailable(available);
-        if (!available) setHomeTab("notebooks");
+        const canvasOk = supportsCanvasCircuitLibraries(projection.extensions);
+        const homeCircuitsOk = supportsCanvasHomeCircuits(projection.extensions);
+        setHomeCanvasAvailable(canvasOk);
+        setHomeCircuitsAvailable(homeCircuitsOk);
+        if (!homeCircuitsOk) setHomeTab("notebooks");
       })
       .catch(() => {
         if (alive) {
           setHomeCanvasAvailable(false);
+          setHomeCircuitsAvailable(false);
           setHomeTab("notebooks");
         }
       });
@@ -5259,7 +5265,7 @@ export default function Home() {
                   {label}
                 </button>
               ))}
-              {homeCanvasAvailable && (
+              {homeCircuitsAvailable && (
                 <button
                   key="circuits"
                   className={`tab ${homeTab === "circuits" ? "active" : ""}`}
@@ -5319,7 +5325,7 @@ export default function Home() {
             </div>
           </section>
 
-          {homeTab === "circuits" && homeCanvasAvailable ? (
+          {homeTab === "circuits" && homeCircuitsAvailable ? (
             <HomeCircuitsView
               isSystemAdmin={currentUser.role === "admin"}
               onOpenGroups={() => showGroups({}, "push")}

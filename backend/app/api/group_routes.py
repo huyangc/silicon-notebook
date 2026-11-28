@@ -210,16 +210,9 @@ def _require_group_owner(group_id: str, user: UserProfile) -> None:
 
 
 def _require_group_visible(group_id: str, user: UserProfile) -> dict:
-    """Any member (or any signed-in user for a public group) may read the group workspace; system admins retain recovery access."""
+    """Any member may read the group's shared notebook inventory; system admins retain recovery access."""
     group = group_repository().get_group(group_id, user_id=user.id)
-    if (
-        group is None
-        or (
-            not group["my_role"]
-            and not group.get("is_public")
-            and not _is_system_admin(user)
-        )
-    ):
+    if group is None or (not group["my_role"] and not _is_system_admin(user)):
         raise _group_not_found()
     return group
 
